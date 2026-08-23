@@ -32,7 +32,8 @@ reports from this allowlist:
 
 - Focus in/out: `ESC [ I` and `ESC [ O`
 - SGR mouse: `ESC [ < Cb ; Cx ; Cy M` and the corresponding release suffix `m`
-- X10 mouse: `ESC [ M` followed by exactly three payload bytes
+- X10 mouse: `ESC [ M` followed by one encoded button byte in the inclusive range 32–255 and two encoded,
+  one-based coordinate bytes in the inclusive range 33–255
 
 The parser scans from offset zero until the entire string is consumed. This supports multiple reports coalesced into one
 input frame. Any malformed report, trailing byte, keyboard character, paste, Enter, Escape, arrow/navigation key, control
@@ -83,7 +84,7 @@ Cover:
 - one X10 report;
 - concatenated reports of the same and different forms;
 - text, paste, Enter, Escape, arrow/navigation keys, and control keys;
-- malformed and truncated reports;
+- malformed and truncated reports, including X10-shaped input with control bytes or zero coordinates;
 - a report followed or preceded by keyboard input;
 - empty input.
 

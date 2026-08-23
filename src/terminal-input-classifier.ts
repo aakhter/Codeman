@@ -21,6 +21,17 @@ function sgrMouseReportLength(rest: string): number {
   return rest[offset] === 'M' || rest[offset] === 'm' ? offset + 1 : 0;
 }
 
+function x10MouseReportLength(rest: string): number {
+  if (!rest.startsWith('\x1b[M') || rest.length < X10_REPORT_LENGTH) return 0;
+
+  const button = rest.charCodeAt(3);
+  const x = rest.charCodeAt(4);
+  const y = rest.charCodeAt(5);
+  if (button < 32 || button > 255 || x < 33 || x > 255 || y < 33 || y > 255) return 0;
+
+  return X10_REPORT_LENGTH;
+}
+
 function terminalReportLengthAt(data: string, offset: number): number {
   const rest = data.slice(offset);
   if (rest.startsWith('\x1b[I') || rest.startsWith('\x1b[O')) return FOCUS_REPORT_LENGTH;
@@ -28,8 +39,7 @@ function terminalReportLengthAt(data: string, offset: number): number {
   const sgrLength = sgrMouseReportLength(rest);
   if (sgrLength > 0) return sgrLength;
 
-  if (rest.startsWith('\x1b[M') && rest.length >= X10_REPORT_LENGTH) return X10_REPORT_LENGTH;
-  return 0;
+  return x10MouseReportLength(rest);
 }
 
 /**

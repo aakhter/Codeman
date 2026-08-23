@@ -4,7 +4,9 @@
 
 Reconstruct the downstream vertical session rail as a focused upstream review branch based on the current
 `upstream/master`. The extraction combines the coherent behavior delivered by COD-286, COD-299, COD-300, COD-311,
-COD-326, COD-327, COD-339, and COD-352 while excluding the later tab-group model and grouped-rail behavior.
+COD-326, COD-327, COD-339, and COD-352. It also includes COD-321's vertical inline-rename paint correction as a required
+compatibility dependency of COD-299's two-line label clamp. The branch excludes the later tab-group model and grouped-rail
+behavior.
 
 ## Selected Approach
 
@@ -27,41 +29,54 @@ same node into a resizable rail beside the terminal. The existing session-sideba
 selected. DOM ownership and `aria-orientation` are resolved together so settings refreshes cannot leave placement,
 presentation, and accessibility state out of sync.
 
-The orientation and width remain device-display settings. Phones resolve to horizontal mode. Vertical mode disables
-horizontal wrapping and overflow behavior, sizes the terminal after the rail settles, and redraws lineage against the
-new tab geometry. The homepage session list is suppressed while the persistent vertical rail is active.
+The orientation and preferred width remain device-display settings. Phones resolve to horizontal mode. Crossing the phone
+breakpoint in either direction reapplies orientation and DOM placement: desktop-to-phone removes the rail, while
+phone-to-desktop restores the selected vertical mode and preferred width. Vertical mode disables horizontal wrapping and
+overflow behavior, sizes the terminal after the rail settles, and redraws lineage against the new tab geometry. The
+homepage session list is suppressed while the persistent vertical rail is active.
 
 No tab-group types, persistence, API calls, group headers, group menus, Focus group, or grouped tree semantics enter this
 branch. The rail renders the upstream flat session list.
 
 ## Components and Data Flow
 
-1. The settings schema and App Settings UI validate and persist tab orientation, rail width, and session-name font size.
+1. The settings schema and App Settings UI validate and persist tab orientation, preferred rail width, and session-name
+   font size. A viewport-constrained effective width is computed separately and never overwrites the preferred width, so
+   widening the viewport restores the user's selection.
 2. Startup resolves device and layout policy before terminal creation, places `#sessionTabs`, restores width, and fits the
    terminal once against the settled rail.
 3. Live orientation or width changes update root layout attributes, move the existing tab-list node, rebuild row action
    placement when crossing the compact threshold, refit terminals, and redraw lineage.
-4. Vertical lineage routing uses the rail gutter rather than horizontal header geometry.
-5. Expanded vertical layouts place the existing action cluster beside the session name. Compact rails keep the direct
+4. Session rows retain the complete generated prefix and editable suffix in the DOM. Horizontal mode may visually suppress
+   the prefix as upstream does, while vertical mode reveals the complete label and clamps settled names to two lines.
+5. Inline rename temporarily removes that vertical clamp from the specific name being edited, preserves the generated
+   prefix beside a flexing native input, and explicitly restores settled state on commit, cancellation, failure, deletion,
+   or rename replacement. This prevents Chromium from accepting keystrokes without repainting their glyphs.
+6. Vertical lineage routing uses the rail gutter rather than horizontal header geometry.
+7. Expanded vertical layouts place the existing action cluster beside the session name. Compact rails keep the direct
    child overflow control so actions remain reachable. Existing hover, focus, active, and coarse-pointer visibility rules
    continue to open the established session action menu.
-6. Session Options uses its corrected content-width-responsive layout so the added display controls do not introduce
+8. Session Options uses its corrected content-width-responsive layout so the added display controls do not introduce
    horizontal overflow.
 
 ## Boundaries and Failure Handling
 
-Invalid or absent settings fall back to existing defaults; persisted width and font values are clamped by their schemas
-and client resolvers. Phones cannot activate the rail. A missing optional terminal or lineage hook must not prevent DOM
-placement; follow the existing guarded-call pattern for refit and redraw operations. Pointer-resize cancellation restores
-a settled width and removes temporary drag state. This extraction introduces no new network endpoints or server-side data
-migration.
+Invalid or absent settings fall back to existing defaults; preferred width and font values are bounded by their schemas and
+client resolvers. Viewport clamping affects only the effective rendered width. Phones cannot activate the rail, and device
+class changes re-run that policy without changing the saved orientation. A missing optional terminal or lineage hook must
+not prevent DOM placement; follow the existing guarded-call pattern for refit and redraw operations. Pointer-resize
+cancellation restores a settled effective width and removes temporary drag state without corrupting the stored preference.
+This extraction introduces no new network endpoints or server-side data migration.
 
 ## Verification
 
 Focused tests will prove:
 
-- orientation defaults, phone fallback, live node movement, persistence, and accessibility state;
-- width restoration, resize bounds, compact-threshold transitions, tab wrapping, and terminal refit timing;
+- orientation defaults, live node movement, persistence, accessibility state, and desktop-to-phone-to-desktop transitions;
+- preferred-width restoration after temporary viewport clamping, resize bounds, compact-threshold transitions, tab
+  wrapping, and terminal refit timing;
+- complete generated-prefix and suffix labels in vertical mode with settled two-line clamping;
+- live Chromium inline-rename painting plus cleanup after commit, cancellation, failure, deletion, and replacement;
 - homepage suppression and vertical lineage routing;
 - session-list refresh ownership with sidebar precedence;
 - session-name font sizing and action placement across expanded, compact, horizontal, and sidebar layouts;

@@ -162,6 +162,87 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
     expect(app._tabRailResizeOwnsObserver).toBe(false);
   });
 
+  it('keeps resize-observer ownership for pointer drags longer than the watchdog', async () => {
+    vi.useFakeTimers();
+    class FakeCodemanApp {}
+    let resizing = true;
+    const context = vm.createContext({
+      CodemanApp: FakeCodemanApp,
+      window: {},
+      document: {
+        body: { classList: { contains: (name: string) => name === 'tab-rail-resizing' && resizing } },
+        querySelector: () => null,
+      },
+      console,
+      clearTimeout,
+      setTimeout,
+    });
+    vm.runInContext(railResizeJs, context, { filename: 'tab-rail-resize.js' });
+    const app = new FakeCodemanApp() as FakeCodemanApp & Record<string, any>;
+
+    app._claimTabRailResize();
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(app._tabRailResizeOwnsObserver).toBe(true);
+
+    resizing = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(app._tabRailResizeOwnsObserver).toBe(false);
+  });
+
+  it('keeps a viewport-clamped effective width out of the preferred-width control', () => {
+    class FakeCodemanApp {}
+    const values = new Map<string, string>();
+    const rootClasses = new Set<string>();
+    const custom = { textContent: 'Custom' };
+    const select = {
+      value: '360',
+      dataset: { currentWidth: '360' },
+      querySelector(selector: string) {
+        if (selector === 'option[value="360"]') return {};
+        if (selector === 'option[value="custom"]') return custom;
+        return null;
+      },
+    };
+    const handle = { setAttribute: vi.fn() };
+    const document = {
+      documentElement: {
+        style: {
+          getPropertyValue: (name: string) => values.get(name) ?? '',
+          setProperty: (name: string, value: string) => values.set(name, value),
+        },
+        classList: {
+          contains: (name: string) => rootClasses.has(name),
+          toggle: (name: string, force: boolean) => (force ? rootClasses.add(name) : rootClasses.delete(name)),
+        },
+      },
+      querySelector: (selector: string) => (selector === '.main' ? { clientWidth: 700 } : null),
+      getElementById: (id: string) => {
+        if (id === 'appSettingsTabRailWidth') return select;
+        if (id === 'tabRailResizeHandle') return handle;
+        return null;
+      },
+    };
+    const context = vm.createContext({
+      CodemanApp: FakeCodemanApp,
+      window: { innerWidth: 700 },
+      document,
+      console,
+      clearTimeout,
+      setTimeout,
+    });
+    vm.runInContext(readFileSync(resolve(publicDir, 'constants.js'), 'utf8'), context, { filename: 'constants.js' });
+    vm.runInContext(railResizeJs, context, { filename: 'tab-rail-resize.js' });
+    const app = new FakeCodemanApp() as FakeCodemanApp & Record<string, any>;
+    app.loadAppSettingsFromStorage = () => ({ tabRailWidth: 360 });
+    app.saveAppSettingsToStorage = vi.fn();
+
+    expect(app.applyTabRailWidth({ persist: false })).toBe(280);
+    expect(values.get('--tab-rail-width')).toBe('280px');
+    expect(select.value).toBe('360');
+    expect(select.dataset.currentWidth).toBe('360');
+    expect(app.readTabRailWidthSetting()).toBe(360);
+  });
+
   it('wraps only vertical rail names to two lines while preserving unbroken names', () => {
     const verticalNameRule = stylesCss.slice(
       stylesCss.indexOf("html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name"),
@@ -193,5 +274,14 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
     expect(settingsJs).toContain('applyTabOrientation({ settleRailWidth: true })');
     expect(settingsJs).toContain('this.applyTabRailWidth?.({ settle: shouldSettleRailWidth })');
     expect(settingsJs).toContain('if (!shouldSettleRailWidth) this.fitAddon?.fit()');
+  });
+
+  it('closes detached rail menus before tab rebuilds and session cleanup', () => {
+    const fullRenderStart = appJs.indexOf('  _fullRenderSessionTabs() {');
+    const fullRender = appJs.slice(fullRenderStart, fullRenderStart + 250);
+    const cleanupStart = appJs.indexOf('  _cleanupSessionData(sessionId) {');
+    const cleanup = appJs.slice(cleanupStart, cleanupStart + 250);
+    expect(fullRender).toContain('this.closeTabRailActionMenu?.()');
+    expect(cleanup).toContain('this.closeTabRailActionMenu?.()');
   });
 });
