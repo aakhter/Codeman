@@ -670,7 +670,8 @@ export class StateStore {
 
   /** Returns an owner layout, or null before that owner has been migrated. */
   getTabLayout(owner: string): TabLayout | null {
-    return this.state.tabLayouts?.[owner] ?? null;
+    const layouts = this.state.tabLayouts;
+    return layouts && Object.hasOwn(layouts, owner) ? layouts[owner] : null;
   }
 
   /** Validates and atomically persists one owner layout. */

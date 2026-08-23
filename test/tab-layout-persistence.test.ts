@@ -189,6 +189,26 @@ describe('normalizeOrMigrateOwnerTabLayout', () => {
     expect(twice.layout).toEqual(once.layout);
   });
 
+  it('migrates an owner named constructor instead of reading the inherited prototype key', () => {
+    const result = normalizeOrMigrateOwnerTabLayout(
+      baseInput({
+        owner: 'constructor',
+        layouts: {
+          alice: {
+            version: 1,
+            groups: [],
+            ungrouped: [],
+            updatedAt: 'old',
+          },
+        },
+      })
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.layouts.constructor).toBeDefined();
+    expect(result.layout.version).toBe(0);
+  });
+
   it('accepts exactly 512 refs and rejects 513 atomically without truncation', () => {
     const sessions = Array.from({ length: MAX_TAB_REFS }, (_, i) => ({ id: `s-${i}`, createdAt: i }));
     const accepted = normalizeOrMigrateOwnerTabLayout(baseInput({ persistedSessions: sessions }));
@@ -222,5 +242,23 @@ describe('StateStore tabLayouts allowlist', () => {
 
     expect(JSON.parse(readFileSync(file, 'utf8')).tabLayouts).toEqual({ alice: layout });
     expect(new StateStore(file).getTabLayout('alice')).toEqual(layout);
+  });
+
+  it('does not treat an inherited constructor property as a persisted owner layout', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codeman-tab-layout-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'state.json');
+    const layout: TabLayout = {
+      version: 3,
+      groups: [],
+      ungrouped: [],
+      updatedAt: '2026-08-16T12:00:00.000Z',
+    };
+
+    const store = new StateStore(file);
+    store.setTabLayout('alice', layout);
+    store.saveNow();
+
+    expect(store.getTabLayout('constructor')).toBeNull();
   });
 });

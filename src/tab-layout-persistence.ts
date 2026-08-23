@@ -99,7 +99,7 @@ function buildMetadata(
 export function normalizeOrMigrateOwnerTabLayout(input: TabLayoutMigrationInput): TabLayoutMigrationResult {
   const sessions = collectSessions(input);
   const metadata = buildMetadata(input, sessions);
-  const existing = input.layouts?.[input.owner];
+  const existing = input.layouts && Object.hasOwn(input.layouts, input.owner) ? input.layouts[input.owner] : undefined;
   if (existing) {
     const layout = normalizeTabLayout(existing, metadata);
     return { layout, layouts: { ...(input.layouts ?? {}), [input.owner]: layout }, created: false };
