@@ -2500,6 +2500,11 @@ export class Session extends EventEmitter {
       throw new Error('Session already has a running process');
     }
 
+    // Viewer ownership is valid only for a fully initialized interactive PTY.
+    // Keep it suspended across every attach/spawn/fallback failure path and
+    // resume only after the new PTY has all synchronous listeners installed.
+    this._suspendTerminalViewerSizing();
+
     // Bounds the workspace-trust scan (see _maybeAcceptTrustDialog). Stamped here
     // rather than at PTY spawn so a slow mux attach still counts as startup.
     this._interactiveStartedAt = Date.now();
@@ -2515,8 +2520,6 @@ export class Session extends EventEmitter {
         'Respawn blocked: interactive PTY exited non-zero too many times in a short window (circuit breaker tripped). Restart the session to clear it.'
       );
     }
-
-    this._resumeTerminalViewerSizing();
 
     // COD-124 unit 2, Gap B: if a native resume id was captured at a previous
     // park, fold it into the mode-specific launch config (currently codex
@@ -2818,6 +2821,7 @@ export class Session extends EventEmitter {
 
     this.ptyProcess.onExit(({ exitCode }) => {
       console.log('[Session] Interactive PTY exited with code:', exitCode);
+      this._suspendTerminalViewerSizing();
       // COD-118: record the exit in the circuit breaker BEFORE status bookkeeping.
       // A clean (0) exit resets the counter; rapid non-zero repeats trip it.
       const breakerResult = this._ptyExitBreaker.recordExit(exitCode, Date.now());
@@ -2868,6 +2872,10 @@ export class Session extends EventEmitter {
       }
       this.emit('exit', exitCode);
     });
+
+    if (this.ptyProcess) {
+      this._resumeTerminalViewerSizing();
+    }
   }
 
   /**

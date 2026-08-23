@@ -26,7 +26,11 @@
  *     {"t":"i","d":"...","seq":N,"cid":"..."} — input (keystroke or paste). seq+cid are
  *                          optional reliable-delivery tags: the server applies each
  *                          (cid,seq) at-most-once and ACKs with {"t":"ia","seq":N}.
- *     {"t":"z","c":N,"r":N,"f":bool} — resize terminal (f=true forces SIGWINCH even if dims unchanged)
+ *     {"t":"va","c":N,"r":N,"v":"mobile"|"tablet"|"desktop"} — explicitly activate this
+ *                          viewer as sizing owner with its fitted dimensions.
+ *     {"t":"z","c":N,"r":N,"v":viewport,"f":bool} — passively remember this viewer's size;
+ *                          only the current owner may apply it (legacy missing/invalid v defaults to desktop,
+ *                          and f=true forces owner SIGWINCH even if dimensions are unchanged).
  */
 
 import { FastifyInstance } from 'fastify';
@@ -176,20 +180,29 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             const cid = typeof msg.cid === 'string' ? msg.cid : null;
             const seq = Number.isInteger(msg.seq) ? (msg.seq as number) : null;
             const apply = cid && seq !== null ? session.shouldApplyInput(cid, seq) : true;
-            let delivered = true;
+            let delivered = !apply;
             if (apply) {
-              if (isKeyboardTerminalInput(msg.d)) {
-                if (session.isCheckpointActive) {
-                  console.info('[Checkpoint] manual takeover', {
-                    sessionId: id,
-                    route: 'ws',
-                    inputClass: 'keyboard',
-                  });
-                }
-                session.cancelCheckpoint('manual-takeover');
+              try {
+                session.activateTerminalViewer(sizingToken);
+              } catch {
+                // Sizing is best-effort. A viewer handoff failure must not drop
+                // input that can still be delivered to the PTY.
               }
-              session.activateTerminalViewer(sizingToken);
-              delivered = session.write(msg.d);
+              try {
+                if (isKeyboardTerminalInput(msg.d)) {
+                  if (session.isCheckpointActive) {
+                    console.info('[Checkpoint] manual takeover', {
+                      sessionId: id,
+                      route: 'ws',
+                      inputClass: 'keyboard',
+                    });
+                  }
+                  session.cancelCheckpoint('manual-takeover');
+                }
+                delivered = session.write(msg.d);
+              } catch {
+                delivered = false;
+              }
               // A session whose PTY is gone swallows the write. ACKing anyway told
               // the client to drop the frame from its durable queue and left the seq
               // burnt, so the retry that reliable delivery exists for was rejected as
@@ -199,6 +212,21 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             if (delivered && seq !== null && socket.readyState === 1) {
               socket.send(`{"t":"ia","seq":${seq}}`);
             }
+          } else if (
+            msg.t === 'va' &&
+            Number.isInteger(msg.c) &&
+            Number.isInteger(msg.r) &&
+            msg.c >= 1 &&
+            msg.c <= 500 &&
+            msg.r >= 1 &&
+            msg.r <= 200 &&
+            (msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop')
+          ) {
+            session.activateTerminalViewer(sizingToken, {
+              cols: msg.c,
+              rows: msg.r,
+              viewportType: msg.v,
+            });
           } else if (
             msg.t === 'z' &&
             Number.isInteger(msg.c) &&
@@ -210,10 +238,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
           ) {
             const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : 'desktop';
             const force = msg.f === true;
-            const resized = session.resizeFromTerminalViewer(sizingToken, msg.c, msg.r, viewportType, force);
-            if (!resized) {
-              session.bootstrapTerminalViewer(sizingToken, force);
-            }
+            session.resizeFromTerminalViewer(sizingToken, msg.c, msg.r, viewportType, force);
           }
         } catch {
           // Ignore malformed messages

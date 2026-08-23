@@ -349,7 +349,7 @@ git commit -m "fix(tmux): COD-370 coalesce terminal resizes"
 - Modify: `src/web/routes/ws-routes.ts:150-235,306-316`
 - Modify: `test/routes/ws-routes.test.ts:380-455`
 
-- [ ] **Step 1: Add failing WebSocket route tests**
+- [x] **Step 1: Add failing WebSocket route tests**
 
 Cover explicit activation, passive resize, input fallback, and close identity:
 
@@ -385,7 +385,7 @@ it('activates remembered desktop dimensions before forwarding desktop input', as
 });
 ```
 
-- [ ] **Step 2: Run the route tests RED**
+- [x] **Step 2: Run the route tests RED**
 
 Run:
 
@@ -395,7 +395,7 @@ npm test -- test/routes/ws-routes.test.ts -t "sizing|activation|desktop input"
 
 Expected: FAIL because `va` is ignored and route mocks lack the new Session API.
 
-- [ ] **Step 3: Implement the route protocol**
+- [x] **Step 3: Implement the route protocol**
 
 Use one `Symbol('ws-terminal-viewer')` per socket. For validated `z` frames, call `resizeFromTerminalViewer()` so every viewer's dimensions are remembered but only the owner applies them. For validated `va` frames, call `activateTerminalViewer()` with the frame dimensions. Immediately before applying an input frame, call `activateTerminalViewer(sizingToken)`; this restores remembered dimensions but does not create another control message.
 
@@ -420,7 +420,7 @@ if (msg.t === 'i' && typeof msg.d === 'string') {
 
 On close, call `releaseTerminalViewer(sizingToken)`. Delete the desktop-only claim variables and calls. Keep malformed-frame handling and exact input ACK behavior unchanged.
 
-- [ ] **Step 4: Run route and input regression tests GREEN**
+- [x] **Step 4: Run route and input regression tests GREEN**
 
 Run:
 
@@ -430,7 +430,7 @@ npm test -- test/routes/ws-routes.test.ts test/reliable-input-dedup.test.ts test
 
 Expected: activation tests and all exact delivery/deduplication tests pass.
 
-- [ ] **Step 5: Commit Task 3**
+- [x] **Step 5: Commit Task 3**
 
 ```bash
 git add src/web/routes/ws-routes.ts test/routes/ws-routes.test.ts

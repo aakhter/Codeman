@@ -266,13 +266,19 @@ describe('ws-routes', () => {
 
     it('ACKs a delivered input and burns its seq', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const write = vi.spyOn(ctx._session, 'write');
       try {
         const session = ctx._session;
         ws.send(JSON.stringify({ t: 'i', d: 'ok\r', cid: 'c1', seq: 1 }));
 
         expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 1 });
+        expect(sizingSession.activateTerminalViewer).toHaveBeenCalledTimes(1);
+        expect(sizingSession.activateTerminalViewer.mock.invocationCallOrder[0]).toBeLessThan(
+          write.mock.invocationCallOrder[0]
+        );
         expect(session.shouldApplyInput('c1', 1)).toBe(false);
       } finally {
+        write.mockRestore();
         ws.close();
       }
     });
@@ -296,6 +302,70 @@ describe('ws-routes', () => {
       }
     });
 
+    it('delivers and ACKs reliable input when viewer activation throws', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        sizingSession.activateTerminalViewer.mockImplementationOnce(() => {
+          throw new Error('sizing failed');
+        });
+
+        ws.send(JSON.stringify({ t: 'i', d: 'delivered\r', cid: 'activation-error', seq: 1 }));
+
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 1 });
+        expect(ctx._session.writeBuffer).toEqual(['delivered\r']);
+        expect(ctx._session.shouldApplyInput('activation-error', 1)).toBe(false);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('rolls back a reliable seq when write throws so the same frame can retry once', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const session = ctx._session;
+      const originalWrite = session.write.bind(session);
+      const write = vi.spyOn(session, 'write').mockImplementationOnce(() => {
+        throw new Error('write failed');
+      });
+      write.mockImplementation(originalWrite);
+      try {
+        const frame = JSON.stringify({ t: 'i', d: 'retry-once\r', cid: 'write-error', seq: 1 });
+        ws.send(frame);
+
+        await expect(nextMessage(ws, 200)).rejects.toThrow(/timeout/);
+        expect(session.writeBuffer).toEqual([]);
+
+        ws.send(frame);
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 1 });
+        expect(session.writeBuffer).toEqual(['retry-once\r']);
+        expect(write).toHaveBeenCalledTimes(2);
+      } finally {
+        write.mockRestore();
+        ws.close();
+      }
+    });
+
+    it('rolls back a reliable seq when checkpoint cancellation throws', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const session = ctx._session;
+      session.isCheckpointActive = true;
+      session.cancelCheckpoint.mockImplementationOnce(() => {
+        throw new Error('checkpoint cancellation failed');
+      });
+      try {
+        const frame = JSON.stringify({ t: 'i', d: 'retry-checkpoint\r', cid: 'checkpoint-error', seq: 1 });
+        ws.send(frame);
+
+        await expect(nextMessage(ws, 200)).rejects.toThrow(/timeout/);
+        expect(session.writeBuffer).toEqual([]);
+
+        ws.send(frame);
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 1 });
+        expect(session.writeBuffer).toEqual(['retry-checkpoint\r']);
+      } finally {
+        ws.close();
+      }
+    });
+
     it('still ACKs a duplicate frame the server deliberately skipped', async () => {
       // Dedup must stay silent-but-acknowledged: the client has to be able to
       // drop a frame it already delivered once.
@@ -309,6 +379,7 @@ describe('ws-routes', () => {
         expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 7 });
         expect(session.writeBuffer).not.toContain('again\r');
         expect(session.cancelCheckpoint).not.toHaveBeenCalled();
+        expect(sizingSession.activateTerminalViewer).not.toHaveBeenCalled();
       } finally {
         ws.close();
       }
@@ -380,6 +451,234 @@ describe('ws-routes', () => {
     });
   });
 
+  // ========== Viewer activation ==========
+
+  describe('viewer activation', () => {
+    it('hands sizing to a phone activation while retaining passive dimensions for desktop input fallback', async () => {
+      type Dimensions = { cols: number; rows: number; viewportType: 'mobile' | 'tablet' | 'desktop' };
+      const remembered = new Map<symbol, Dimensions>();
+      const applied: Dimensions[] = [];
+      let owner: symbol | null = null;
+
+      sizingSession.activateTerminalViewer.mockImplementation((token: symbol, dimensions?: Dimensions) => {
+        if (dimensions) remembered.set(token, dimensions);
+        owner = token;
+        const activeDimensions = remembered.get(token);
+        if (activeDimensions) applied.push(activeDimensions);
+      });
+      sizingSession.resizeFromTerminalViewer.mockImplementation(
+        (token: symbol, cols: number, rows: number, viewportType: Dimensions['viewportType']) => {
+          const dimensions = { cols, rows, viewportType };
+          remembered.set(token, dimensions);
+          if (owner !== token) return false;
+          applied.push(dimensions);
+          return true;
+        }
+      );
+      sizingSession.bootstrapTerminalViewer.mockImplementation((token: symbol) => {
+        if (owner !== null) return false;
+        owner = token;
+        const dimensions = remembered.get(token);
+        if (dimensions) applied.push(dimensions);
+        return dimensions !== undefined;
+      });
+
+      const desktop = await connectWs('/ws/sessions/ws-test-session/terminal?cid=desktop');
+      const phone = await connectWs('/ws/sessions/ws-test-session/terminal?cid=phone');
+      try {
+        desktop.send(JSON.stringify({ t: 'va', c: 140, r: 44, v: 'desktop' }));
+        await vi.waitFor(() => expect(applied).toEqual([{ cols: 140, rows: 44, viewportType: 'desktop' }]));
+        const desktopToken = sizingSession.activateTerminalViewer.mock.calls[0][0] as symbol;
+
+        phone.send(JSON.stringify({ t: 'z', c: 75, r: 62, v: 'mobile' }));
+        await vi.waitFor(() => expect(sizingSession.resizeFromTerminalViewer).toHaveBeenCalledTimes(1));
+        const phoneToken = sizingSession.resizeFromTerminalViewer.mock.calls[0][0] as symbol;
+        expect(owner).toBe(desktopToken);
+        expect(applied).toHaveLength(1);
+
+        phone.send(JSON.stringify({ t: 'va', c: 75, r: 62, v: 'mobile' }));
+        await vi.waitFor(() => expect(owner).toBe(phoneToken));
+        expect(applied).toEqual([
+          { cols: 140, rows: 44, viewportType: 'desktop' },
+          { cols: 75, rows: 62, viewportType: 'mobile' },
+        ]);
+
+        desktop.send(JSON.stringify({ t: 'z', c: 160, r: 48, v: 'desktop' }));
+        await vi.waitFor(() => expect(remembered.get(desktopToken)?.cols).toBe(160));
+        expect(owner).toBe(phoneToken);
+        expect(applied).toHaveLength(2);
+
+        desktop.send(JSON.stringify({ t: 'i', d: 'x', cid: 'desktop-input', seq: 1 }));
+        expect(await nextMessage(desktop)).toEqual({ t: 'ia', seq: 1 });
+        expect(owner).toBe(desktopToken);
+        expect(applied.at(-1)).toEqual({ cols: 160, rows: 48, viewportType: 'desktop' });
+        expect(ctx._session.writeBuffer).toContain('x');
+      } finally {
+        desktop.close();
+        phone.close();
+      }
+    });
+
+    it('uses one socket token for activation, resize, input fallback, and close without releasing another owner', async () => {
+      let owner: symbol | null = null;
+      sizingSession.activateTerminalViewer.mockImplementation((token: symbol) => {
+        owner = token;
+      });
+      sizingSession.releaseTerminalViewer.mockImplementation((token: symbol) => {
+        if (owner === token) owner = null;
+      });
+
+      const desktop = await connectWs('/ws/sessions/ws-test-session/terminal?cid=desktop-token');
+      const phone = await connectWs('/ws/sessions/ws-test-session/terminal?cid=phone-token');
+      try {
+        desktop.send(JSON.stringify({ t: 'va', c: 140, r: 44, v: 'desktop' }));
+        desktop.send(JSON.stringify({ t: 'z', c: 160, r: 48, v: 'desktop' }));
+        desktop.send(JSON.stringify({ t: 'i', d: 'd' }));
+        await vi.waitFor(() => expect(sizingSession.activateTerminalViewer).toHaveBeenCalledTimes(2));
+
+        const desktopToken = sizingSession.activateTerminalViewer.mock.calls[0][0] as symbol;
+        expect(sizingSession.activateTerminalViewer.mock.calls[1][0]).toBe(desktopToken);
+        expect(sizingSession.resizeFromTerminalViewer.mock.calls[0][0]).toBe(desktopToken);
+
+        phone.send(JSON.stringify({ t: 'va', c: 75, r: 62, v: 'mobile' }));
+        await vi.waitFor(() => expect(sizingSession.activateTerminalViewer).toHaveBeenCalledTimes(3));
+        const phoneToken = sizingSession.activateTerminalViewer.mock.calls[2][0] as symbol;
+        expect(phoneToken).not.toBe(desktopToken);
+        expect(owner).toBe(phoneToken);
+
+        const desktopClosed = waitForClose(desktop);
+        desktop.close();
+        await desktopClosed;
+        await vi.waitFor(() => expect(sizingSession.releaseTerminalViewer).toHaveBeenCalledWith(desktopToken));
+        expect(sizingSession.releaseTerminalViewer.mock.calls.filter(([token]) => token === desktopToken)).toHaveLength(
+          1
+        );
+        expect(owner).toBe(phoneToken);
+
+        const phoneClosed = waitForClose(phone);
+        phone.close();
+        await phoneClosed;
+        await vi.waitFor(() => expect(sizingSession.releaseTerminalViewer).toHaveBeenCalledWith(phoneToken));
+        expect(sizingSession.releaseTerminalViewer.mock.calls.filter(([token]) => token === phoneToken)).toHaveLength(
+          1
+        );
+        expect(owner).toBeNull();
+      } finally {
+        if (desktop.readyState === WebSocket.OPEN) desktop.close();
+        if (phone.readyState === WebSocket.OPEN) phone.close();
+      }
+    });
+
+    it('keeps ownerless passive sizing inactive until accepted input activates its remembered dimensions', async () => {
+      type Dimensions = { cols: number; rows: number; viewportType: 'mobile' | 'tablet' | 'desktop' };
+      const remembered = new Map<symbol, Dimensions>();
+      const applied: Dimensions[] = [];
+      let owner: symbol | null = null;
+      sizingSession.resizeFromTerminalViewer.mockImplementation(
+        (token: symbol, cols: number, rows: number, viewportType: Dimensions['viewportType']) => {
+          const dimensions = { cols, rows, viewportType };
+          remembered.set(token, dimensions);
+          if (owner !== token) return false;
+          applied.push(dimensions);
+          return true;
+        }
+      );
+      sizingSession.activateTerminalViewer.mockImplementation((token: symbol) => {
+        owner = token;
+        const dimensions = remembered.get(token);
+        if (dimensions) applied.push(dimensions);
+      });
+
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal?cid=ownerless-passive');
+      try {
+        ws.send(JSON.stringify({ t: 'z', c: 92, r: 37, v: 'tablet' }));
+        await vi.waitFor(() => expect(sizingSession.resizeFromTerminalViewer).toHaveBeenCalledTimes(1));
+        const token = sizingSession.resizeFromTerminalViewer.mock.calls[0][0] as symbol;
+        expect(owner).toBeNull();
+        expect(applied).toEqual([]);
+        expect(sizingSession.bootstrapTerminalViewer).not.toHaveBeenCalled();
+
+        ws.send(JSON.stringify({ t: 'i', d: 'activate', cid: 'ownerless-input', seq: 1 }));
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 1 });
+        expect(owner).toBe(token);
+        expect(applied).toEqual([{ cols: 92, rows: 37, viewportType: 'tablet' }]);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('does not let a reconnecting passive resize acquire ownerless sizing', async () => {
+      const oldSocket = await connectWs('/ws/sessions/ws-test-session/terminal?cid=passive-reconnect');
+      oldSocket.send(JSON.stringify({ t: 'va', c: 140, r: 44, v: 'desktop' }));
+      await vi.waitFor(() => expect(sizingSession.activateTerminalViewer).toHaveBeenCalledTimes(1));
+      const oldToken = sizingSession.activateTerminalViewer.mock.calls[0][0] as symbol;
+      const oldClosed = waitForClose(oldSocket);
+
+      const replacement = await connectWs('/ws/sessions/ws-test-session/terminal?cid=passive-reconnect');
+      try {
+        await oldClosed;
+        await vi.waitFor(() => expect(sizingSession.releaseTerminalViewer).toHaveBeenCalledWith(oldToken));
+
+        replacement.send(JSON.stringify({ t: 'z', c: 75, r: 62, v: 'mobile' }));
+        await vi.waitFor(() => expect(sizingSession.resizeFromTerminalViewer).toHaveBeenCalledTimes(1));
+        const replacementToken = sizingSession.resizeFromTerminalViewer.mock.calls[0][0] as symbol;
+        expect(replacementToken).not.toBe(oldToken);
+        expect(sizingSession.activateTerminalViewer).toHaveBeenCalledTimes(1);
+        expect(sizingSession.bootstrapTerminalViewer).not.toHaveBeenCalled();
+      } finally {
+        replacement.close();
+      }
+    });
+
+    it.each([
+      ['missing viewport', { t: 'va', c: 120, r: 40 }],
+      ['invalid viewport', { t: 'va', c: 120, r: 40, v: 'watch' }],
+      ['fractional cols', { t: 'va', c: 120.5, r: 40, v: 'desktop' }],
+      ['fractional rows', { t: 'va', c: 120, r: 40.5, v: 'desktop' }],
+      ['cols below range', { t: 'va', c: 0, r: 40, v: 'desktop' }],
+      ['cols above range', { t: 'va', c: 501, r: 40, v: 'desktop' }],
+      ['rows below range', { t: 'va', c: 120, r: 0, v: 'desktop' }],
+      ['rows above range', { t: 'va', c: 120, r: 201, v: 'desktop' }],
+    ])('ignores invalid sizing activation: %s', async (_label, frame) => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        ws.send(JSON.stringify(frame));
+        ws.send(JSON.stringify({ t: 'i', d: 'still-usable', cid: 'valid-after-invalid', seq: 1 }));
+
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 1 });
+        expect(ctx._session.writeBuffer).toEqual(['still-usable']);
+        expect(sizingSession.activateTerminalViewer).toHaveBeenCalledTimes(1);
+        expect(sizingSession.activateTerminalViewer).toHaveBeenCalledWith(expect.any(Symbol));
+        expect(sizingSession.resizeFromTerminalViewer).not.toHaveBeenCalled();
+        expect(sizingSession.bootstrapTerminalViewer).not.toHaveBeenCalled();
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('applies a valid sizing activation without input or ACK side effects', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const messages: WebSocket.RawData[] = [];
+      ws.on('message', (raw) => messages.push(raw));
+      try {
+        ws.send(JSON.stringify({ t: 'va', c: 75, r: 62, v: 'mobile' }));
+
+        await vi.waitFor(() => {
+          expect(sizingSession.activateTerminalViewer).toHaveBeenCalledWith(expect.any(Symbol), {
+            cols: 75,
+            rows: 62,
+            viewportType: 'mobile',
+          });
+        });
+        expect(ctx._session.writeBuffer).toEqual([]);
+        expect(ctx._session.cancelCheckpoint).not.toHaveBeenCalled();
+        expect(messages).toEqual([]);
+      } finally {
+        ws.close();
+      }
+    });
+  });
+
   // ========== Resize validation ==========
 
   describe('resize validation', () => {
@@ -398,7 +697,7 @@ describe('ws-routes', () => {
           );
         });
         const token = sizingSession.resizeFromTerminalViewer.mock.calls[0][0];
-        expect(sizingSession.bootstrapTerminalViewer).toHaveBeenCalledWith(token, false);
+        expect(sizingSession.bootstrapTerminalViewer).not.toHaveBeenCalled();
         expect(sizingSession.activateTerminalViewer).not.toHaveBeenCalled();
       } finally {
         ws.close();
@@ -419,8 +718,7 @@ describe('ws-routes', () => {
             false
           );
         });
-        const token = sizingSession.resizeFromTerminalViewer.mock.calls[0][0];
-        expect(sizingSession.bootstrapTerminalViewer).toHaveBeenCalledWith(token, false);
+        expect(sizingSession.bootstrapTerminalViewer).not.toHaveBeenCalled();
       } finally {
         ws.close();
       }
@@ -455,8 +753,7 @@ describe('ws-routes', () => {
             true
           );
         });
-        const token = sizingSession.resizeFromTerminalViewer.mock.calls[0][0];
-        expect(sizingSession.bootstrapTerminalViewer).toHaveBeenCalledWith(token, true);
+        expect(sizingSession.bootstrapTerminalViewer).not.toHaveBeenCalled();
       } finally {
         ws.close();
       }

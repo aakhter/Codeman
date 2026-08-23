@@ -10,7 +10,22 @@ type ResizeableSessionInternals = {
 type SizingLifecycleInternals = {
   _mux: { killSession: () => Promise<boolean> } | null;
   _respawnBlocked: boolean;
-  _applyNativeResumeIdForResume: () => void;
+};
+
+type InteractiveExit = (event: { exitCode: number }) => void;
+
+type InteractiveStartInternals = {
+  _mux: { backend: string; setAttached: (id: string, attached: boolean) => void } | null;
+  _useMux: boolean;
+  _setupOrAttachMuxSession: () => Promise<{ isRestored: boolean }>;
+  ptyProcess: {
+    pid: number;
+    resize: (cols: number, rows: number) => void;
+    write: (data: string) => void;
+    kill: () => void;
+    onData: (callback: (data: string) => void) => void;
+    onExit: (callback: InteractiveExit) => void;
+  } | null;
 };
 
 function attachFakePty(session: Session, cols = 160, rows = 48) {
@@ -20,6 +35,41 @@ function attachFakePty(session: Session, cols = 160, rows = 48) {
   internals._ptyCols = cols;
   internals._ptyRows = rows;
   return resize;
+}
+
+function prepareSuccessfulInteractiveStart(session: Session) {
+  const resize = vi.fn();
+  let onExit: InteractiveExit | null = null;
+  let finishSetup!: () => void;
+  const setupGate = new Promise<void>((resolve) => {
+    finishSetup = resolve;
+  });
+  const internals = session as unknown as InteractiveStartInternals;
+  internals._mux = { backend: 'test', setAttached: vi.fn() };
+  internals._useMux = true;
+  internals._setupOrAttachMuxSession = vi.fn(async () => {
+    await setupGate;
+    internals.ptyProcess = {
+      pid: 1234,
+      resize,
+      write: vi.fn(),
+      kill: vi.fn(),
+      onData: vi.fn(),
+      onExit: vi.fn((callback: InteractiveExit) => {
+        onExit = callback;
+      }),
+    };
+    return { isRestored: true };
+  });
+  return {
+    resize,
+    setup: internals._setupOrAttachMuxSession,
+    finishSetup,
+    exit(exitCode: number) {
+      if (!onExit) throw new Error('interactive exit handler was not registered');
+      onExit({ exitCode });
+    },
+  };
 }
 
 describe('Session resize ownership', () => {
@@ -128,7 +178,7 @@ describe('Session resize ownership', () => {
     expect(resize).toHaveBeenCalledWith(80, 60);
   });
 
-  it('suspends sizing throughout delayed park teardown and re-enables it at interactive resume', async () => {
+  it('keeps sizing suspended throughout delayed park teardown and a failed interactive resume', async () => {
     const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
     const stale = Symbol('stale');
     const resumed = Symbol('resumed');
@@ -158,18 +208,55 @@ describe('Session resize ownership', () => {
     await parking;
     expect(session.bootstrapTerminalViewer(stale)).toBe(false);
 
-    lifecycle._applyNativeResumeIdForResume = () => {
-      throw new Error('resume-boundary-sentinel');
-    };
-    await expect(session.startInteractive()).rejects.toThrow('resume-boundary-sentinel');
+    await expect(session.startInteractive()).rejects.toThrow('OpenCode sessions require tmux');
 
     const resize = attachFakePty(session, 120, 40);
     expect(session.resizeFromTerminalViewer(resumed, 160, 48, 'desktop')).toBe(false);
-    expect(session.bootstrapTerminalViewer(resumed)).toBe(true);
+    expect(session.bootstrapTerminalViewer(resumed)).toBe(false);
     expect(session.resizeFromTerminalViewer(stale, 70, 50, 'mobile')).toBe(false);
 
-    expect(resize).toHaveBeenCalledTimes(1);
-    expect(resize).toHaveBeenCalledWith(160, 48);
+    expect(resize).not.toHaveBeenCalled();
+  });
+
+  it('resumes sizing only after a successful interactive start', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    const viewer = Symbol('viewer');
+
+    await session.park();
+    const start = prepareSuccessfulInteractiveStart(session);
+
+    const starting = session.startInteractive();
+    await vi.waitFor(() => expect(start.setup).toHaveBeenCalledTimes(1));
+    expect(session.resizeFromTerminalViewer(viewer, 70, 25, 'tablet')).toBe(false);
+    expect(session.bootstrapTerminalViewer(viewer)).toBe(false);
+
+    start.finishSetup();
+    await starting;
+    session.activateTerminalViewer(viewer, { cols: 80, rows: 30, viewportType: 'tablet' });
+
+    expect(start.resize).toHaveBeenCalledWith(80, 30);
+  });
+
+  it('suspends and clears viewer sizing when the interactive PTY exits', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    const active = Symbol('active');
+    const afterExit = Symbol('after-exit');
+
+    await session.park();
+    const start = prepareSuccessfulInteractiveStart(session);
+    const starting = session.startInteractive();
+    await vi.waitFor(() => expect(start.setup).toHaveBeenCalledTimes(1));
+    start.finishSetup();
+    await starting;
+    session.activateTerminalViewer(active, { cols: 80, rows: 30, viewportType: 'tablet' });
+    start.resize.mockClear();
+
+    start.exit(0);
+    session.activateTerminalViewer(afterExit, { cols: 100, rows: 35, viewportType: 'desktop' });
+
+    expect(session.resizeFromTerminalViewer(afterExit, 110, 36, 'desktop')).toBe(false);
+    expect(session.bootstrapTerminalViewer(afterExit)).toBe(false);
+    expect(start.resize).not.toHaveBeenCalled();
   });
 
   it('does not re-enable sizing when interactive resume fails its respawn guard', async () => {
@@ -203,7 +290,7 @@ describe('Session resize ownership', () => {
     expect(session.bootstrapTerminalViewer(restarted)).toBe(false);
     expect(session.resizeFromTerminalViewer(stale, 70, 50, 'mobile')).toBe(false);
 
-    lifecycle._applyNativeResumeIdForResume = () => {
+    (lifecycle as unknown as { _applyNativeResumeIdForResume: () => void })._applyNativeResumeIdForResume = () => {
       throw new Error('stopped-start-sentinel');
     };
     await expect(session.startInteractive()).rejects.toThrow('stopped-start-sentinel');
