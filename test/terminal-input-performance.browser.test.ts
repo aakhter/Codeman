@@ -268,6 +268,15 @@ type ImePreviewMetrics = {
   maxHandlerMs: number;
 };
 
+type ImeBurstSynchronousBudget = { dispatchElapsedMs: number; maxHandlerMs: number };
+
+function isImeBurstWithinSynchronousBudget(
+  metrics: Pick<ImePreviewMetrics, 'dispatchElapsedMs' | 'maxHandlerMs'>,
+  budget: ImeBurstSynchronousBudget
+): boolean {
+  return metrics.dispatchElapsedMs <= budget.dispatchElapsedMs && metrics.maxHandlerMs <= budget.maxHandlerMs;
+}
+
 async function installMobileImePreviewTrace(): Promise<void> {
   await page.evaluate(() => {
     const app = (window as any).app;
@@ -916,9 +925,9 @@ describe('terminal input real browser/server/probe correlation', () => {
   }, 30_000);
 
   it.each([
-    ['unthrottled desktop viewport', 1, { width: 1280, height: 800 }],
-    ['4x CPU throttling at keyboard-sized mobile viewport', 4, { width: 390, height: 520 }],
-  ] as const)('collapses a 500-update IME burst under %s', async (_label, cpuRate, viewport) => {
+    ['unthrottled desktop viewport', 1, { width: 1280, height: 800 }, 500],
+    ['4x CPU throttling at keyboard-sized mobile viewport', 4, { width: 390, height: 520 }, 2_000],
+  ] as const)('collapses a 500-update IME burst under %s', async (_label, cpuRate, viewport, dispatchBudgetMs) => {
     const before = await resetTrace();
     const originalViewport = page.viewportSize() ?? { width: 1280, height: 800 };
     let cdp: Awaited<ReturnType<BrowserContext['newCDPSession']>> | undefined;
@@ -958,8 +967,15 @@ describe('terminal input real browser/server/probe correlation', () => {
       expect(metrics.provisionalValues.at(-1)).toBe('value-500');
       expect(metrics.latestPreview).toBe('value-500');
       expect(metrics.lastRenderAt - metrics.lastUpdateAt).toBeLessThanOrEqual(100);
-      expect(metrics.dispatchElapsedMs).toBeLessThanOrEqual(500);
-      expect(metrics.maxHandlerMs).toBeLessThanOrEqual(50);
+      // Total wall time includes host descheduling and CDP's deliberate slowdown,
+      // so scale it with the throttle rate. The per-handler ceiling remains fixed
+      // to catch synchronous application work independently of host contention.
+      expect(
+        isImeBurstWithinSynchronousBudget(metrics, {
+          dispatchElapsedMs: dispatchBudgetMs,
+          maxHandlerMs: 50,
+        })
+      ).toBe(true);
       expect(readProbeBytes(before.probeIndex)).toEqual(Buffer.alloc(0));
       expect(await readInputLayers(before)).toEqual({ logical: [], ws: [], http: [] });
     } finally {
@@ -991,6 +1007,19 @@ describe('terminal input real browser/server/probe correlation', () => {
     });
     expect(readProbeBytes(before.probeIndex)).toEqual(Buffer.alloc(0));
     expect(await readInputLayers(before)).toEqual({ logical: [], ws: [], http: [] });
+  });
+
+  it('rejects a multi-second synchronous IME handler backlog even under 4x throttling', () => {
+    const throttledBudget = { dispatchElapsedMs: 2_000, maxHandlerMs: 50 };
+    expect(isImeBurstWithinSynchronousBudget({ dispatchElapsedMs: 1_999, maxHandlerMs: 49 }, throttledBudget)).toBe(
+      true
+    );
+    expect(isImeBurstWithinSynchronousBudget({ dispatchElapsedMs: 5_000, maxHandlerMs: 50 }, throttledBudget)).toBe(
+      false
+    );
+    expect(isImeBurstWithinSynchronousBudget({ dispatchElapsedMs: 100, maxHandlerMs: 5_000 }, throttledBudget)).toBe(
+      false
+    );
   });
 
   it('restores the real WebSocket target when an HTTP-scoped assertion fails', async () => {
