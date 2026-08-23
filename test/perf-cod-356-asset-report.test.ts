@@ -146,12 +146,34 @@ describe('COD-356 asset profiler contracts', () => {
       'scripts/perf/cod-356-asset-report.mjs',
     ]);
 
+    let recordedProvenance: typeof provenance | undefined;
     for (const reportPath of reportPaths) {
       const report = JSON.parse(readFileSync(reportPath, 'utf8'));
       expect(report.schemaVersion).toBe(3);
-      expect(report.profilerProvenance.contentHash).toBe(provenance.contentHash);
-      expect(report.profilerProvenance.files).toEqual(provenance.files);
-      expect(report.profilerProvenance.dependencies).toEqual(provenance.dependencies);
+      const archived = report.profilerProvenance as typeof provenance;
+      expect(archived.schemaVersion).toBe(1);
+      expect(archived.algorithm).toBe('sha256 of sorted path/byte-length/content-sha256 manifest');
+      expect(archived.files.map((file) => file.path)).toEqual(provenance.files.map((file) => file.path));
+      expect(archived.contentHash).toBe(createHash('sha256').update(JSON.stringify(archived.files)).digest('hex'));
+      expect(archived.dependencies.packageLockSha256).toBe(
+        archived.files.find((file) => file.path === 'package-lock.json')?.sha256
+      );
+      expect(archived.toolRepository.headRevision).toMatch(/^[0-9a-f]{40}$/);
+      expect(archived.toolRepository.headTree).toBe(
+        git(root, 'rev-parse', `${archived.toolRepository.headRevision}^{tree}`)
+      );
+      if (recordedProvenance) {
+        expect(archived).toMatchObject({
+          contentHash: recordedProvenance.contentHash,
+          files: recordedProvenance.files,
+          dependencies: recordedProvenance.dependencies,
+          toolRepository: {
+            headRevision: recordedProvenance.toolRepository.headRevision,
+            headTree: recordedProvenance.toolRepository.headTree,
+          },
+        });
+      }
+      recordedProvenance = archived;
     }
   });
 

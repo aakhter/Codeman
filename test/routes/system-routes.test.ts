@@ -73,6 +73,15 @@ vi.mock('../../src/session-lifecycle-log.js', () => ({
   })),
 }));
 
+vi.mock('../../src/web/repo-status.js', () => ({
+  getRepositoryStatus: vi.fn(async () => ({
+    installType: 'git',
+    branch: 'local',
+    upstream: { remote: 'upstream', ahead: 0, behind: 0, incoming: [] },
+    fork: { remote: 'origin', ahead: 0, behind: 0, incoming: [] },
+  })),
+}));
+
 vi.mock('../../src/utils/opencode-cli-resolver.js', () => ({
   isOpenCodeAvailable: vi.fn(() => false),
   resolveOpenCodeDir: vi.fn(() => null),
@@ -388,6 +397,20 @@ describe('system-routes', () => {
       const body = JSON.parse(res.body);
       expect(body).toHaveProperty('cpu');
       expect(body).toHaveProperty('memory');
+    });
+  });
+
+  // ========== GET /api/system/repo-status ==========
+
+  describe('GET /api/system/repo-status', () => {
+    it('registers once and returns repository status', async () => {
+      const res = await harness.app.inject({ method: 'GET', url: '/api/system/repo-status' });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({
+        installType: 'git',
+        branch: 'local',
+      });
     });
   });
 

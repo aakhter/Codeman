@@ -97,7 +97,7 @@ export interface CreateSessionOptions {
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75). Default off → `unset COLORTERM`. Codex is always truecolor. */
   truecolorEnabled?: boolean;
-  /** tmux history-limit to set for this session. */
+  /** tmux history-limit (scrollback lines) allocated when this session is created. */
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
   remote?: SessionRemote;
@@ -138,7 +138,7 @@ export interface RespawnPaneOptions {
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75, preserved across respawns). Default off. */
   truecolorEnabled?: boolean;
-  /** tmux history-limit to set for this session after respawn. */
+  /** Original tmux history-limit retained for config parity; respawn cannot resize the existing pane. */
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
   remote?: SessionRemote;
@@ -252,7 +252,7 @@ export interface TerminalMultiplexer extends EventEmitter {
   /** Update Ralph enabled state for a session */
   updateRalphEnabled(sessionId: string, enabled: boolean): void;
 
-  /** Apply a tmux history-limit to all tracked sessions. */
+  /** Apply history-limit to live panes where tmux supports it, otherwise to future panes. */
   setHistoryLimit(limit: number): Promise<void>;
 
   // ========== Discovery ==========

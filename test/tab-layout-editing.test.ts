@@ -1492,6 +1492,36 @@ describe('COD-315 dismissible group menu', () => {
 });
 
 describe('COD-307 subtree-aware move destinations', () => {
+  it('uses Move up and Move down in group and session menus', () => {
+    const app = makeInteractionApp();
+    app.sessions.set('tail', { id: 'tail', name: 'Tail' });
+    app.tabLayout.groups[0].refs = [
+      { kind: 'session', id: 'other' },
+      { kind: 'session', id: 'parent' },
+      { kind: 'session', id: 'child' },
+      { kind: 'session', id: 'tail' },
+    ];
+    app.tabLayout.groups[1].refs = [];
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.openSessionOptions = vi.fn();
+    app.requestCloseSession = vi.fn();
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+
+    openGroupMenu(app, trigger);
+    const groupLabels = [...document.querySelectorAll('.tab-layout-group-action-menu [role="menuitem"]')].map(
+      (item) => item.textContent
+    );
+    expect(groupLabels).toEqual(['New session', 'Rename group', 'Move up', 'Move down', 'Delete group']);
+    expect(groupLabels).not.toEqual(expect.arrayContaining(['Move group earlier', 'Move group later']));
+    app.closeTabGroupMenu();
+
+    app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, 'parent');
+    const sessionLabels = [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
+    expect(sessionLabels).toEqual(expect.arrayContaining(['Move up', 'Move down']));
+    expect(sessionLabels).not.toEqual(expect.arrayContaining(['Move earlier', 'Move later']));
+  });
+
   it('moves to the current group end through the real ref menu without a semantic error', () => {
     const app = makeInteractionApp();
     enableRealSemanticEditing(app);
@@ -1510,7 +1540,7 @@ describe('COD-307 subtree-aware move destinations', () => {
     expect(app.tabLayout.groups[1].refs.map((ref: Ref) => ref.id)).toEqual(['other']);
   });
 
-  it('does not expose Move later when a parent subtree has no external next block', () => {
+  it('does not expose Move down when a parent subtree has no external next block', () => {
     const app = makeInteractionApp();
     app.tabLayout.groups[0].refs = [
       { kind: 'session', id: 'parent' },
@@ -1527,7 +1557,7 @@ describe('COD-307 subtree-aware move destinations', () => {
       }
     );
 
-    expect([...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent === 'Move later')).toBe(
+    expect([...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent === 'Move down')).toBe(
       false
     );
   });

@@ -621,10 +621,10 @@ class CodemanApp {
     this._subagentPersistenceGenerations = new Map();
     this._initFallbackTimer = null; // fallback timer if SSE init doesn't arrive
     this._selectGeneration = 0;   // cancel stale selectSession loads
-    // Sessions whose full tmux scrollback has already been replayed this page load
-    // (COD-47). Tracked PER SESSION rather than as a single "first load" flag: the
-    // flag was consumed by whichever session auto-selected at page load, so every
-    // OTHER tab started life with one visible frame of history (issue #205).
+    // Non-shell sessions whose full tmux scrollback has already been replayed this
+    // page load (COD-47). Shells deliberately start from a bounded tail because
+    // their scrollback can be very large; full history stays available on demand.
+    // Tracked PER SESSION rather than as a single "first load" flag (issue #205).
     this._fullHistoryLoaded = new Set();
     // Cooldown per session for the scroll-to-top "load more history" re-pull.
     this._fullHistoryRepullAt = new Map(); // Map<sessionId, timestamp>
@@ -5691,7 +5691,7 @@ class CodemanApp {
       },
       { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
       {
-        label: 'Move group earlier',
+        label: 'Move up',
         run: () =>
           this.editTabLayout(
             { type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) },
@@ -5699,7 +5699,7 @@ class CodemanApp {
           ),
       },
       {
-        label: 'Move group later',
+        label: 'Move down',
         run: () =>
           this.editTabLayout(
             {
@@ -5791,10 +5791,10 @@ class CodemanApp {
     const next = blocks.find((block) => block.start === sourceEnd);
     return [
       ...(sourceStart > 0
-        ? [{ label: 'Move earlier', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
+        ? [{ label: 'Move up', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
         : []),
       ...(sourceEnd < refs.length
-        ? [{ label: 'Move later', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
+        ? [{ label: 'Move down', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
         : []),
       { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
       ...this.tabLayout.groups.map((group) => ({
@@ -7864,14 +7864,14 @@ class CodemanApp {
   moveActiveTabLeft() {
     if (!this.activeSessionId) return;
     const ref = { kind: 'session', id: this.activeSessionId };
-    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move earlier');
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move up');
     if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
   moveActiveTabRight() {
     if (!this.activeSessionId) return;
     const ref = { kind: 'session', id: this.activeSessionId };
-    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move later');
+    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move down');
     if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
   }
 
@@ -8104,6 +8104,22 @@ class CodemanApp {
     this.terminal.write('\x1b[3J\x1b[H\x1b[2J');
   }
 
+  _recordTerminalLoadTiming(timing) {
+    this._lastTerminalLoadTiming = timing;
+    console.info('[TERMINAL-PERF]', timing);
+    const resetAndParseMs =
+      (timing.cacheResetAndParseMs || 0) +
+      (timing.freshResetAndParseMs || 0) +
+      (timing.resetAndParseMs || 0);
+    const totalMs = timing.selectDoneMs ?? timing.totalMs ?? timing.selectToReplayCompleteMs ?? 0;
+    _crashDiag.log(
+      `TERMINAL_LOAD: ${timing.trigger} ${timing.full ? 'full' : 'tail'} ${timing.chars} chars ` +
+      `ttfb=${timing.ttfbMs.toFixed(0)}ms body+json=${timing.bodyAndJsonMs.toFixed(0)}ms ` +
+      `reset+parse=${resetAndParseMs.toFixed(0)}ms total=${totalMs.toFixed(0)}ms ` +
+      `server="${timing.serverTiming}"${timing.refused ? ' refused-downgrade' : ''}`
+    );
+  }
+
   /**
    * "Load more history": re-pull the whole tmux scrollback when the user scrolls up
    * while already at the top of what the browser has.
@@ -8132,6 +8148,11 @@ class CodemanApp {
     const sessionId = this.activeSessionId;
     if (!sessionId || this._fullHistoryRepullInFlight || this._isLoadingBuffer) return;
     if (this.detachedSessions?.has(sessionId)) return;
+    const session = this.sessions.get(sessionId);
+    // A shell's full capture can be many megabytes. Replaying it from an
+    // ordinary scroll gesture blocks xterm's main thread, so keep that cost
+    // behind the explicit "Load full history" button.
+    if (!force && session?.mode === 'shell') return;
     const now = Date.now();
     // Momentum scrolling fires this dozens of times per flick, and a burst of new
     // output is the normal reason to want a re-pull, so cooldown rather than latch.
@@ -8143,13 +8164,32 @@ class CodemanApp {
     this._fullHistoryRepullAt.set(sessionId, now);
     this._fullHistoryRepullInFlight = true;
     try {
+      const requestStartedAt = performance.now();
       const res = await fetch(`/api/sessions/${sessionId}/terminal?full=1`);
+      const headersReceivedAt = performance.now();
       const payload = (await res.json())?.data ?? {};
+      const bodyParsedAt = performance.now();
       const buffer = payload.terminalBuffer;
+      const timing = {
+        trigger: force ? 'full-history-button' : 'full-history-scroll',
+        mode: session?.mode || 'unknown',
+        full: true,
+        source: payload.source || 'unknown',
+        chars: buffer?.length || 0,
+        ttfbMs: headersReceivedAt - requestStartedAt,
+        bodyAndJsonMs: bodyParsedAt - headersReceivedAt,
+        resetAndParseMs: 0,
+        totalMs: 0,
+        serverTiming: res.headers?.get?.('server-timing') || '',
+        refused: false,
+      };
       // Bail on a tab switch mid-fetch: writing here would paint another session's
       // history into the terminal the user is now looking at.
       if (!buffer || this.activeSessionId !== sessionId) return;
       if (this._replayWouldShrinkBuffer(buffer)) {
+        timing.refused = true;
+        timing.totalMs = performance.now() - requestStartedAt;
+        this._recordTerminalLoadTiming(timing);
         (this._fullHistoryRepullUseless ||= new Set()).add(sessionId);
         this._logScrollRouting?.('repull-refused-downgrade');
         // The browser already holds more than tmux can give back, so there is
@@ -8160,17 +8200,32 @@ class CodemanApp {
       this._setHistoryTruncation(sessionId, payload);
       this._fullHistoryRepullUseless?.delete(sessionId);
       const rowsBefore = this.terminal.buffer.active.length;
+      const replayStartedAt = performance.now();
       this._resetTerminalForReplay();
-      await this.chunkedTerminalWrite(buffer, TERMINAL_CHUNK_SIZE, sessionId);
-      if (this.activeSessionId !== sessionId) return;
-      this.terminalBufferCache.set(sessionId, buffer);
+      const {
+        parsedAt,
+        bufferLength: parsedBufferLength,
+        completed,
+      } = await this.chunkedTerminalWrite(buffer, TERMINAL_CHUNK_SIZE, sessionId);
+      timing.resetAndParseMs = parsedAt - replayStartedAt;
+      if (!completed || this.activeSessionId !== sessionId) return;
+      // Keep shell tab restores bounded too. A user-triggered full-history pull
+      // may be tens of MB; caching it would replay that whole payload again on
+      // the next tab switch before the normal 1MB tail fetch replaces it.
+      if (this.sessions.get(sessionId)?.mode !== 'shell') {
+        this.terminalBufferCache.set(sessionId, buffer);
+      } else {
+        this.terminalBufferCache.delete(sessionId);
+      }
       // Hold the user's place. The replay is a superset that grew the buffer
       // UPWARD, so what used to be row 0 (what they were looking at) is now `delta`
       // rows down; scrolling there reveals the recovered history above it instead
       // of teleporting them to the bottom the way a normal buffer load does.
-      const delta = this.terminal.buffer.active.length - rowsBefore;
+      const delta = parsedBufferLength - rowsBefore;
       if (delta > 0) this.terminal.scrollToLine(delta);
       else this.terminal.scrollToTop();
+      timing.totalMs = performance.now() - requestStartedAt;
+      this._recordTerminalLoadTiming(timing);
     } catch {
       // Transient (offline, 5xx) — the next scroll-up past the cooldown retries.
     } finally {
@@ -8467,6 +8522,7 @@ class CodemanApp {
     // COD-144: track whether the load painted nothing (empty fetch + no cache).
     // For that just-created-session case we flush (not discard) queued SSE events.
     let bufferWasEmpty = false;
+    let cacheResetAndParseMs = 0;
     try {
       // Fit terminal to container BEFORE writing any buffer data.
       // If the browser was resized while viewing another session, the terminal
@@ -8553,27 +8609,34 @@ class CodemanApp {
       // blank and rewrites with fresh data. Skip the cache and write the fresh
       // buffer once for a single clean transition.
       const cachedBuffer = mirror ? undefined : this.terminalBufferCache.get(sessionId);
-      let clearedForBusy = false;
+      let clearedBeforeFresh = false;
       if (mirror) {
         // COD-187: clear now; the frame fetch below paints the screen.
         this._resetTerminalForReplay();
-        clearedForBusy = true;
-      } else if (cachedBuffer && !sessionIsBusy && !restoredSnapshot) {
+        clearedBeforeFresh = true;
+      } else if (cachedBuffer && !sessionIsBusy && !restoredSnapshot && session?.mode !== 'shell') {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');
+        const cacheReplayStartedAt = performance.now();
         this._resetTerminalForReplay();
-        await this.chunkedTerminalWrite(cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
+        const { parsedAt: cacheParsedAt } = await this.chunkedTerminalWrite(
+          cachedBuffer,
+          TERMINAL_CHUNK_SIZE,
+          bufferLoadOwner
+        );
+        cacheResetAndParseMs = cacheParsedAt - cacheReplayStartedAt;
         if (this._isStaleSelect(selectGen)) {
           this._clearTerminalLoadState(sessionId, selectGen);
           return;
         }
         this.terminal.scrollToBottom();
         _crashDiag.log('CACHE_DONE');
-      } else if (sessionIsBusy && !restoredSnapshot) {
-        // Clear stale content immediately — fresh buffer is being fetched
+      } else if (sessionIsBusy || session?.mode === 'shell') {
+        // Busy sessions have stale caches. Shell sessions deliberately skip even
+        // an idle cache so a changed 1MB tail cannot cause two back-to-back parses.
         this._resetTerminalForReplay();
-        clearedForBusy = true;
-        _crashDiag.log('CACHE_SKIP_BUSY');
+        clearedBeforeFresh = true;
+        _crashDiag.log(session?.mode === 'shell' ? 'CACHE_SKIP_SHELL' : 'CACHE_SKIP_BUSY');
       }
 
       // Give TUI sessions a short chance to redraw after resize before the
@@ -8591,16 +8654,15 @@ class CodemanApp {
 
       this._setTerminalLoadState(sessionId, selectGen, 'fetching');
       _crashDiag.log('FETCH_START');
-      // The first load OF EACH SESSION this page load requests the full tmux
-      // scrollback (?full=1, COD-47) so history that scrolled off the server's byte
-      // buffer comes back. Later switches to an already-replayed session keep the
-      // fast ?tail= frame path, which is why this is a Set and not a flag: the flag
-      // version gave the full replay to the auto-selected tab and one frame of
-      // history to every other one (issue #205). Applies to shell too — #205 is
-      // what restored shell scrollback, so shell must not be special-cased out.
-      const useFullHistory = !this._fullHistoryLoaded.has(sessionId);
+      // TUI sessions still get one canonical full replay per page (COD-47/#205).
+      // A shell can retain hundreds of thousands of plain scrollback lines, so
+      // automatically replaying all of them makes tab selection scale with the
+      // entire session. Load its bounded 1MB tail first; the existing truncation
+      // banner action fetches ?full=1 when the user explicitly asks for it.
+      const useFullHistory = session?.mode !== 'shell' && !this._fullHistoryLoaded.has(sessionId);
       if (useFullHistory) this._fullHistoryLoaded.add(sessionId);
       this._sessionsLoadedSincePageOpen.add(sessionId);
+      const fetchStartedAt = performance.now();
       // COD-187: mirror tabs fetch ONLY the current cursor-positioned frame.
       const terminalUrl = mirror
         ? `/api/sessions/${sessionId}/terminal?frame=1`
@@ -8608,13 +8670,16 @@ class CodemanApp {
           ? `/api/sessions/${sessionId}/terminal?full=1`
           : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
       const res = await fetch(terminalUrl);
+      const headersReceivedAt = performance.now();
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
       }
       const data = (await res.json())?.data ?? {};
+      const bodyParsedAt = performance.now();
       _crashDiag.log(`FETCH_DONE: ${data.terminalBuffer ? (data.terminalBuffer.length/1024).toFixed(0) + 'KB' : 'empty'} truncated=${data.truncated}`);
 
+      let freshResetAndParseMs = 0;
       if (data.terminalBuffer) {
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
@@ -8632,7 +8697,7 @@ class CodemanApp {
         // codex-only. Predicate lives in terminal-ui.js (unit-tested).
         const preserveSnapshotScrollback = this._shouldPreserveSnapshotScrollback({
           restoredSnapshot,
-          clearedForBusy,
+          clearedForBusy: clearedBeforeFresh,
           // Renamed from requestFullHistory when the #205 merge replaced the
           // per-page-open flag with the per-session _fullHistoryLoaded Set.
           requestFullHistory: useFullHistory,
@@ -8641,10 +8706,12 @@ class CodemanApp {
           mode: session?.mode,
         });
         const needsRewrite =
-          clearedForBusy || (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
+          clearedBeforeFresh ||
+          (!preserveSnapshotScrollback && (restoredSnapshot || data.terminalBuffer !== cachedBuffer));
         if (needsRewrite) {
           _crashDiag.log(`REWRITE: ${(data.terminalBuffer.length/1024).toFixed(0)}KB`);
           this._setTerminalLoadState(sessionId, selectGen, 'replaying');
+          const replayStartedAt = performance.now();
           this._resetTerminalForReplay();
           // Truncation is reported OUT OF BAND (#258). This used to write a grey
           // "... earlier output truncated ..." line into the
@@ -8652,7 +8719,12 @@ class CodemanApp {
           // cannot be actioned, and is indistinguishable from real CLI output.
           this._setHistoryTruncation(sessionId, data);
           // Use chunked write for large buffers to avoid UI jank
-          await this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner);
+          const { parsedAt: freshParsedAt } = await this.chunkedTerminalWrite(
+            data.terminalBuffer,
+            TERMINAL_CHUNK_SIZE,
+            bufferLoadOwner
+          );
+          freshResetAndParseMs = freshParsedAt - replayStartedAt;
           if (this._isStaleSelect(selectGen)) {
             this._clearTerminalLoadState(sessionId, selectGen);
             return;
@@ -8665,6 +8737,10 @@ class CodemanApp {
           // COD-187: frames are not cached (always refetched); remember the
           // painted frame so _refreshMirrorFrame can dedupe.
           this._lastMirrorFrame = { id: sessionId, buf: data.terminalBuffer };
+        // Shell selection always uses a fresh bounded tail, so retaining its
+        // payload only wastes memory and can evict useful TUI caches.
+        } else if (session?.mode === 'shell') {
+          this.terminalBufferCache.delete(sessionId);
         } else {
           // Update cache (cap at 20 entries)
           this.terminalBufferCache.set(sessionId, data.terminalBuffer);
@@ -8674,9 +8750,10 @@ class CodemanApp {
             this.terminalBufferCache.delete(oldest);
           }
         }
-      } else if (!cachedBuffer) {
-        // No fresh buffer and no cache — clear any stale content
-        this._resetTerminalForReplay();
+      } else if (!cachedBuffer || clearedBeforeFresh) {
+        // Nothing was painted. If this path was not already cleared above,
+        // clear stale content now; either way queued live output must be flushed.
+        if (!clearedBeforeFresh) this._resetTerminalForReplay();
         bufferWasEmpty = true;
         // COD-187: a mirror tab whose frame fetch came back degraded/empty
         // recovers from live repaints; nudge one frame retry for idle panes
@@ -8686,9 +8763,22 @@ class CodemanApp {
         }
       }
 
+      const terminalLoadTiming = {
+        trigger: 'session-select',
+        mode: session?.mode || 'unknown',
+        full: useFullHistory,
+        source: data.source || 'unknown',
+        chars: data.terminalBuffer?.length || 0,
+        ttfbMs: headersReceivedAt - fetchStartedAt,
+        bodyAndJsonMs: bodyParsedAt - headersReceivedAt,
+        cacheResetAndParseMs,
+        freshResetAndParseMs,
+        selectToReplayCompleteMs: performance.now() - _selStart,
+        serverTiming: res.headers?.get?.('server-timing') || '',
+      };
       // Buffer load complete — unblock live SSE writes. chunkedTerminalWrite calls
-      // _finishBufferLoad internally (discarding queued events to prevent duplicate
-      // content); if we skipped the write (cache hit or empty), call it here.
+      // _finishBufferLoad after ordering the fetched snapshot in xterm; if we skipped
+      // the write (cache hit or empty), call it here.
       // COD-144: when the load painted nothing, FLUSH the queued events instead of
       // discarding — a new session's prompt arrives only as a queued SSE event.
       if (this._isLoadingBuffer) {
@@ -8789,6 +8879,9 @@ class CodemanApp {
       if (typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible) {
         KeyboardHandler.onKeyboardShow();
       }
+      const selectDoneMs = performance.now() - _selStart;
+      terminalLoadTiming.selectDoneMs = selectDoneMs;
+      this._recordTerminalLoadTiming(terminalLoadTiming);
       this._clearTerminalLoadState(sessionId, selectGen);
       this._scheduleTerminalRepaint();
       // COD-284b: tab-switch / multi-reload tear — second fit+refresh after buffer paint
@@ -8797,8 +8890,8 @@ class CodemanApp {
         try { this.terminal?.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
         this._syncTerminalTouchAction?.();
       });
-      _crashDiag.log(`SELECT_DONE: ${(performance.now() - _selStart).toFixed(0)}ms`);
-      console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${(performance.now() - _selStart).toFixed(0)}ms`);
+      _crashDiag.log(`SELECT_DONE: ${selectDoneMs.toFixed(0)}ms`);
+      console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${selectDoneMs.toFixed(0)}ms`);
     } catch (err) {
       if (this._isLoadingBuffer) this._finishBufferLoad(bufferLoadOwner);
       this._restoringFlushedState = false;

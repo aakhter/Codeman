@@ -221,11 +221,12 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     expect(cacheRestore).toBeGreaterThan(-1);
     expect(busyClear).toBeGreaterThan(cacheRestore);
     expect(needsRewrite).toBeGreaterThan(busyClear);
-    expect(replayBlock).toContain('clearedForBusy');
+    expect(replayBlock).toContain('clearedBeforeFresh');
     expect(replayBlock).toContain('preserveSnapshotScrollback');
-    // needsRewrite is unconditionally forced by clearedForBusy — mode-agnostic
+    // needsRewrite is unconditionally forced by clearedBeforeFresh — mode-agnostic
     // since COD-92 removed the codex-only carve-out from this guard.
-    expect(replayBlock).toContain('clearedForBusy || (!preserveSnapshotScrollback');
+    expect(replayBlock).toContain('clearedBeforeFresh ||');
+    expect(replayBlock).toContain('!preserveSnapshotScrollback');
 
     // Behavioural: clearedForBusy alone must defeat preservation, even with
     // every other input set to favour preserving the snapshot (restored

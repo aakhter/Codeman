@@ -2783,13 +2783,25 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
 .session-tab:hover > .tab-actions > .tab-more,
 .session-tab:focus-within > .tab-actions > .tab-more,
 .session-tab.active > .tab-actions > .tab-more,
-.tab-focus-shortcut > .tab-actions > .tab-more {
+.tab-focus-shortcut > .tab-actions > .tab-more,
+html[data-session-list='sidebar'][data-sidebar='expanded'] .session-sidebar
+  :is(.session-tab:hover, .session-tab:focus-within, .session-tab.active)
+  .tab-name-row
+  > .tab-actions
+  > .tab-more,
+html[data-tab-orientation='vertical']:not(.tab-rail-compact) .tab-rail
+  :is(.session-tab:hover, .session-tab:focus-within, .session-tab.active)
+  .tab-name-row
+  > .tab-actions
+  > .tab-more {
   visibility: visible;
   pointer-events: auto;
 }
 
 @media (pointer: coarse) {
-  .session-tab > .tab-actions > .tab-more {
+  .session-tab > .tab-actions > .tab-more,
+  html[data-session-list='sidebar'][data-sidebar='expanded'] .session-sidebar .session-tab .tab-name-row > .tab-actions > .tab-more,
+  html[data-tab-orientation='vertical']:not(.tab-rail-compact) .tab-rail .session-tab .tab-name-row > .tab-actions > .tab-more {
     visibility: visible;
     pointer-events: auto;
   }

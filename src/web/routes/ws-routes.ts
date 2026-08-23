@@ -33,6 +33,7 @@ import { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { SessionPort } from '../ports/session-port.js';
 import { MAX_INPUT_LENGTH } from '../../config/terminal-limits.js';
+import { isKeyboardTerminalInput } from '../../terminal-input-classifier.js';
 import { isAllowedRequestHost, isAllowedRequestOrigin, type HostPolicy } from '../network-auth-policy.js';
 import { WsConnectionRegistry } from '../ws-connection-registry.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
@@ -182,7 +183,16 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             const apply = cid && seq !== null ? session.shouldApplyInput(cid, seq) : true;
             let delivered = true;
             if (apply) {
-              session.cancelCheckpoint('manual-takeover');
+              if (isKeyboardTerminalInput(msg.d)) {
+                if (session.isCheckpointActive) {
+                  console.info('[Checkpoint] manual takeover', {
+                    sessionId: id,
+                    route: 'ws',
+                    inputClass: 'keyboard',
+                  });
+                }
+                session.cancelCheckpoint('manual-takeover');
+              }
               // Typed input from a claim-holding desktop keeps the claim "hot"
               // and re-asserts the desktop layout after a mobile override.
               if (holdsDesktopClaim) session.noteDesktopActivity();

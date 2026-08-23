@@ -1,6 +1,85 @@
 # aicodeman
 
+## 1.21.1
+
+### Patch Changes
+
+- 59c709a: Place expanded-sidebar actions beside session names and add persisted 11-18px session-name-only sizing.
+- afa00fd: Apply session-name sizing and compact inline actions to the full-width vertical side rail.
+- 5a5547b: Add owner-scoped default session groups to Case Settings.
+- d9c5d5d: Add reusable private Codex command profiles for remote cases.
+- 702e479: Restore the contextual session actions menu in expanded vertical navigation.
+- 1818ad9: Restore Codex needs-input approvals and tab alerts after completed turns while preserving Claude live-agent suppression.
+- Keep agent checkpoint handoffs active through terminal mouse and focus reports, while preserving immediate manual takeover for keyboard input across WebSocket and HTTP delivery.
+
 ## Unreleased
+
+## 1.21.0
+
+### Minor Changes
+
+- **`codeman tui`: a terminal dashboard for your sessions.** For the times you are in SSH or Termius instead of a browser. The web UI remains the primary surface and bare `codeman` still prints help, so the dashboard itself is strictly additive.
+
+  Sessions are grouped NEEDS YOU / WORKING / IDLE / RECENT in the same status language as the web tabs and the phone overview, and the states come from the server (hooks, idle confirmation, the approvals inbox) over the existing HTTP/SSE API rather than being screen-scraped. That is what lets the dashboard answer a permission dialog instead of only reporting one.
+  - `↑↓`/`j`/`k` select; `1`-`9`, `[`/`]` and `Tab` switch between sessions
+  - `Enter` attaches and hands the terminal to tmux; **`F1` comes back**, one key, no modifier. Inside the pane a bar across the top carries the session strip and `Alt+1`..`Alt+9` switch without returning to the dashboard first
+  - `Enter` on a RECENT row resumes that conversation; on a session whose pane has died it refuses and offers `r` to resume it in a fresh pane
+  - `y`/`n`/digits answer the selected session's pending permission or question card (the server re-captures the pane first, so a keystroke can never land in the composer)
+  - `p` sends a one-line prompt without attaching, `x` kills (`y` confirms), `n` starts a session and opens straight into it
+  - `/` cross-session search, `g` away digest, `?` help, live preview pane, plan-usage chip in the header, a terminal bell when a new approval arrives
+  - `codeman tui --list` and `codeman tui <n>` are scriptable fast paths; with no server running it lists panes straight from the instance's tmux socket, attach-only, and upgrades live when the server comes back
+
+  Narrow terminals (under 72 columns, a phone SSH client) drop the preview and get a single-column layout. `NO_COLOR`, non-UTF-8 glyph fallback and a non-TTY refusal are all handled. Zero new dependencies: hand-rolled ANSI over chalk and commander. User guide: `docs/tui.md`.
+
+  **Breaking: the `sc` tmux chooser is retired.** `scripts/tmux-chooser.sh` is deleted and `install.sh` no longer creates the `tmux-chooser` symlink or the `sc` alias; it sweeps both up instead, on update and on uninstall. `codeman tui` replaces it and does the job better: `sc` numbered its entries globally but only accepted a single `[1-9]` keypress, so sessions 10+ were listed and could not be selected, and it inferred nothing about what an agent was doing. The alias cleanup is marker-owned, matching the exact line the installer wrote, so a user's own `alias sc=` for another tool is untouched.
+
+  **CLI polish that came with it.**
+  - New shared style kit (`src/cli-style.ts`) used across the CLI: semantic palette, glyphs, width-aware table, spinner, confirm.
+  - `codeman doctor` is colorized and its table is measured, so the "Antigravity CLI" label no longer pushes its row out of column. `--json` output is unchanged.
+  - `codeman web` no longer prints its "running at" line twice, and the server's non-loopback security warning is painted like the CLI's (chalk degrades off a TTY, so journald and `web.log` stay free of escape codes).
+  - Spinners on the silent up-to-30s waits in `codeman web -d`, `codeman web --stop` and `codeman service install`.
+  - `codeman reset` asks a real y/N confirmation on a TTY; non-interactive callers keep the old `--force` refusal.
+  - `codeman list` and `codeman session list` share one renderer instead of drifting copies.
+  - `codeman attach` is described correctly in the README (it shows an attachment card for a local file).
+  - `test/cli-commands.test.ts` now derives its inventory from the real commander program instead of a hand-written fixture that had drifted.
+
+  **Internal.** New `tmux -L` callers resolve the socket through `resolveTmuxSocketName()`, now exported from `config/instance.ts`, so a second process can never point a beta instance at prod's panes. CLAUDE.md and `docs/architecture-invariants.md` both record the rule.
+
+  ### Thanks
+
+  The TUI went through seven rounds of beta testing over PuTTY/SSH by **@Ark0N**, which is where the way out of an attach, the session strip, the preview repaint handling and the glyph set all came from.
+
+## 1.20.1
+
+### Patch Changes
+
+- Terminal input and scrollback fixes (PRs #327, #331):
+  - IME punctuation preserved (#327): keyCode 229 / `Process` key events are now delegated to xterm's CompositionHelper instead of being suppressed, so an active Chinese IME committing numbers and full-width punctuation (，。！？ and friends) reaches the terminal correctly. The CJK input field sends the browser's committed text instead of guessing from `KeyboardEvent.key`, and the redundant Android orphan-input fallback is removed so xterm is the single input owner.
+  - Shell history replay bounded (#331): selecting a Shell session loads a bounded 1 MiB tail instead of replaying the entire multi-megabyte tmux scrollback on xterm's main thread; full history stays available via the explicit "Load full history" action. tmux history limits now apply correctly on both legacy tmux (global default set in the same command queue before pane creation) and tmux 3.7+ (per-pane targeting that never resizes or trims unrelated live panes). Also adds `Server-Timing` and `[TERMINAL-PERF]` timing stages for terminal loads, fixes `scrollToLastNonEmptyLine` double-counting scrollback rows, and keeps live output ordered behind snapshot replays.
+
+  ### Thanks
+  - @dignfei for both fixes: the IME punctuation root-cause fix (#327) and the bounded shell history replay with the tmux history-limit correctness work (#331).
+
+## 1.20.0
+
+### Minor Changes
+
+- Response viewer for OpenCode, Gemini, Antigravity and Pi sessions (#326). External CLIs render their own TUIs, so the viewer used to come up empty for them; a new transcript parser (`response-viewer-transcript.ts`) reconstructs the conversation from the pane text instead, and the `?context=full` view now tags every block with a role so prompts render as "You" and agent output as the assistant. The divider normalizer was rewritten as a linear scan after review found catastrophic backtracking on agent-controlled input (minutes of stall on a long dash run), with an equivalence corpus pinning the old accept set.
+
+  CLIs installed via nvm or Homebrew are now found when Codeman runs as a service (#329). A shared resolver falls back to a login-shell probe when the direct PATH lookup misses, so systemd and LaunchAgent installs no longer report every CLI as missing. Review hardening on top: a failed resolution is negative-cached with doubling backoff instead of re-spawning a login shell on every request, all probes pass `killSignal: 'SIGKILL'` (interactive bash shrugs off SIGTERM, and a blocking `.bash_profile` could have hung the server indefinitely), the resolvers are inert under vitest again so test suites cannot execute binaries found on the dev box, and the improved not-found guidance is wired into both the session-create errors and the per-CLI status endpoints.
+
+  `GET /api/system/repo-status` reports branch, upstream, ahead/behind and remote reachability for git-clone installs (#328). Review hardening: the git network calls moved off the synchronous path onto a single-flight 45s cache (one slow remote could previously freeze the whole server for up to a minute per request), remote URLs and git stderr are credential-redacted before they leave the server, the spawns use the same non-interactive git env as the clone path, and a local-branch upstream no longer parses into garbage.
+
+  Auto Copy for the terminal (#325, opt-in, per-device): a finished selection (mouse drag, double or triple click, or a phone long-press) lands on the clipboard by itself, so select-then-copy becomes select. Alongside it, hand-encoded tap reports are now gated on the server-observed `cliMouseTracking` state, so a pane that has fallen back to a plain shell no longer receives `[<0;88;20M` junk on tap.
+
+  The Ralph loop no longer stops polling after two ticks (#330): the reschedule guard read a stale timer handle that the timer callback never cleared, so the loop silently died while its status stayed `running`. The handle is now nulled as the callback's first statement, and a regression test pins the bug.
+
+  The red "needs you" tab alert clears when a dialog is answered in the terminal instead of surviving until the end of the turn: the post-hook re-capture could erase the parsed dialog options that the staleness sweep relies on (`applyCapture` is now add-only for options), and a delayed staleness pass now runs while a page is open. The unreachable `copyTerminal()` was removed, closing out #322.
+
+  ### Thanks
+  - @aakhter contributed the external-CLI response viewer (#326), the repo-status endpoint (#328), the login-shell CLI resolution (#329) and the Ralph reschedule fix (#330)
+  - @rounakdatta reported the mobile copy gap (#322) closed out in this release
+
 ## 1.19.7
 
 ### Patch Changes
@@ -43,6 +122,7 @@
   **Upload (COD-317):** `POST /api/sessions/:id/files/upload?path=<relativeDir>` writes any file to the workspace with CSRF (`Origin/Referer==Host` or `X-Codeman-CSRF`), per-`(IP,session)` token bucket (20/min), `sanitizeUploadFilename`, `validateSessionFilePath` confinement, `isSensitivePath`/`isBlockedAttachmentPath`/`.git` guards, symlink-safe `lstat` + `O_EXCL|O_NOFOLLOW` and non-recursive `mkdir` loop, `409` on exists, 50 MB cap via `@fastify/multipart`; remote writes via `writeRemoteFileBytes` (`umask 077`, atomic `mv -n`, 15 s timeout). Header `⬆ Upload` handles multi-file (10/batch, concurrency 3, progress toasts, order-preserving) and drag-drop onto a folder now targets that folder; both now respect the **current folder** (last expanded) and show `· in <dir>` in the status bar.
 
   **Mkdir / Rename / Delete (COD-318):** `POST /api/sessions/:id/files/mkdir {path}`, `POST /api/sessions/:id/files/rename {from,to}`, `DELETE /api/sessions/:id/files?path=` share the same guards plus recursive `fs.rm` for local deletes and `mkdir -p`/`SFTP rename`/`rm -rf` for remote via new `remote-sftp.ts` helpers (`createRemoteWorkspaceDirectory`, `renameRemoteWorkspacePath`, `deleteRemoteWorkspacePath`). Header `＋ New folder` creates in the current folder (e.g. `src/utils` when that is expanded) and auto-expands it; per-row `✎ Rename` (prompt for new base, moves expanded/current state) and `🗑 Delete` (confirm, recursive for non-empty dirs) appear on hover. All operations refresh the tree and keep `fileBrowserCurrentDir`/`ExpandedDirs` consistent.
+
 - Wiki user manual, a phone tab tap-zone fix, per-parent lineage colours, and two robustness fixes.
   - **Wiki**: `docs/wiki/` is now a 30-page user manual (installation, quick start, the dashboard, agent CLIs, remote/Docker cases, hooks, security, HTTP API, troubleshooting and more), published to the GitHub wiki by a sync workflow on every push that touches it.
   - **Phone tabs**: on a narrow phone the active tab's geometric centre could land on its gear icon, so a thumb aiming at the tab opened Session Options instead of switching. The active tab's name now reserves a minimum width, and a static test recomputes the clearance from the stylesheet so widening the icons fails there rather than on a phone.
@@ -70,6 +150,7 @@
   - That drift was a silent hole, not a tidiness problem: a file excluded from CI and added to no runner is tested by NOTHING, and every command stays green, because vitest counts "no files matched" as success. `test/test-suite-partition.test.ts` now fails if any test file is reachable by no runner or by two.
   - ⚠️ A file filter must match its runner: `npm test -- test/mobile/keyboard.test.ts` matches nothing and exits green having run zero tests, because the gate excludes that path. Use `npm run test:mobile -- <file>`. Documented in CLAUDE.md, and the one place that recommended the old form was corrected.
   - Docs synced: CLAUDE.md, AGENTS.md, .github/CONTRIBUTING.md, both READMEs, and two ci.yml comments that claimed only `test/mobile/**` was excluded (it is three suites, and 5 Playwright files rather than 3).
+
 ## 1.19.11
 
 ### Patch Changes
@@ -109,7 +190,6 @@
 ### Patch Changes
 
 - Fix desktop tab and terminal interaction regressions: replace ambiguous tab hamburger drag handles with grip affordances; make F2 inline renames repaint immediately, remain usable in compact rails, preserve group editors, and serialize overlapping saves; keep vertical console placement and tab-list accessibility synchronized; adapt Session Options to narrow viewports; and unblock CJK input while agent output is active.
-
 
 ## 1.19.6
 

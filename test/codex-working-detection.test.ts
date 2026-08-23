@@ -359,6 +359,19 @@ describe('checkpoint prompt observations', () => {
     await session.stop();
   });
 
+  it('projects whether checkpoint automation is active', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'codex' });
+    session.setCheckpoint(true, ['new']);
+    expect(session.isCheckpointActive).toBe(false);
+
+    session.requestCheckpoint({ mode: 'new' });
+    expect(session.isCheckpointActive).toBe(true);
+
+    session.cancelCheckpoint('manual-takeover');
+    expect(session.isCheckpointActive).toBe(false);
+    await session.stop();
+  });
+
   it('fences a cancelled checkpoint while Codex owned-ID snapshot preparation is pending', async () => {
     vi.useFakeTimers();
     const session = new Session({ workingDir: '/tmp', mode: 'codex' });
