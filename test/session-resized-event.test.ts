@@ -48,13 +48,14 @@ describe('COD-179 session resized event', () => {
     expect(seen).toEqual([]);
   });
 
-  it('does not emit when a small-viewport resize is blocked by an active desktop claim', () => {
-    session.claimDesktopSizing('desktop-conn-1');
-    session.resize(178, 31, { viewportType: 'desktop' });
+  it('does not emit when a passive viewer resize is ignored by ownership', () => {
+    const owner = Symbol('owner');
+    const passive = Symbol('passive');
+    session.activateTerminalViewer(owner, { cols: 178, rows: 31, viewportType: 'desktop' });
     const seen: unknown[] = [];
     session.on('resized', (d) => seen.push(d));
 
-    session.resize(60, 20, { viewportType: 'mobile' }); // ignored while desktop is active
+    expect(session.resizeFromTerminalViewer(passive, 60, 20, 'mobile')).toBe(false);
 
     expect(seen).toEqual([]);
   });

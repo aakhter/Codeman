@@ -137,11 +137,16 @@ import {
 import type { CodexProviderEnvironment } from './readmymind-predictor.js';
 import type { CodexProviderIdentity } from './codex-provider-identity.js';
 import { workingFramePollCoordinator } from './working-frame-poll-coordinator.js';
+import {
+  TerminalSizingOwnership,
+  type TerminalViewerDimensions,
+  type TerminalViewportType,
+} from './terminal-sizing-ownership.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
 
-export type ResizeViewportType = 'mobile' | 'tablet' | 'desktop';
+export type ResizeViewportType = TerminalViewportType;
 
 export type SessionIdleReason = 'turn-end' | 'initial-ready' | 'shell-ready';
 
@@ -2511,6 +2516,8 @@ export class Session extends EventEmitter {
       );
     }
 
+    this._resumeTerminalViewerSizing();
+
     // COD-124 unit 2, Gap B: if a native resume id was captured at a previous
     // park, fold it into the mode-specific launch config (currently codex
     // only) before building spawn options below, so the relaunch resumes the
@@ -4185,64 +4192,72 @@ export class Session extends EventEmitter {
   private _ptyCols = 120;
   private _ptyRows = 40;
 
-  /**
-   * Live WebSocket connections that have announced a desktop viewport for this
-   * session. While at least one is registered, small-viewport (mobile/tablet)
-   * resizes are ignored so a phone glancing at the session can't reflow the
-   * PTY under an active desktop view. Claims are connection-scoped: ws-routes
-   * registers them on a desktop-typed resize and releases them on socket
-   * close, so a mobile-only session (no desktop connected) keeps full control
-   * of its own size — including narrowing below the spawn default.
-   *
-   * Deliberate tradeoff: claims are WS-only because only a socket has a
-   * liveness signal. A desktop degraded to the stateless HTTP resize fallback
-   * still applies its typed resizes but holds no claim, so a concurrent phone
-   * can reflow it. This is cooperative UX arbitration, not a security
-   * boundary — untyped (legacy/API) resizes bypass claims by design.
-   */
-  private _desktopSizeClaims = new Set<symbol>();
+  private readonly _terminalSizing = new TerminalSizingOwnership();
+  private _acceptsTerminalViewerSizing = true;
 
-  /**
-   * A desktop sizing claim only blocks small-viewport resizes while the
-   * desktop is RECENTLY ACTIVE (claim registration or typed input within this
-   * window). An abandoned-but-connected desktop tab (left open at home, screen
-   * locked) must not hold a phone's view hostage: without this, the phone
-   * renders a desktop-width stream in a narrow xterm — mid-word wraps, tmux
-   * dot-fill, and Ink overdraw soup (the 0.9.8–0.9.12 mobile regression).
-   */
-  private static readonly DESKTOP_CLAIM_IDLE_MS = 90_000;
-
-  /** Last evidence of a live desktop user (claim registered / typed input). */
-  private _lastDesktopActivityAt = 0;
-
-  /** Last desktop-typed dimensions, for re-asserting after a mobile override. */
-  private _lastDesktopDims: { cols: number; rows: number } | null = null;
-
-  /** True while a small viewport reflowed the pane past an idle desktop claim. */
-  private _mobileSizeOverride = false;
-
-  /** Register a live desktop sizing claim (see _desktopSizeClaims). */
-  claimDesktopSizing(token: symbol): void {
-    this._desktopSizeClaims.add(token);
-    this._lastDesktopActivityAt = Date.now();
+  private _suspendTerminalViewerSizing(): void {
+    this._acceptsTerminalViewerSizing = false;
+    this._terminalSizing.clear();
   }
 
-  /** Release a desktop sizing claim when its connection goes away. */
-  releaseDesktopSizing(token: symbol): void {
-    this._desktopSizeClaims.delete(token);
-  }
-
-  /**
-   * Record desktop user activity (typed input over a claim-holding socket).
-   * If a phone reflowed the pane while the desktop was idle, the desktop
-   * layout is restored — "whoever is actively using the session wins".
-   */
-  noteDesktopActivity(): void {
-    this._lastDesktopActivityAt = Date.now();
-    if (this._mobileSizeOverride && this._lastDesktopDims) {
-      this._mobileSizeOverride = false;
-      this.resize(this._lastDesktopDims.cols, this._lastDesktopDims.rows, { viewportType: 'desktop' });
+  private _resumeTerminalViewerSizing(): void {
+    if (!this._isStopped) {
+      this._acceptsTerminalViewerSizing = true;
     }
+  }
+
+  rememberTerminalViewerSize(token: symbol, cols: number, rows: number, viewportType: TerminalViewportType): void {
+    if (!this._acceptsTerminalViewerSizing) {
+      return;
+    }
+    this._terminalSizing.remember(token, { cols, rows, viewportType });
+  }
+
+  activateTerminalViewer(token: symbol, dimensions?: TerminalViewerDimensions): number {
+    if (!this._acceptsTerminalViewerSizing) {
+      return this._terminalSizing.currentGeneration;
+    }
+    const activation = this._terminalSizing.activate(token, dimensions);
+    if (activation.dimensions) {
+      const { cols, rows, viewportType } = activation.dimensions;
+      this.resize(cols, rows, { viewportType });
+    }
+    return activation.generation;
+  }
+
+  resizeFromTerminalViewer(
+    token: symbol,
+    cols: number,
+    rows: number,
+    viewportType: TerminalViewportType,
+    force = false
+  ): boolean {
+    if (!this._acceptsTerminalViewerSizing) {
+      return false;
+    }
+    this.rememberTerminalViewerSize(token, cols, rows, viewportType);
+    if (!this._terminalSizing.isOwner(token)) {
+      return false;
+    }
+    this.resize(cols, rows, { viewportType, force });
+    return true;
+  }
+
+  bootstrapTerminalViewer(token: symbol, force = false): boolean {
+    if (!this._acceptsTerminalViewerSizing) {
+      return false;
+    }
+    const activation = this._terminalSizing.bootstrap(token);
+    if (!activation?.dimensions) {
+      return false;
+    }
+    const { cols, rows, viewportType } = activation.dimensions;
+    this.resize(cols, rows, { viewportType, force });
+    return true;
+  }
+
+  releaseTerminalViewer(token: symbol): void {
+    this._terminalSizing.release(token);
   }
 
   /**
@@ -4250,30 +4265,10 @@ export class Session extends EventEmitter {
    * Skips the resize if dimensions haven't changed to avoid triggering
    * unnecessary Ink full-screen redraws (visible flicker on tab switch).
    *
-   * Arbitration: while a desktop connection holds a sizing claim AND has been
-   * active within DESKTOP_CLAIM_IDLE_MS, resizes from small viewports
-   * (mobile/tablet) are ignored — shrink AND grow would both reflow the
-   * desktop view. Once the desktop goes idle, a phone may take the pane (the
-   * desktop re-asserts its size on its next typed input via
-   * noteDesktopActivity). Without a desktop connected, small viewports
-   * control the PTY size freely.
-   *
    * @param cols - Number of columns (width in characters)
    * @param rows - Number of rows (height in lines)
    */
   resize(cols: number, rows: number, options: { viewportType?: ResizeViewportType; force?: boolean } = {}): void {
-    const isSmallViewport = options.viewportType === 'mobile' || options.viewportType === 'tablet';
-    if (options.viewportType === 'desktop') {
-      this._lastDesktopDims = { cols, rows };
-      this._lastDesktopActivityAt = Date.now();
-      this._mobileSizeOverride = false;
-    }
-    if (isSmallViewport && this._desktopSizeClaims.size > 0) {
-      if (Date.now() - this._lastDesktopActivityAt < Session.DESKTOP_CLAIM_IDLE_MS) {
-        return;
-      }
-      this._mobileSizeOverride = true;
-    }
     const dimsChanged = cols !== this._ptyCols || rows !== this._ptyRows;
     if (this.ptyProcess && (dimsChanged || options.force)) {
       this._ptyCols = cols;
@@ -4382,14 +4377,9 @@ export class Session extends EventEmitter {
     // Set stopped flag first to prevent new timers from being created
     this._isStopped = true;
     Session.codexSubmitTimes.delete(this.id);
+    this._suspendTerminalViewerSizing();
 
     this._clearAllTimers();
-
-    // Drop desktop sizing claims defensively. Sockets normally release their
-    // own claim on close, but a hung client's close event can lag the session
-    // teardown by up to a ping cycle — don't let a stale claim suppress
-    // mobile resizes if this Session object sees any further use.
-    this._desktopSizeClaims.clear();
 
     // Immediately cleanup Promise callbacks to prevent orphaned references
     // during the rest of stop() processing (e.g., if mux kill times out)
@@ -4504,14 +4494,14 @@ export class Session extends EventEmitter {
       return;
     }
 
+    this._suspendTerminalViewerSizing();
+
     // Preserve the conversation-resume id for claude-mode sessions only.
     if (this.mode === 'claude') {
       this._resumeSessionId = this._claudeSessionId || this._resumeSessionId || this.id;
     }
 
     this._clearAllTimers();
-    this._desktopSizeClaims.clear();
-
     if (this.rejectPromise && !this._promptResolved) {
       this._promptResolved = true;
       this.rejectPromise(new Error('Session parked'));

@@ -40,7 +40,7 @@
 - Modify: `test/session-resize-arbitration.test.ts`
 - Modify: `test/session-resized-event.test.ts`
 
-- [ ] **Step 1: Write the failing pure ownership tests**
+- [x] **Step 1: Write the failing pure ownership tests**
 
 Create tests that define the token, dimension, and generation contract:
 
@@ -76,7 +76,7 @@ it('only clears ownership when the current connection token is released', () => 
 });
 ```
 
-- [ ] **Step 2: Run the pure test to verify RED**
+- [x] **Step 2: Run the pure test to verify RED**
 
 Run:
 
@@ -86,7 +86,7 @@ npm test -- test/terminal-sizing-ownership.test.ts
 
 Expected: FAIL because `src/terminal-sizing-ownership.ts` does not exist.
 
-- [ ] **Step 3: Implement the pure coordinator**
+- [x] **Step 3: Implement the pure coordinator**
 
 Create the focused module:
 
@@ -150,7 +150,7 @@ export class TerminalSizingOwnership {
 }
 ```
 
-- [ ] **Step 4: Add failing Session handoff tests**
+- [x] **Step 4: Add failing Session handoff tests**
 
 Replace timeout-based desktop claims with explicit connection behavior:
 
@@ -183,7 +183,7 @@ it('ignores passive resize frames and restores desktop dimensions on desktop inp
 });
 ```
 
-- [ ] **Step 5: Implement the Session viewer API and delete the 90-second claim state**
+- [x] **Step 5: Implement the Session viewer API and delete the 90-second claim state**
 
 Compose `TerminalSizingOwnership` in `Session` and add these public methods:
 
@@ -226,7 +226,7 @@ releaseTerminalViewer(token: symbol): void {
 
 Remove `_desktopSizeClaims`, `DESKTOP_CLAIM_IDLE_MS`, `_lastDesktopActivityAt`, `_lastDesktopDims`, `_mobileSizeOverride`, `claimDesktopSizing`, `releaseDesktopSizing`, and `noteDesktopActivity`. Keep `resize()` as the low-level trusted/recovery operation and keep its existing no-op and `resized` event behavior.
 
-- [ ] **Step 6: Run the focused server tests GREEN**
+- [x] **Step 6: Run the focused server tests GREEN**
 
 Run:
 
@@ -236,7 +236,7 @@ npm test -- test/terminal-sizing-ownership.test.ts test/session-resize-arbitrati
 
 Expected: all focused tests pass; no timers are required for ownership.
 
-- [ ] **Step 7: Commit Task 1**
+- [x] **Step 7: Commit Task 1**
 
 ```bash
 git add src/terminal-sizing-ownership.ts src/session.ts test/terminal-sizing-ownership.test.ts test/session-resize-arbitration.test.ts test/session-resized-event.test.ts

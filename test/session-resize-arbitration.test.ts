@@ -1,184 +1,215 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
 
-/** Must exceed Session.DESKTOP_CLAIM_IDLE_MS (90s) */
-const PAST_IDLE_MS = 91_000;
-
 type ResizeableSessionInternals = {
-  ptyProcess: { resize: (cols: number, rows: number) => void };
+  ptyProcess: { resize: (cols: number, rows: number) => void; kill: () => void };
   _ptyCols: number;
   _ptyRows: number;
+};
+
+type SizingLifecycleInternals = {
+  _mux: { killSession: () => Promise<boolean> } | null;
+  _respawnBlocked: boolean;
+  _applyNativeResumeIdForResume: () => void;
 };
 
 function attachFakePty(session: Session, cols = 160, rows = 48) {
   const resize = vi.fn();
   const internals = session as unknown as ResizeableSessionInternals;
-  internals.ptyProcess = { resize };
+  internals.ptyProcess = { resize, kill: vi.fn() };
   internals._ptyCols = cols;
   internals._ptyRows = rows;
   return resize;
 }
 
-describe('Session resize arbitration', () => {
-  it('lets a mobile-only session shrink below the spawn default (no desktop connected)', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
+describe('Session resize ownership', () => {
+  it('immediately hands an idle connected desktop pane to an explicitly active phone', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const resize = attachFakePty(session, 140, 44);
+    const desktop = Symbol('desktop');
+    const phone = Symbol('phone');
 
-    session.resize(48, 28, { viewportType: 'mobile' });
+    session.rememberTerminalViewerSize(desktop, 140, 44, 'desktop');
+    session.activateTerminalViewer(desktop);
+    session.rememberTerminalViewerSize(phone, 75, 62, 'mobile');
+    const generation = session.activateTerminalViewer(phone);
 
-    expect(resize).toHaveBeenCalledWith(48, 28);
+    expect(generation).toBe(2);
+    expect(resize).toHaveBeenLastCalledWith(75, 62);
   });
 
-  it('lets a mobile-only session shrink rows only', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
+  it('remembers a passive desktop resize and immediately restores it on explicit activation', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const resize = attachFakePty(session, 140, 44);
+    const desktop = Symbol('desktop');
+    const phone = Symbol('phone');
 
-    session.resize(160, 28, { viewportType: 'mobile' });
+    session.rememberTerminalViewerSize(desktop, 140, 44, 'desktop');
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    resize.mockClear();
 
-    expect(resize).toHaveBeenCalledWith(160, 28);
-  });
-
-  it('lets a mobile-only session re-grow after shrinking', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
-
-    session.resize(48, 28, { viewportType: 'mobile' });
-    session.resize(80, 36, { viewportType: 'tablet' });
-
-    expect(resize).toHaveBeenNthCalledWith(1, 48, 28);
-    expect(resize).toHaveBeenNthCalledWith(2, 80, 36);
-  });
-
-  it('ignores mobile resizes while a desktop connection holds a sizing claim', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
-    const desktop = Symbol('desktop-conn');
-
-    session.claimDesktopSizing(desktop);
-    session.resize(48, 28, { viewportType: 'mobile' });
-    // Grow is ignored too — it would reflow the desktop view just the same.
-    session.resize(200, 60, { viewportType: 'tablet' });
-
-    expect(resize).not.toHaveBeenCalled();
-  });
-
-  it('always applies desktop resizes, claim or not', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
-
-    session.claimDesktopSizing(Symbol('desktop-conn'));
-    session.resize(120, 40, { viewportType: 'desktop' });
-
-    expect(resize).toHaveBeenCalledWith(120, 40);
-  });
-
-  it('restores mobile control once the desktop claim is released', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
-    const desktop = Symbol('desktop-conn');
-
-    session.claimDesktopSizing(desktop);
-    session.resize(48, 28, { viewportType: 'mobile' });
+    expect(session.resizeFromTerminalViewer(desktop, 160, 48, 'desktop')).toBe(false);
     expect(resize).not.toHaveBeenCalled();
 
-    session.releaseDesktopSizing(desktop);
-    session.resize(48, 28, { viewportType: 'mobile' });
-    expect(resize).toHaveBeenCalledWith(48, 28);
+    expect(session.activateTerminalViewer(desktop)).toBe(2);
+    expect(resize).toHaveBeenCalledWith(160, 48);
   });
 
-  it('keeps ignoring mobile resizes until every desktop claim is released', () => {
-    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-    const resize = attachFakePty(session, 160, 48);
-    const desktopA = Symbol('desktop-a');
-    const desktopB = Symbol('desktop-b');
+  it('keeps the owner after passive release and requires activation after owner release', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const resize = attachFakePty(session, 140, 44);
+    const desktop = Symbol('desktop');
+    const phone = Symbol('phone');
 
-    session.claimDesktopSizing(desktopA);
-    session.claimDesktopSizing(desktopB);
-    session.releaseDesktopSizing(desktopA);
-    session.resize(48, 28, { viewportType: 'mobile' });
-    expect(resize).not.toHaveBeenCalled();
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    session.rememberTerminalViewerSize(desktop, 160, 48, 'desktop');
+    resize.mockClear();
 
-    session.releaseDesktopSizing(desktopB);
-    session.resize(48, 28, { viewportType: 'mobile' });
-    expect(resize).toHaveBeenCalledWith(48, 28);
+    session.releaseTerminalViewer(desktop);
+    expect(session.resizeFromTerminalViewer(phone, 80, 60, 'mobile')).toBe(true);
+    expect(resize).toHaveBeenLastCalledWith(80, 60);
+
+    session.releaseTerminalViewer(phone);
+    expect(session.resizeFromTerminalViewer(phone, 82, 58, 'mobile')).toBe(false);
+    expect(resize).toHaveBeenCalledTimes(1);
+
+    session.activateTerminalViewer(phone);
+    expect(resize).toHaveBeenLastCalledWith(82, 58);
   });
 
-  it('applies untyped (legacy/API) resizes regardless of claims', () => {
+  it('keeps low-level resize as a trusted path without viewer ownership', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'shell' });
     const resize = attachFakePty(session, 160, 48);
 
-    session.claimDesktopSizing(Symbol('desktop-conn'));
+    session.resize(48, 28, { viewportType: 'mobile' });
     session.resize(100, 30);
 
-    expect(resize).toHaveBeenCalledWith(100, 30);
+    expect(resize).toHaveBeenNthCalledWith(1, 48, 28);
+    expect(resize).toHaveBeenNthCalledWith(2, 100, 30);
   });
 
-  it('applies forced resizes even when the dimensions did not change', () => {
+  it('forwards force from the owning viewer for a same-size resize', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'shell' });
     const resize = attachFakePty(session, 120, 40);
+    const viewer = Symbol('viewer');
 
-    session.resize(120, 40, { force: true });
+    session.activateTerminalViewer(viewer, { cols: 120, rows: 40, viewportType: 'desktop' });
+    expect(resize).not.toHaveBeenCalled();
+
+    expect(session.resizeFromTerminalViewer(viewer, 120, 40, 'desktop', true)).toBe(true);
+    expect(resize).toHaveBeenCalledWith(120, 40);
+  });
+
+  it('bootstraps an ownerless remembered viewer once and forwards force', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    const resize = attachFakePty(session, 120, 40);
+    const viewer = Symbol('viewer');
+
+    expect(session.resizeFromTerminalViewer(viewer, 120, 40, 'desktop', true)).toBe(false);
+    expect(session.bootstrapTerminalViewer(viewer, true)).toBe(true);
 
     expect(resize).toHaveBeenCalledWith(120, 40);
   });
 
-  describe('idle-desktop override (whoever is active wins)', () => {
-    afterEach(() => {
-      vi.useRealTimers();
+  it('does not let a passive viewer bootstrap over an existing owner', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const resize = attachFakePty(session, 140, 44);
+    const phone = Symbol('phone');
+    const desktop = Symbol('desktop');
+
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    resize.mockClear();
+
+    expect(session.resizeFromTerminalViewer(desktop, 160, 48, 'desktop')).toBe(false);
+    expect(session.bootstrapTerminalViewer(desktop)).toBe(false);
+    expect(session.resizeFromTerminalViewer(phone, 80, 60, 'mobile')).toBe(true);
+
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize).toHaveBeenCalledWith(80, 60);
+  });
+
+  it('suspends sizing throughout delayed park teardown and re-enables it at interactive resume', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const stale = Symbol('stale');
+    const resumed = Symbol('resumed');
+    let finishMuxTeardown!: (value: boolean) => void;
+    const muxTeardown = new Promise<boolean>((resolve) => {
+      finishMuxTeardown = resolve;
     });
+    const lifecycle = session as unknown as SizingLifecycleInternals;
+    lifecycle._mux = { killSession: vi.fn(() => muxTeardown) };
 
-    it('lets a mobile client take the pane once the desktop claim goes idle', () => {
-      vi.useFakeTimers();
-      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-      const resize = attachFakePty(session, 160, 48);
+    attachFakePty(session, 140, 44);
+    session.activateTerminalViewer(stale, { cols: 75, rows: 62, viewportType: 'mobile' });
+    const parking = session.park();
 
-      session.claimDesktopSizing(Symbol('desktop-conn'));
-      session.resize(48, 28, { viewportType: 'mobile' });
-      expect(resize).not.toHaveBeenCalled(); // fresh claim → ignored
-
-      vi.advanceTimersByTime(PAST_IDLE_MS);
-      session.resize(48, 28, { viewportType: 'mobile' });
-      expect(resize).toHaveBeenCalledWith(48, 28); // idle desktop → applied
+    const gatedGeneration = session.activateTerminalViewer(stale, {
+      cols: 70,
+      rows: 50,
+      viewportType: 'mobile',
     });
+    expect(session.resizeFromTerminalViewer(stale, 68, 48, 'mobile')).toBe(false);
+    expect(session.bootstrapTerminalViewer(stale)).toBe(false);
+    expect(session.activateTerminalViewer(resumed, { cols: 160, rows: 48, viewportType: 'desktop' })).toBe(
+      gatedGeneration
+    );
 
-    it('keeps blocking mobile while the desktop stays active via typed input', () => {
-      vi.useFakeTimers();
-      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-      const resize = attachFakePty(session, 160, 48);
+    finishMuxTeardown(true);
+    await parking;
+    expect(session.bootstrapTerminalViewer(stale)).toBe(false);
 
-      session.claimDesktopSizing(Symbol('desktop-conn'));
-      vi.advanceTimersByTime(PAST_IDLE_MS - 10_000);
-      session.noteDesktopActivity(); // user typed on desktop
-      vi.advanceTimersByTime(20_000); // idle since claim, but not since input
+    lifecycle._applyNativeResumeIdForResume = () => {
+      throw new Error('resume-boundary-sentinel');
+    };
+    await expect(session.startInteractive()).rejects.toThrow('resume-boundary-sentinel');
 
-      session.resize(48, 28, { viewportType: 'mobile' });
-      expect(resize).not.toHaveBeenCalled();
-    });
+    const resize = attachFakePty(session, 120, 40);
+    expect(session.resizeFromTerminalViewer(resumed, 160, 48, 'desktop')).toBe(false);
+    expect(session.bootstrapTerminalViewer(resumed)).toBe(true);
+    expect(session.resizeFromTerminalViewer(stale, 70, 50, 'mobile')).toBe(false);
 
-    it('re-asserts the desktop layout on desktop input after a mobile override', () => {
-      vi.useFakeTimers();
-      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-      const resize = attachFakePty(session, 160, 48);
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize).toHaveBeenCalledWith(160, 48);
+  });
 
-      session.resize(208, 45, { viewportType: 'desktop' }); // desktop sizes the pane
-      session.claimDesktopSizing(Symbol('desktop-conn'));
-      vi.advanceTimersByTime(PAST_IDLE_MS);
+  it('does not re-enable sizing when interactive resume fails its respawn guard', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    const lifecycle = session as unknown as SizingLifecycleInternals;
+    const viewer = Symbol('viewer');
 
-      session.resize(48, 28, { viewportType: 'mobile' }); // phone takes over
-      expect(resize).toHaveBeenLastCalledWith(48, 28);
+    await session.park();
+    lifecycle._respawnBlocked = true;
 
-      session.noteDesktopActivity(); // desktop user types again
-      expect(resize).toHaveBeenLastCalledWith(208, 45); // layout restored
-    });
+    await expect(session.startInteractive()).rejects.toThrow('Respawn blocked');
+    expect(session.resizeFromTerminalViewer(viewer, 160, 48, 'desktop')).toBe(false);
+    expect(session.bootstrapTerminalViewer(viewer)).toBe(false);
+  });
 
-    it('does not re-assert when no mobile override happened', () => {
-      const session = new Session({ workingDir: '/tmp', mode: 'shell' });
-      const resize = attachFakePty(session, 160, 48);
+  it('keeps sizing terminally suspended during and after stop', async () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    const stale = Symbol('stale');
+    const restarted = Symbol('restarted');
+    const lifecycle = session as unknown as SizingLifecycleInternals;
 
-      session.resize(208, 45, { viewportType: 'desktop' });
-      resize.mockClear();
-      session.noteDesktopActivity();
-      expect(resize).not.toHaveBeenCalled();
-    });
+    attachFakePty(session, 140, 44);
+    session.activateTerminalViewer(stale, { cols: 75, rows: 62, viewportType: 'mobile' });
+    const stopping = session.stop(false);
+
+    expect(session.resizeFromTerminalViewer(stale, 70, 50, 'mobile')).toBe(false);
+    expect(session.bootstrapTerminalViewer(stale)).toBe(false);
+    await stopping;
+
+    expect(session.resizeFromTerminalViewer(restarted, 160, 48, 'desktop')).toBe(false);
+    expect(session.bootstrapTerminalViewer(restarted)).toBe(false);
+    expect(session.resizeFromTerminalViewer(stale, 70, 50, 'mobile')).toBe(false);
+
+    lifecycle._applyNativeResumeIdForResume = () => {
+      throw new Error('stopped-start-sentinel');
+    };
+    await expect(session.startInteractive()).rejects.toThrow('stopped-start-sentinel');
+
+    const resize = attachFakePty(session, 120, 40);
+    expect(session.bootstrapTerminalViewer(restarted)).toBe(false);
+    expect(resize).not.toHaveBeenCalled();
   });
 });

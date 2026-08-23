@@ -160,12 +160,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         socket.send(`{"t":"o","d":${JSON.stringify(DEC_2026_START + data + DEC_2026_END)}}`);
       };
 
-      // Per-connection desktop sizing claim — registered on the first
-      // desktop-typed resize and released on socket close, so Session.resize()
-      // can ignore small-viewport resizes only while a desktop is actually
-      // connected (see Session._desktopSizeClaims).
-      const sizingToken = Symbol('ws-desktop-sizing');
-      let holdsDesktopClaim = false;
+      const sizingToken = Symbol('ws-terminal-viewer');
 
       // Attach message handler synchronously BEFORE any async work
       // (@fastify/websocket requirement to avoid dropped messages).
@@ -193,9 +188,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
                 }
                 session.cancelCheckpoint('manual-takeover');
               }
-              // Typed input from a claim-holding desktop keeps the claim "hot"
-              // and re-asserts the desktop layout after a mobile override.
-              if (holdsDesktopClaim) session.noteDesktopActivity();
+              session.activateTerminalViewer(sizingToken);
               delivered = session.write(msg.d);
               // A session whose PTY is gone swallows the write. ACKing anyway told
               // the client to drop the frame from its durable queue and left the seq
@@ -215,18 +208,12 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             msg.r >= 1 &&
             msg.r <= 200
           ) {
-            const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : undefined;
-            if (viewportType === 'desktop') {
-              session.claimDesktopSizing(sizingToken);
-              holdsDesktopClaim = true;
-            } else if (viewportType) {
-              // The connection's viewport can change (e.g. browser window
-              // narrowed past the tablet breakpoint) — drop a stale claim.
-              session.releaseDesktopSizing(sizingToken);
-              holdsDesktopClaim = false;
-            }
+            const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : 'desktop';
             const force = msg.f === true;
-            session.resize(msg.c, msg.r, { viewportType, force });
+            const resized = session.resizeFromTerminalViewer(sizingToken, msg.c, msg.r, viewportType, force);
+            if (!resized) {
+              session.bootstrapTerminalViewer(sizingToken, force);
+            }
           }
         } catch {
           // Ignore malformed messages
@@ -309,7 +296,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         session.off('clearTerminal', onClearTerminal);
         session.off('needsRefresh', onNeedsRefresh);
         session.off('exit', onSessionExit);
-        session.releaseDesktopSizing(sizingToken);
+        session.releaseTerminalViewer(sizingToken);
 
         // Release this socket's slot. Idempotent and identity-matched: if this
         // socket was already superseded (a same-cid reconnect took its slot) or
