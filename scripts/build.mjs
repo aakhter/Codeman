@@ -154,6 +154,10 @@ run(
   'npx esbuild dist/web/public/session-ui.js --minify --outfile=dist/web/public/session-ui.js --allow-overwrite'
 );
 run(
+  'minify mobile-tabs.js',
+  'npx esbuild dist/web/public/mobile-tabs.js --minify --outfile=dist/web/public/mobile-tabs.js --allow-overwrite'
+);
+run(
   'minify styles.css',
   'npx esbuild dist/web/public/styles.css --minify --outfile=dist/web/public/styles.css --allow-overwrite'
 );
@@ -192,6 +196,9 @@ console.log('\n[build] content-hash cache busting');
     'subagent-windows.js',
     'image-input.js',
     'spreadsheet-preview.js',
+    'mobile-tabs.js',
+    'mobile-overview.js',
+    'home-sessions.js',
     'vendor/xterm-zerolag-input.js',
     'vendor/xterm-predictive-echo.js',
   ];

@@ -131,6 +131,11 @@
         </button>
       </div>
 
+      <!-- Mobile Tab Pill — always in DOM for instant paint, JS toggles visibility -->
+      <button id="mobileTabPill" class="mobile-tab-pill" aria-label="Open tab list" aria-expanded="false" aria-controls="mobileTabSheet" style="display:none">
+        <span class="pill-mini"></span><span class="pill-count">0</span><span class="pill-chev">▼</span>
+      </button>
+
       <!-- Session Tabs. In sidebar layout THIS VERY #sessionTabs element is
            re-parented into #sessionSidebarList by applySessionListLayout() and
            this host is hidden — it is never cloned or rebuilt, because

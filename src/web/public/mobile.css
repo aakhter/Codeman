@@ -4038,3 +4038,9 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab .tab-close {
 .sheet-row .row-close{width:28px;height:28px;display:grid;place-items:center;border-radius:6px;color:#98a2b1;flex-shrink:0;border:none;background:transparent;cursor:pointer}
 .sheet-row .row-close:active{background:rgba(255,255,255,.08)}
 .mobile-tab-sheet .sheet-footer{padding:8px 12px;border-top:1px solid #2b333f;display:flex;justify-content:space-between;font-size:.7rem;color:#98a2b1}
+/* Global fallback for pill — ensures it shows even if phone media query fails or for desktop testing */
+.mobile-tab-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:8px;background:#1b222c;border:1px solid #2b333f;color:#f3f6fa;font-size:.72rem;font-weight:600;cursor:pointer;flex-shrink:0}
+.mobile-tab-pill .pill-mini{max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f3f6fa}
+.mobile-tab-pill .pill-count{background:var(--accent,#38b6f0);color:#04223a;font-size:.68rem;font-weight:800;padding:1px 6px;border-radius:20px}
+.mobile-tab-pill .pill-chev{color:var(--text-dim,#98a2b1);font-size:.65rem;transition:transform .2s}
+.mobile-tab-pill[aria-expanded="true"] .pill-chev{transform:rotate(180deg)}

@@ -1503,13 +1503,21 @@ export class WebServer extends EventEmitter {
     registerSecurityHeaders(this.app, this.https);
     this.app.get('/', async (_req, reply) => {
       return reply
-        .header('Cache-Control', 'no-cache')
+        .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        .header('CDN-Cache-Control', 'no-store')
+        .header('Cloudflare-CDN-Cache-Control', 'no-store')
+        .header('Surrogate-Control', 'no-store')
+        .header('Pragma', 'no-cache')
         .type('text/html; charset=utf-8')
         .send(await this.renderIndexHtml());
     });
     this.app.get('/index.html', async (_req, reply) => {
       return reply
-        .header('Cache-Control', 'no-cache')
+        .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        .header('CDN-Cache-Control', 'no-store')
+        .header('Cloudflare-CDN-Cache-Control', 'no-store')
+        .header('Surrogate-Control', 'no-store')
+        .header('Pragma', 'no-cache')
         .type('text/html; charset=utf-8')
         .send(await this.renderIndexHtml());
     });
@@ -1523,7 +1531,11 @@ export class WebServer extends EventEmitter {
     this.app.get('/session/:id', async (req, reply) => {
       const { id } = req.params as { id: string };
       return reply
-        .header('Cache-Control', 'no-cache')
+        .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        .header('CDN-Cache-Control', 'no-store')
+        .header('Cloudflare-CDN-Cache-Control', 'no-store')
+        .header('Surrogate-Control', 'no-store')
+        .header('Pragma', 'no-cache')
         .type('text/html; charset=utf-8')
         .send(await this.renderIndexHtml(id));
     });

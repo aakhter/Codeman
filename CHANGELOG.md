@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.22.4
+
+### Patch Changes
+
+- Fix mobile tab pill not appearing on iPhone Chrome due to Cloudflare and service worker cache: bump SW cache to v2 and add mobile-tabs to precache, set no-store + CDN-Cache-Control for index and session routes, and cache-bust mobile-tabs hash
+
 ## 1.22.3
 
 ### Patch Changes

@@ -9,18 +9,45 @@ const MobileTabSheet = {
   _filter: 'all',
   _q: '',
   init() {
-    if (!this._isEnabled()) return;
+    // Always create elements — _isEnabled gates visibility, not existence (debug on desktop + ensures iPhone race never hides pill)
     this._createElements();
     this._bindEvents();
-    // Hook into app renders
     this._patchApp();
+    // Robustness: if header is re-rendered and pill removed, re-create immediately
+    try {
+      const header = document.querySelector('.header');
+      if (header && window.MutationObserver) {
+        const obs = new MutationObserver(() => {
+          if (!document.getElementById('mobileTabPill')) {
+            console.log('[MobileTabSheet] pill missing — recreating');
+            this._createElements();
+            this.updatePill();
+          }
+        });
+        obs.observe(header, { childList: true, subtree: false });
+        this._headerObserver = obs;
+      }
+    } catch {}
+    // Also ensure pill stays visible even if something else hides it — force every 800ms
+    setInterval(() => {
+      const p = document.getElementById('mobileTabPill');
+      if (p && this._isEnabled() && getComputedStyle(p).display === 'none') {
+        console.log('[MobileTabSheet] pill was hidden — forcing visible');
+        p.style.setProperty('display', 'inline-flex', 'important');
+      }
+    }, 800);
+    console.log('[MobileTabSheet] init', { isMobile: this._isEnabled(), width: window.innerWidth });
   },
   _isEnabled() {
     try {
-      return window.MobileDetection && MobileDetection.isMobile();
-    } catch {
-      return window.innerWidth < 430;
-    }
+      // Use <=430 to include iPhone Pro Max (430) which isMobile() excludes (strict <430)
+      if (window.MobileDetection) {
+        const w = window.innerWidth;
+        if (w <= 430) return true;
+        return MobileDetection.isMobile();
+      }
+    } catch {}
+    return window.innerWidth <= 430 || window.innerWidth < 768;
   },
   _shouldShowPill() {
     try {
@@ -146,13 +173,35 @@ const MobileTabSheet = {
     this.render();
   },
   updatePill() {
-    const pill = document.getElementById('mobileTabPill');
-    if (!pill) return;
+    let pill = document.getElementById('mobileTabPill');
+    if (!pill) {
+      // Pill was removed (header re-render) — recreate
+      this._createElements();
+      pill = document.getElementById('mobileTabPill');
+      if (!pill) return;
+    }
     const n = window.app?.sessionOrder?.length || 0;
-    const should = n > 8 && this._isEnabled();
-    pill.style.display = should ? '' : 'none';
+    const isMobile = this._isEnabled();
+    const showPill = isMobile && n >= 1;
+    const hideStrip = isMobile;
+    // Debug: log every 5s if pill would hide
+    if (!showPill)
+      console.log('[MobileTabSheet] pill hidden', { n, isMobile: this._isEnabled(), w: window.innerWidth });
+    try {
+      pill.style.setProperty('display', showPill ? 'inline-flex' : 'none', 'important');
+      pill.style.setProperty('visibility', showPill ? 'visible' : 'hidden', 'important');
+      pill.style.setProperty('opacity', showPill ? '1' : '0', 'important');
+    } catch {
+      pill.style.display = showPill ? 'inline-flex' : 'none';
+    }
     const tabsHost = document.getElementById('sessionTabsHost');
-    if (tabsHost) tabsHost.style.display = should ? 'none' : '';
+    if (tabsHost) {
+      try {
+        tabsHost.style.setProperty('display', hideStrip ? 'none' : '', 'important');
+      } catch {
+        tabsHost.style.display = hideStrip ? 'none' : '';
+      }
+    }
     const countEl = pill.querySelector('.pill-count');
     if (countEl) countEl.textContent = n;
     const mini = pill.querySelector('.pill-mini');
