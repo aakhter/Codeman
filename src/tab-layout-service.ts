@@ -213,11 +213,20 @@ export class TabLayoutService {
         .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible && !excluded.has(fact.id))
         .map((fact) => fact.id);
       const visible = new Set(facts);
+      const foreign = new Set(
+        item.metadata
+          .filter((fact) => fact.kind === 'session' && !fact.ownerValid && fact.visible)
+          .map((fact) => fact.id)
+      );
       const rawPrevious = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
       const rawNext = flattenOwnerSessionOrder(item.next);
       const previous = rawPrevious.filter((id) => visible.has(id) || excluded.has(id));
       const next = rawNext.filter((id) => visible.has(id) && !excluded.has(id));
-      const claimedIds = normalizeSessionOrder([...rawPrevious, ...rawNext, ...facts]);
+      const claimedIds = normalizeSessionOrder([
+        ...rawPrevious.filter((id) => !foreign.has(id)),
+        ...rawNext.filter((id) => !foreign.has(id)),
+        ...facts,
+      ]);
       const currentIds = normalizeSessionOrder([...next, ...facts]);
       return {
         owner: item.owner,

@@ -747,6 +747,45 @@ describe('TabLayoutService', () => {
     expect(await h.service.get('alice')).toEqual(h.layouts.alice);
   });
 
+  it('does not claim or disturb a known foreign session found in a stale owner layout', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'a1' },
+          { kind: 'session', id: 'b1' },
+          { kind: 'session', id: 'a2' },
+        ]),
+        bob: existing([
+          { kind: 'session', id: 'b1' },
+          { kind: 'session', id: 'b2' },
+        ]),
+      },
+      order: ['a1', 'b1', 'a2', 'b2'],
+      live: [
+        { id: 'a1', owner: 'alice', createdAt: 1 },
+        { id: 'b1', owner: 'bob', createdAt: 2 },
+        { id: 'a2', owner: 'alice', createdAt: 3 },
+        { id: 'b2', owner: 'bob', createdAt: 4 },
+      ],
+    });
+
+    const result = await h.service.putLegacyOrder({ owner: 'alice', isAdmin: false }, ['a2', 'a1']);
+
+    expect(result).toMatchObject({
+      order: ['a2', 'a1'],
+      changedOwnerOrders: { alice: ['a2', 'a1'] },
+      globalOrder: ['a2', 'b1', 'a1', 'b2'],
+      globalChanged: true,
+    });
+    expect(h.layouts.alice.ungrouped.map((ref) => ref.id)).toEqual(['a2', 'a1']);
+    expect(h.layouts.bob.ungrouped.map((ref) => ref.id)).toEqual(['b1', 'b2']);
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: { alice: ['a2', 'a1'] },
+      globalOrder: ['a2', 'b1', 'a1', 'b2'],
+      globalChanged: true,
+    });
+  });
+
   it('publishes layout and order together, suppresses duplicate order events, and rolls back store rejection', async () => {
     const h = createHarness({
       layouts: {
