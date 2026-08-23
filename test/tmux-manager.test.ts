@@ -102,6 +102,22 @@ describe('TmuxManager (unit)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedExec.mockImplementation((_cmd: string, optionsOrCallback?: unknown, maybeCallback?: unknown) => {
+      const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+      if (typeof callback === 'function') {
+        setImmediate(() =>
+          (callback as (err: null, result: { stdout: string; stderr: string }) => void)(null, {
+            stdout: '',
+            stderr: '',
+          })
+        );
+      }
+      return {
+        on: vi.fn(),
+        kill: vi.fn(),
+        pid: 12345,
+      } as never;
+    });
     // Default: which claude returns /usr/local/bin/claude
     mockedExecSync.mockImplementation((cmd: string) => {
       if (typeof cmd === 'string' && cmd.includes('which claude')) {
@@ -117,6 +133,7 @@ describe('TmuxManager (unit)', () => {
 
   afterEach(() => {
     manager.destroy();
+    vi.restoreAllMocks();
   });
 
   describe('backend', () => {
@@ -286,6 +303,49 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('window sizing', () => {
+    async function importWithTmuxCommandsEnabled(): Promise<typeof TmuxManager> {
+      const originalVitest = process.env.VITEST;
+      vi.resetModules();
+      delete process.env.VITEST;
+      try {
+        return (await import('../src/tmux-manager.js')).TmuxManager;
+      } finally {
+        if (originalVitest === undefined) delete process.env.VITEST;
+        else process.env.VITEST = originalVitest;
+      }
+    }
+
+    function holdFirstTeardownExec(): {
+      resizeCallbacks: Array<(error: Error | null) => void>;
+      releaseTeardown: () => void;
+      resizeCommandCount: () => number;
+    } {
+      const resizeCallbacks: Array<(error: Error | null) => void> = [];
+      let teardownCallback: ((error: null, result: { stdout: string; stderr: string }) => void) | undefined;
+      mockedExec.mockImplementation((command, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        if (String(command).includes('resize-window')) {
+          resizeCallbacks.push(callback as (error: Error | null) => void);
+        } else if (!teardownCallback) {
+          teardownCallback = callback as (error: null, result: { stdout: string; stderr: string }) => void;
+        } else if (typeof callback === 'function') {
+          setImmediate(() =>
+            (callback as (error: null, result: { stdout: string; stderr: string }) => void)(null, {
+              stdout: '',
+              stderr: '',
+            })
+          );
+        }
+        return { on: vi.fn(), kill: vi.fn(), pid: 12345 } as never;
+      });
+      return {
+        resizeCallbacks,
+        releaseTeardown: () => teardownCallback!(null, { stdout: '', stderr: '' }),
+        resizeCommandCount: () =>
+          mockedExec.mock.calls.filter(([command]) => String(command).includes('resize-window')).length,
+      };
+    }
+
     it('pins a tmux window to manual sizing before browser attach', () => {
       expect(manager.setManualWindowSize('codeman-abc12345')).toBe(true);
 
@@ -304,6 +364,457 @@ describe('TmuxManager (unit)', () => {
         expect.objectContaining({ timeout: expect.any(Number) }),
         expect.any(Function)
       );
+    });
+
+    it('coalesces pending window resizes and finishes on the latest dimensions', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+
+      expect(manager.resizeWindow('codeman-abc12345', 140, 42)).toBe(true);
+      expect(manager.resizeWindow('codeman-abc12345', 75, 62)).toBe(true);
+      expect(manager.resizeWindow('codeman-abc12345', 160, 48)).toBe(true);
+      expect(mockedExec).toHaveBeenCalledTimes(1);
+
+      callbacks.shift()!(null);
+
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      expect(mockedExec.mock.calls[1][0]).toContain('-x 160 -y 48');
+      expect(mockedExec.mock.calls.map(([command]) => command)).not.toContain(expect.stringContaining('-x 75 -y 62'));
+    });
+
+    it('drains pending resizes after success or error and returns to idle', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 75, 62);
+      callbacks.shift()!(null);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      callbacks.shift()!(new Error('tmux failed'));
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain('-x 160 -y 48');
+
+      callbacks.shift()!(null);
+      expect(manager.resizeWindow('codeman-abc12345', 180, 55)).toBe(true);
+      expect(mockedExec).toHaveBeenCalledTimes(4);
+      expect(mockedExec.mock.calls[3][0]).toContain('-x 180 -y 55');
+      expect(consoleError).toHaveBeenCalledWith('[TmuxManager] Failed to resize tmux window:', expect.any(Error));
+      callbacks.shift()!(null);
+      expect(
+        (
+          manager as unknown as {
+            pendingWindowResizes: Map<string, unknown>;
+          }
+        ).pendingWindowResizes.has('codeman-abc12345')
+      ).toBe(false);
+      consoleError.mockRestore();
+    });
+
+    it('retains serialization when error logging requests a re-entrant resize', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {
+        manager.resizeWindow('codeman-abc12345', 160, 48);
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      callbacks.shift()!(new Error('tmux failed'));
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      manager.resizeWindow('codeman-abc12345', 180, 55);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      callbacks.shift()!(null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain('-x 180 -y 55');
+      consoleError.mockRestore();
+    });
+
+    it('runs resize queues for different mux names independently', () => {
+      const callbacks = new Map<string, Array<(error: Error | null) => void>>();
+      mockedExec.mockImplementation((command, _options, callback) => {
+        const muxName = String(command).includes('codeman-def67890') ? 'codeman-def67890' : 'codeman-abc12345';
+        const muxCallbacks = callbacks.get(muxName) ?? [];
+        muxCallbacks.push(callback as (error: Error | null) => void);
+        callbacks.set(muxName, muxCallbacks);
+        return {} as never;
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-def67890', 120, 40);
+      manager.resizeWindow('codeman-abc12345', 75, 62);
+      manager.resizeWindow('codeman-def67890', 90, 50);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      callbacks.get('codeman-abc12345')!.shift()!(null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain("-t 'codeman-abc12345' -x 75 -y 62");
+
+      callbacks.get('codeman-def67890')!.shift()!(null);
+      expect(mockedExec).toHaveBeenCalledTimes(4);
+      expect(mockedExec.mock.calls[3][0]).toContain("-t 'codeman-def67890' -x 90 -y 50");
+    });
+
+    it('rejects invalid resize requests without starting a command', () => {
+      expect(manager.resizeWindow('unsafe;name', 140, 42)).toBe(false);
+      expect(manager.resizeWindow('codeman-abc12345', 0, 42)).toBe(false);
+      expect(manager.resizeWindow('codeman-abc12345', 140, 1001)).toBe(false);
+      expect(manager.resizeWindow('codeman-abc12345', 140.5, 42)).toBe(false);
+      expect(mockedExec).not.toHaveBeenCalled();
+    });
+
+    it('recovers after a synchronous resize executor throw', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedExec
+        .mockImplementationOnce(() => {
+          throw new Error('executor threw');
+        })
+        .mockImplementation((_cmd, _options, callback) => {
+          callbacks.push(callback as (error: Error | null) => void);
+          return {} as never;
+        });
+
+      expect(() => manager.resizeWindow('codeman-abc12345', 140, 42)).not.toThrow();
+      expect(manager.resizeWindow('codeman-abc12345', 160, 48)).toBe(true);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      expect(mockedExec.mock.calls[1][0]).toContain('-x 160 -y 48');
+      expect(callbacks).toHaveLength(1);
+      expect(consoleError).toHaveBeenCalledWith('[TmuxManager] Failed to resize tmux window:', expect.any(Error));
+      consoleError.mockRestore();
+    });
+
+    it('retains latest resize requested re-entrantly while draining a callback', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        if (mockedExec.mock.calls.length === 2) {
+          manager.resizeWindow('codeman-abc12345', 90, 50);
+          manager.resizeWindow('codeman-abc12345', 160, 48);
+        }
+        return {} as never;
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 75, 62);
+      callbacks.shift()!(null);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      callbacks.shift()!(null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain('-x 160 -y 48');
+      expect(mockedExec.mock.calls.map(([command]) => command)).not.toContain(expect.stringContaining('-x 90 -y 50'));
+    });
+
+    it('ignores a duplicate completion from an older resize command', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      const firstCompletion = callbacks[0];
+      firstCompletion(null);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      firstCompletion(null);
+      manager.resizeWindow('codeman-abc12345', 180, 55);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      callbacks[1](null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain('-x 180 -y 55');
+    });
+
+    it('ignores a synchronous executor throw after its callback completed', () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedExec.mockImplementationOnce((_cmd, _options, callback) => {
+        (callback as (error: Error | null) => void)(null);
+        throw new Error('throw after callback');
+      });
+
+      expect(() => manager.resizeWindow('codeman-abc12345', 140, 42)).not.toThrow();
+      expect(consoleError).not.toHaveBeenCalled();
+      expect(manager.resizeWindow('codeman-abc12345', 160, 48)).toBe(true);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+    });
+
+    it('drains safely when error logging throws and later resizes stay serialized', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {
+        throw new Error('logger failed');
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      expect(() => callbacks[0](new Error('tmux failed'))).not.toThrow();
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+
+      manager.resizeWindow('codeman-abc12345', 180, 55);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      callbacks[1](null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain('-x 180 -y 55');
+    });
+
+    it('kill drops pending resize work and leaves independent mux queues running', async () => {
+      const callbacks = new Map<string, Array<(error: Error | null) => void>>();
+      mockedExec.mockImplementation((command, _options, callback) => {
+        const muxName = String(command).includes('codeman-def67890') ? 'codeman-def67890' : 'codeman-abc12345';
+        const muxCallbacks = callbacks.get(muxName) ?? [];
+        muxCallbacks.push(callback as (error: Error | null) => void);
+        callbacks.set(muxName, muxCallbacks);
+        return {} as never;
+      });
+      manager.registerSession({
+        sessionId: 'resize-kill',
+        muxName: 'codeman-abc12345',
+        pid: 123,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      manager.resizeWindow('codeman-def67890', 120, 40);
+      manager.resizeWindow('codeman-def67890', 90, 50);
+      expect(await manager.killSession('resize-kill')).toBe(true);
+
+      callbacks.get('codeman-abc12345')![0](null);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      callbacks.get('codeman-def67890')![0](null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain("-t 'codeman-def67890' -x 90 -y 50");
+    });
+
+    it('destroy drops pending resize work for every mux', () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      manager.resizeWindow('codeman-def67890', 120, 40);
+      manager.resizeWindow('codeman-def67890', 90, 50);
+      manager.destroy();
+      callbacks.forEach((callback) => callback(null));
+
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      expect(
+        (
+          manager as unknown as {
+            pendingWindowResizes: Map<string, unknown>;
+          }
+        ).pendingWindowResizes.size
+      ).toBe(0);
+    });
+
+    it('recreates cancelled state without letting an old callback alter it', async () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+      manager.registerSession({
+        sessionId: 'old-session',
+        muxName: 'codeman-abc12345',
+        pid: 123,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 150, 45);
+      expect(await manager.killSession('old-session')).toBe(true);
+      manager.registerSession({
+        sessionId: 'new-session',
+        muxName: 'codeman-abc12345',
+        pid: 456,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+      });
+
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      callbacks[0](null);
+      manager.resizeWindow('codeman-abc12345', 180, 55);
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      callbacks[1](null);
+      expect(mockedExec).toHaveBeenCalledTimes(3);
+      expect(mockedExec.mock.calls[2][0]).toContain('-x 180 -y 55');
+    });
+
+    it('does not cancel resize work when kill cannot find the session', async () => {
+      const callbacks: Array<(error: Error | null) => void> = [];
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+
+      manager.resizeWindow('codeman-abc12345', 140, 42);
+      manager.resizeWindow('codeman-abc12345', 160, 48);
+      expect(await manager.killSession('missing-session')).toBe(false);
+      callbacks[0](null);
+
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      expect(mockedExec.mock.calls[1][0]).toContain('-x 160 -y 48');
+    });
+
+    it('does not cancel resize work when self-kill is refused', async () => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      const callbacks: Array<(error: Error | null) => void> = [];
+      const originalMuxName = process.env.CODEMAN_MUX_NAME;
+      process.env.CODEMAN_MUX_NAME = 'codeman-abc12345';
+      mockedExec.mockImplementation((_cmd, _options, callback) => {
+        callbacks.push(callback as (error: Error | null) => void);
+        return {} as never;
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      nonTestManager.registerSession({
+        sessionId: 'self-session',
+        muxName: 'codeman-abc12345',
+        pid: 123,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+      });
+
+      try {
+        nonTestManager.resizeWindow('codeman-abc12345', 140, 42);
+        nonTestManager.resizeWindow('codeman-abc12345', 160, 48);
+        expect(await nonTestManager.killSession('self-session')).toBe(false);
+        callbacks[0](null);
+        expect(mockedExec).toHaveBeenCalledTimes(2);
+        expect(mockedExec.mock.calls[1][0]).toContain('-x 160 -y 48');
+      } finally {
+        nonTestManager.destroy();
+        if (originalMuxName === undefined) delete process.env.CODEMAN_MUX_NAME;
+        else process.env.CODEMAN_MUX_NAME = originalMuxName;
+      }
+    });
+
+    it('invalidates pending resize work before non-owned remote detach awaits', async () => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      const { resizeCallbacks, releaseTeardown, resizeCommandCount } = holdFirstTeardownExec();
+      nonTestManager.registerSession({
+        sessionId: 'remote-detach',
+        muxName: 'codeman-abc12345',
+        pid: 999_999_999,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+        remote: {
+          hostId: 'remote-host',
+          label: 'Remote',
+          host: 'remote.example',
+          username: 'user',
+          remotePath: '/tmp',
+          owned: false,
+        },
+      });
+
+      try {
+        nonTestManager.resizeWindow('codeman-abc12345', 140, 42);
+        nonTestManager.resizeWindow('codeman-abc12345', 160, 48);
+        const killing = nonTestManager.killSession('remote-detach');
+        resizeCallbacks[0](null);
+        expect(resizeCommandCount()).toBe(1);
+        releaseTeardown();
+        await expect(killing).resolves.toBe(true);
+      } finally {
+        nonTestManager.destroy();
+      }
+    });
+
+    it('invalidates pending resize work before owned remote teardown awaits', async () => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      const { resizeCallbacks, releaseTeardown, resizeCommandCount } = holdFirstTeardownExec();
+      nonTestManager.registerSession({
+        sessionId: 'remote-owned',
+        muxName: 'codeman-abc12345',
+        pid: 999_999_999,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+        remote: {
+          hostId: 'remote-host',
+          label: 'Remote',
+          host: 'remote.example',
+          username: 'user',
+          remotePath: '/tmp',
+          owned: true,
+        },
+      });
+
+      try {
+        nonTestManager.resizeWindow('codeman-abc12345', 140, 42);
+        nonTestManager.resizeWindow('codeman-abc12345', 160, 48);
+        const killing = nonTestManager.killSession('remote-owned');
+        resizeCallbacks[0](null);
+        expect(resizeCommandCount()).toBe(1);
+        releaseTeardown();
+        await expect(killing).resolves.toBe(true);
+      } finally {
+        nonTestManager.destroy();
+      }
+    });
+
+    it('invalidates pending resize work before local teardown awaits', async () => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      const { resizeCallbacks, releaseTeardown, resizeCommandCount } = holdFirstTeardownExec();
+      nonTestManager.registerSession({
+        sessionId: 'local-owned',
+        muxName: 'codeman-abc12345',
+        pid: 999_999_999,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'claude',
+        attached: false,
+      });
+
+      try {
+        nonTestManager.resizeWindow('codeman-abc12345', 140, 42);
+        nonTestManager.resizeWindow('codeman-abc12345', 160, 48);
+        const killing = nonTestManager.killSession('local-owned');
+        resizeCallbacks[0](null);
+        expect(resizeCommandCount()).toBe(1);
+        releaseTeardown();
+        await expect(killing).resolves.toBe(true);
+      } finally {
+        nonTestManager.destroy();
+      }
     });
   });
 

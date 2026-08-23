@@ -250,7 +250,7 @@ git commit -m "feat(terminal): COD-370 track active sizing viewer"
 - Modify: `src/tmux-manager.ts:4297-4323`
 - Modify: `test/tmux-manager.test.ts:294-310`
 
-- [ ] **Step 1: Write the failing coalescing test**
+- [x] **Step 1: Write the failing coalescing test**
 
 Capture `exec` callbacks and prove only the newest queued resize runs after the active command:
 
@@ -273,7 +273,7 @@ it('coalesces pending window resizes and finishes on the latest dimensions', () 
 });
 ```
 
-- [ ] **Step 2: Run the tmux test RED**
+- [x] **Step 2: Run the tmux test RED**
 
 Run:
 
@@ -283,7 +283,7 @@ npm test -- test/tmux-manager.test.ts -t "coalesces pending window resizes"
 
 Expected: FAIL because three commands start immediately.
 
-- [ ] **Step 3: Implement a per-window non-blocking drain**
+- [x] **Step 3: Implement a per-window non-blocking drain**
 
 Add a map keyed by mux name:
 
@@ -325,7 +325,7 @@ private drainWindowResize(
 }
 ```
 
-- [ ] **Step 4: Run tmux tests GREEN**
+- [x] **Step 4: Run tmux tests GREEN**
 
 Run:
 
@@ -335,7 +335,7 @@ npm test -- test/tmux-manager.test.ts
 
 Expected: the existing non-blocking contract and new latest-wins test pass.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```bash
 git add src/tmux-manager.ts test/tmux-manager.test.ts
