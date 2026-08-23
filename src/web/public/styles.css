@@ -16783,6 +16783,13 @@ html[data-tab-orientation='vertical'] .home-sessions {
   padding: 0 22px 22px;
 }
 
+#sessionOptionsModal #context-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.25rem 1rem;
+  align-items: start;
+}
+
 #sessionOptionsModal .set-section {
   padding-top: 18px;
 }
@@ -16798,6 +16805,22 @@ html[data-tab-orientation='vertical'] .home-sessions {
 #sessionOptionsModal .set-section-blurb {
   margin: 0 0 13px 40px;
   font-size: 0.75rem;
+}
+
+@media (min-width: 1200px) {
+  #sessionOptionsModal .modal-content.modal-lg {
+    width: min(1120px, 96vw);
+    max-width: min(1120px, 96vw);
+  }
+
+  #sessionOptionsModal #context-tab {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #sessionOptionsModal #context-tab > .set-section-head,
+  #sessionOptionsModal #context-tab > .set-section-blurb {
+    grid-column: 1 / -1;
+  }
 }
 
 #sessionOptionsModal .set-group + .set-group {
