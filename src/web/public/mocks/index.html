@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Codeman — Mobile Tab Mockups</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family:
+          Manrope,
+          -apple-system,
+          sans-serif;
+        background: #11151c;
+        color: #f3f6fa;
+        padding: 24px;
+        max-width: 800px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin-bottom: 4px;
+      }
+      .sub {
+        color: #98a2b1;
+        font-size: 0.85rem;
+        margin-bottom: 24px;
+      }
+      .card {
+        background: #1b222c;
+        border: 1px solid #2b333f;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+        color: inherit;
+        transition: background 0.15s;
+      }
+      .card:hover {
+        background: #202833;
+        border-color: #3a4350;
+      }
+      .card .num {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        background: rgba(56, 182, 240, 0.15);
+        color: #38b6f0;
+        display: grid;
+        place-items: center;
+        font-weight: 700;
+        font-size: 0.85rem;
+        flex-shrink: 0;
+      }
+      .card h3 {
+        font-size: 0.9rem;
+      }
+      .card p {
+        font-size: 0.75rem;
+        color: #98a2b1;
+      }
+      .card .tag {
+        margin-left: auto;
+        font-size: 0.7rem;
+        background: #2a323d;
+        padding: 3px 8px;
+        border-radius: 20px;
+        color: #98a2b1;
+      }
+      .badge {
+        margin-top: 24px;
+        background: #0f172a;
+        border: 1px solid rgba(56, 182, 240, 0.2);
+        border-radius: 8px;
+        padding: 12px;
+        font-size: 0.8rem;
+        color: #98a2b1;
+      }
+      .badge b {
+        color: #38b6f0;
+      }
+      code {
+        background: #0a0a0a;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>📱 Mobile Tab Switching — Mockups</h1>
+    <div class="sub">Open on iPhone via LAN IP · Tap a card to compare current vs proposals</div>
+
+    <a class="card" href="tabs-current.html">
+      <div class="num">0</div>
+      <div>
+        <h3>Current — Horizontal scroll strip</h3>
+        <p>15 tabs, 80px swipe, no overflow hint. Baseline.</p>
+      </div>
+      <span class="tag">baseline</span>
+    </a>
+
+    <a class="card" href="tabs-a-sheet.html">
+      <div class="num">A</div>
+      <div>
+        <h3>Bottom Sheet + Search ⭐ Recommended</h3>
+        <p>Compact pill bar → 70vh drawer, search + filters, 44px rows.</p>
+      </div>
+      <span class="tag" style="background: #44b99320; color: #44b993">recommended</span>
+    </a>
+
+    <a class="card" href="tabs-b-grid.html">
+      <div class="num">B</div>
+      <div>
+        <h3>2-Row Grid + Show All</h3>
+        <p>Wrap to 2 rows, expand to full grid on tap.</p>
+      </div>
+      <span class="tag">alt 1</span>
+    </a>
+
+    <a class="card" href="tabs-d-overflow.html">
+      <div class="num">D</div>
+      <div>
+        <h3>Overflow Arrows + Dots</h3>
+        <p>Keep strip, add ◀ ▶ + progress dots.</p>
+      </div>
+      <span class="tag">alt 2</span>
+    </a>
+
+    <div class="badge">
+      <b>LAN:</b> <code>http://192.168.20.66:3002/mocks/</code> &nbsp;·&nbsp; Also
+      <code>http://192.168.20.66:3000/mocks/</code> if dev on 3000<br />
+      Host allowlist accepts <code>codeman.sakhter.org</code> · Each mock is self-contained, no server restart needed.
+    </div>
+  </body>
+</html>

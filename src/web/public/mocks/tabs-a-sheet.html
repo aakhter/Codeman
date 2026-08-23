@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Mock A — Bottom Sheet — Codeman</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --bg: #11151c;
+        --card: #1b222c;
+        --border: #2b333f;
+        --text: #f3f6fa;
+        --dim: #98a2b1;
+        --accent: #38b6f0;
+        --green: #44b993;
+        --yellow: #f0c25a;
+        --red: #e06363;
+      }
+      body {
+        font-family:
+          Manrope,
+          -apple-system,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .phone {
+        max-width: 393px;
+        margin: 0 auto;
+        min-height: 100dvh;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        overflow: hidden;
+      }
+      .header {
+        height: 44px;
+        background: #0a0a0a;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+      .logo {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        color: var(--accent);
+      }
+      .pill {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: #1b222c;
+        border: 1px solid #2b333f;
+        border-radius: 8px;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+      .pill .count {
+        margin-left: auto;
+        background: var(--accent);
+        color: #04223a;
+        font-size: 0.7rem;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 20px;
+      }
+      .pill .chev {
+        color: var(--dim);
+        transition: transform 0.2s;
+      }
+      .pill.open .chev {
+        transform: rotate(180deg);
+      }
+      .mini-tabs {
+        display: flex;
+        gap: 4px;
+        overflow: hidden;
+      }
+      .mini-tab {
+        font-size: 0.65rem;
+        padding: 3px 6px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--dim);
+        white-space: nowrap;
+      }
+      .mini-tab.active {
+        background: rgba(34, 197, 94, 0.15);
+        border: 1px solid #00ff66;
+        color: #fff;
+      }
+      .term {
+        flex: 1;
+        background: #161b23;
+        display: grid;
+        place-items: center;
+        color: var(--dim);
+        font-size: 0.85rem;
+        padding: 24px;
+        text-align: center;
+      }
+      .bar {
+        height: 40px;
+        background: #111;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--dim);
+        font-size: 0.75rem;
+        flex-shrink: 0;
+      }
+      .topnote {
+        background: #1b222c;
+        border-bottom: 1px solid #2b333f;
+        padding: 6px 10px;
+        font-size: 0.7rem;
+        color: var(--dim);
+        display: flex;
+        justify-content: space-between;
+      }
+      .topnote a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      /* sheet */
+      .scrim {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s;
+        z-index: 30;
+      }
+      .scrim.open {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .sheet {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 31;
+        background: var(--card);
+        border-radius: 16px 16px 0 0;
+        border-top: 1px solid var(--border);
+        max-height: 72vh;
+        display: flex;
+        flex-direction: column;
+        transform: translateY(100%);
+        transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+        box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.5);
+      }
+      .sheet.open {
+        transform: translateY(0);
+      }
+      .handle {
+        width: 36px;
+        height: 4px;
+        background: #3a4350;
+        border-radius: 2px;
+        margin: 8px auto 6px;
+      }
+      .search {
+        margin: 0 12px 8px;
+        display: flex;
+        gap: 8px;
+      }
+      .search input {
+        flex: 1;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        border-radius: 8px;
+        padding: 8px 10px;
+        color: var(--text);
+        font-size: 0.85rem;
+      }
+      .search input:focus {
+        outline: 2px solid var(--accent);
+        border-color: var(--accent);
+      }
+      .filters {
+        display: flex;
+        gap: 6px;
+        padding: 0 12px 8px;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .filters::-webkit-scrollbar {
+        display: none;
+      }
+      .chip {
+        flex-shrink: 0;
+        padding: 5px 10px;
+        border-radius: 20px;
+        font-size: 0.7rem;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        color: var(--dim);
+        cursor: pointer;
+      }
+      .chip.active {
+        background: var(--accent);
+        color: #04223a;
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      .list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 0 8px 8px;
+        -webkit-overflow-scrolling: touch;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 8px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .row:hover {
+        background: #202833;
+      }
+      .row.active {
+        background: rgba(34, 197, 94, 0.12);
+        border: 1px solid rgba(0, 255, 102, 0.3);
+      }
+      .row .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .dot.busy {
+        background: var(--green);
+        box-shadow: 0 0 8px rgba(68, 185, 147, 0.6);
+      }
+      .dot.idle {
+        background: var(--yellow);
+        box-shadow: 0 0 6px rgba(240, 194, 90, 0.5);
+        animation: blink 1.5s infinite;
+      }
+      .dot.action {
+        background: var(--red);
+        box-shadow: 0 0 6px rgba(224, 99, 99, 0.6);
+        animation: blink 0.9s infinite;
+      }
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
+      }
+      .row .info {
+        flex: 1;
+        min-width: 0;
+      }
+      .row .name {
+        font-size: 0.82rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .row .meta {
+        font-size: 0.65rem;
+        color: var(--dim);
+      }
+      .badge {
+        font-size: 0.6rem;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        color: var(--dim);
+      }
+      .badge.opencode {
+        color: #44b993;
+        border-color: rgba(68, 185, 147, 0.3);
+      }
+      .badge.claude {
+        color: #38b6f0;
+        border-color: rgba(56, 182, 240, 0.3);
+      }
+      .row .close {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border-radius: 6px;
+        color: var(--dim);
+        flex-shrink: 0;
+      }
+      .row .close:active {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .footer {
+        padding: 8px 12px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.7rem;
+        color: var(--dim);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="phone" id="phone">
+      <div class="header">
+        <div class="logo">C</div>
+        <div class="pill" id="pill" onclick="toggleSheet()">
+          <div class="mini-tabs">
+            <span class="mini-tab active">w3-my-fe…</span><span class="mini-tab">w2-api</span
+            ><span class="mini-tab">w12-hot…</span>
+          </div>
+          <span class="count" id="pillCount">15</span>
+          <span class="chev">▼</span>
+        </div>
+        <div style="width: 26px"></div>
+      </div>
+      <div class="topnote"><span>⭐ A — Bottom Sheet (recommended)</span><a href="index.html">← all</a></div>
+      <div class="term">
+        <div>
+          Terminal<br /><small style="color: #98a2b1">Tap pill ↑ to open sheet</small><br /><br /><small
+            >Swipe on terminal still = prev/next.<br />Sheet search filters instantly.</small
+          >
+        </div>
+      </div>
+      <div class="bar">Toolbar · Run · Enter</div>
+
+      <div class="scrim" id="scrim" onclick="toggleSheet()"></div>
+      <div class="sheet" id="sheet">
+        <div class="handle"></div>
+        <div class="search">
+          <input id="q" placeholder="Search tabs…  (w3, fix, api)" oninput="filter()" /><span
+            style="font-size: 0.7rem; color: #98a2b1; align-self: center"
+            >15 tabs</span
+          >
+        </div>
+        <div class="filters" id="filters">
+          <button class="chip active" onclick="setFilter('all', this)">All</button>
+          <button class="chip" onclick="setFilter('needs', this)">Needs input ★</button>
+          <button class="chip" onclick="setFilter('working', this)">Working ●</button>
+          <button class="chip" onclick="setFilter('idle', this)">Idle</button>
+        </div>
+        <div class="list" id="list"></div>
+        <div class="footer">
+          <span>Swipe row to switch · Long-press for options</span><span id="footCount">15</span>
+        </div>
+      </div>
+    </div>
+    <script>
+      const tabs = [
+        { id: 1, name: 'w1-auth-service', mode: 'claude', status: 'idle', branch: 'main' },
+        { id: 2, name: 'w2-api-gateway', mode: 'opencode', status: 'busy', branch: 'feat/api' },
+        {
+          id: 3,
+          name: 'w3-my-feature-branch',
+          mode: 'claude',
+          status: 'idle',
+          active: true,
+          branch: 'feat/my-feature',
+        },
+        { id: 4, name: 'w4-fix-urgent-hotfix', mode: 'codex', status: 'idle', branch: 'hotfix/urgent' },
+        { id: 5, name: 'w5-shell-ops', mode: 'shell', status: 'idle', branch: 'main' },
+        { id: 6, name: 'w6-docs-sync', mode: 'gemini', status: 'idle', branch: 'docs/sync' },
+        { id: 7, name: 'w7-agy-research', mode: 'antigravity', status: 'busy', branch: 'feat/research' },
+        { id: 8, name: 'w8-pi-experiment', mode: 'pi', status: 'idle', branch: 'exp/pi' },
+        { id: 9, name: 'w9-review-pr-412', mode: 'claude', status: 'action', branch: 'pr/412' },
+        { id: 10, name: 'w10-tests-e2e', mode: 'claude', status: 'idle', branch: 'feat/tests' },
+        { id: 11, name: 'w11-deploy-prod', mode: 'opencode', status: 'idle', branch: 'main' },
+        { id: 12, name: 'w12-hotfix-urgent', mode: 'claude', status: 'action', branch: 'hotfix/urgent' },
+        { id: 13, name: 'w13-refactor-core', mode: 'codex', status: 'busy', branch: 'feat/refactor' },
+        { id: 14, name: 'w14-migrate-db', mode: 'claude', status: 'idle', branch: 'feat/migrate' },
+        { id: 15, name: 'w15-cleanup-tmp', mode: 'shell', status: 'idle', branch: 'main' },
+      ];
+      let filterKind = 'all';
+      function render() {
+        const q = document.getElementById('q').value.toLowerCase().trim();
+        let list = tabs.filter((t) => {
+          if (filterKind === 'needs' && t.status !== 'action') return false;
+          if (filterKind === 'working' && t.status !== 'busy') return false;
+          if (filterKind === 'idle' && t.status !== 'idle') return false;
+          if (q && !t.name.toLowerCase().includes(q) && !t.mode.includes(q)) return false;
+          return true;
+        });
+        document.getElementById('list').innerHTML =
+          list
+            .map(
+              (t) => `
+   <div class="row ${t.active ? 'active' : ''}" onclick="activate(${t.id})">
+     <span class="dot ${t.status}"></span>
+     <div class="info"><div class="name">${t.name}</div><div class="meta">${t.branch} · ${t.mode}</div></div>
+     <span class="badge ${t.mode}">${t.mode.slice(0, 2)}</span>
+     ${t.status === 'action' ? ' <span style="font-size:.65rem;color:#e06363">● needs</span>' : ''}
+     ${t.status === 'busy' ? ' <span style="font-size:.65rem;color:#44b993">● working</span>' : ''}
+     <span class="close" onclick="event.stopPropagation();closeTab(${t.id})">×</span>
+   </div>
+ `
+            )
+            .join('') ||
+          `<div style="padding:24px;text-align:center;color:#98a2b1;font-size:.85rem">No tabs match</div>`;
+        document.getElementById('footCount').textContent = list.length + ' / 15';
+      }
+      function setFilter(k, el) {
+        filterKind = k;
+        document.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
+        el.classList.add('active');
+        render();
+      }
+      function filter() {
+        render();
+      }
+      function activate(id) {
+        tabs.forEach((t) => (t.active = t.id === id));
+        render();
+        toggleSheet();
+        updatePill();
+      }
+      function closeTab(id) {
+        const i = tabs.findIndex((t) => t.id === id);
+        if (i >= 0) tabs.splice(i, 1);
+        document.getElementById('pillCount').textContent = tabs.length;
+        render();
+        updatePill();
+      }
+      function updatePill() {
+        const a = tabs.find((t) => t.active);
+        document.querySelector('.mini-tabs').innerHTML =
+          `<span class="mini-tab active">${(a ? a.name : '—').slice(0, 8)}…</span><span class="mini-tab">w2-api</span><span class="mini-tab">w12-hot…</span>`;
+      }
+      function toggleSheet() {
+        const s = document.getElementById('sheet'),
+          sc = document.getElementById('scrim'),
+          p = document.getElementById('pill');
+        const open = s.classList.toggle('open');
+        sc.classList.toggle('open', open);
+        p.classList.toggle('open', open);
+      }
+      render();
+      let startY = 0;
+      const sheet = document.getElementById('sheet');
+      sheet.addEventListener('touchstart', (e) => (startY = e.touches[0].clientY), { passive: true });
+      sheet.addEventListener(
+        'touchmove',
+        (e) => {
+          if (e.touches[0].clientY - startY > 40) toggleSheet();
+        },
+        { passive: true }
+      );
+    </script>
+  </body>
+</html>

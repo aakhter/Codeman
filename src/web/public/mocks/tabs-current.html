@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Current — Codeman Mobile Tabs</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --bg: #11151c;
+        --text: #f3f6fa;
+        --dim: #98a2b1;
+        --accent: #38b6f0;
+        --green: #44b993;
+        --yellow: #f0c25a;
+        --red: #e06363;
+      }
+      body {
+        font-family:
+          Manrope,
+          -apple-system,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .phone {
+        max-width: 393px;
+        margin: 0 auto;
+        border: 1px solid #2b333f;
+        min-height: 100dvh;
+        background: #0a0a0a;
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        height: 44px;
+        background: #0a0a0a;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      .logo {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        color: var(--accent);
+      }
+      .tabs {
+        flex: 1;
+        display: flex;
+        gap: 2px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+        padding: 4px 0;
+      }
+      .tabs::-webkit-scrollbar {
+        display: none;
+      }
+      .tab {
+        flex-shrink: 0;
+        min-height: 32px;
+        padding: 6px 8px;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        color: var(--dim);
+        font-size: 0.7rem;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }
+      .tab.active {
+        background: rgba(34, 197, 94, 0.15);
+        border: 2px solid #00ff66;
+        color: #fff;
+      }
+      .dot {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: #2b333f;
+      }
+      .dot.busy {
+        width: 9px;
+        height: 9px;
+        background: var(--green);
+        box-shadow: 0 0 8px 2px rgba(34, 197, 94, 0.55);
+      }
+      .dot.idle {
+        width: 7px;
+        height: 7px;
+        background: var(--yellow);
+        box-shadow: 0 0 6px rgba(240, 194, 90, 0.5);
+      }
+      .name {
+        max-width: 50px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .term {
+        flex: 1;
+        background: #161b23;
+        display: grid;
+        place-items: center;
+        color: var(--dim);
+        font-size: 0.85rem;
+        padding: 24px;
+        text-align: center;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 0.6rem;
+        padding: 1px 4px;
+        border-radius: 3px;
+        background: rgba(56, 182, 240, 0.15);
+        color: var(--accent);
+        margin-left: 2px;
+      }
+      .bar {
+        height: 40px;
+        background: #111;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--dim);
+        font-size: 0.75rem;
+        flex-shrink: 0;
+      }
+      .topnote {
+        background: #1b222c;
+        border-bottom: 1px solid #2b333f;
+        padding: 8px 12px;
+        font-size: 0.7rem;
+        color: var(--dim);
+        display: flex;
+        justify-content: space-between;
+      }
+      .topnote a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .hint {
+        background: rgba(240, 194, 90, 0.12);
+        border: 1px solid rgba(240, 194, 90, 0.25);
+        margin: 8px;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 0.7rem;
+        color: #f0c25a;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="phone">
+      <div class="header">
+        <div class="logo">C</div>
+        <div class="tabs" id="tabs"></div>
+      </div>
+      <div class="topnote"><span>⬅ Current: horizontal scroll</span><a href="index.html">← all mocks</a></div>
+      <div class="hint">
+        ⚠️ Try scrolling the tab strip with 15 tabs. No hint that tabs 11-15 exist. Swipe distance to reach tab 15:
+        ~900px (4-5 swipes).
+      </div>
+      <div class="term">
+        <div>
+          Terminal<br /><small style="color: #98a2b1">w3 · claude — active</small><br /><br /><small
+            >Swipe left/right on terminal = prev/next (only 1 step). Need to find w12? Scroll strip manually.</small
+          >
+        </div>
+      </div>
+      <div class="bar">Toolbar · Run · Enter</div>
+    </div>
+    <script>
+      const tabs = [
+        { name: 'w1-auth', mode: 'claude', status: 'idle' },
+        { name: 'w2-api', mode: 'opencode', status: 'busy' },
+        { name: 'w3-my-feature-branch', mode: 'claude', status: 'idle', active: true },
+        { name: 'w4-fix', mode: 'codex', status: 'idle' },
+        { name: 'w5-shell', mode: 'shell', status: 'idle' },
+        { name: 'w6-docs', mode: 'gemini', status: 'idle' },
+        { name: 'w7-agy', mode: 'antigravity', status: 'busy' },
+        { name: 'w8-pi', mode: 'pi', status: 'idle' },
+        { name: 'w9-review', mode: 'claude', status: 'action' },
+        { name: 'w10-tests', mode: 'claude', status: 'idle' },
+        { name: 'w11-deploy', mode: 'opencode', status: 'idle' },
+        { name: 'w12-hotfix-urgent', mode: 'claude', status: 'action' },
+        { name: 'w13-refactor', mode: 'codex', status: 'busy' },
+        { name: 'w14-migrate', mode: 'claude', status: 'idle' },
+        { name: 'w15-cleanup', mode: 'shell', status: 'idle' },
+      ];
+      const el = document.getElementById('tabs');
+      el.innerHTML = tabs
+        .map(
+          (t) =>
+            `<div class="tab ${t.active ? 'active' : ''}"><span class="dot ${t.status}"></span><span class="name">${t.name}</span><span class="badge">${t.mode.slice(0, 2)}</span>${t.active ? ' <span style="opacity:.6">⚙</span>' : ''}</div>`
+        )
+        .join('');
+      setTimeout(() => {
+        el.scrollLeft = el.scrollWidth;
+        setTimeout(() => (el.scrollLeft = 0), 800);
+      }, 400);
+    </script>
+  </body>
+</html>

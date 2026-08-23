@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Mock B — Grid — Codeman</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --bg: #11151c;
+        --card: #1b222c;
+        --border: #2b333f;
+        --text: #f3f6fa;
+        --dim: #98a2b1;
+        --accent: #38b6f0;
+        --green: #44b993;
+        --yellow: #f0c25a;
+        --red: #e06363;
+      }
+      body {
+        font-family:
+          Manrope,
+          -apple-system,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .phone {
+        max-width: 393px;
+        margin: 0 auto;
+        min-height: 100dvh;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        height: 44px;
+        background: #0a0a0a;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+      .logo {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        color: var(--accent);
+      }
+      .expand {
+        margin-left: auto;
+        font-size: 0.7rem;
+        color: var(--accent);
+        cursor: pointer;
+        border: 1px solid rgba(56, 182, 240, 0.3);
+        padding: 4px 8px;
+        border-radius: 6px;
+      }
+      .grid {
+        padding: 6px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .grid.collapsed {
+        max-height: 72px;
+        overflow: hidden;
+        position: relative;
+      }
+      .grid.collapsed::after {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 24px;
+        background: linear-gradient(transparent, #0a0a0a);
+        pointer-events: none;
+      }
+      .tab {
+        flex: 1 1 calc(33% - 4px);
+        min-width: 90px;
+        max-width: calc(33% - 4px);
+        padding: 8px;
+        border-radius: 8px;
+        background: #1b222c;
+        border: 1px solid #2b333f;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        cursor: pointer;
+      }
+      .tab.active {
+        background: rgba(34, 197, 94, 0.12);
+        border-color: #00ff66;
+        color: #fff;
+      }
+      .tab .top {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .dot.busy {
+        background: var(--green);
+        box-shadow: 0 0 6px rgba(68, 185, 147, 0.6);
+      }
+      .dot.idle {
+        background: var(--dim);
+      }
+      .dot.action {
+        background: var(--red);
+        box-shadow: 0 0 6px rgba(224, 99, 99, 0.6);
+      }
+      .name {
+        font-size: 0.7rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
+      }
+      .badge {
+        font-size: 0.55rem;
+        padding: 1px 4px;
+        border-radius: 3px;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        color: var(--dim);
+      }
+      .meta {
+        font-size: 0.6rem;
+        color: var(--dim);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .term {
+        flex: 1;
+        background: #161b23;
+        display: grid;
+        place-items: center;
+        color: var(--dim);
+        font-size: 0.85rem;
+        padding: 24px;
+        text-align: center;
+      }
+      .bar {
+        height: 40px;
+        background: #111;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--dim);
+        font-size: 0.75rem;
+      }
+      .topnote {
+        background: #1b222c;
+        border-bottom: 1px solid #2b333f;
+        padding: 6px 10px;
+        font-size: 0.7rem;
+        color: var(--dim);
+        display: flex;
+        justify-content: space-between;
+      }
+      .topnote a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="phone">
+      <div class="header">
+        <div class="logo">C</div>
+        <div style="font-size: 0.75rem; color: #98a2b1">15 tabs — grid</div>
+        <div class="expand" id="btn" onclick="toggle()">Show all ▼</div>
+      </div>
+      <div class="topnote"><span>B — 2-row grid (expandable)</span><a href="index.html">← all</a></div>
+      <div class="grid collapsed" id="grid"></div>
+      <div class="term">
+        <div>
+          Terminal<br /><small style="color: #98a2b1">w3 active · Tap any grid card to switch</small><br /><br /><small
+            >Pros: no drawer, always visible<br />Cons: eats 72px of terminal (2 rows)</small
+          >
+        </div>
+      </div>
+      <div class="bar">Toolbar</div>
+    </div>
+    <script>
+      const tabs = [
+        { name: 'w1-auth', mode: 'claude', status: 'idle' },
+        { name: 'w2-api', mode: 'opencode', status: 'busy', active: true },
+        { name: 'w3-my-feature-branch-extra-long', mode: 'claude', status: 'idle' },
+        { name: 'w4-fix', mode: 'codex', status: 'idle' },
+        { name: 'w5-shell', mode: 'shell', status: 'idle' },
+        { name: 'w6-docs', mode: 'gemini', status: 'idle' },
+        { name: 'w7-agy', mode: 'antigravity', status: 'busy' },
+        { name: 'w8-pi', mode: 'pi', status: 'idle' },
+        { name: 'w9-review', mode: 'claude', status: 'action' },
+        { name: 'w10-tests', mode: 'claude', status: 'idle' },
+        { name: 'w11-deploy', mode: 'opencode', status: 'idle' },
+        { name: 'w12-hotfix', mode: 'claude', status: 'action' },
+        { name: 'w13-refactor', mode: 'codex', status: 'busy' },
+        { name: 'w14-migrate', mode: 'claude', status: 'idle' },
+        { name: 'w15-cleanup', mode: 'shell', status: 'idle' },
+      ];
+      const g = document.getElementById('grid');
+      function render() {
+        g.innerHTML = tabs
+          .map(
+            (t) =>
+              `<div class="tab ${t.status === 'busy' || t.status === 'action' ? '' : ''} ${t.active ? 'active' : ''}" onclick="activate('${t.name}')"><div class="top"><span class="dot ${t.status}"></span><span class="name">${t.name}</span></div><div class="meta"><span class="badge">${t.mode.slice(0, 2)}</span> ${t.status}</div></div>`
+          )
+          .join('');
+      }
+      function toggle() {
+        const c = g.classList.toggle('collapsed');
+        document.getElementById('btn').textContent = c ? 'Show all ▼' : 'Collapse ▲';
+      }
+      function activate(n) {
+        tabs.forEach((t) => (t.active = t.name === n));
+        render();
+      }
+      g.classList.add('collapsed');
+      render();
+    </script>
+  </body>
+</html>

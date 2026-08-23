@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Mock D — Overflow Arrows — Codeman</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --bg: #11151c;
+        --text: #f3f6fa;
+        --dim: #98a2b1;
+        --accent: #38b6f0;
+        --green: #44b993;
+      }
+      body {
+        font-family:
+          Manrope,
+          -apple-system,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .phone {
+        max-width: 393px;
+        margin: 0 auto;
+        min-height: 100dvh;
+        background: #0a0a0a;
+        border: 1px solid #2b333f;
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        height: 44px;
+        background: #0a0a0a;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        padding: 0 4px;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+      .logo {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        color: var(--accent);
+        flex-shrink: 0;
+      }
+      .wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+      }
+      .arrow {
+        width: 28px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        background: #1b222c;
+        border: 1px solid #2b333f;
+        border-radius: 6px;
+        color: var(--dim);
+        flex-shrink: 0;
+        cursor: pointer;
+      }
+      .arrow:active {
+        background: #2a323d;
+      }
+      .tabs {
+        flex: 1;
+        display: flex;
+        gap: 2px;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+      }
+      .tabs::-webkit-scrollbar {
+        display: none;
+      }
+      .tab {
+        flex-shrink: 0;
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: #1b222c;
+        border: 1px solid #2b333f;
+        color: var(--dim);
+        font-size: 0.7rem;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }
+      .tab.active {
+        background: rgba(34, 197, 94, 0.15);
+        border-color: #00ff66;
+        color: #fff;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #2b333f;
+      }
+      .dot.busy {
+        background: var(--green);
+        box-shadow: 0 0 6px rgba(68, 185, 147, 0.6);
+      }
+      .dots {
+        height: 8px;
+        display: flex;
+        gap: 3px;
+        justify-content: center;
+        padding: 4px 0;
+        flex-shrink: 0;
+      }
+      .dots span {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: #2b333f;
+      }
+      .dots span.on {
+        background: var(--accent);
+      }
+      .term {
+        flex: 1;
+        background: #161b23;
+        display: grid;
+        place-items: center;
+        color: var(--dim);
+        font-size: 0.85rem;
+        padding: 24px;
+        text-align: center;
+      }
+      .bar {
+        height: 40px;
+        background: #111;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--dim);
+        font-size: 0.75rem;
+      }
+      .topnote {
+        background: #1b222c;
+        border-bottom: 1px solid #2b333f;
+        padding: 6px 10px;
+        font-size: 0.7rem;
+        color: var(--dim);
+        display: flex;
+        justify-content: space-between;
+      }
+      .topnote a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="phone">
+      <div class="header">
+        <div class="logo">C</div>
+        <div class="wrap">
+          <div class="arrow" onclick="scrollTabs(-120)">◀</div>
+          <div class="tabs" id="tabs"></div>
+          <div class="arrow" onclick="scrollTabs(120)">▶</div>
+        </div>
+      </div>
+      <div class="dots" id="dots"></div>
+      <div class="topnote"><span>D — Arrows + dots (keep strip)</span><a href="index.html">← all</a></div>
+      <div class="term">
+        <div>
+          Terminal<br /><small style="color: #98a2b1">w7 active</small><br /><br /><small
+            >Tap ◀ ▶ to jump 3 tabs.<br />Dots show position. Minimal change.</small
+          >
+        </div>
+      </div>
+      <div class="bar">Toolbar</div>
+    </div>
+    <script>
+      const tabs = Array.from({ length: 15 }, (_, i) => ({
+        name: `w${i + 1}-${['auth', 'api', 'feature', 'fix', 'shell', 'docs', 'agy', 'pi', 'review', 'tests', 'deploy', 'hotfix', 'refactor', 'migrate', 'cleanup'][i]}`,
+        active: i === 6,
+      }));
+      const el = document.getElementById('tabs');
+      el.innerHTML = tabs
+        .map(
+          (t) =>
+            `<div class="tab ${t.active ? 'active' : ''}"><span class="dot ${t.active ? 'busy' : ''}"></span>${t.name}</div>`
+        )
+        .join('');
+      function scrollTabs(d) {
+        el.scrollBy({ left: d, behavior: 'smooth' });
+      }
+      const dots = document.getElementById('dots');
+      dots.innerHTML = Array(5)
+        .fill(0)
+        .map((_, i) => `<span class="${i === 1 ? 'on' : ''}"></span>`)
+        .join('');
+      el.addEventListener(
+        'scroll',
+        () => {
+          const p = el.scrollLeft / (el.scrollWidth - el.clientWidth || 1);
+          const idx = Math.round(p * 4);
+          dots.querySelectorAll('span').forEach((s, i) => s.classList.toggle('on', i === idx));
+        },
+        { passive: true }
+      );
+    </script>
+  </body>
+</html>

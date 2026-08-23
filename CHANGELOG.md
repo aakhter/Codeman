@@ -1,5 +1,18 @@
 # aicodeman
 
+## 1.22.3
+
+### Patch Changes
+
+- Mobile tab switching for 10+ tabs: bottom sheet drawer on phones (pill + search + filters) replaces horizontal scroll strip when >8 tabs
+- edebff7: Keep Codeman responsive during activity detection with bounded asynchronous tmux capture and one shared polling
+  coordinator. The matched performance matrix delivered 160/160 exact steady-state WebSocket trials; separate focused real
+  browser/server regressions cover normal HTTP input, delayed/lost ACK retries, reconnects, and reloads while the server
+  remains live. A restart before ACK persistence can still redeliver one PTY record because dedup state is process-local;
+  this pre-existing boundary is covered by `test/terminal-input-performance.browser.test.ts`, tracked as COD-363, and
+  unchanged by COD-356.
+- c091648: Keep fast iPhone terminal typing visually current while preserving exact IME-committed input.
+
 ## 1.22.2
 
 ### Patch Changes
