@@ -1,7 +1,7 @@
 # COD-356 Performance Improvements Design
 
-**Date:** 2026-08-22  
-**Issue:** COD-356  
+**Date:** 2026-08-22
+**Issue:** COD-356
 **Status:** Approved
 
 ## Problem
