@@ -10,6 +10,7 @@ export const PORTS = {
   ACCESSIBILITY: 3207,
   HEADER_BUTTONS: 3208,
   OPENCODE_E2E: 3209,
+  MOBILE_TAB_PILL: 3210,
 } as const;
 
 // CSS Selectors
