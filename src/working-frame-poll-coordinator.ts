@@ -73,9 +73,7 @@ export class WorkingFramePollCoordinator {
       ...registration,
       token,
       sequence: this.nextSequence++,
-      dueAt:
-        this.now() +
-        (registration.initialDelayMs ?? this.intervalMs + stableOffset(registration.key, Math.max(1, this.intervalMs))),
+      dueAt: this.now() + (registration.initialDelayMs ?? stableOffset(registration.key, Math.max(1, this.intervalMs))),
       failures: 0,
       requests: [],
     };

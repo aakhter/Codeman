@@ -34,7 +34,7 @@ describe('WorkingFramePollCoordinator', () => {
     });
   }
 
-  it('uses one shared scheduler and deterministically staggers registrations across the interval', async () => {
+  it('starts initial captures during the first interval, then keeps one shared staggered scheduler', async () => {
     const poller = coordinator();
     const captureTimes: number[] = [];
     const captures = Array.from({ length: 4 }, () =>
@@ -49,14 +49,12 @@ describe('WorkingFramePollCoordinator', () => {
 
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1_999);
-    expect(captures.every((capture) => capture.mock.calls.length === 0)).toBe(true);
-    await vi.advanceTimersByTimeAsync(2_000);
     const callTimes = captures.flatMap((capture) => capture.mock.invocationCallOrder);
     expect(callTimes).toHaveLength(4);
     expect(new Set(captures.map((capture) => capture.mock.calls.length))).toEqual(new Set([1]));
     expect(new Set(captureTimes).size).toBe(4);
-    expect(Math.min(...captureTimes)).toBeGreaterThanOrEqual(2_000);
-    expect(Math.max(...captureTimes)).toBeLessThan(4_000);
+    expect(Math.min(...captureTimes)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...captureTimes)).toBeLessThan(2_000);
     expect(vi.getTimerCount()).toBe(1);
 
     unregister.forEach((stop) => stop());

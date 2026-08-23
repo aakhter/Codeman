@@ -17,7 +17,7 @@ function managerWith(execute: TmuxPaneTextExecutor): TmuxManager {
 }
 
 describe('TmuxManager.capturePaneTextAsync', () => {
-  it('returns a promise and captures the active pane with one plain bounded command', async () => {
+  it('returns a promise and captures only the visible active pane with one plain command', async () => {
     const execute = vi.fn<TmuxPaneTextExecutor>().mockResolvedValue({ stdout: 'working frame\n' });
     const manager = managerWith(execute);
 
@@ -29,7 +29,7 @@ describe('TmuxManager.capturePaneTextAsync', () => {
 
     const [file, args, options] = execute.mock.calls[0]!;
     expect(file).toBe('tmux');
-    expect(args).toEqual(['-L', manager.muxSocket, 'capture-pane', '-p', '-S', '-200', '-t', 'codeman-acde-1234']);
+    expect(args).toEqual(['-L', manager.muxSocket, 'capture-pane', '-p', '-t', 'codeman-acde-1234']);
     expect(options).toEqual(
       expect.objectContaining({
         encoding: 'utf8',
@@ -38,36 +38,10 @@ describe('TmuxManager.capturePaneTextAsync', () => {
       })
     );
     expect(args).not.toContain('-e');
+    expect(args).not.toContain('-S');
     expect(args).not.toContain('list-panes');
     expect(args).not.toContain('display-message');
     expect(args).not.toContain('-');
-  });
-
-  it.each([
-    { requested: 1, expected: '-1' },
-    { requested: 0.9, expected: '-1' },
-    { requested: 42.9, expected: '-42' },
-    { requested: 99_999, expected: '-500' },
-    { requested: 0, expected: '-200' },
-    { requested: -10, expected: '-200' },
-    { requested: Number.NaN, expected: '-200' },
-    { requested: '1; list-sessions', expected: '-200' },
-  ])('sanitizes lastLines=$requested to $expected', async ({ requested, expected }) => {
-    const execute = vi.fn<TmuxPaneTextExecutor>().mockResolvedValue({ stdout: '' });
-    const manager = managerWith(execute);
-
-    await manager.capturePaneTextAsync('codeman-acde-1234', { lastLines: requested as number });
-
-    expect(execute.mock.calls[0]![1]).toEqual([
-      '-L',
-      manager.muxSocket,
-      'capture-pane',
-      '-p',
-      '-S',
-      expected,
-      '-t',
-      'codeman-acde-1234',
-    ]);
   });
 
   it.each(['bad; touch /tmp/injected', 'codeman-safe $(touch /tmp/injected)', 'codeman-safe\nlist-sessions', '--help'])(
