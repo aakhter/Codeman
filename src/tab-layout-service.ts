@@ -361,9 +361,9 @@ export class TabLayoutService {
         if (!sameLayout(current, next)) prepared.push({ owner, stored: this.prepareCommit(current, next) });
       }
 
-      const result = action(new Set(confirmed.map((item) => item.id)));
+      const result = await action(new Set(confirmed.map((item) => item.id)));
       for (const item of prepared) this.commitPrepared(item.owner, item.stored);
-      return await result;
+      return result;
     });
   }
 

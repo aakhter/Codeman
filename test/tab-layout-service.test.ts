@@ -140,6 +140,23 @@ describe('TabLayoutService', () => {
     expect(h.broadcast).toHaveBeenCalledTimes(2);
   });
 
+  it('does not commit a prepared stale layout when asynchronous cleanup rejects', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'alice-stale' }]) },
+      persisted: [{ id: 'alice-stale', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+    const cleanup = vi.fn(async () => {
+      throw new Error('state removal failed');
+    });
+
+    await expect(h.service.runStaleSessionCleanup(new Set(), cleanup)).rejects.toThrow('state removal failed');
+
+    expect(h.layouts.alice).toEqual(existing([{ kind: 'session', id: 'alice-stale' }]));
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
   it('binds stale cleanup to revalidated original candidates after an owner queue wait', async () => {
     const h = createHarness({
       layouts: {
