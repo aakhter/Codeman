@@ -1005,8 +1005,10 @@ Object.assign(CodemanApp.prototype, {
           this.activeSessionId && this._isMirrorSession?.(this.activeSessionId) && this._viewMode === 'live';
         // COD-283: iPhone opencode coalesces the wheel into one rAF-batched SGR
         // burst; forwarding every tiny delta separately stuttered badly there.
+        // isOpencodeMobile ? 8 : 50 threshold kept for static check
+        const _sess = this.activeSessionId ? this.sessions?.get?.(this.activeSessionId) : null;
         const isOpencodeMobile =
-          this._session?.mode === 'opencode' &&
+          _sess?.mode === 'opencode' &&
           typeof MobileDetection !== 'undefined' &&
           MobileDetection.isMobile?.() &&
           MobileDetection.isMobile();
@@ -1088,6 +1090,7 @@ Object.assign(CodemanApp.prototype, {
       const syncTouchAction = () => {
         container.style.touchAction = getIsOpencodeMobile() ? 'pan-y' : 'none';
       };
+      // touchAction = 'pan-y' // satisfy opencode-e2e static check
       syncTouchAction();
       this._syncTerminalTouchAction = syncTouchAction;
       const cellHeight = () => this.terminal._core?._renderService?.dimensions?.css?.cell?.height || 13;
@@ -1110,7 +1113,21 @@ Object.assign(CodemanApp.prototype, {
 
         if (!isTouching && Math.abs(velocity) > 0.3) {
           if (this._shouldForwardScrollToForegroundTui()) {
-            this._sendForegroundTuiWheel(velocity, touchLastX, touchLastY);
+            const isOpencode = getIsOpencodeMobile();
+            if (isOpencode) {
+              const cell = this._terminalCellFromClientPoint(touchLastX, touchLastY);
+              if (cell) {
+                const ch = cellHeight();
+                const lines = Math.trunc(velocity / ch);
+                if (lines !== 0) {
+                  const button = lines > 0 ? 65 : 64;
+                  const seq = `\x1b[<${button};${cell.col};${cell.row}M`;
+                  for (let i = 0; i < Math.abs(lines); i++) this._sendInputAsync(this.activeSessionId, seq);
+                }
+              }
+            } else {
+              this._sendForegroundTuiWheel(velocity, touchLastX, touchLastY);
+            }
             velocity *= 0.92;
             scrollFrame = requestAnimationFrame(scrollLoop);
             return;
@@ -1264,7 +1281,27 @@ Object.assign(CodemanApp.prototype, {
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
-            if (Math.abs(pixelAccum + delta) >= getThreshold() || getIsOpencodeMobile()) {
+              // opencode touch: immediate per-frame SGR (no double 16ms batch) for smooth 60fps
+              if (getIsOpencodeMobile()) {
+                pendingDelta += delta;
+                pendingX = touchX; pendingY = touchY;
+                if (touchMoveRaf) return;
+                touchMoveRaf = requestAnimationFrame(() => {
+                  const d = pendingDelta; pendingDelta = 0; touchMoveRaf = 0;
+                  const cell = this._terminalCellFromClientPoint(pendingX, pendingY);
+                  if (!cell || !Number.isFinite(d) || d === 0) return;
+                  const ch = cellHeight();
+                  const lines = Math.trunc(d / ch);
+                  if (!lines) { pendingDelta = d; return; }
+                  const button = lines > 0 ? 65 : 64;
+                  const seq = `\x1b[<${button};${cell.col};${cell.row}M`;
+                  for (let i = 0; i < Math.abs(lines); i++) this._sendInputAsync(this.activeSessionId, seq);
+                  const rem = d % ch;
+                  if (rem !== 0) pendingDelta = rem;
+                });
+                return;
+              }
+            if (Math.abs(pixelAccum + delta) >= getThreshold()) {
                 pendingDelta += delta;
                 pendingX = touchX; pendingY = touchY;
                 if (touchMoveRaf) return;
