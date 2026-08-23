@@ -279,16 +279,19 @@ export class TabLayoutService {
    * The StateStore action remains synchronous in production, so the candidate
    * snapshot cannot change between successful preparation and resource removal.
    */
-  async runStaleSessionCleanup<T>(activeSessionIds: ReadonlySet<string>, action: () => T | Promise<T>): Promise<T> {
+  async runStaleSessionCleanup<T>(
+    activeSessionIds: ReadonlySet<string>,
+    action: (ids: ReadonlySet<string>) => T | Promise<T>
+  ): Promise<T> {
     this.assertDeletionReady();
-    if (this.restorationState === 'skipped') return action();
-    const stale = Object.entries(this.deps.store.getSessions())
+    const candidates = Object.entries(this.deps.store.getSessions())
       .filter(([id, record]) => !activeSessionIds.has(id) && record.pinned !== true)
       .map(([id, record]) => ({ id, owner: record.owner }));
-    if (stale.length === 0) return action();
+    if (this.restorationState === 'skipped') return action(new Set(candidates.map((item) => item.id)));
+    if (candidates.length === 0) return action(new Set());
 
     const byOwner = new Map<string, string[]>();
-    for (const item of stale) {
+    for (const item of candidates) {
       const owner = ownerOf(item);
       const ids = byOwner.get(owner) ?? [];
       ids.push(item.id);
@@ -296,18 +299,71 @@ export class TabLayoutService {
     }
     const owners = [...byOwner.keys()].sort();
     return this.withOwners(owners, async () => {
+      const webviews = await this.deps.readWebviews();
+      const persistedState = this.deps.store.getSessions();
+      const persisted = Object.entries(persistedState).map(([id, record]) => ({
+        id,
+        owner: record.owner,
+        createdAt: record.createdAt,
+        parentSessionId: record.parentSessionId,
+      }));
+      const liveIds = new Set(this.deps.sessions.keys());
+      const confirmed = candidates.filter((candidate) => {
+        const record = persistedState[candidate.id];
+        return (
+          record !== undefined &&
+          ownerOf(record) === ownerOf(candidate) &&
+          record.pinned !== true &&
+          !activeSessionIds.has(candidate.id) &&
+          !liveIds.has(candidate.id)
+        );
+      });
+      const confirmedByOwner = new Map<string, string[]>();
+      for (const item of confirmed) {
+        const owner = ownerOf(item);
+        const ids = confirmedByOwner.get(owner) ?? [];
+        ids.push(item.id);
+        confirmedByOwner.set(owner, ids);
+      }
+
       const prepared: Array<{ owner: string; stored: TabLayout }> = [];
       for (const owner of owners) {
+        const ids = confirmedByOwner.get(owner) ?? [];
+        if (ids.length === 0) continue;
         const current = this.deps.store.getTabLayout(owner);
         if (!current) continue;
-        const { metadata } = await this.facts(owner);
-        const next = materializeOrphans(normalizeTabLayout(current, metadata), byOwner.get(owner) ?? [], metadata);
+        const sessions = new Map<string, TabLayoutSessionRecord>();
+        for (const record of persisted) sessions.set(record.id, record);
+        for (const record of this.deps.sessions.values()) sessions.set(record.id, record);
+        const ownedSessions = [...sessions.values()]
+          .filter((record) => ownerOf(record) === owner)
+          .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+        const sessionOrder = new Map(ownedSessions.map((record, index) => [record.id, index]));
+        const metadata: TabRefMetadata[] = [...sessions.values()].map((record) => ({
+          kind: 'session',
+          id: record.id,
+          ownerValid: ownerOf(record) === owner,
+          visible: true,
+          order: sessionOrder.get(record.id) ?? record.createdAt,
+          parentSessionId: record.parentSessionId,
+        }));
+        const offset = ownedSessions.length;
+        webviews.forEach((record, index) =>
+          metadata.push({
+            kind: 'webview',
+            id: record.id,
+            ownerValid: ownerOf(record) === owner,
+            visible: true,
+            order: offset + index,
+          })
+        );
+        const next = materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata);
         if (!sameLayout(current, next)) prepared.push({ owner, stored: this.prepareCommit(current, next) });
       }
 
-      const result = await action();
+      const result = action(new Set(confirmed.map((item) => item.id)));
       for (const item of prepared) this.commitPrepared(item.owner, item.stored);
-      return result;
+      return await result;
     });
   }
 

@@ -19,6 +19,7 @@ function createHarness(
   const layouts = { ...(options.layouts ?? {}) };
   const persisted = Object.fromEntries((options.persisted ?? []).map((session) => [session.id, session]));
   const live = new Map((options.live ?? []).map((session) => [session.id, session]));
+  const readWebviews = vi.fn(async () => options.webviews ?? []);
   const store = {
     getTabLayout: vi.fn((owner: string) => layouts[owner] ?? null),
     setTabLayout: vi.fn((owner: string, value: TabLayout) => {
@@ -31,11 +32,11 @@ function createHarness(
   const service = new TabLayoutService({
     store: store as never,
     sessions: live as never,
-    readWebviews: vi.fn(async () => options.webviews ?? []),
+    readWebviews,
     broadcast,
     now: () => '2026-08-16T12:00:00.000Z',
   });
-  return { service, store, broadcast, layouts, live, persisted };
+  return { service, store, broadcast, layouts, live, persisted, readWebviews };
 }
 
 const existing = (refs: TabLayout['ungrouped'], version = 7): TabLayout => ({
@@ -137,6 +138,44 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).toHaveBeenCalledTimes(2);
     expect(h.store.setTabLayout.mock.calls.map(([owner]) => owner)).toEqual(['alice', 'bob']);
     expect(h.broadcast).toHaveBeenCalledTimes(2);
+  });
+
+  it('binds stale cleanup to revalidated original candidates after an owner queue wait', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([{ kind: 'session', id: 'alice-stale' }]),
+        bob: existing([{ kind: 'session', id: 'bob-new-stale' }]),
+      },
+      persisted: [{ id: 'alice-stale', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+    let releaseFacts!: () => void;
+    const factsBlocked = new Promise<void>((resolve) => {
+      releaseFacts = resolve;
+    });
+    h.readWebviews.mockImplementationOnce(async () => {
+      await factsBlocked;
+      return [];
+    });
+
+    const occupiedOwnerQueue = h.service.get('alice');
+    await vi.waitFor(() => expect(h.readWebviews).toHaveBeenCalledOnce());
+    const cleanup = vi.fn((ids: ReadonlySet<string>) => ({ ids: [...ids] }));
+    const pending = h.service.runStaleSessionCleanup(new Set(), cleanup);
+
+    h.persisted['alice-stale'].pinned = true;
+    h.persisted['bob-new-stale'] = { id: 'bob-new-stale', owner: 'bob', createdAt: 2 };
+    releaseFacts();
+
+    await occupiedOwnerQueue;
+    await expect(pending).resolves.toEqual({ ids: [] });
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledWith(new Set());
+    expect(h.persisted['alice-stale']).toBeDefined();
+    expect(h.persisted['bob-new-stale']).toBeDefined();
+    expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'alice-stale' }]);
+    expect(h.layouts.bob.ungrouped).toEqual([{ kind: 'session', id: 'bob-new-stale' }]);
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
   });
 
   it('allows skipped-mode stale cleanup without pruning or versioning layouts', async () => {
