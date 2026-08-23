@@ -82,6 +82,14 @@ interface OwnerProjectionPublication {
   excludedSessionIds?: ReadonlySet<string>;
 }
 
+interface PreparedOrderProjection {
+  owner: string;
+  previousOrder: string[];
+  claimedIds: string[];
+  currentIds: string[];
+  order: string[];
+}
+
 const ownerOf = (record: { owner?: string }): string => record.owner ?? SINGLE_USER_LAYOUT_OWNER;
 const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000${ref.id}`;
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -202,56 +210,64 @@ export class TabLayoutService {
     });
   }
 
+  private prepareOrderProjection(item: OwnerProjectionPublication): PreparedOrderProjection {
+    const excluded = item.excludedSessionIds ?? new Set<string>();
+    const facts = item.metadata
+      .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible && !excluded.has(fact.id))
+      .map((fact) => fact.id);
+    const visible = new Set(facts);
+    const foreign = new Set(
+      item.metadata.filter((fact) => fact.kind === 'session' && !fact.ownerValid && fact.visible).map((fact) => fact.id)
+    );
+    const rawPrevious = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
+    const rawNext = flattenOwnerSessionOrder(item.next);
+    const previousOrder = rawPrevious.filter((id) => visible.has(id) || excluded.has(id));
+    const order = rawNext.filter((id) => visible.has(id) && !excluded.has(id));
+    const claimedIds = normalizeSessionOrder([
+      ...rawPrevious.filter((id) => !foreign.has(id)),
+      ...rawNext.filter((id) => !foreign.has(id)),
+      ...excluded,
+      ...facts,
+    ]);
+    return {
+      owner: item.owner,
+      previousOrder,
+      claimedIds,
+      currentIds: normalizeSessionOrder([...order, ...facts]),
+      order,
+    };
+  }
+
+  private projectOrder(
+    latest: readonly string[],
+    projections: readonly PreparedOrderProjection[],
+    preferred?: readonly string[]
+  ): string[] {
+    const before = normalizeSessionOrder(latest);
+    const removed = new Set(
+      projections.flatMap((projection) => projection.claimedIds.filter((id) => !projection.currentIds.includes(id)))
+    );
+    return recomposeGlobalSessionOrder(
+      before.filter((id) => !removed.has(id)),
+      projections.map((projection) => ({
+        owner: projection.owner,
+        ownedIds: projection.currentIds,
+        order: projection.order,
+      })),
+      preferred
+    );
+  }
+
   private publish(
     layouts: Readonly<Record<string, TabLayout>>,
     publications: readonly OwnerProjectionPublication[],
     preferred?: readonly string[]
   ): SessionOrderProjectionChange {
-    const projections = publications.map((item) => {
-      const excluded = item.excludedSessionIds ?? new Set<string>();
-      const facts = item.metadata
-        .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible && !excluded.has(fact.id))
-        .map((fact) => fact.id);
-      const visible = new Set(facts);
-      const foreign = new Set(
-        item.metadata
-          .filter((fact) => fact.kind === 'session' && !fact.ownerValid && fact.visible)
-          .map((fact) => fact.id)
-      );
-      const rawPrevious = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
-      const rawNext = flattenOwnerSessionOrder(item.next);
-      const previous = rawPrevious.filter((id) => visible.has(id) || excluded.has(id));
-      const next = rawNext.filter((id) => visible.has(id) && !excluded.has(id));
-      const claimedIds = normalizeSessionOrder([
-        ...rawPrevious.filter((id) => !foreign.has(id)),
-        ...rawNext.filter((id) => !foreign.has(id)),
-        ...facts,
-      ]);
-      const currentIds = normalizeSessionOrder([...next, ...facts]);
-      return {
-        owner: item.owner,
-        previousOrder: previous,
-        claimedIds,
-        currentIds,
-        order: next,
-      };
-    });
+    const projections = publications.map((item) => this.prepareOrderProjection(item));
     let beforeOrder: string[] = [];
     const accepted = this.deps.store.commitTabLayoutProjection(layouts, (latest) => {
       beforeOrder = normalizeSessionOrder(latest);
-      const removed = new Set(
-        projections.flatMap((projection) => projection.claimedIds.filter((id) => !projection.currentIds.includes(id)))
-      );
-      const base = beforeOrder.filter((id) => !removed.has(id));
-      return recomposeGlobalSessionOrder(
-        base,
-        projections.map((projection) => ({
-          owner: projection.owner,
-          ownedIds: projection.currentIds,
-          order: projection.order,
-        })),
-        preferred
-      );
+      return this.projectOrder(beforeOrder, projections, preferred);
     });
     const changedEntries: Array<[string, string[]]> = [];
     for (const projection of projections) {
@@ -305,7 +321,18 @@ export class TabLayoutService {
 
   private async getUnlocked(owner: string): Promise<TabLayout> {
     const prepared = await this.prepareUnlocked(owner);
-    if (!prepared.needsReconciliationCommit) return prepared.authoritative;
+    if (!prepared.needsReconciliationCommit) {
+      const publication = {
+        owner,
+        previous: prepared.current,
+        next: prepared.authoritative,
+        metadata: prepared.metadata,
+      };
+      const latest = this.deps.store.getSessionOrder();
+      const projected = this.projectOrder(latest, [this.prepareOrderProjection(publication)]);
+      if (!sameOrder(normalizeSessionOrder(latest), projected)) this.publish({}, [publication]);
+      return prepared.authoritative;
+    }
     const base = prepared.current ?? { ...prepared.authoritative, version: -1 };
     return this.commit(owner, base, prepared.authoritative, prepared.metadata);
   }
@@ -433,23 +460,21 @@ export class TabLayoutService {
       const updates: Record<string, TabLayout> = Object.create(null) as Record<string, TabLayout>;
       for (const owner of owners) {
         const ids = byOwner.get(owner) ?? [];
-        const current = this.deps.store.getTabLayout(owner);
-        if (!current) continue;
-        const { metadata } = await this.facts(owner);
+        const prepared = await this.prepareUnlocked(owner);
+        const current = prepared.current;
         // Normalize and prune together so stale cleanup, orphan materialization,
         // and missing-ref repair remain one versioned server mutation.
         const next = normalizeTabLayout(
-          materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata),
-          metadata
+          materializeOrphans(prepared.authoritative, ids, prepared.metadata),
+          prepared.metadata
         );
-        if (sameLayout(current, next)) continue;
-        const stored = this.prepareCommit(current, next);
-        updates[owner] = stored;
+        const stored = current && !sameLayout(current, next) ? this.prepareCommit(current, next) : null;
+        if (stored) updates[owner] = stored;
         publications.push({
           owner,
           previous: current,
-          next: stored,
-          metadata,
+          next: stored ?? next,
+          metadata: prepared.metadata,
           excludedSessionIds: new Set(ids),
         });
       }
@@ -470,23 +495,22 @@ export class TabLayoutService {
     const owner = owners.values().next().value as string;
     const ids = removed.map((item) => item.id);
     return this.withOwner(owner, async () => {
-      const current = this.deps.store.getTabLayout(owner);
-      let next: TabLayout | null = null;
-      let stored: TabLayout | null = null;
-      let metadata: TabRefMetadata[] = [];
-      if (current) {
-        ({ metadata } = await this.facts(owner));
-        // Prepare while the soon-to-be-deleted sessions are still known, so
-        // direct children can be materialized before their parent ref is removed.
-        next = materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata);
-        if (!sameLayout(current, next)) stored = this.prepareCommit(current, next);
-      }
+      const prepared = await this.prepareUnlocked(owner);
+      const current = prepared.current;
+      // Prepare while the soon-to-be-deleted sessions are still known, so
+      // direct children can be materialized before their parent ref is removed.
+      const next = materializeOrphans(prepared.authoritative, ids, prepared.metadata);
+      const stored = current && !sameLayout(current, next) ? this.prepareCommit(current, next) : null;
       const result = await action();
-      if (current && stored) {
-        this.publish({ [owner]: stored }, [
-          { owner, previous: current, next: stored, metadata, excludedSessionIds: new Set(ids) },
-        ]);
-      }
+      this.publish(stored ? { [owner]: stored } : {}, [
+        {
+          owner,
+          previous: current,
+          next: stored ?? next,
+          metadata: prepared.metadata,
+          excludedSessionIds: new Set(ids),
+        },
+      ]);
       return result;
     });
   }
@@ -545,8 +569,9 @@ export class TabLayoutService {
 
       const prepared: Array<{
         owner: string;
-        current: TabLayout;
-        stored: TabLayout;
+        current: TabLayout | null;
+        next: TabLayout;
+        stored: TabLayout | null;
         metadata: TabRefMetadata[];
         excludedSessionIds: ReadonlySet<string>;
       }> = [];
@@ -554,7 +579,6 @@ export class TabLayoutService {
         const ids = confirmedByOwner.get(owner) ?? [];
         if (ids.length === 0) continue;
         const current = this.deps.store.getTabLayout(owner);
-        if (!current) continue;
         const sessions = new Map<string, TabLayoutSessionRecord>();
         for (const record of persisted) sessions.set(record.id, record);
         for (const record of this.deps.sessions.values()) sessions.set(record.id, record);
@@ -580,26 +604,34 @@ export class TabLayoutService {
             order: offset + index,
           })
         );
-        const next = materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata);
-        if (!sameLayout(current, next)) {
-          prepared.push({
-            owner,
-            current,
-            stored: this.prepareCommit(current, next),
-            metadata,
-            excludedSessionIds: new Set(ids),
-          });
-        }
+        const authoritative = normalizeOrMigrateOwnerTabLayout({
+          owner,
+          layouts: current ? { [owner]: current } : undefined,
+          sessionOrder: this.deps.store.getSessionOrder(),
+          persistedSessions: persisted,
+          liveSessions: [...this.deps.sessions.values()],
+          webviews,
+          updatedAt: (this.deps.now ?? (() => new Date().toISOString()))(),
+        }).layout;
+        const next = materializeOrphans(authoritative, ids, metadata);
+        prepared.push({
+          owner,
+          current,
+          next,
+          stored: current && !sameLayout(current, next) ? this.prepareCommit(current, next) : null,
+          metadata,
+          excludedSessionIds: new Set(ids),
+        });
       }
 
       const result = await action(new Set(confirmed.map((item) => item.id)));
       if (prepared.length > 0) {
         this.publish(
-          Object.fromEntries(prepared.map((item) => [item.owner, item.stored])),
+          Object.fromEntries(prepared.filter((item) => item.stored).map((item) => [item.owner, item.stored!])),
           prepared.map((item) => ({
             owner: item.owner,
             previous: item.current,
-            next: item.stored,
+            next: item.stored ?? item.next,
             metadata: item.metadata,
             excludedSessionIds: item.excludedSessionIds,
           }))

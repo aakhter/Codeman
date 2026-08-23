@@ -176,6 +176,7 @@ describe('TabLayoutService', () => {
         alice: existing([{ kind: 'session', id: 'alice-stale' }]),
         bob: existing([{ kind: 'session', id: 'bob-new-stale' }]),
       },
+      order: ['alice-stale'],
       persisted: [{ id: 'alice-stale', owner: 'alice', createdAt: 1 }],
     });
     h.service.markRestorationComplete();
@@ -237,6 +238,43 @@ describe('TabLayoutService', () => {
     await h.service.get('alice');
     expect(h.store.commitTabLayoutProjection).toHaveBeenCalledTimes(1);
     expect(h.broadcast).toHaveBeenCalledWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
+  });
+
+  it('repairs only the legacy projection on GET when the stored layout is already canonical', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'a' },
+          { kind: 'session', id: 'b' },
+        ]),
+      },
+      order: ['b', 'a'],
+      live: [
+        { id: 'a', owner: 'alice', createdAt: 1 },
+        { id: 'b', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    const first = await h.service.get('alice');
+    const second = await h.service.get('alice');
+
+    expect(first).toEqual(
+      existing([
+        { kind: 'session', id: 'a' },
+        { kind: 'session', id: 'b' },
+      ])
+    );
+    expect(second).toEqual(first);
+    expect(h.order).toEqual(['a', 'b']);
+    expect(h.layouts.alice.version).toBe(7);
+    expect(h.store.commitTabLayoutProjection).toHaveBeenCalledTimes(1);
+    expect(h.store.commitTabLayoutProjection.mock.calls[0][0]).toEqual({});
+    expect(h.broadcast).not.toHaveBeenCalled();
+    expect(h.broadcastSessionOrder).toHaveBeenCalledExactlyOnceWith({
+      changedOwnerOrders: {},
+      globalOrder: ['a', 'b'],
+      globalChanged: true,
+    });
   });
 
   it('isolates owner metadata and filters saved webviews by exact owner', async () => {
@@ -539,6 +577,86 @@ describe('TabLayoutService', () => {
 
     expect(action).not.toHaveBeenCalled();
     expect(h.store.commitTabLayoutProjection).not.toHaveBeenCalled();
+  });
+
+  it('removes a legacy-only ID when deleting before owner layout migration', async () => {
+    const h = createHarness({
+      order: ['mine'],
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+    const action = vi.fn(async () => {
+      h.live.delete('mine');
+      return 'removed';
+    });
+
+    await expect(h.service.runSessionDeletion([{ id: 'mine', owner: 'alice' }], action)).resolves.toBe('removed');
+
+    expect(h.layouts.alice).toBeUndefined();
+    expect(h.order).toEqual([]);
+    expect(h.store.commitTabLayoutProjection).toHaveBeenCalledExactlyOnceWith({}, expect.any(Function));
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('removes a deleted legacy ID absent from an existing layout without bumping its version', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'keep' }]) },
+      order: ['gone', 'keep'],
+      live: [
+        { id: 'gone', owner: 'alice', createdAt: 1 },
+        { id: 'keep', owner: 'alice', createdAt: 2 },
+      ],
+    });
+    h.service.markRestorationComplete();
+
+    await h.service.runSessionDeletion([{ id: 'gone', owner: 'alice' }], async () => {
+      h.live.delete('gone');
+    });
+
+    expect(h.layouts.alice).toEqual(existing([{ kind: 'session', id: 'keep' }]));
+    expect(h.order).toEqual(['keep']);
+    expect(h.store.commitTabLayoutProjection.mock.calls[0][0]).toEqual({});
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('removes legacy-only IDs from post-removal repair with no migrated layout or layout delta', async () => {
+    const h = createHarness({
+      layouts: { bob: existing([{ kind: 'session', id: 'keep' }]) },
+      order: ['alice-gone', 'bob-gone', 'keep'],
+      live: [{ id: 'keep', owner: 'bob', createdAt: 3 }],
+    });
+    h.service.markRestorationComplete();
+
+    await h.service.sessionsRemoved([
+      { id: 'alice-gone', owner: 'alice' },
+      { id: 'bob-gone', owner: 'bob' },
+    ]);
+
+    expect(h.layouts.alice).toBeUndefined();
+    expect(h.layouts.bob).toEqual(existing([{ kind: 'session', id: 'keep' }]));
+    expect(h.order).toEqual(['keep']);
+    expect(h.store.commitTabLayoutProjection).toHaveBeenCalledTimes(1);
+    expect(h.store.commitTabLayoutProjection.mock.calls[0][0]).toEqual({});
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('removes a confirmed stale legacy-only ID even before owner layout migration', async () => {
+    const h = createHarness({
+      order: ['stale'],
+      persisted: [{ id: 'stale', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+    const cleanup = vi.fn((ids: ReadonlySet<string>) => {
+      delete h.persisted.stale;
+      return [...ids];
+    });
+
+    await expect(h.service.runStaleSessionCleanup(new Set(), cleanup)).resolves.toEqual(['stale']);
+
+    expect(h.layouts.alice).toBeUndefined();
+    expect(h.order).toEqual([]);
+    expect(h.store.commitTabLayoutProjection).toHaveBeenCalledExactlyOnceWith({}, expect.any(Function));
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 
   it('does not prune or bump when restoration was skipped', async () => {
