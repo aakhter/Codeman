@@ -766,6 +766,7 @@ class CodemanApp {
     this._wsSessionId = null;   // Session ID the WS is connected to
     this._wsReady = false;      // True when WS is open and ready for I/O
     this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | gone | disconnected
+    this._wsGoneSessionId = null; // exact session named by authoritative 4004/4009 close
     this._wsLastClose = null; // { code, reason, at } for transport diagnostics
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
     this._wsCloseRefreshTimer = null;
@@ -4101,6 +4102,15 @@ class CodemanApp {
     }
   }
 
+  _isTerminalSessionGone(sessionId) {
+    return (
+      typeof sessionId === 'string' &&
+      sessionId === this.activeSessionId &&
+      sessionId === this._wsGoneSessionId &&
+      this._wsState === 'gone'
+    );
+  }
+
   _prepareFreshSocketInputReplay(sessionId, socket) {
     const list = this._pendingDeliveries?.get?.(sessionId);
     if (!list || list.length === 0) return true;
@@ -4125,6 +4135,8 @@ class CodemanApp {
    * reliable browser input for the next activated socket.
    */
   _connectWs(sessionId) {
+    if (this._isTerminalSessionGone(sessionId)) return;
+    this._wsGoneSessionId = null;
     // A passive resize belongs to the session measured when it was queued. A
     // real tab switch must not carry that geometry into the next session.
     if (this._pendingTerminalResize?.sessionId !== sessionId) this._pendingTerminalResize = null;
@@ -4248,6 +4260,7 @@ class CodemanApp {
         if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
         this._terminalViewerActivity?.clearSession?.(sessionId);
         if (hadQueuedInput) this._persistReliableNow();
+        this._wsGoneSessionId = sessionId;
         this._wsState = stillActive ? 'gone' : 'disconnected';
         this._updateConnectionIndicator();
         if (stillActive) {
@@ -4377,6 +4390,7 @@ class CodemanApp {
    */
   _sendInputAsync(sessionId, input, opts) {
     if (!sessionId || !input) return;
+    if (this._isTerminalSessionGone(sessionId)) return;
     if (sessionId === this.activeSessionId) this._terminalViewerActivity?.activate?.('terminal-input');
     this._reliableSend(sessionId, input, opts?.useMux === true);
   }
@@ -4418,7 +4432,7 @@ class CodemanApp {
   _reliableSend(sessionId, data, useMux) {
     // A 4004/4009 close is authoritative: no reconnect will ever drain new
     // records for this still-selected dead terminal.
-    if (this._wsState === 'gone' && this.activeSessionId === sessionId) return;
+    if (this._isTerminalSessionGone(sessionId)) return;
     const seq = this._nextSeq(sessionId);
     const rec = { seq, data, useMux: !!useMux, ts: Date.now(), tries: 0, sentAt: 0 };
     let list = this._pendingDeliveries.get(sessionId);
@@ -4879,9 +4893,14 @@ class CodemanApp {
     this._lastOfflineUiKey = '';
     this._updateConnectionLossUi();
     this.connectSSE();
-    // The terminal socket does not always come back on its own (planWsReconnect
-    // 'give-up'), so the same button re-arms it.
-    if (this.activeSessionId && this._wsState !== 'connected') {
+    // Re-arm transiently unavailable terminal transport with the SSE stream.
+    // An authoritative 4004/4009 remains closed: retrying cannot revive a
+    // terminal session the server says no longer exists.
+    if (
+      this.activeSessionId &&
+      this._wsState !== 'connected' &&
+      !this._isTerminalSessionGone(this.activeSessionId)
+    ) {
       this._wsReconnectAttempts = 0;
       this._connectWs(this.activeSessionId);
     }

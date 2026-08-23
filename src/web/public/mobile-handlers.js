@@ -634,6 +634,7 @@ const KeyboardHandler = {
       typeof app === 'undefined' ||
       !app.activeSessionId ||
       typeof app.sendResize !== 'function' ||
+      app._isTerminalSessionGone?.(app.activeSessionId) ||
       document.visibilityState === 'hidden'
     )
       return;

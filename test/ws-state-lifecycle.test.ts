@@ -78,6 +78,7 @@ function loadHarness() {
     HTMLCanvasElement: class HTMLCanvasElement {},
     WebSocket: FakeWebSocket,
     location: { protocol: 'https:', host: 'test.local' },
+    navigator: { onLine: true },
     fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args),
     document: { addEventListener: vi.fn() },
     localStorage: {
@@ -312,6 +313,7 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     const { CodemanApp } = loadHarness();
     const { app } = makeApp(CodemanApp, {
       _wsState: 'gone',
+      _wsGoneSessionId: 's1',
       _seqCounters: new Map(),
       _persistReliableState: vi.fn(),
       _drainSession: vi.fn(),
@@ -325,6 +327,40 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
 
     expect((app as unknown as Record<string, any>)._pendingDeliveries.has('s1')).toBe(false);
     expect((app as unknown as Record<string, any>)._seqCounters.has('s1')).toBe(false);
+  });
+
+  it('retryConnection keeps SSE retry but does not reconnect an authoritative terminal-gone WS', () => {
+    const { CodemanApp } = loadHarness();
+    const connectSSE = vi.fn();
+    const connectWs = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _wsState: 'gone',
+      _wsGoneSessionId: 's1',
+      connectSSE,
+      _connectWs: connectWs,
+      _updateConnectionLossUi: vi.fn(),
+    });
+
+    (app as unknown as { retryConnection: () => void }).retryConnection();
+
+    expect(connectSSE).toHaveBeenCalledOnce();
+    expect(connectWs).not.toHaveBeenCalled();
+  });
+
+  it('retryConnection still reconnects a transiently unavailable terminal', () => {
+    const { CodemanApp } = loadHarness();
+    const connectWs = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _wsState: 'reconnecting',
+      _wsGoneSessionId: null,
+      connectSSE: vi.fn(),
+      _connectWs: connectWs,
+      _updateConnectionLossUi: vi.fn(),
+    });
+
+    (app as unknown as { retryConnection: () => void }).retryConnection();
+
+    expect(connectWs).toHaveBeenCalledWith('s1');
   });
 
   it('flushes one exact latest passive z after pending explicit va, without HTTP or a new activation', () => {

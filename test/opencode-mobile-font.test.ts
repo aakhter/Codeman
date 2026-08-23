@@ -482,6 +482,34 @@ describe('OpenCode device-local terminal font policy', () => {
     expect(wsSend).not.toHaveBeenCalled();
   });
 
+  it('rejects exact terminal-gone resize paths before fitting, activation, or pending geometry', async () => {
+    const harness = createApp('desktop', {}, 'opencode');
+    harness.app._wsState = 'gone';
+    harness.app._wsGoneSessionId = 'session-1';
+    harness.app._isTerminalSessionGone = vi.fn(() => true);
+    harness.app._pendingTerminalResize = null;
+    harness.app.applyTerminalFontPolicyForActiveSession = vi.fn();
+    harness.app.fitAddon = {
+      fit: vi.fn(),
+      proposeDimensions: vi.fn(() => ({ cols: 100, rows: 30 })),
+    };
+
+    expect(await harness.app.sendResize('session-1')).toBe(false);
+    expect(harness.app._sendOrQueueTerminalResize('session-1', { t: 'z', c: 100, r: 30, v: 'desktop' })).toBe(false);
+    expect(harness.app.applyTerminalFontPolicyForActiveSession).not.toHaveBeenCalled();
+    expect(harness.app.fitAddon.fit).not.toHaveBeenCalled();
+    expect(harness.app._pendingTerminalResize).toBeNull();
+
+    const resizeThrottle = terminalSource.slice(
+      terminalSource.indexOf('const throttledResize = () => {'),
+      terminalSource.indexOf("window.addEventListener('resize', throttledResize)")
+    );
+    expect(resizeThrottle.indexOf('_isTerminalSessionGone')).toBeGreaterThan(-1);
+    expect(resizeThrottle.indexOf('_isTerminalSessionGone')).toBeLessThan(
+      resizeThrottle.indexOf('this.applyTerminalFontPolicyForActiveSession()')
+    );
+  });
+
   it('does not bypass viewer ownership through HTTP when the sizing socket is unavailable', async () => {
     const harness = createApp('mobile', {}, 'opencode');
     harness.app.fitAddon = {
@@ -585,6 +613,24 @@ describe('OpenCode device-local terminal font policy', () => {
     expect(harness.fetchMock).not.toHaveBeenCalled();
   });
 
+  it('rejects terminal restore after authoritative close without activation, geometry, or another toast', async () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app._wsState = 'gone';
+    harness.app._wsGoneSessionId = 'session-1';
+    harness.app._isTerminalSessionGone = vi.fn(() => true);
+    harness.app._pendingTerminalResize = null;
+    harness.app.getTerminalDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    harness.app._terminalViewerActivity = { activate: vi.fn() };
+    harness.app.showToast = vi.fn();
+
+    expect(await harness.app.restoreTerminalSize()).toBe(false);
+
+    expect(harness.app.getTerminalDimensions).not.toHaveBeenCalled();
+    expect(harness.app._terminalViewerActivity.activate).not.toHaveBeenCalled();
+    expect(harness.app._pendingTerminalResize).toBeNull();
+    expect(harness.app.showToast).not.toHaveBeenCalled();
+  });
+
   it('reports a ready-socket send failure as queued instead of restored', async () => {
     const harness = createApp('mobile', {}, 'opencode');
     harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
@@ -659,6 +705,22 @@ describe('OpenCode device-local terminal font policy', () => {
 
     expect(harness.app.sendResize).toHaveBeenCalledOnce();
     expect(harness.app.sendResize).toHaveBeenCalledWith('session-1');
+    expect(mobile.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a visible mobile keyboard settle for the exact terminal-gone session', () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app._wsState = 'gone';
+    harness.app._wsGoneSessionId = 'session-1';
+    harness.app._isTerminalSessionGone = vi.fn(() => true);
+    harness.app.sendResize = vi.fn();
+    const mobile = loadMobileBehaviorHarness(harness.app);
+    mobile.setVisibility('visible');
+
+    mobile.KeyboardHandler._sendTerminalResize();
+
+    expect(harness.app._isTerminalSessionGone).toHaveBeenCalledWith('session-1');
+    expect(harness.app.sendResize).not.toHaveBeenCalled();
     expect(mobile.fetchMock).not.toHaveBeenCalled();
   });
 

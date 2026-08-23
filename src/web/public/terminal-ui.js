@@ -1727,6 +1727,7 @@ Object.assign(CodemanApp.prototype, {
       });
     };
     const throttledResize = () => {
+      if (this._isTerminalSessionGone?.(this.activeSessionId)) return;
       // COD-299: the rail controller owns terminal sizing while its width is
       // changing. Ignore observer churn so the final 150ms settle performs the
       // only fit/reflow and PTY resize for the gesture.
@@ -5716,6 +5717,7 @@ Object.assign(CodemanApp.prototype, {
       this.showToast('No active session', 'warning');
       return false;
     }
+    if (this._isTerminalSessionGone?.(this.activeSessionId)) return false;
 
     const dims = this.getTerminalDimensions();
     if (!dims) {
@@ -6808,6 +6810,7 @@ Object.assign(CodemanApp.prototype, {
 
   _sendOrQueueTerminalResize(sessionId, frame) {
     if (!sessionId || sessionId !== this.activeSessionId) return false;
+    if (this._isTerminalSessionGone?.(sessionId)) return false;
     if (this._wsReady && this._wsSessionId === sessionId && this._ws) {
       try {
         this._ws.send(JSON.stringify(frame));
@@ -6831,6 +6834,7 @@ Object.assign(CodemanApp.prototype, {
     // Terminal dimensions belong only to the currently active browser view.
     // A delayed selection must never report the winner's shared xterm as its own.
     if (!sessionId || sessionId !== this.activeSessionId || document.visibilityState === 'hidden') return false;
+    if (this._isTerminalSessionGone?.(sessionId)) return false;
     // Fit terminal to container before reading dimensions — ensures local
     // terminal size matches what we report to the server PTY.
     this.applyTerminalFontPolicyForActiveSession();

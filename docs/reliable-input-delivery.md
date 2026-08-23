@@ -42,7 +42,9 @@ undeliverable queue is discarded and the UI says the session ended.
   session gets a fresh activated WS. A 4004/4009 close is terminal rather than
   transient: only that dead session's queue, pending resize, and viewer activity
   are cleared, persistence is flushed immediately, no reconnect is scheduled,
-  and further input is not enqueued for the still-selected dead terminal.
+  and further input, resize, restore, and manual terminal reconnect actions are
+  rejected for the still-selected dead terminal. The connection-loss retry can
+  still reconnect SSE without reopening that terminal WS.
 - **Half-open recovery** (`_redeliverSweep`, every 2s): if the active WS session's
   oldest record is unacked past `_reliableAckTimeoutMs` (4s), the socket is assumed
   dead — `ws.close()` forces a fast reconnect; `onopen` (`_onWsReady`) resets

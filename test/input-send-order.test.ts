@@ -97,6 +97,29 @@ function makeApp(): App {
 }
 
 describe('durable input delivery — send ordering', () => {
+  it('rejects public input for the exact active gone session before ownership activation', () => {
+    const app = makeApp() as App & Record<string, any>;
+    app._wsState = 'gone';
+    app._wsGoneSessionId = 'session-1';
+
+    app._sendInputAsync('session-1', 'must-not-queue');
+
+    expect(app._terminalViewerActivity.activate).not.toHaveBeenCalled();
+    expect(app._pendingDeliveries.has('session-1')).toBe(false);
+    expect(app._seqCounters.has('session-1')).toBe(false);
+  });
+
+  it('preserves public input for another session when the prior terminal is gone', () => {
+    const app = makeApp() as App & Record<string, any>;
+    app._wsState = 'gone';
+    app._wsGoneSessionId = 'gone-session';
+
+    app._sendInputAsync('session-1', 'still-valid');
+
+    expect(app._terminalViewerActivity.activate).toHaveBeenCalledWith('terminal-input');
+    expect(app._pendingDeliveries.get('session-1')).toMatchObject([{ data: 'still-valid' }]);
+  });
+
   it('retains input without HTTP while WS activation is unavailable', async () => {
     const app = makeApp() as App & Record<string, any>;
     const activate = vi.fn(() => false);
