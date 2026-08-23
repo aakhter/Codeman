@@ -7,7 +7,9 @@
  * which the route-test harness does not install — so they need a real WebServer.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { flattenOwnerSessionOrder, type TabLayout } from '../src/tab-layout.js';
 import { WebServer } from '../src/web/server.js';
+import { SseEvent } from '../src/web/sse-events.js';
 
 const PORT = 3168;
 
@@ -95,11 +97,15 @@ describe('Stable HTTP contract (live server)', () => {
 
   it('keeps the tab layout foundation smoke contract atomic and writable', async () => {
     type TabLayoutInternals = {
+      sessions: Map<string, { id: string; createdAt: number; owner?: string }>;
       store: {
-        getTabLayout(owner: string): { version: number } | null;
+        getSessionOrder(): string[];
+        getTabLayout(owner: string): TabLayout | null;
         commitTabLayoutProjection: (...args: unknown[]) => unknown;
       };
       sse: {
+        addClient(reply: unknown, sessionFilter: Set<string> | null, isRemote: boolean): void;
+        removeClient(reply: unknown): void;
         broadcast: (...args: unknown[]) => void;
         broadcastSessionOrder: (...args: unknown[]) => void;
       };
@@ -108,6 +114,10 @@ describe('Stable HTTP contract (live server)', () => {
     const commit = vi.spyOn(internals.store, 'commitTabLayoutProjection');
     const layoutEvent = vi.spyOn(internals.sse, 'broadcast');
     const orderEvent = vi.spyOn(internals.sse, 'broadcastSessionOrder');
+    const previousSessions = new Map(internals.sessions);
+    const recipientWrites: string[] = [];
+    const recipient = { raw: { write: (chunk: string) => (recipientWrites.push(chunk), true) } };
+    internals.sse.addClient(recipient, null, false);
     const requested = {
       version: 0,
       groups: [],
@@ -115,42 +125,77 @@ describe('Stable HTTP contract (live server)', () => {
       updatedAt: '2026-08-23T00:00:00.000Z',
     };
 
-    expect(internals.store.getTabLayout('@single')).toBeNull();
+    try {
+      expect(internals.store.getTabLayout('@single')).toBeNull();
 
-    const direct = await fetch(`${base}/api/tab-layout`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ baseVersion: 0, layout: requested }),
-    });
-    expect(direct.status).toBe(200);
-    expect((await direct.json()).data.layout.version).toBe(1);
-    expect(commit).toHaveBeenCalledTimes(1);
+      const direct = await fetch(`${base}/api/tab-layout`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseVersion: 0, layout: requested }),
+      });
+      expect(direct.status).toBe(200);
+      expect((await direct.json()).data.layout.version).toBe(1);
+      expect(commit).toHaveBeenCalledTimes(1);
+      expect(layoutEvent).toHaveBeenCalledTimes(1);
+      expect(layoutEvent).toHaveBeenCalledWith(SseEvent.TabLayoutChanged, { owner: '@single', version: 1 }, undefined);
+      expect(orderEvent).not.toHaveBeenCalled();
+      expect(recipientWrites).toEqual(['event: tab:layoutChanged\ndata: {"owner":"@single","version":1}\n\n']);
+      recipientWrites.length = 0;
 
-    const writesBeforeConflict = commit.mock.calls.length;
-    const layoutEventsBeforeConflict = layoutEvent.mock.calls.length;
-    const orderEventsBeforeConflict = orderEvent.mock.calls.length;
-    const stale = await fetch(`${base}/api/tab-layout`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ baseVersion: 0, layout: requested }),
-    });
-    expect(stale.status).toBe(409);
-    expect((await stale.json()).errorCode).toBe('CONFLICT');
-    expect(commit).toHaveBeenCalledTimes(writesBeforeConflict);
-    expect(layoutEvent).toHaveBeenCalledTimes(layoutEventsBeforeConflict);
-    expect(orderEvent).toHaveBeenCalledTimes(orderEventsBeforeConflict);
+      const layoutBeforeConflict = internals.store.getTabLayout('@single');
+      const orderBeforeConflict = internals.store.getSessionOrder();
+      const writesBeforeConflict = commit.mock.calls.length;
+      const layoutEventsBeforeConflict = layoutEvent.mock.calls.length;
+      const orderEventsBeforeConflict = orderEvent.mock.calls.length;
+      const stale = await fetch(`${base}/api/tab-layout`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseVersion: 0, layout: requested }),
+      });
+      expect(stale.status).toBe(409);
+      expect((await stale.json()).errorCode).toBe('CONFLICT');
+      expect(internals.store.getTabLayout('@single')).toEqual(layoutBeforeConflict);
+      expect(internals.store.getSessionOrder()).toEqual(orderBeforeConflict);
+      expect(commit).toHaveBeenCalledTimes(writesBeforeConflict);
+      expect(layoutEvent).toHaveBeenCalledTimes(layoutEventsBeforeConflict);
+      expect(orderEvent).toHaveBeenCalledTimes(orderEventsBeforeConflict);
+      expect(recipientWrites).toEqual([]);
 
-    const ownerGet = await fetch(`${base}/api/tab-layout`);
-    expect(ownerGet.status).toBe(200);
-    expect((await ownerGet.json()).data.layout.version).toBe(1);
+      const ownerGet = await fetch(`${base}/api/tab-layout`);
+      expect(ownerGet.status).toBe(200);
+      expect((await ownerGet.json()).data.layout.version).toBe(1);
 
-    const legacyPut = await fetch(`${base}/api/session-order`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order: [] }),
-    });
-    expect(legacyPut.status).toBe(200);
-    expect((await legacyPut.json()).data.order).toEqual([]);
+      const firstId = 'tab-layout-smoke-a';
+      const secondId = 'tab-layout-smoke-b';
+      internals.sessions.set(firstId, { id: firstId, createdAt: 1 });
+      internals.sessions.set(secondId, { id: secondId, createdAt: 2 });
+      const orderEventsBeforeLegacy = orderEvent.mock.calls.length;
+      const legacyPut = await fetch(`${base}/api/session-order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: [secondId, firstId] }),
+      });
+      expect(legacyPut.status).toBe(200);
+      expect((await legacyPut.json()).data.order).toEqual([secondId, firstId]);
+      expect(internals.store.getSessionOrder()).toEqual([secondId, firstId]);
+      expect(flattenOwnerSessionOrder(internals.store.getTabLayout('@single')!)).toEqual([secondId, firstId]);
+      expect(orderEvent).toHaveBeenCalledTimes(orderEventsBeforeLegacy + 1);
+      expect(orderEvent).toHaveBeenLastCalledWith({
+        changedOwnerOrders: { '@single': [secondId, firstId] },
+        globalOrder: [secondId, firstId],
+        globalChanged: true,
+      });
+      expect(recipientWrites.at(-1)).toBe(
+        `event: session:orderChanged\ndata: {"order":["${secondId}","${firstId}"]}\n\n`
+      );
+    } finally {
+      internals.sse.removeClient(recipient);
+      internals.sessions.clear();
+      for (const [id, session] of previousSessions) internals.sessions.set(id, session);
+      commit.mockRestore();
+      layoutEvent.mockRestore();
+      orderEvent.mockRestore();
+    }
   });
 
   it('serves the same envelope on the /api/v1 alias', async () => {
