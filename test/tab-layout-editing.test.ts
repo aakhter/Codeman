@@ -1925,6 +1925,7 @@ describe('COD-307 delegated pointer behavior', () => {
       ),
     };
     const layouts: Record<string, Layout> = { alice: serverLayout };
+    let sessionOrder = ['parent', 'child', 'grandchild', 'other'];
     const sessions = {
       parent: { id: 'parent', owner: 'alice', createdAt: 1 },
       child: { id: 'child', owner: 'alice', createdAt: 2, parentSessionId: 'parent' },
@@ -1934,17 +1935,24 @@ describe('COD-307 delegated pointer behavior', () => {
     };
     const store = {
       getTabLayout: (owner: string) => layouts[owner] ?? null,
-      setTabLayout: (owner: string, next: Layout) => {
-        layouts[owner] = next;
+      getTabLayouts: () => structuredClone(layouts),
+      commitTabLayoutProjection: (
+        updates: Readonly<Record<string, Layout>>,
+        projectOrder: (latest: readonly string[]) => readonly string[]
+      ) => {
+        Object.assign(layouts, structuredClone(updates));
+        sessionOrder = [...projectOrder(sessionOrder)];
+        return { layouts: structuredClone(updates), sessionOrder: [...sessionOrder] };
       },
       getSessions: () => sessions,
-      getSessionOrder: () => ['parent', 'child', 'grandchild', 'other'],
+      getSessionOrder: () => [...sessionOrder],
     };
     const service = new TabLayoutService({
       store: store as never,
       sessions: new Map(),
       readWebviews: async () => [{ id: 'web', owner: 'alice' }],
       broadcast: vi.fn(),
+      broadcastSessionOrder: vi.fn(),
       now: () => '2026-08-16T12:00:00.000Z',
     });
     const server = Fastify({ logger: false });

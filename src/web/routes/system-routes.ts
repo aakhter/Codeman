@@ -566,8 +566,8 @@ export function registerSystemRoutes(
   // ========== State & Lifecycle ===
   app.post('/api/cleanup-state', async () => {
     const activeSessionIds = new Set(ctx.sessions.keys());
-    const result = await ctx.tabLayouts.runStaleSessionCleanup(activeSessionIds, () =>
-      ctx.store.cleanupStaleSessions(activeSessionIds)
+    const result = await ctx.tabLayouts.runStaleSessionCleanup(activeSessionIds, (confirmedIds) =>
+      ctx.store.cleanupSessionsByIds(confirmedIds)
     );
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {

@@ -100,6 +100,7 @@ import { applyWorkspaceHooks } from '../hooks-config.js';
 import { PushSubscriptionStore } from '../push-store.js';
 import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
+import { sessionOrderForStatus } from './session-order-status.js';
 import { deriveTabLayoutSseHint } from './tab-layout-sse.js';
 import { deriveWebviewSseHint } from './webview-sse.js';
 import type { SessionCreationOptions } from './ports/session-port.js';
@@ -558,6 +559,10 @@ export class WebServer extends EventEmitter {
       sessions: this.sessions,
       readWebviews: () => readWebviews(getDataDir()),
       broadcast: this.broadcast.bind(this),
+      broadcastSessionOrder: (change) => {
+        this.cachedLightState = null;
+        this.sse.broadcastSessionOrder(change);
+      },
     });
     if (this.testMode) this.tabLayouts.markRestorationSkipped();
 
@@ -1302,6 +1307,29 @@ export class WebServer extends EventEmitter {
     }
   }
 
+  /** Register a live session only inside its owner layout queue, rolling activity state back on failure. */
+  private async registerSessionWithLayout(session: Session, options: SessionCreationOptions = {}) {
+    this.attachAgentActivity(session);
+    let activityAttached = true;
+    try {
+      await this.reconcileWatcherConversation(session);
+      return await this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options, () => {
+        this.sessions.set(session.id, session);
+        return () => {
+          if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+          if (activityAttached) {
+            this.detachAgentActivity(session);
+            activityAttached = false;
+          }
+        };
+      });
+    } catch (error) {
+      if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+      if (activityAttached) this.detachAgentActivity(session);
+      throw error;
+    }
+  }
+
   /**
    * Build a route context object satisfying all 5 port interfaces.
    * Single object with zero runtime cost — ISP enforced at the type level.
@@ -1312,24 +1340,7 @@ export class WebServer extends EventEmitter {
     return {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
-      addSession: async (session: Session, options: SessionCreationOptions = {}) => {
-        this.attachAgentActivity(session);
-        await this.reconcileWatcherConversation(session);
-        try {
-          return await this.tabLayouts.sessionCreated(session.owner ?? '@single', session.id, options, () => {
-            this.sessions.set(session.id, session);
-            return () => {
-              if (this.sessions.get(session.id) === session) {
-                this.detachAgentActivity(session);
-                this.sessions.delete(session.id);
-              }
-            };
-          });
-        } catch (error) {
-          this.detachAgentActivity(session);
-          throw error;
-        }
-      },
+      addSession: this.registerSessionWithLayout.bind(this),
       tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),
       setupSessionListeners: this.setupSessionListeners.bind(this),
@@ -2719,9 +2730,7 @@ export class WebServer extends EventEmitter {
           // server-authoritative Agent Checkpoint default.
           session = new Session({ workingDir: run.workingDir, checkpointEnabled, claudeSessionStartHookReady });
         }
-        this.attachAgentActivity(session);
-        await this.reconcileWatcherConversation(session);
-        this.sessions.set(session.id, session);
+        await this.registerSessionWithLayout(session);
         this.store.incrementSessionsCreated();
         this.persistSessionState(session);
         await this.setupSessionListeners(session);
@@ -2858,8 +2867,8 @@ export class WebServer extends EventEmitter {
    */
   private async cleanupStaleSessions(): Promise<number> {
     const activeSessionIds = new Set(this.sessions.keys());
-    const result = await this.tabLayouts.runStaleSessionCleanup(activeSessionIds, () =>
-      this.store.cleanupStaleSessions(activeSessionIds)
+    const result = await this.tabLayouts.runStaleSessionCleanup(activeSessionIds, (confirmedIds) =>
+      this.store.cleanupSessionsByIds(confirmedIds)
     );
     const lifecycleLog = getLifecycleLog();
     for (const s of result.cleaned) {
@@ -2884,11 +2893,13 @@ export class WebServer extends EventEmitter {
 
   /** Shallow-filter the light-state blob to what a non-admin user may see. */
   private filterLightStateForUser(base: Record<string, unknown>, username: string): Record<string, unknown> {
-    const ownedIds = new Set<string>();
+    const authoritativeOwners = new Map<string, string | undefined>();
+    for (const [id, session] of Object.entries(this.store.getSessions())) authoritativeOwners.set(id, session.owner);
+    for (const [id, session] of this.sessions) authoritativeOwners.set(id, session.owner);
+    const ownedIds = new Set([...authoritativeOwners].filter(([, owner]) => owner === username).map(([id]) => id));
     const ownedClaudeIds = new Set<string>();
-    for (const [id, s] of this.sessions) {
+    for (const s of this.sessions.values()) {
       if (s.owner === username) {
-        ownedIds.add(id);
         if (s.claudeSessionId) ownedClaudeIds.add(s.claudeSessionId);
       }
     }
@@ -2906,6 +2917,13 @@ export class WebServer extends EventEmitter {
     const filtered: Record<string, unknown> = {
       ...base,
       sessions,
+      sessionOrder: sessionOrderForStatus(
+        Array.isArray(base.sessionOrder) ? (base.sessionOrder as string[]) : [],
+        this.store.getSessions(),
+        this.sessions,
+        { username, role: 'user' },
+        true
+      ),
       respawnStatus,
       scheduledRuns: [], // legacy ScheduledRun has no owner yet → admin-only
       subagents: bySession(base.subagents, 'sessionId'),
@@ -2952,6 +2970,7 @@ export class WebServer extends EventEmitter {
     const result = {
       version: APP_VERSION,
       sessions: this.getLightSessionsState(),
+      sessionOrder: this.store.getSessionOrder(),
       scheduledRuns: Array.from(this.scheduledRuns.values()),
       respawnStatus,
       globalStats: this.store.getAggregateStats(activeSessionTokens),

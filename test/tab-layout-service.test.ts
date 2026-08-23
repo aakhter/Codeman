@@ -12,6 +12,7 @@ type SessionFact = { id: string; owner?: string; createdAt: number; parentSessio
 function createHarness(
   options: {
     layouts?: Record<string, TabLayout>;
+    order?: string[];
     persisted?: SessionFact[];
     live?: SessionFact[];
     webviews?: Array<{ id: string; owner?: string }>;
@@ -20,30 +21,42 @@ function createHarness(
   } = {}
 ) {
   const layouts = { ...(options.layouts ?? {}) };
+  const order = [...(options.order ?? [])];
   const persisted = Object.fromEntries((options.persisted ?? []).map((session) => [session.id, session]));
   const live = new Map((options.live ?? []).map((session) => [session.id, session]));
   const caseDefaults = structuredClone(options.caseDefaults ?? {});
   const store = {
-    getTabLayout: vi.fn((owner: string) => layouts[owner] ?? null),
+    getTabLayout: vi.fn((owner: string) => (Object.hasOwn(layouts, owner) ? layouts[owner] : null)),
+    getTabLayouts: vi.fn(() => structuredClone(layouts)),
     setTabLayout: vi.fn((owner: string, value: TabLayout) => {
       layouts[owner] = value;
     }),
     getSessions: vi.fn(() => persisted),
-    getSessionOrder: vi.fn(() => []),
+    getSessionOrder: vi.fn(() => [...order]),
+    commitTabLayoutProjection: vi.fn(
+      (updates: Readonly<Record<string, TabLayout>>, project: (latest: readonly string[]) => readonly string[]) => {
+        const projected = [...project([...order])];
+        for (const [owner, layout] of Object.entries(updates)) store.setTabLayout(owner, layout);
+        order.splice(0, order.length, ...projected);
+        return { layouts: structuredClone(updates), sessionOrder: [...order] };
+      }
+    ),
     getCaseDefaultGroup: vi.fn((owner: string, caseName: string) => caseDefaults[owner]?.[caseName]),
     setCaseDefaultGroup: vi.fn((owner: string, caseName: string, groupId: string | null) => {
       caseDefaults[owner] = { ...(caseDefaults[owner] ?? {}), [caseName]: groupId };
     }),
   };
   const broadcast = vi.fn();
+  const broadcastSessionOrder = vi.fn();
   const service = new TabLayoutService({
     store: store as never,
     sessions: live as never,
     readWebviews: options.readWebviews ?? vi.fn(async () => options.webviews ?? []),
     broadcast,
+    broadcastSessionOrder,
     now: () => '2026-08-16T12:00:00.000Z',
   });
-  return { service, store, broadcast, layouts, live, persisted, caseDefaults };
+  return { service, store, broadcast, broadcastSessionOrder, layouts, order, live, persisted, caseDefaults };
 }
 
 const existing = (refs: TabLayout['ungrouped'], version = 7): TabLayout => ({
@@ -522,7 +535,7 @@ describe('TabLayoutService', () => {
     const moved = await h.service.putOperations(
       'alice',
       [{ type: 'moveRef', ref: { kind: 'session', id: 'child' }, groupId: null, index: 0 }],
-      8
+      7
     );
     expect(moved.layout.ungrouped[0]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
 
@@ -533,7 +546,7 @@ describe('TabLayoutService', () => {
           { type: 'createGroup', id: 'duplicate', name: 'One' },
           { type: 'createGroup', id: 'duplicate', name: 'Two' },
         ],
-        9
+        8
       )
     ).rejects.toThrow(/duplicate/);
     expect(h.layouts.alice.groups).toEqual([]);

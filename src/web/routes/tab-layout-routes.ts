@@ -8,6 +8,12 @@ import type { TabLayoutPort } from '../ports/index.js';
 
 export const TAB_LAYOUT_BODY_LIMIT = 128 * 1024;
 
+const hasExactKeys = (input: Record<string, unknown>, expected: readonly string[]): boolean => {
+  const actual = Object.keys(input).sort();
+  const canonical = [...expected].sort();
+  return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
+};
+
 function parseWriteBody(
   body: unknown
 ):
@@ -25,7 +31,16 @@ function parseWriteBody(
   if (!Number.isSafeInteger(input.baseVersion) || (input.baseVersion as number) < 0) {
     throw new TabLayoutValidationError('baseVersion must be a non-negative safe integer');
   }
-  if ('operations' in input && input.layout === undefined) {
+  if (
+    'operations' in input &&
+    input.layout === undefined &&
+    hasExactKeys(
+      input as Record<string, unknown>,
+      input.recoveryBaseLayout === undefined
+        ? ['baseVersion', 'operations']
+        : ['baseVersion', 'operations', 'recoveryBaseLayout']
+    )
+  ) {
     return {
       kind: 'operations',
       baseVersion: input.baseVersion as number,
@@ -33,7 +48,11 @@ function parseWriteBody(
       ...(input.recoveryBaseLayout === undefined ? {} : { recoveryBaseLayout: input.recoveryBaseLayout }),
     };
   }
-  if (input.layout !== undefined && input.operations === undefined) {
+  if (
+    input.layout !== undefined &&
+    input.operations === undefined &&
+    hasExactKeys(input as Record<string, unknown>, ['baseVersion', 'layout'])
+  ) {
     return { kind: 'layout', baseVersion: input.baseVersion as number, layout: input.layout };
   }
   throw new TabLayoutValidationError('exactly one of layout or operations is required');

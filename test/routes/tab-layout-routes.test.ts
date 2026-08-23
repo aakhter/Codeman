@@ -81,6 +81,21 @@ describe('tab layout routes', () => {
     await app.close();
   });
 
+  it.each([
+    { baseVersion: 3, layout: layout(), extra: true },
+    { baseVersion: 3, operations: [], extra: true },
+    { baseVersion: 3, operations: [], recoveryBaseLayout: layout(), extra: true },
+  ])('rejects extra top-level write keys before invoking the service', async (payload) => {
+    const { app, service } = await harness();
+
+    const response = await app.inject({ method: 'PUT', url: '/api/tab-layout', payload });
+
+    expect(response.statusCode).toBe(400);
+    expect(service.put).not.toHaveBeenCalled();
+    expect(service.putOperations).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it('routes semantic operation batches by authenticated owner and rejects ambiguous payloads', async () => {
     vi.stubEnv('CODEMAN_MULTIUSER', '1');
     const { app, service } = await harness('alice');
@@ -140,20 +155,28 @@ describe('tab layout routes', () => {
       ungrouped: [{ kind: 'session', id: 'child', placement: 'manual' }],
     };
     const layouts: Record<string, TabLayout> = { alice: current };
+    let sessionOrder = ['child'];
     const service = new TabLayoutService({
       store: {
         getTabLayout: (owner: string) => layouts[owner] ?? null,
-        setTabLayout: (owner: string, next: TabLayout) => {
-          layouts[owner] = next;
+        getTabLayouts: () => structuredClone(layouts),
+        commitTabLayoutProjection: (
+          updates: Readonly<Record<string, TabLayout>>,
+          projectOrder: (latest: readonly string[]) => readonly string[]
+        ) => {
+          Object.assign(layouts, structuredClone(updates));
+          sessionOrder = [...projectOrder(sessionOrder)];
+          return { layouts: structuredClone(updates), sessionOrder: [...sessionOrder] };
         },
         getSessions: () => ({
           child: { id: 'child', owner: 'alice', createdAt: 1, parentSessionId: 'missing' },
         }),
-        getSessionOrder: () => ['child'],
+        getSessionOrder: () => [...sessionOrder],
       } as never,
       sessions: new Map(),
       readWebviews: async () => [],
       broadcast: vi.fn(),
+      broadcastSessionOrder: vi.fn(),
       now: () => '2026-08-16T12:00:00.000Z',
     });
     const app = Fastify({ logger: false });

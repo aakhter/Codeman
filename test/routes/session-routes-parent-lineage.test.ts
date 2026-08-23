@@ -97,19 +97,27 @@ describe('POST /api/sessions parentSessionId', () => {
         ungrouped: [],
       },
     };
+    let sessionOrder: string[] = [];
     Object.assign(harness.ctx.sessions.get(PARENT_ID)!, { createdAt: 1 });
     const service = new TabLayoutService({
       store: {
         getTabLayout: (owner: string) => layouts[owner] ?? null,
-        setTabLayout: (owner: string, value: TabLayout) => {
-          layouts[owner] = value;
+        getTabLayouts: () => structuredClone(layouts),
+        commitTabLayoutProjection: (
+          updates: Readonly<Record<string, TabLayout>>,
+          projectOrder: (latest: readonly string[]) => readonly string[]
+        ) => {
+          Object.assign(layouts, structuredClone(updates));
+          sessionOrder = [...projectOrder(sessionOrder)];
+          return { layouts: structuredClone(updates), sessionOrder: [...sessionOrder] };
         },
         getSessions: () => ({}),
-        getSessionOrder: () => [],
+        getSessionOrder: () => [...sessionOrder],
       } as never,
       sessions: harness.ctx.sessions as never,
       readWebviews: async () => [],
       broadcast: () => {},
+      broadcastSessionOrder: () => {},
       now: () => '2026-08-16T12:00:00.000Z',
     });
     harness.ctx.tabLayouts = service as never;

@@ -252,16 +252,23 @@ describe('POST /api/webviews', () => {
       updatedAt: '2026-08-16T00:00:00.000Z',
     };
     let stored = original;
+    let sessionOrder: string[] = [];
     const live = new Map(refs.map((ref, index) => [ref.id, { id: ref.id, createdAt: index }]));
     const atomicBroadcast = vi.fn();
     const service = new TabLayoutService({
       store: {
         getTabLayout: () => stored,
-        setTabLayout: (_owner, layout) => {
-          stored = layout;
+        getTabLayouts: () => ({ '@single': structuredClone(stored) }),
+        commitTabLayoutProjection: (
+          updates: Readonly<Record<string, TabLayout>>,
+          projectOrder: (latest: readonly string[]) => readonly string[]
+        ) => {
+          if (updates['@single']) stored = structuredClone(updates['@single']);
+          sessionOrder = [...projectOrder(sessionOrder)];
+          return { layouts: structuredClone(updates), sessionOrder: [...sessionOrder] };
         },
         getSessions: () => ({}),
-        getSessionOrder: () => [],
+        getSessionOrder: () => [...sessionOrder],
       } as never,
       sessions: live,
       readWebviews: async () =>
@@ -269,6 +276,7 @@ describe('POST /api/webviews', () => {
           Array<{ id: string; owner?: string }>
         >,
       broadcast: atomicBroadcast,
+      broadcastSessionOrder: vi.fn(),
     });
     const atomicApp = Fastify({ logger: false });
     await atomicApp.register(fastifyCookie);

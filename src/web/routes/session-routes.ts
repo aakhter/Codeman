@@ -45,9 +45,12 @@ import {
   QuickStartSchema,
   InteractiveStartSchema,
   ParkSessionSchema,
+  SessionOrderUpdateSchema,
   SessionWaitQuerySchema,
   SessionWaitOutputQuerySchema,
 } from '../schemas.js';
+import { ownerLayoutKey } from '../../tab-layout-persistence.js';
+import { TabLayoutValidationError } from '../../tab-layout.js';
 import {
   sessionWaits,
   resolveWaitSignals,
@@ -118,6 +121,7 @@ import type {
   AuthPort,
   RespawnPort,
   AgentActivityPort,
+  TabLayoutPort,
 } from '../ports/index.js';
 import { RunSummaryTracker } from '../../run-summary.js';
 import {
@@ -831,7 +835,7 @@ async function injectAgentSkill(casePath: string): Promise<void> {
 
 export function registerSessionRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort & AgentActivityPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort & AgentActivityPort & TabLayoutPort
 ): void {
   // ═══════════════════════════════════════════════════════════════
   // Auth
@@ -863,10 +867,23 @@ export function registerSessionRoutes(
     return (list as Array<{ owner?: string }>).filter((s) => canAccessOwned(user, s.owner));
   });
 
-  // ========== Legacy Session Tab Order (migration source, read-only) ==========
+  // ========== Legacy Session Tab Order (temporary synchronized compatibility bridge) ==========
 
-  app.put('/api/session-order', async (): Promise<ApiResponse<never>> => {
-    return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Session order is read-only; migrate to /api/tab-layout');
+  app.put('/api/session-order', async (req, reply): Promise<ApiResponse<{ order: string[] }>> => {
+    try {
+      const { order } = parseBody(SessionOrderUpdateSchema, req.body, 'Invalid session order');
+      const user = getAuthUser(req);
+      const result = await ctx.tabLayouts.putLegacyOrder(
+        { owner: ownerLayoutKey(ownerFor(req)), isAdmin: user.role === 'admin' },
+        order
+      );
+      return { success: true, data: { order: result.order } };
+    } catch (error) {
+      if (error instanceof TabLayoutValidationError) {
+        return reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, error.message));
+      }
+      throw error;
+    }
   });
 
   // ========== Session Creation ==========

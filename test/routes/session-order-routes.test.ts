@@ -1,11 +1,11 @@
 /**
- * @fileoverview Tests for the read-only legacy PUT /api/session-order endpoint.
+ * @fileoverview Tests for the synchronized legacy PUT /api/session-order endpoint.
  *
  * Uses app.inject() — no real HTTP ports needed.
  * Asserts the uniform envelope contract:
  *   SUCCESS -> 2xx, { success: true, data: { order } }
  *   ERROR   -> 4xx/5xx, { success: false, error, errorCode }
- * Legacy callers are directed to the owner-scoped tab-layout endpoint without writes.
+ * Legacy callers are bridged through the authenticated owner-scoped tab-layout service.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -29,9 +29,14 @@ interface LocalHarness {
   ctx: MockRouteContext;
 }
 
-async function buildHarness(): Promise<LocalHarness> {
+async function buildHarness(identity?: { username: string; role: 'admin' | 'user' }): Promise<LocalHarness> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
+  if (identity) {
+    app.addHook('onRequest', async (request) => {
+      (request as unknown as { authUser: typeof identity }).authUser = identity;
+    });
+  }
 
   const ctx = createMockRouteContext();
   registerSessionRoutes(app, ctx as unknown as Parameters<typeof registerSessionRoutes>[1]);
@@ -65,24 +70,43 @@ describe('PUT /api/session-order', () => {
 
   afterEach(async () => {
     await harness.app.close();
+    vi.unstubAllEnvs();
   });
 
-  it('is read-only and directs legacy clients to the owner layout endpoint', async () => {
+  it('routes the single-user admin legacy writer through the machine-wide layout bridge', async () => {
     const res = await harness.app.inject({
       method: 'PUT',
       url: '/api/session-order',
       payload: { order: ['a', 'b', 'c'] },
     });
 
-    expect(res.statusCode).toBe(422);
-    const body = res.json();
-    expect(body).toEqual({
-      success: false,
-      error: 'Session order is read-only; migrate to /api/tab-layout',
-      errorCode: ApiErrorCode.OPERATION_FAILED,
-    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ success: true, data: { order: ['a', 'b', 'c'] } });
+    expect(harness.ctx.tabLayouts.putLegacyOrder).toHaveBeenCalledWith({ owner: '@single', isAdmin: true }, [
+      'a',
+      'b',
+      'c',
+    ]);
     expect(harness.ctx.store.setSessionOrder).not.toHaveBeenCalled();
-    expect(harness.ctx.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('routes a regular multi-user writer through only the authenticated owner', async () => {
+    await harness.app.close();
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
+    harness = await buildHarness({ username: 'alice', role: 'user' });
+
+    const res = await harness.app.inject({
+      method: 'PUT',
+      url: '/api/session-order',
+      payload: { order: ['a2', 'a1'] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(harness.ctx.tabLayouts.putLegacyOrder).toHaveBeenCalledWith({ owner: 'alice', isAdmin: false }, [
+      'a2',
+      'a1',
+    ]);
+    expect(harness.ctx.store.setSessionOrder).not.toHaveBeenCalled();
   });
 
   it('does not revive the legacy writer for malformed bodies', async () => {

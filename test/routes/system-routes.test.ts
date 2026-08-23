@@ -417,14 +417,18 @@ describe('system-routes', () => {
   // ========== POST /api/cleanup-state ==========
 
   describe('POST /api/cleanup-state', () => {
-    it('cleans up stale session state', async () => {
-      const runStaleSessionCleanup = vi.fn(async (_activeIds: Set<string>, action: () => unknown) => action());
+    it('deletes only the session ids revalidated by the layout service', async () => {
+      const confirmedIds = new Set(['confirmed-stale']);
+      const runStaleSessionCleanup = vi.fn(
+        async (_activeIds: Set<string>, action: (ids: ReadonlySet<string>) => unknown) => action(confirmedIds)
+      );
       harness.ctx.tabLayouts.runStaleSessionCleanup = runStaleSessionCleanup;
       const res = await harness.app.inject({ method: 'POST', url: '/api/cleanup-state' });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.cleanedSessions).toBe(0);
-      expect(harness.ctx.store.cleanupStaleSessions).toHaveBeenCalled();
+      expect(harness.ctx.store.cleanupSessionsByIds).toHaveBeenCalledWith(confirmedIds);
+      expect(harness.ctx.store.cleanupStaleSessions).not.toHaveBeenCalled();
       expect(runStaleSessionCleanup).toHaveBeenCalledOnce();
     });
   });

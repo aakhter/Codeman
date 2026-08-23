@@ -45,10 +45,10 @@ describe('Stable HTTP contract (live server)', () => {
     expect(['aicodeman', 'codeman']).toContain(body.data.codemanCli.name);
   });
 
-  it('does not expose global or owner tab ordering in shared light state', async () => {
+  it('preserves the legacy session-order projection without exposing owner layouts', async () => {
     const res = await fetch(`${base}/api/status`);
     const body = await res.json();
-    expect(body.data).not.toHaveProperty('sessionOrder');
+    expect(body.data.sessionOrder).toEqual([]);
     expect(body.data).not.toHaveProperty('tabLayouts');
   });
 

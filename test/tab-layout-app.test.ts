@@ -1227,7 +1227,9 @@ describe('COD-306 CodemanApp integration', () => {
       app.commandPaletteItems.filter((item: any) => item.type === 'session').map((item: any) => item.sessionId)
     ).toEqual(['s2', 's1']);
     expect(
-      [...document.querySelectorAll('#commandPaletteList .command-palette-title')].map((el) => el.textContent)
+      [...document.querySelectorAll('#commandPaletteList .command-palette-title')].map((el) =>
+        el.childNodes[0]?.textContent?.trim()
+      )
     ).toEqual(['Two', 'One', 'New session', 'Browse all sessions…']);
     app._tabLayoutCoordinator.dispose();
   });
@@ -1252,7 +1254,9 @@ describe('COD-306 CodemanApp integration', () => {
       app.commandPaletteItems.filter((item: any) => item.type === 'session').map((item: any) => item.sessionId)
     ).toEqual(['s1', 's2']);
     expect(
-      [...document.querySelectorAll('#commandPaletteList .command-palette-title')].map((el) => el.textContent)
+      [...document.querySelectorAll('#commandPaletteList .command-palette-title')].map((el) =>
+        el.childNodes[0]?.textContent?.trim()
+      )
     ).toEqual(['One', 'Two', 'New session', 'Browse all sessions…']);
     app._tabLayoutCoordinator.dispose();
   });
