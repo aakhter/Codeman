@@ -593,11 +593,13 @@ html[data-tab-orientation='vertical'] .tab-rail {
 }
 
 html[data-tab-orientation='vertical'] .tab-rail .session-tabs {
+  --lineage-vertical-gutter: 24px;
   flex-direction: column;
   flex-wrap: nowrap;
   align-items: stretch;
   gap: 2px;
   padding: 0.35rem;
+  padding-left: calc(0.35rem + var(--lineage-vertical-gutter));
   overflow-x: hidden;
   overflow-y: auto;
   max-height: none;
@@ -14863,6 +14865,10 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
    lever (el.hidden) does nothing. */
 .home-sessions[hidden] {
   display: none;
+}
+
+html[data-tab-orientation='vertical'] .home-sessions {
+  display: none !important;
 }
 
 /* Belt and braces with shouldShowHomeSessions(): a resize that outruns the
