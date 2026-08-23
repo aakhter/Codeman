@@ -36,6 +36,7 @@ import {
 // Appending SSE comment padding (ignored by EventSource) forces the proxy to flush.
 // Pre-computed once at startup to avoid repeated string allocation.
 const SSE_PADDING = ':' + 'p'.repeat(SSE_PADDING_SIZE) + '\n';
+const UNROUTED_TAB_LAYOUT = Symbol('unrouted-tab-layout');
 
 /** Dependencies injected by WebServer — keeps SseStreamManager decoupled from session/respawn state. */
 interface SseStreamManagerDeps {
@@ -81,8 +82,8 @@ export class SseStreamManager {
   private backpressuredClients: Set<FastifyReply> = new Set();
   /** Latest already recipient-filtered legacy order frame awaiting a client's drain. */
   private pendingSessionOrderFrames: Map<FastifyReply, string> = new Map();
-  /** Latest owner-filtered tab-layout invalidation awaiting a client's drain. */
-  private pendingTabLayoutFrames: Map<FastifyReply, string> = new Map();
+  /** Latest owner-filtered tab-layout invalidation per affected owner awaiting a client's drain. */
+  private pendingTabLayoutFrames: Map<FastifyReply, Map<string | symbol, string>> = new Map();
 
   // ─── Tunnel State ───────────────────────────────────────
   /** Cached tunnel active state — updated on TunnelStarted/TunnelStopped to avoid getUrl() on every broadcast */
@@ -233,11 +234,18 @@ export class SseStreamManager {
         this.markBackpressured(reply);
         return;
       }
-      const pendingLayout = this.pendingTabLayoutFrames.get(reply);
-      if (pendingLayout) {
+      const pendingLayouts = this.pendingTabLayoutFrames.get(reply);
+      if (pendingLayouts) {
+        for (const [owner, pendingLayout] of pendingLayouts) {
+          pendingLayouts.delete(owner);
+          this.sendSSEPreformatted(reply, pendingLayout);
+          if (!this.sseClients.has(reply)) return;
+          if (this.backpressuredClients.has(reply)) {
+            if (pendingLayouts.size === 0) this.pendingTabLayoutFrames.delete(reply);
+            return;
+          }
+        }
         this.pendingTabLayoutFrames.delete(reply);
-        this.sendSSEPreformatted(reply, pendingLayout);
-        if (!this.sseClients.has(reply) || this.backpressuredClients.has(reply)) return;
       }
       const pendingOrder = this.pendingSessionOrderFrames.get(reply);
       if (!pendingOrder) return;
@@ -298,7 +306,19 @@ export class SseStreamManager {
       // Multi-user ownership routing (no-op for identity-less single-user clients).
       if (!this.canDeliver(client, hint)) continue;
       if (event === SseEvent.TabLayoutChanged && this.backpressuredClients.has(client)) {
-        this.pendingTabLayoutFrames.set(client, message);
+        const owner =
+          data !== null &&
+          typeof data === 'object' &&
+          Object.hasOwn(data, 'owner') &&
+          typeof (data as { owner?: unknown }).owner === 'string'
+            ? (data as { owner: string }).owner
+            : (hint?.username ?? hint?.owner ?? UNROUTED_TAB_LAYOUT);
+        let pending = this.pendingTabLayoutFrames.get(client);
+        if (!pending) {
+          pending = new Map();
+          this.pendingTabLayoutFrames.set(client, pending);
+        }
+        pending.set(owner, message);
         continue;
       }
       this.sendSSEPreformatted(client, message);
