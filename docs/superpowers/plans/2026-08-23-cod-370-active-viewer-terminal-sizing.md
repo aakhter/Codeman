@@ -755,7 +755,7 @@ Let the actively used desktop or phone control a shared terminal's size, and fit
 
 - [x] **Step 2: Run the exact focused Node regression set**
 
-Evidence: 12 files and 328 tests passed in 25.11s with `CODEMAN_MUX=1`; no bare full-suite command was used.
+Final-head evidence: at `4d736cb3496cab5a444db67d0f750c9c046c5082`, 12 files and 347 tests passed in 28.95s with `CODEMAN_MUX=1`; no bare full-suite command was used.
 
 ```bash
 npm test -- \
@@ -777,9 +777,13 @@ Expected: all selected tests pass. Do not run bare `npm test` inside the managed
 
 - [x] **Step 3: Run the exact browser/mobile regressions**
 
-Evidence: OpenCode mobile passed 10/10 with 75x62 phone geometry at 8px and 178x38 desktop geometry. At 1x CPU, typing median/p95 was 52.1/63.3ms and phone/desktop handoff was 204.5/96.2ms. At 4x CPU, typing median/p95 was 81.2/99.2ms and phone/desktop handoff was 113.0/91.1ms. Page errors and serious console errors were empty; every reported cleanup assertion was true. The two browser regressions passed 64/64 in 53.68s.
+Final-head evidence: OpenCode mobile passed 11 tests with the comparator mode intentionally skipped, using 75x62 phone geometry at 8px and restoring 178x38 desktop geometry. At 1x CPU, typing median/p95 was 58.6/95.6ms and phone/desktop handoff was 134.1/91.5ms. At 4x CPU, typing median/p95 was 98.7/117.0ms and phone/desktop handoff was 141.6/91.0ms. Page errors and serious console errors were empty; every reported cleanup assertion was true. The same exact command also passed twice from scratch for the comparator owner. The two browser regressions passed 64/64 in 52.51s.
+
+Harness RCA evidence: at clean `239820e5400a6de34cc1d4366f5f7cd7930e524b`, the mobile acceptance failed twice at the first composer character even though browser logical and durable delivery recorded the exact `q`. The fixed test harness waits for the real composer in tmux and phone xterm and clicks its actual row, avoiding mouse reports to row 60 while retaining production pointer-activation coverage. The harness-only fix is `4d736cb3496cab5a444db67d0f750c9c046c5082`; runtime remains `e7b3d4d001a8ab426cc21e9eece92046040e8d40`.
 
 Font comparator evidence: exact pre-COD-370 `d080481690dc62ffc0d0d4f8e7daae2cc8bf8613` at 10px was compared with final runtime `e7b3d4d001a8ab426cc21e9eece92046040e8d40` at 8px in complete ABBA order on the same host. Each runtime/rate retained 20 unfiltered dispatch-to-visible samples. Baseline versus candidate median/p95/max was `32.2/99.0/130.0ms` versus `36.5/110.9/234.2ms` at 1x and `69.2/88.5/90.0ms` versus `75.4/94.5/95.2ms` at 4x. The defined p95 gate passed: deltas were `+11.9ms/+12.0%` and `+6.0ms/+6.8%`, respectively. One isolated candidate 1x maximum of `234.2ms` (`+104.2ms/+80.2%`) was retained and disclosed; it had no recorded long task. Geometry improved from `62x49` to `75x62`; every run had exact frame/byte/token correctness, no page or serious console errors, no typing-window resize events, and all-true cleanup. The single-phone comparator deliberately excludes active-viewer handoff because the baseline predates that protocol; the separate final-head two-viewer acceptance above covers handoff. Full report and raw evidence: `docs/reports/cod-370/font-performance-comparison.md` and `docs/reports/cod-370/raw/`.
+
+Post-review runtime fixes are `8bb9c97285c55e6046619f43516acad93c6390f9` (fence viewer HTTP fallback), `8b05539c57fde055d98bc4c8937cb4ec82a7381e` and `a2fc9551cc94b4b6c210f7c2f8ea90069e9de29b` (owned resize completion and stale-completion reconciliation), `8c5c4653c132b65752e8a428602ab0ba279f90ad` (reconnect recovery), `15f257d7d12ced76f09a381562bfcd3e4befd7ec` (pending activation flush), and `e7b3d4d001a8ab426cc21e9eece92046040e8d40` (transport-scoped activity dedupe).
 
 ```bash
 npm run test:mobile -- test/mobile/opencode-e2e.test.ts
@@ -790,9 +794,9 @@ Expected: all selected real-browser tests pass with no leftover test server, bro
 
 - [x] **Step 4: Run static and build gates**
 
-Evidence: typecheck, format check, lockfile check, frontend syntax (41 files), browser excludes (29 browser files among 444 collected files), build, and `git diff --check` exited 0. Lint exited 0 with one pre-existing unchanged explicit-`any` warning at `src/web/server.ts:1550`; build retained the pre-existing duplicate Chinese `Idle` key warning in `i18n.js`.
+Final-head evidence: typecheck, format check, lockfile check, frontend syntax (41 files), browser excludes (29 browser files among 444 collected files), build, and `git diff --check` exited 0. Lint exited 0 with one pre-existing unchanged explicit-`any` warning at `src/web/server.ts:1550`; build retained the pre-existing duplicate Chinese `Idle` key warning in `i18n.js`.
 
-Realistic-smoke evidence: the fresh temporary instance on port 41567 completed 132/132 recorded checks, including Codex, Claude, shell replay, tab switching, 100120-line history, reload recovery, no page errors, and no serious console errors/warnings. All four temporary sessions returned cleanup 200; port 41567, the temporary root, and the unique tmux socket were absent afterward. Expected already-terminated-process `ESRCH` cleanup notices were non-fatal. Artifacts: `/tmp/codeman-dev-smoke-artifacts-2026-08-23T21-28-36-629Z`.
+Realistic-smoke evidence: the fresh final-head temporary instance on port 43817 completed 132/132 recorded checks, including Codex, Claude, shell replay, tab switching, 100120-line history, reload recovery, no page errors, and a passing serious-console classifier. The summary retained 18 non-serious warning events: four WebGL driver messages, thirteen bounded flush diagnostics, and one long-task diagnostic. All four temporary sessions returned cleanup 200; expected already-terminated-process `ESRCH` notices were non-fatal. The port and temporary root were absent afterward. A dead unique tmux socket file remained, `tmux` confirmed no server was running on it, and that exact smoke-owned socket was unlinked and verified absent. Artifacts: `/tmp/codeman-dev-smoke-artifacts-2026-08-23T22-34-19-785Z`.
 
 ```bash
 npm run typecheck
@@ -816,6 +820,8 @@ git commit -m "chore: COD-370 document active-viewer sizing"
 
 - [ ] **Step 6: Request spec and quality review**
 
+Status: pending root-coordinated final review of the post-release-evidence runtime fixes and comparator evidence; this step is intentionally not marked complete.
+
 Review must explicitly verify:
 
 - one OpenCode process/session/pane across both viewers;
@@ -829,6 +835,8 @@ Review must explicitly verify:
 Resolve every Critical or Important finding with a focused RED/GREEN cycle before release.
 
 - [ ] **Step 7: Update COD-370 and prepare physical iPhone Chrome acceptance**
+
+Status: Jira comment is drafted but not posted; disposable LAN and physical iPhone Chrome acceptance remain pending final review.
 
 Post branch, commits, exact commands/counts, 1x/4x metrics, cleanup proof, and review verdicts to COD-370. Expose a disposable authenticated LAN instance only after all automated gates pass. On the physical iPhone:
 
