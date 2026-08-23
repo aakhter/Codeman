@@ -7,8 +7,10 @@ based on `upstream/master`. The branch provides the pure semantic model, owner-s
 authoritative coordination service, authenticated versioned API, lifecycle repair, and minimal SSE invalidation required by
 later grouped-rail work.
 
-The extraction freezes behavior at historical commit `b9526f09`, the final reviewed COD-303 correction. It does not import
-later downstream additions merely because they now live in the same modules.
+The extraction freezes its feature surface at historical commit `b9526f09`, the final reviewed COD-303 correction. It does
+not import later downstream additions merely because they now live in the same modules. Two extraction corrections are
+required: preserve upstream's legacy session-order contract until COD-360 supplies a browser consumer, and prevent a PUT
+from persisting reconciliation before its version check.
 
 ## Selected Approach
 
@@ -20,7 +22,8 @@ Replay and audit the nine reviewed commits in dependency order:
 
 Each commit is applied separately to a clean `upstream/master` branch. Conflicts are resolved against the responsibility of
 that commit and audited against its historical patch, rather than accepting either side wholesale. Preserve the original
-review-sized commit boundaries where upstream compatibility permits it.
+review-sized commit boundaries where upstream compatibility permits it. Add focused compatibility/correctness commits for
+the two extraction corrections rather than rewriting the historical patches invisibly.
 
 Rejected alternatives:
 
@@ -51,22 +54,34 @@ ungrouped layout. Persisted sessions seed restart recovery, matching live sessio
 and foreign-owner records never enter the owner's layout. Re-running migration is idempotent and never overwrites an
 existing owner layout.
 
+COD-359 retains upstream's legacy ordering contract alongside the new owner layout. `/api/status` continues to expose
+`sessionOrder`, and `PUT /api/session-order` continues to validate, merge, persist, and broadcast legacy order updates. The
+new migration reads that order, but the old contract is not made read-only until COD-360 migrates the browser to
+`/api/tab-layout`. This avoids silently disabling ordering for existing browsers and cross-device clients between PRs.
+
 ### Coordination service
 
 `src/tab-layout-service.ts` is the only authoritative mutation boundary. It gathers persisted sessions, live sessions, and
-saved webviews; normalizes them through the pure model; serializes work per owner; commits at most one version increment for
-one completed action; persists before broadcasting; and provides lifecycle wrappers for atomic creation, deletion, and
-stale cleanup.
+saved webviews; normalizes them through the pure model; serializes work per owner; persists before broadcasting; and
+provides lifecycle wrappers for atomic creation, deletion, and stale cleanup.
+
+GET and lifecycle reconciliation may persist one initialization or normalization update. PUT uses a side-effect-free
+reconciliation preparation path: it derives the same authoritative base and version that GET would produce without storing
+or broadcasting, compares `baseVersion`, and only then commits the normalized requested layout. A stale PUT therefore
+writes nothing; a matching direct-first or normalization-requiring PUT collapses reconciliation plus the requested change
+into one persistence write and one invalidation.
 
 The service retains the historical restoration state machine. Deletion-sensitive work fails closed while restoration is
-pending. Startup explicitly marks restoration complete, failed, or skipped in tests, then reconciles layouts only when it
-is safe to distinguish stale records from sessions that have not yet been restored.
+pending or failed. Only successful completion or an explicit test-only skip unlocks destructive cleanup. Startup
+reconciles layouts only after successful restoration, when it is safe to distinguish stale records from sessions that have
+not yet been restored.
 
 ### API and SSE boundary
 
 `GET /api/tab-layout` returns the authenticated owner's authoritative layout. `PUT /api/tab-layout` accepts exactly
-`{ baseVersion, layout }`, applies a 128 KiB body limit, and performs an exact-version compare before validation and commit.
-The request cannot provide an owner key.
+`{ baseVersion, layout }`, applies a 128 KiB body limit, and performs an exact-version compare against the side-effect-free
+reconciled base before validation and commit. The request cannot provide an owner key. The legacy session-order status
+field, PUT route, and `session:orderChanged` event remain intact as a temporary compatibility surface.
 
 Successful mutations emit the minimal tab-layout SSE invalidation through the existing registry and owner filtering. The
 event does not duplicate the layout; consumers refetch. Registry parity may require the corresponding public event token,
@@ -76,12 +91,14 @@ but this branch adds no browser handler, renderer, projection, settings UI, or g
 
 1. A route or lifecycle caller derives the owner from authenticated/server-owned state.
 2. The service reads that owner's stored layout and authoritative session/webview facts.
-3. Persistence primitives migrate a missing layout or the model normalizes an existing one without mutating caller input.
-4. A GET returns the normalized authoritative layout.
-5. A PUT enters the owner's serialized queue. If `baseVersion` differs from the current version, it returns a conflict with
-   the current layout and performs no write.
-6. A valid matching PUT stores one incremented layout, then emits one owner-filtered invalidation.
-7. Session, Ralph, cron, and webview creation hooks update layout only after their underlying creation succeeds. Session,
+3. Persistence primitives derive migration or normalization without mutating caller input.
+4. A GET persists at most one required reconciliation, emits its invalidation, and returns the authoritative layout.
+5. A PUT enters the owner's serialized queue and prepares the reconciled base without side effects. If `baseVersion`
+   differs from that prepared version, it returns the prepared authoritative layout and performs no write or invalidation.
+6. A valid matching PUT normalizes the requested layout against the same facts, stores one incremented result, then emits
+   one owner-filtered invalidation. Initialization or normalization is folded into that single commit.
+7. Existing browsers continue reading and writing the separate legacy `sessionOrder` contract until COD-360 migrates them.
+8. Session, Ralph, cron, and webview creation hooks update layout only after their underlying creation succeeds. Session,
    webview, and stale cleanup paths coordinate the underlying deletion and layout repair transactionally.
 
 ## Boundaries
@@ -92,14 +109,18 @@ Included:
 - historical COD-304 owner persistence, legacy migration, and authoritative live-record correction;
 - historical COD-303 GET/PUT API, per-owner serialization, restoration gate, lifecycle atomicity, deletion repair, stale
   cleanup transaction, and SSE invalidation;
+- temporary preservation of upstream's legacy `/api/status.sessionOrder`, writable `/api/session-order`, merge behavior,
+  persistence, and `session:orderChanged` broadcast until the browser migration lands;
+- an extraction-specific side-effect-free PUT reconciliation path with no-write conflict and single-write direct-first
+  guarantees;
 - the minimum route-port, server, state, session/webview/Ralph/cron, event-registry, mock, and test wiring needed by those
   behaviors;
 - a minor changeset for the new versioned owner-scoped API.
 
 Excluded:
 
-- browser layout fetching, grouped or flat rendering, collapse UI, lineage drawing, editing UI, drag/drop, menus, and
-  accessibility tree behavior;
+- new browser layout fetching, grouped or flat rendering, collapse UI, lineage drawing, editing UI, drag/drop, menus, and
+  accessibility tree behavior; the existing legacy session-order browser behavior remains operational;
 - HTTP semantic-operation replay, recovery-base layouts, Focus flags/groups, search, case-default groups, automatic child
   placement, Session Bridge placement, and saved-webview UI integration;
 - unrelated downstream refactors or fixes that happen to touch the same large server or route files;
@@ -112,11 +133,13 @@ Excluded:
   are atomic.
 - A stale `baseVersion` returns `409 CONFLICT` with the current authoritative layout and causes no persistence write or SSE
   event.
+- A matching PUT against a missing or normalization-requiring layout folds reconciliation and the requested update into one
+  stored version and one invalidation; it never exposes an intermediate persisted layout.
 - Owner queues continue after a rejected operation and never serialize unrelated owners behind one another.
 - Persistence completes before invalidation. A failed store write propagates and cannot announce a state that was not
   committed.
-- Restoration-pending deletion paths fail closed. Restoration failure or explicit test skip releases the gate without
-  incorrectly pruning sessions that were never proven stale.
+- Restoration-pending and restoration-failed deletion paths remain closed. Only successful restoration or an explicit
+  test-only skip unlocks destructive cleanup; failed restoration cannot prune sessions that were never proven stale.
 - Creation hooks run only after successful underlying creation. Transactional deletion wrappers prevent layout repair and
   runtime deletion from observing conflicting intermediate states.
 - Multi-owner stale cleanup acquires owner queues in stable order to avoid deadlock and performs the cleanup action once.
@@ -129,14 +152,17 @@ Focused verification will prove:
   immutable group/ref operations, and reviewed follow-parent replay safety;
 - owner-key derivation, single-user compatibility, deterministic/idempotent migration, restart persistence, foreign-owner
   isolation, and authoritative replacement by live records;
+- preservation of the legacy status field and writable session-order route, including validation, server-known ID merge,
+  persistence, cross-device broadcast, and migration use, until COD-360 replaces the browser consumer;
 - exact-version conflicts, per-owner serialization, queue recovery after failure, one-write/one-event commits, atomic
-  validation and persistence failures, restoration gating, deletion repair, and stable multi-owner stale cleanup;
+  validation and persistence failures, side-effect-free conflict reconciliation, single-write direct-first and normalized
+  PUTs, restoration success/failure/skip gating, deletion repair, and stable multi-owner stale cleanup;
 - authenticated GET/PUT envelopes, owner isolation, the 128 KiB body limit, `400` validation responses, and `409` conflict
   responses through focused Fastify injection tests;
 - session, webview, Ralph, cron, restore, cleanup, route-port, SSE filtering, and event-registry integration required by the
   historical series;
-- an isolated server API smoke test covering authenticated owner-scoped GET, one successful PUT, and one stale-version
-  conflict without exercising browser rendering.
+- an isolated server API smoke test covering the preserved legacy ordering contract, authenticated owner-scoped GET, one
+  successful direct-first PUT, and one stale-version no-write conflict without exercising new browser rendering.
 
 Run only explicitly named safe test files from the managed session. Finish with typecheck, lint, formatting, lockfile,
 frontend-syntax/event-parity checks, and the production build. Audit the final branch diff against `upstream/master`, the
