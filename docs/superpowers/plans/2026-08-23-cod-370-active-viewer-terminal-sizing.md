@@ -743,7 +743,7 @@ processes absent, and validated scenario root absent.
 - Create: `.changeset/cod-370-active-viewer-terminal-sizing.md`
 - Modify: `docs/superpowers/plans/2026-08-23-cod-370-active-viewer-terminal-sizing.md` (checkboxes/evidence only)
 
-- [ ] **Step 1: Add the changeset**
+- [x] **Step 1: Add the changeset**
 
 ```md
 ---
@@ -753,7 +753,9 @@ processes absent, and validated scenario root absent.
 Let the actively used desktop or phone control a shared terminal's size, and fit OpenCode into more usable mobile rows without restarting the session.
 ```
 
-- [ ] **Step 2: Run the exact focused Node regression set**
+- [x] **Step 2: Run the exact focused Node regression set**
+
+Evidence: 12 files and 328 tests passed in 25.11s with `CODEMAN_MUX=1`; no bare full-suite command was used.
 
 ```bash
 npm test -- \
@@ -773,7 +775,9 @@ npm test -- \
 
 Expected: all selected tests pass. Do not run bare `npm test` inside the managed Codeman session.
 
-- [ ] **Step 3: Run the exact browser/mobile regressions**
+- [x] **Step 3: Run the exact browser/mobile regressions**
+
+Evidence: OpenCode mobile passed 10/10 with 75x62 phone geometry at 8px and 178x38 desktop geometry. At 1x CPU, typing median/p95 was 52.1/63.3ms and phone/desktop handoff was 204.5/96.2ms. At 4x CPU, typing median/p95 was 81.2/99.2ms and phone/desktop handoff was 113.0/91.1ms. Page errors and serious console errors were empty; every reported cleanup assertion was true. The two browser regressions passed 64/64 in 53.68s.
 
 ```bash
 npm run test:mobile -- test/mobile/opencode-e2e.test.ts
@@ -782,7 +786,11 @@ npm run test:browser -- test/terminal-input-performance.browser.test.ts test/cod
 
 Expected: all selected real-browser tests pass with no leftover test server, browser, tmux, or fixture directory.
 
-- [ ] **Step 4: Run static and build gates**
+- [x] **Step 4: Run static and build gates**
+
+Evidence: typecheck, format check, lockfile check, frontend syntax (41 files), browser excludes (29 browser files among 444 collected files), build, and `git diff --check` exited 0. Lint exited 0 with one pre-existing unchanged explicit-`any` warning at `src/web/server.ts:1550`; build retained the pre-existing duplicate Chinese `Idle` key warning in `i18n.js`.
+
+Realistic-smoke evidence: the fresh temporary instance on port 41567 completed 132/132 recorded checks, including Codex, Claude, shell replay, tab switching, 100120-line history, reload recovery, no page errors, and no serious console errors/warnings. All four temporary sessions returned cleanup 200; port 41567, the temporary root, and the unique tmux socket were absent afterward. Expected already-terminated-process `ESRCH` cleanup notices were non-fatal. Artifacts: `/tmp/codeman-dev-smoke-artifacts-2026-08-23T21-28-36-629Z`.
 
 ```bash
 npm run typecheck
@@ -797,7 +805,7 @@ git diff --check
 
 Expected: every command exits 0. Document but do not hide pre-existing warnings whose source lines are unchanged.
 
-- [ ] **Step 5: Commit release evidence**
+- [x] **Step 5: Commit release evidence**
 
 ```bash
 git add .changeset/cod-370-active-viewer-terminal-sizing.md docs/superpowers/plans/2026-08-23-cod-370-active-viewer-terminal-sizing.md
