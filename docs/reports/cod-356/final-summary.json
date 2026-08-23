@@ -1,0 +1,315 @@
+{
+  "schemaVersion": 1,
+  "issue": "COD-356",
+  "status": "release-evidence-complete-not-integrated",
+  "branch": "COD-356-performance-improvements",
+  "branchBaseRevision": "a5ec3ce4830ff671e686568c72cd966a8cd4c52b",
+  "runtimeRevision": "cc15b5931283167d4819c10eef3227f06b164955",
+  "comparisonRevision": "a445cdaf645309ce51d8b1431733afa8f0bc55ac",
+  "comparisonRevisionContext": "The intervening design and plan commits are documentation-only; the branch-base and comparison-revision runtime trees are identical.",
+  "releaseCommitCreated": true,
+  "jiraUpdated": true,
+  "jira": {
+    "commentId": "21576",
+    "statusAfterUpdate": "To Do",
+    "transitionPerformed": false
+  },
+  "pushed": false,
+  "merged": false,
+  "deployed": false,
+  "qualityRemediation": {
+    "specificationReview": "approved",
+    "qualityReview": "approved-no-findings",
+    "commit": "cc15b5931283167d4819c10eef3227f06b164955",
+    "red": [
+      "owned-tree registry: 1 failed / 99 skipped; registerOwnedProcessTree missing",
+      "PID/start-time termination and verification helpers: 3 failed / 99 skipped",
+      "branch-base/comparison-revision provenance contract: 1 failed / 102 skipped",
+      "closed-registration signal-race fallback: 1 failed / 103 skipped"
+    ],
+    "green": {
+      "harnessTestsPassed": 104,
+      "performanceInfrastructureFilesPassed": 2,
+      "performanceInfrastructureTestsPassed": 111
+    }
+  },
+  "benchmark": {
+    "command": "npm run perf:cod356 -- --phase after --conditions idle,cpu --samples 5 --runtime-revision cc15b5931283167d4819c10eef3227f06b164955",
+    "baseline": {
+      "summary": "docs/reports/cod-356/baseline-summary.json",
+      "environment": "docs/reports/cod-356/baseline-environment.json",
+      "summarySha256": "91ccb739a7756d3fd35339d51187d00731e7170177abc9246922ade2ce8d9683",
+      "environmentSha256": "62a4c3684551e557dc084d23512cd2e8f296a41e6a7bd0a5711d1519e1e396b9",
+      "reportSetId": "10fb75599cf4c6d11e4996b97624fe7a",
+      "rawArtifactDirectory": "/tmp/cod356-artifacts-before-8BAYB1"
+    },
+    "final": {
+      "summary": "docs/reports/cod-356/after-summary.json",
+      "environment": "docs/reports/cod-356/after-environment.json",
+      "summarySha256": "f1611d81a5d092d8e32702930e51788fbd2c578ce5e56f8c174a516c2bf60d86",
+      "environmentSha256": "c78d05ddc77030fe31a38f4ba2876274cd17de0c0804d77c90fd2f7acef41bfd",
+      "reportSetId": "83fdab0c977da9be702afc2f41a201b2",
+      "rawArtifactDirectory": "/tmp/cod356-artifacts-after-Yhuw1P"
+    },
+    "protocol": {
+      "cells": 4,
+      "samplesPerCell": 5,
+      "warmupsPerCell": 1,
+      "inputTrialsPerSample": 8,
+      "apiOffersPerSample": 45,
+      "cpuWorkers": 7,
+      "cpuDutyCycle": 0.7,
+      "cpuDeadlineMs": 60000,
+      "fixedCohortAndDeadlineMet": true
+    },
+    "harness": {
+      "commit": "cc15b5931283167d4819c10eef3227f06b164955",
+      "contentHash": "d96677535fb5c1454f553fcc82a76a70185e04d7474dfc39a138c4b2d6e8ee63",
+      "baselineOverlayDirty": true,
+      "finalCommittedClean": true
+    },
+    "publicationGuard": {
+      "acceptedBaselineReportSetIdDuringFinalRun": "4163bef9ae5cba2276daba4369e1acca",
+      "semantics": "The final run loaded the still-committed original pair for generated-asset/protocol binding; the corrected baseline was copied only after final publication, then independently validated with the same protocol, asset manifest, and corrected harness hash."
+    },
+    "cells": {
+      "idle-idle": {
+        "eventLoopMedianMs": { "baseline": 10.289151, "final": 10.682367, "deltaPercent": 3.821656 },
+        "eventLoopP95Ms": { "baseline": 31.948799, "final": 16.310271, "deltaPercent": -48.948719 },
+        "apiMedianMs": { "baseline": 4.863135, "final": 4.57132, "deltaPercent": -6.000553 },
+        "apiP95Ms": { "baseline": 39.89216, "final": 29.117652, "deltaPercent": -27.009086 },
+        "inputExactTrials": 40,
+        "inputExpectedBytes": 1440,
+        "inputReceivedBytes": 1440,
+        "inputDuplicateMissingReordered": [0, 0, 0]
+      },
+      "idle-interactive": {
+        "eventLoopMedianMs": { "baseline": 10.444799, "final": 10.272767, "deltaPercent": -1.647059 },
+        "eventLoopP95Ms": { "baseline": 63.799295, "final": 22.282239, "deltaPercent": -65.074475 },
+        "apiMedianMs": { "baseline": 4.314322, "final": 3.831538, "deltaPercent": -11.190263 },
+        "apiP95Ms": { "baseline": 74.950636, "final": 61.269747, "deltaPercent": -18.253199 },
+        "inputExactTrials": 40,
+        "inputExpectedBytes": 1440,
+        "inputReceivedBytes": 1440,
+        "inputDuplicateMissingReordered": [0, 0, 0]
+      },
+      "cpu-idle": {
+        "eventLoopMedianMs": { "baseline": 11.583487, "final": 11.509759, "deltaPercent": -0.636492 },
+        "eventLoopP95Ms": { "baseline": 104.660991, "final": 23.101439, "deltaPercent": -77.927365 },
+        "apiMedianMs": { "baseline": 15.015292, "final": 11.273958, "deltaPercent": -24.916825 },
+        "apiP95Ms": { "baseline": 175.019427, "final": 150.15643, "deltaPercent": -14.20585 },
+        "inputExactTrials": 40,
+        "inputExpectedBytes": 1440,
+        "inputReceivedBytes": 1440,
+        "inputDuplicateMissingReordered": [0, 0, 0]
+      },
+      "cpu-interactive": {
+        "eventLoopMedianMs": { "baseline": 11.796479, "final": 11.632639, "deltaPercent": -1.388889 },
+        "eventLoopP95Ms": { "baseline": 115.802111, "final": 23.166975, "deltaPercent": -79.994341 },
+        "apiMedianMs": { "baseline": 17.488718, "final": 13.585432, "deltaPercent": -22.318883 },
+        "apiP95Ms": { "baseline": 191.725349, "final": 54.920033, "deltaPercent": -71.35484 },
+        "inputExactTrials": 40,
+        "inputExpectedBytes": 1440,
+        "inputReceivedBytes": 1440,
+        "inputDuplicateMissingReordered": [0, 0, 0]
+      }
+    },
+    "correctness": {
+      "exactInputTrials": 160,
+      "totalInputTrials": 160,
+      "expectedBytes": 5760,
+      "receivedBytes": 5760,
+      "duplicateBytes": 0,
+      "missingBytes": 0,
+      "reorderedBytes": 0,
+      "inputIdentityScope": {
+        "numericMatrixTransport": "websocket",
+        "numericMatrixMode": "steady-state",
+        "numericMatrixTrials": 160,
+        "serverProcessRemainsLive": true
+      },
+      "separateFocusedBrowserServerCoverage": {
+        "normalHttpTransport": true,
+        "delayedAckRetransmit": true,
+        "lostAckRetransmit": true,
+        "reconnect": true,
+        "reload": true,
+        "suites": [
+          "test/reliable-input-dedup.test.ts",
+          "test/routes/session-input-delivery.test.ts",
+          "test/terminal-input-performance.browser.test.ts"
+        ]
+      },
+      "limitations": [
+        {
+          "issue": "COD-363",
+          "boundary": "A server restart after PTY application but before browser ACK persistence loses process-local dedup state, so the durable retry can deliver one duplicate PTY record.",
+          "preExisting": true,
+          "changedByCod356": false,
+          "coverage": "test/terminal-input-performance.browser.test.ts"
+        }
+      ],
+      "apiFailures": 0,
+      "apiTimeouts": 0,
+      "pageErrors": 0,
+      "seriousConsoleErrors": 0,
+      "cleanupCleanAndStable": true,
+      "cleanupListenerProof": {
+        "baseline": {
+          "processPids": [1179806, 1179817, 1179835],
+          "listenerPid": 1179817,
+          "port": 46787,
+          "exactPidsStillAlive": [],
+          "listenerPidsStillBound": [],
+          "portClosed": true
+        },
+        "final": {
+          "processPids": [1203310, 1203327, 1203347],
+          "listenerPid": 1203327,
+          "port": 40939,
+          "exactPidsStillAlive": [],
+          "listenerPidsStillBound": [],
+          "portClosed": true
+        }
+      },
+      "postRunAssetsMatched": true,
+      "postRunProvenanceMatched": true
+    },
+    "nonImprovements": [
+      "event-loop median increased 3.8% in idle-idle",
+      "Node CPU p95 increased 14.6% in idle-idle",
+      "idle-interactive API scheduler missed slots increased from 7 to 8 even though aggregate misses improved from 127 to 70 and failures/timeouts remained zero",
+      "tmux capture duration median and p95 increased in all four cells",
+      "idle-interactive input send median/p95 increased 5.6%/40.3% and ACK median increased 23.1%",
+      "CPU-idle input send median/p95 increased 14.8%/8.0%",
+      "idle-idle visible-convergence p95 increased 11.0% and idle-interactive median increased 12.6%",
+      "idle-host navigation/app-ready medians and idle-idle first-terminal median increased",
+      "long-task-duration p95 increased in all four browser cells"
+    ]
+  },
+  "afterPollerCheckpoint": {
+    "retained": true,
+    "label": "valid-partial-negative-evidence",
+    "runtimeRevision": "ecd182f4baa4fa87e974c6f97669ff633e15d59f",
+    "reportSetId": "96e0bf52c3144a204fda118082753b2a",
+    "summarySha256": "a02aea3712c94a77200bf724093eb705d7cebbefd7b43d87f2482654f002bb22",
+    "environmentSha256": "0fd7d6c9ad527d73ca96511d86b642b516f9229b741c1937342bb004c14b13f4",
+    "rawArtifactDirectory": "/tmp/cod356-artifacts-after-poller-ZWpnam",
+    "step8Satisfied": false,
+    "reason": "idle-idle API p95 regressed from 38.245650 ms to 44.190497 ms despite event-loop improvement",
+    "baselineSemantics": "historical then-accepted checkpoint baseline; not the corrected final-pair baseline"
+  },
+  "retainedProductChanges": [
+    { "commit": "4a149c42", "behavior": "bounded asynchronous recent-pane text capture" },
+    { "commit": "ecd182f4", "behavior": "shared bounded working-frame poll coordinator" }
+  ],
+  "revertedExperiments": [
+    {
+      "task": 5,
+      "candidate": "f58f3ea9",
+      "revert": "02bfc38a",
+      "result": "no material cold improvement and steady p95 regressions"
+    },
+    {
+      "task": 6,
+      "candidate": "ef38287c",
+      "revert": "ddf16027",
+      "result": "startup and long-task retention gate failed"
+    },
+    { "task": 7, "candidate": "6ca0598d", "revert": "6890c8a4", "result": "end-to-end tail and CPU median regressions" }
+  ],
+  "verification": {
+    "node": { "filesPassed": 9, "testsPassed": 165, "testsSkipped": 1 },
+    "browser": { "filesPassed": 4, "testsPassed": 42 },
+    "performanceInfrastructure": {
+      "filesPassed": 2,
+      "testsPassed": 111,
+      "suites": ["test/perf-cod-356-asset-report.test.ts", "test/perf-cod-356-harness.test.ts"]
+    },
+    "combined": { "filesPassed": 15, "testsPassed": 318, "testsSkipped": 1 },
+    "plannedAbsentFiles": ["test/frontend-lazy-loading.test.ts", "test/frontend-render-budget.test.ts"],
+    "plannedAbsentReason": "candidate-only behavior was explicitly reverted and is not shipping",
+    "gates": {
+      "typecheck": "pass",
+      "lint": "pass-with-one-unchanged-warning",
+      "formatCheck": "pass",
+      "lockfile": "pass",
+      "frontendSyntax": "pass",
+      "browserExcludes": "pass",
+      "build": "pass-with-one-unchanged-warning",
+      "diffCheck": "pass"
+    }
+  },
+  "smoke": {
+    "gateSatisfied": true,
+    "gateQualification": "Two installed-run branch smokes failed 2 viewport checks, while the installed-run exact-source control and an observational unchanged-branch run passed all 132 original assertions; the diagnostic did not reproduce or confirm an RCA.",
+    "productionTouched": false,
+    "installedRunnerSha256": "2c651f104f7cd00dcc776765a4e729c4819a2fd1ac849fa34991fa64f9eab8f6",
+    "branchRuns": [
+      {
+        "artifact": "/tmp/codeman-dev-smoke-artifacts-2026-08-22T23-54-35-972Z/summary.json",
+        "passed": 130,
+        "failed": 2,
+        "pageErrors": 0,
+        "seriousConsoleErrors": 0
+      },
+      {
+        "artifact": "/tmp/codeman-dev-smoke-artifacts-2026-08-23T00-03-24-573Z/summary.json",
+        "passed": 130,
+        "failed": 2,
+        "pageErrors": 0,
+        "seriousConsoleErrors": 0
+      }
+    ],
+    "exactSourceControl": {
+      "revision": "ca11a1d7",
+      "artifact": "/tmp/codeman-dev-smoke-artifacts-2026-08-23T00-00-16-321Z/summary.json",
+      "passed": 132,
+      "failed": 0,
+      "pageErrors": 0,
+      "seriousConsoleErrors": 0,
+      "runtimeDiffToSmokeRevision": "empty for src, packages, package.json, package-lock.json, and config at 72da85a0",
+      "laterHeadDifference": "cc15b593 changes benchmark-only files and removes one detached orphan JSDoc block; no executable runtime or browser behavior changed"
+    },
+    "equivalentDiagnosticRun": {
+      "runtimeRevision": "72da85a062ed01937d4628aeb14c84578d55a79c",
+      "artifact": "/tmp/codeman-dev-smoke-artifacts-2026-08-23T00-20-00-635Z/summary.json",
+      "log": "/tmp/cod356-smoke-diagnostic-MxxklB/run.log",
+      "runnerCopy": "/tmp/cod356-smoke-diagnostic-MxxklB/run-codeman-prod-smoke-diagnostic.mjs",
+      "runnerCopySha256": "7e6edce616d567baeee754f15d14f8148eb7138d04c16ba6e1d2dcae6bbc6122",
+      "passed": 132,
+      "failed": 0,
+      "pageErrors": 0,
+      "seriousConsoleErrors": 0,
+      "originalAssertionsPreserved": true,
+      "oldFixed300msConditionPassed": true,
+      "conditionPollExecuted": false,
+      "diagnostics": [],
+      "failureReproduced": false,
+      "rcaConfirmed": false,
+      "skillModified": false
+    },
+    "failedChecks": [
+      "shell viewport scroll-down returns to late replayed history after reload",
+      "shell viewport scroll-up reveals text before dashed divider after reload"
+    ],
+    "cleanup": {
+      "apiCleanupSucceeded": true,
+      "temporaryServersStopped": true,
+      "temporaryWorkdirsAbsent": true,
+      "exactSessionProcessesAbsent": true,
+      "staleUnservedSocketPathsValidatedAndRemoved": true,
+      "detachedControlWorktreeRemoved": true,
+      "survivors": []
+    },
+    "warnings": [
+      "Filtered WebGL and GPU-stall warnings, including canvas-renderer fallback",
+      "Filtered CRASH-DIAG deferred-write and long-task warnings",
+      "Cleanup logged ESRCH when an already-terminated process or process group was targeted",
+      "Each unserved unique tmux socket path was validated and explicitly unlinked"
+    ],
+    "rerunAfterHarnessCorrection": false,
+    "rerunReason": "not required: cc15b593 changes the benchmark harness plus one orphan comment only"
+  },
+  "reviewBlockers": []
+}

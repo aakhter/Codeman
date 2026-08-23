@@ -23,6 +23,7 @@
     "test:ci": "vitest run --config config/vitest.ci.config.ts",
     "test:browser": "vitest run --config config/vitest.browser.config.ts",
     "test:perf": "vitest run --config config/vitest.perf.config.ts",
+    "perf:cod356": "node scripts/perf/cod-356-benchmark.mjs",
     "test:all": "vitest run --config config/vitest.config.ts",
     "pretest:mobile": "node scripts/prepare-test-vendor.mjs",
     "test:mobile": "vitest run --config test/mobile/vitest.config.ts",

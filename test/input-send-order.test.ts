@@ -19,6 +19,8 @@ import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
+const reliableStorage = new Map<string, string>();
+
 function loadCodemanAppClass() {
   const constants = readFileSync(resolve(import.meta.dirname, '../src/web/public/constants.js'), 'utf8');
   const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
@@ -35,11 +37,13 @@ function loadCodemanAppClass() {
     fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args),
     document: { addEventListener: vi.fn() },
     localStorage: {
-      length: 0,
-      key: vi.fn(),
-      getItem: vi.fn(),
-      setItem: vi.fn(),
-      removeItem: vi.fn(),
+      get length() {
+        return reliableStorage.size;
+      },
+      key: (index: number) => [...reliableStorage.keys()][index] ?? null,
+      getItem: (key: string) => reliableStorage.get(key) ?? null,
+      setItem: (key: string, value: string) => reliableStorage.set(key, value),
+      removeItem: (key: string) => reliableStorage.delete(key),
     },
     window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
     MobileDetection: {},
@@ -68,6 +72,13 @@ type App = {
   activeSessionId: string | null;
 };
 
+const INPUT_CASES = [
+  ['500 identical printable characters', 'x'.repeat(500)],
+  ['repeated runs', 'aaabbb111___'],
+  ['printable/control/Enter boundaries', `ab\x03cd\x1bef\r`],
+  ['paste near the configured input limit', 'paste-'.repeat(10_922).slice(0, 65_520)],
+] as const;
+
 function makeApp(): App {
   const app = Object.create((CodemanApp as { prototype: object }).prototype) as App & Record<string, unknown>;
   app._clientId = 'c-test';
@@ -90,6 +101,35 @@ function makeApp(): App {
 }
 
 describe('durable input delivery — send ordering', () => {
+  it.each(INPUT_CASES)('preserves %s as one exact WebSocket record', (_label, input) => {
+    const app = makeApp();
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
+    app._wsSessionId = 'session-1';
+
+    app._sendInputAsync('session-1', input);
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ t: 'i', d: input, seq: 1, cid: 'c-test' });
+    expect(Buffer.from(frames[0].d)).toEqual(Buffer.from(input));
+  });
+
+  it.each(INPUT_CASES)('preserves %s through the serialized HTTP fallback', async (_label, input) => {
+    const app = makeApp();
+    const calls: PostBody[] = [];
+    global.fetch = vi.fn(async (_url, init) => {
+      calls.push(JSON.parse(String(init?.body)) as PostBody);
+      return new Response('{}', { status: 200 });
+    });
+
+    app._sendInputAsync('session-1', input);
+    await waitForCalls(calls, 1);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ input, seq: 1, clientId: 'c-test' });
+    expect(Buffer.from(calls[0].input)).toEqual(Buffer.from(input));
+  });
+
   it('delivers rapid input as distinct ordered seq frames over an open WebSocket (no coalescing)', () => {
     const app = makeApp();
     const frames: Frame[] = [];
@@ -233,5 +273,45 @@ describe('durable input delivery — _redeliverSweep ACK-loss recovery (COD-135)
     // It must NOT have re-sent over the dead socket.
     expect(close).toHaveBeenCalledTimes(1);
     expect(frames.map((f) => f.d)).toEqual(['a']);
+  });
+});
+
+describe('durable input delivery — persistence boundaries', () => {
+  it('restores pending records with the same client and sequence after reload', () => {
+    const app = makeApp() as App & Record<string, any>;
+    reliableStorage.clear();
+    reliableStorage.set('codeman:clientId', 'c-test');
+    try {
+      app._reliableMaxBytes = 1024 * 1024;
+      app._persistReliableTimer = null;
+      delete app._persistReliableNow;
+      app._sendInputAsync('session-1', 'pending');
+      app._persistReliableNow();
+
+      const restored = makeApp() as App & Record<string, any>;
+      restored._clientId = '';
+      restored._loadReliableState();
+
+      expect(restored._clientId).toBe('c-test');
+      expect(restored._pendingDeliveries.get('session-1')).toMatchObject([
+        { seq: 1, data: 'pending', tries: 0, sentAt: 0 },
+      ]);
+    } finally {
+      reliableStorage.clear();
+    }
+  });
+
+  it('persists an empty durable queue immediately after ACK before a server restart/reload', () => {
+    const app = makeApp() as App & Record<string, any>;
+    app._reliableMaxBytes = 1024 * 1024;
+    app._persistReliableNow = vi.fn();
+    app._ws = { readyState: 1, send: vi.fn() };
+    app._wsSessionId = 'session-1';
+
+    app._sendInputAsync('session-1', 'once');
+    app._onWsInputAck(1);
+
+    expect(app._pendingDeliveries.size).toBe(0);
+    expect(app._persistReliableNow).toHaveBeenCalledTimes(1);
   });
 });

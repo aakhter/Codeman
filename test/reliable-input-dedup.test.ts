@@ -21,6 +21,16 @@ function makeSession(): Session {
 }
 
 describe('Session.shouldApplyInput (exactly-once input dedup)', () => {
+  it('deduplicates every redelivery shape independently of payload contents', () => {
+    const s = makeSession();
+    const cases = ['x'.repeat(500), 'aaabbb111___', `ab\x03cd\x1bef\r`, '界'.repeat(128)];
+    for (const [index] of cases.entries()) {
+      const seq = index + 1;
+      expect(s.shouldApplyInput('trace-client', seq)).toBe(true);
+      expect(s.shouldApplyInput('trace-client', seq)).toBe(false);
+    }
+  });
+
   it('applies a fresh (clientId, seq) exactly once', () => {
     const s = makeSession();
     expect(s.shouldApplyInput('clientA', 1)).toBe(true);

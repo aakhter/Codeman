@@ -21,7 +21,7 @@
 import { getCellDimensions } from './cell-dimensions.js';
 import { charCellWidth } from './overlay-renderer.js';
 import { addPredictionSpan, clearAllSpans, removePredictionSpan } from './prediction-renderer.js';
-import type { FontStyle, XtermAddon, XtermTerminal } from './types.js';
+import type { CellDimensions, FontStyle, XtermAddon, XtermTerminal } from './types.js';
 
 export interface PredictiveEchoOptions {
   /** Z-index of the span container. @default 7 (same layer as the buffer overlay) */
@@ -75,6 +75,14 @@ interface PredictionRecord {
   sentAt: number;
   /** Consecutive reconcile passes that saw foreign non-blank content. */
   mismatches: number;
+}
+
+interface PredictionContext {
+  terminal: XtermTerminal;
+  container: HTMLDivElement;
+  dims: CellDimensions;
+  cursorX: number;
+  cursorY: number;
 }
 
 const DEFAULT_OPTIONS = {
@@ -239,34 +247,9 @@ export class PredictiveEchoAddon implements XtermAddon {
         return false;
       }
 
-      const t = this._terminal;
-      if (!t || !this._container) {
-        this._debugTotalSuppressed++;
-        this._incDebug(!t ? 'no-terminal' : 'no-container');
-        return false;
-      }
-      const dims = getCellDimensions(t);
-      if (!dims) {
-        this._debugTotalSuppressed++;
-        this._incDebug('no-dims');
-        return false;
-      }
-      const buf = t.buffer.active;
-      if (typeof buf.cursorX !== 'number' || typeof buf.cursorY !== 'number') {
-        this._debugTotalSuppressed++;
-        this._incDebug('no-cursor');
-        return false;
-      }
-      if (buf.viewportY !== buf.baseY) {
-        this._debugTotalSuppressed++;
-        this._incDebug('scrolled');
-        return false;
-      }
-      if (this._predictWhen && this._predictWhen(t) === false) {
-        this._debugTotalSuppressed++;
-        this._incDebug('predictWhen:false');
-        return false;
-      }
+      const context = this._getPredictionContext();
+      if (!context) return false;
+      const { terminal: t, container, dims, cursorX, cursorY } = context;
 
       const cps = Array.from(ch);
       if (cps.length !== 1) {
@@ -298,7 +281,7 @@ export class PredictiveEchoAddon implements XtermAddon {
       }
 
       if (this._outstanding.length === 0) {
-        this._anchor = { row: buf.cursorY, col: buf.cursorX };
+        this._anchor = { row: cursorY, col: cursorX };
         this._cursorOffRowSince = null;
       }
       const anchor = this._anchor!;
@@ -321,7 +304,7 @@ export class PredictiveEchoAddon implements XtermAddon {
         mismatches: 0,
       };
       this._outstanding.push(rec);
-      addPredictionSpan(this._container, this._spans, {
+      addPredictionSpan(container, this._spans, {
         seq: rec.seq,
         row: anchor.row,
         col,
@@ -334,6 +317,164 @@ export class PredictiveEchoAddon implements XtermAddon {
       this._armTtl();
       return true;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Predict an entire committed text run at the current insertion point.
+   * Validation, buffer snapshots, and span construction complete before any
+   * prediction is accepted, so a rejected or failed run never paints a prefix.
+   * The consumer sends the text to the PTY regardless of this visual result.
+   */
+  predictText(text: string): boolean {
+    let acceptedBefore = this._outstanding.length;
+    let seqBefore = this._seq;
+    let anchorBefore = this._anchor;
+    let cursorOffRowSinceBefore = this._cursorOffRowSince;
+    let timerBefore = this._ttlTimer;
+    let rollbackReady = false;
+    const appendedSpans: HTMLSpanElement[] = [];
+    const committedSeqs: number[] = [];
+
+    try {
+      this._debugTotalCalls++;
+      this._reconcile();
+      acceptedBefore = this._outstanding.length;
+      seqBefore = this._seq;
+      anchorBefore = this._anchor;
+      cursorOffRowSinceBefore = this._cursorOffRowSince;
+      timerBefore = this._ttlTimer;
+      rollbackReady = true;
+      if (this._anchorHold) {
+        this._debugTotalSuppressed++;
+        this._incDebug('anchorHold');
+        return false;
+      }
+
+      const context = this._getPredictionContext();
+      if (!context) return false;
+      const { terminal: t, container, dims, cursorX, cursorY } = context;
+
+      const chars = Array.from(text);
+      if (chars.length === 0) {
+        this._debugTotalSuppressed++;
+        this._incDebug('empty-text');
+        return false;
+      }
+      if (this._hasCompoundGrapheme(text, chars)) {
+        this._debugTotalSuppressed++;
+        this._incDebug('compound-grapheme');
+        return false;
+      }
+      if (this._outstanding.length + chars.length > this._options.maxPending) {
+        this._debugTotalSuppressed++;
+        this._incDebug('maxPending');
+        return false;
+      }
+
+      const widths: Array<1 | 2> = [];
+      let runWidth = 0;
+      let hasWide = false;
+      for (const char of chars) {
+        const cp = char.codePointAt(0)!;
+        if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || cp === 0x2028 || cp === 0x2029) {
+          this._debugTotalSuppressed++;
+          this._incDebug(cp === 0x7f ? 'is-del' : 'control');
+          return false;
+        }
+        const width = charCellWidth(t, char);
+        if (width !== 1 && width !== 2) {
+          this._debugTotalSuppressed++;
+          this._incDebug('bad-width');
+          return false;
+        }
+        widths.push(width);
+        runWidth += width;
+        hasWide ||= width === 2;
+      }
+      if (hasWide && !this._hasGetCell()) {
+        this._debugTotalSuppressed++;
+        this._incDebug('wide-no-getCell');
+        return false;
+      }
+
+      const anchor = this._anchor ?? { row: cursorY, col: cursorX };
+      const last = this._outstanding[this._outstanding.length - 1];
+      const initialOffset = last ? last.offsetCells + last.width : 0;
+      if (anchor.col + initialOffset + runWidth > t.cols - this._options.edgeMarginCells) {
+        this._debugTotalSuppressed++;
+        this._incDebug('edgeMargin');
+        return false;
+      }
+
+      const sentAt = performance.now();
+      const candidates: PredictionRecord[] = [];
+      let offset = initialOffset;
+      for (let i = 0; i < chars.length; i++) {
+        candidates.push({
+          seq: seqBefore + i,
+          char: chars[i],
+          width: widths[i],
+          offsetCells: offset,
+          snapshot: this._readCell(anchor.row, anchor.col + offset),
+          sentAt,
+          mismatches: 0,
+        });
+        offset += widths[i];
+      }
+
+      // Construct the whole run off-DOM. Appending one fragment makes the
+      // visible paint atomic; records and the live span map are committed only
+      // after that append succeeds.
+      const staging = document.createElement('div');
+      const stagedSpans = new Map<number, HTMLSpanElement>();
+      for (const rec of candidates) {
+        addPredictionSpan(staging, stagedSpans, {
+          seq: rec.seq,
+          row: anchor.row,
+          col: anchor.col + rec.offsetCells,
+          char: rec.char,
+          width: rec.width,
+          dims,
+          font: this._font,
+          underline: this._options.underlinePredictions,
+        });
+      }
+      const fragment = document.createDocumentFragment();
+      for (const span of stagedSpans.values()) {
+        appendedSpans.push(span);
+        fragment.appendChild(span);
+      }
+      container.appendChild(fragment);
+
+      for (const rec of candidates) {
+        this._spans.set(rec.seq, stagedSpans.get(rec.seq)!);
+        committedSeqs.push(rec.seq);
+      }
+      this._outstanding.push(...candidates);
+      this._seq += candidates.length;
+      if (acceptedBefore === 0) {
+        this._anchor = anchor;
+        this._cursorOffRowSince = null;
+      }
+      this._armTtl();
+      return true;
+    } catch {
+      if (rollbackReady) {
+        for (const span of appendedSpans) span.remove();
+        for (const seq of committedSeqs) this._spans.delete(seq);
+        this._outstanding.splice(acceptedBefore);
+        this._seq = seqBefore;
+        this._anchor = anchorBefore;
+        this._cursorOffRowSince = cursorOffRowSinceBefore;
+        if (timerBefore === null && this._ttlTimer !== null) {
+          clearTimeout(this._ttlTimer);
+          this._ttlTimer = null;
+        }
+      }
+      this._debugTotalSuppressed++;
+      this._incDebug('exception');
       return false;
     }
   }
@@ -438,6 +579,57 @@ export class PredictiveEchoAddon implements XtermAddon {
     this._debugLastHoldMs = null;
     this._debugTotalCalls = 0;
     this._debugTotalSuppressed = 0;
+  }
+
+  private _getPredictionContext(): PredictionContext | null {
+    const terminal = this._terminal;
+    const container = this._container;
+    if (!terminal || !container) {
+      this._debugTotalSuppressed++;
+      this._incDebug(!terminal ? 'no-terminal' : 'no-container');
+      return null;
+    }
+    const dims = getCellDimensions(terminal);
+    if (!dims) {
+      this._debugTotalSuppressed++;
+      this._incDebug('no-dims');
+      return null;
+    }
+    const buf = terminal.buffer.active;
+    if (typeof buf.cursorX !== 'number' || typeof buf.cursorY !== 'number') {
+      this._debugTotalSuppressed++;
+      this._incDebug('no-cursor');
+      return null;
+    }
+    if (buf.viewportY !== buf.baseY) {
+      this._debugTotalSuppressed++;
+      this._incDebug('scrolled');
+      return null;
+    }
+    if (this._predictWhen && this._predictWhen(terminal) === false) {
+      this._debugTotalSuppressed++;
+      this._incDebug('predictWhen:false');
+      return null;
+    }
+    return { terminal, container, dims, cursorX: buf.cursorX, cursorY: buf.cursorY };
+  }
+
+  private _hasCompoundGrapheme(text: string, codePoints: string[]): boolean {
+    const Segmenter = Intl.Segmenter;
+    if (typeof Segmenter === 'function') {
+      const graphemes = Array.from(
+        new Segmenter(undefined, { granularity: 'grapheme' }).segment(text),
+        ({ segment }) => segment
+      );
+      return (
+        graphemes.length !== codePoints.length || graphemes.some((grapheme, index) => grapheme !== codePoints[index])
+      );
+    }
+    if (codePoints.length <= 1) return false;
+    return codePoints.some((codePoint) => {
+      const value = codePoint.codePointAt(0)!;
+      return value < 0x20 || value > 0x7e;
+    });
   }
 
   // ─── Reconciliation ───────────────────────────────────────────────

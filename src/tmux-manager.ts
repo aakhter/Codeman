@@ -28,6 +28,14 @@ import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+/** Recent pane lines needed by the working-frame classifiers. */
+const ASYNC_TEXT_CAPTURE_DEFAULT_LINES = 200;
+/** Keep activity polling bounded even if a caller passes an excessive value. */
+const ASYNC_TEXT_CAPTURE_MAX_LINES = 500;
+/** Activity frames are small; reject unexpectedly large captures. */
+const ASYNC_TEXT_CAPTURE_MAX_BUFFER = 256 * 1024;
+/** Activity polling must settle quickly when a pane disappears or tmux stalls. */
+const ASYNC_TEXT_CAPTURE_TIMEOUT_MS = 1_500;
 /** ssh roundtrip budget for a remote pane capture (COD-180) — LAN is ~100-300ms; WAN gets headroom. */
 const REMOTE_CAPTURE_TIMEOUT_MS = 10_000;
 /** Remote full-history captures can span tens of thousands of lines with SGR escapes. */
@@ -398,6 +406,31 @@ export function parseTmuxCodexProviderEnvironment(output: string): CodexProvider
 }
 
 export type TmuxEnvironmentExecutor = (file: string, args: string[]) => Promise<{ stdout: string }>;
+
+export interface TmuxPaneTextExecOptions {
+  encoding: 'utf8';
+  timeout: number;
+  maxBuffer: number;
+  signal?: AbortSignal;
+}
+
+export type TmuxPaneTextExecutor = (
+  file: string,
+  args: string[],
+  options: TmuxPaneTextExecOptions
+) => Promise<{ stdout: string }>;
+
+const executePaneTextCapture: TmuxPaneTextExecutor = async (file, args, options) => {
+  const { stdout } = await execFileAsync(file, args, options);
+  return { stdout };
+};
+
+function sanitizeAsyncTextCaptureLines(lastLines?: number): number {
+  if (typeof lastLines !== 'number' || !Number.isFinite(lastLines) || lastLines <= 0) {
+    return ASYNC_TEXT_CAPTURE_DEFAULT_LINES;
+  }
+  return Math.min(Math.max(Math.floor(lastLines), 1), ASYNC_TEXT_CAPTURE_MAX_LINES);
+}
 
 export async function readTmuxCodexProviderEnvironment(
   socket: string,
@@ -1993,13 +2026,21 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private trueColorConfigured = false;
   private readonly checkpointExecutor?: (command: string) => Promise<void>;
   private readonly checkpointDelayMs: number;
+  private readonly paneTextExecutor: TmuxPaneTextExecutor;
   /** tmux 3.7+ can resize pane history after creation; older releases cannot. */
   private liveHistoryResizeSupported: boolean | null = null;
 
-  constructor(options: { checkpointExecutor?: (command: string) => Promise<void>; checkpointDelayMs?: number } = {}) {
+  constructor(
+    options: {
+      checkpointExecutor?: (command: string) => Promise<void>;
+      checkpointDelayMs?: number;
+      paneTextExecutor?: TmuxPaneTextExecutor;
+    } = {}
+  ) {
     super();
     this.checkpointExecutor = options.checkpointExecutor;
     this.checkpointDelayMs = options.checkpointDelayMs ?? 50;
+    this.paneTextExecutor = options.paneTextExecutor ?? executePaneTextCapture;
     this.setMaxListeners(50);
     if (!IS_TEST_MODE) {
       this.loadSessions();
@@ -3933,6 +3974,41 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     } catch {
       // A dead/renamed pane is an ordinary outcome here, not an error worth logging
       // on a timer; the caller treats null as "no evidence either way".
+      return null;
+    }
+  }
+
+  /**
+   * Capture a bounded recent window from the session's active pane without
+   * blocking the event loop. Passing argv directly to execFile avoids a shell
+   * and targeting the session lets tmux resolve its active pane in one command.
+   */
+  async capturePaneTextAsync(
+    muxName: string,
+    opts?: { lastLines?: number; signal?: AbortSignal }
+  ): Promise<string | null> {
+    if (!SAFE_TMUX_SOCKET_PATTERN.test(this.tmuxSocket) || !isValidMuxName(muxName)) return null;
+
+    const lastLines = sanitizeAsyncTextCaptureLines(opts?.lastLines);
+    const execOptions: TmuxPaneTextExecOptions = {
+      encoding: 'utf8',
+      timeout: ASYNC_TEXT_CAPTURE_TIMEOUT_MS,
+      maxBuffer: ASYNC_TEXT_CAPTURE_MAX_BUFFER,
+    };
+    if (opts?.signal) execOptions.signal = opts.signal;
+
+    try {
+      const { stdout } = await this.paneTextExecutor(
+        'tmux',
+        ['-L', this.tmuxSocket, 'capture-pane', '-p', '-S', `-${lastLines}`, '-t', muxName],
+        execOptions
+      );
+      if (Buffer.byteLength(stdout, 'utf8') > ASYNC_TEXT_CAPTURE_MAX_BUFFER) return null;
+      return stdout;
+    } catch {
+      // Dead/renamed panes, aborts, timeouts, and bounded-buffer overflow are
+      // all ordinary polling outcomes. The activity caller treats null as
+      // inconclusive and will retry on its next scheduled turn.
       return null;
     }
   }

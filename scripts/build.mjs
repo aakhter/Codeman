@@ -109,6 +109,10 @@ run(
   'npx esbuild dist/web/public/input-cjk.js --minify --outfile=dist/web/public/input-cjk.js --allow-overwrite'
 );
 run(
+  'minify mobile-ime-preview.js',
+  'npx esbuild dist/web/public/mobile-ime-preview.js --minify --outfile=dist/web/public/mobile-ime-preview.js --allow-overwrite'
+);
+run(
   'minify i18n.js',
   'npx esbuild dist/web/public/i18n.js --minify --outfile=dist/web/public/i18n.js --allow-overwrite'
 );
@@ -172,6 +176,7 @@ console.log('\n[build] content-hash cache busting');
     'notification-manager.js',
     'keyboard-accessory.js',
     'input-cjk.js',
+    'mobile-ime-preview.js',
     'sanitize-html.js',
     'tab-layout-browser.js',
     'app.js',

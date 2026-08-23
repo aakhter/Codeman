@@ -35,6 +35,16 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+function withoutSegmenter(run: () => void): void {
+  const segmenterDescriptor = Object.getOwnPropertyDescriptor(Intl, 'Segmenter')!;
+  Object.defineProperty(Intl, 'Segmenter', { configurable: true, value: undefined });
+  try {
+    run();
+  } finally {
+    Object.defineProperty(Intl, 'Segmenter', segmenterDescriptor);
+  }
+}
+
 describe('PredictiveEchoAddon', () => {
   let mock: ReturnType<typeof createMockTerminal>;
   let addon: PredictiveEchoAddon;
@@ -60,6 +70,258 @@ describe('PredictiveEchoAddon', () => {
     expect(spans[0].style.left).toBe(`${2 * 8.4}px`);
     expect(spans[0].style.top).toBe('0px');
     expect(addon.state.outstanding).toBe(1);
+  });
+
+  describe('predictText', () => {
+    it('paints an entire committed run atomically', () => {
+      expect(addon.predictText('hello')).toBe(true);
+      expect(spansOf(mock).map((span) => span.textContent)).toEqual(['h', 'e', 'l', 'l', 'o']);
+      expect(addon.state.outstanding).toBe(5);
+      expect(addon.state.anchor).toEqual({ row: 0, col: 2 });
+    });
+
+    it('supports mixed ASCII, CJK, and emoji with cumulative cell widths', () => {
+      expect(addon.predictText('a你😀z')).toBe(true);
+      const spans = spansOf(mock);
+      expect(spans.map((span) => span.style.left)).toEqual([
+        `${2 * 8.4}px`,
+        `${3 * 8.4}px`,
+        `${5 * 8.4}px`,
+        `${7 * 8.4}px`,
+      ]);
+      expect(spans.map((span) => span.style.width)).toEqual([
+        `${1 * 8.4}px`,
+        `${2 * 8.4}px`,
+        `${2 * 8.4}px`,
+        `${1 * 8.4}px`,
+      ]);
+      expect(addon.state.outstanding).toBe(4);
+    });
+
+    it.each([
+      ['decomposed accent', 'e\u0301'],
+      ['emoji modifier', '👍🏽'],
+      ['regional-indicator flag', '🇺🇸'],
+      ['variation selector', '✈️'],
+      ['ZWJ family', '👨‍👩‍👧'],
+    ])('rejects the multi-codepoint %s grapheme without changing an existing run', (_label, text) => {
+      const unicode = { activeVersion: '15' };
+      Object.assign(mock.terminal, { unicode });
+      expect('getStringCellWidth' in unicode).toBe(false);
+      expect(addon.predictChar('x')).toBe(true);
+      const beforeState = addon.state;
+      const beforeSpans = spansOf(mock);
+
+      expect(addon.predictText(text)).toBe(false);
+      expect(addon.state).toEqual(beforeState);
+      expect(spansOf(mock)).toEqual(beforeSpans);
+    });
+
+    it('keeps single-codepoint accented, CJK, and emoji glyphs eligible', () => {
+      Object.assign(mock.terminal, { unicode: { activeVersion: '15' } });
+      expect(addon.predictText('é你😀')).toBe(true);
+      expect(spansOf(mock).map((span) => span.textContent)).toEqual(['é', '你', '😀']);
+      expect(addon.state.outstanding).toBe(3);
+    });
+
+    it.each([
+      ['Hangul Jamo syllable', '한'],
+      ['emoji tag sequence', '\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}'],
+    ])('fails closed for a %s when Intl.Segmenter is unavailable', (_label, text) => {
+      withoutSegmenter(() => {
+        expect(addon.predictChar('x')).toBe(true);
+        const beforeState = addon.state;
+        const beforeSpans = spansOf(mock);
+        expect(addon.predictText(text)).toBe(false);
+        expect(addon.state).toEqual(beforeState);
+        expect(spansOf(mock)).toEqual(beforeSpans);
+      });
+    });
+
+    it('allows printable ASCII runs and single-codepoint Unicode when Intl.Segmenter is unavailable', () => {
+      withoutSegmenter(() => {
+        expect(addon.predictText('ASCII ~')).toBe(true);
+        expect(addon.predictText('你')).toBe(true);
+        expect(addon.predictText('😀')).toBe(true);
+        expect(spansOf(mock).map((span) => span.textContent)).toEqual(['A', 'S', 'C', 'I', 'I', ' ', '~', '你', '😀']);
+      });
+    });
+
+    it('rejects every C0/C1 control and DEL without painting', () => {
+      const controls = [
+        ...Array.from({ length: 0x20 }, (_, cp) => String.fromCodePoint(cp)),
+        ...Array.from({ length: 0x21 }, (_, index) => String.fromCodePoint(0x7f + index)),
+      ];
+      for (const control of controls) expect(addon.predictText(control)).toBe(false);
+      expect(addon.state.outstanding).toBe(0);
+      expect(spansOf(mock)).toHaveLength(0);
+    });
+
+    it.each(['', '\x1b[31mred', 'one\ntwo', 'one\u2028two', 'one\u2029two'])(
+      'rejects non-committable text %j without painting',
+      (text) => {
+        expect(addon.predictText(text)).toBe(false);
+        expect(addon.state.outstanding).toBe(0);
+        expect(spansOf(mock)).toHaveLength(0);
+      }
+    );
+
+    it('applies predictWhen and anchor-hold gates to the entire run', () => {
+      addon.setPredictWhen(() => false);
+      expect(addon.predictText('hello')).toBe(false);
+      addon.setPredictWhen(null);
+      addon.clearPredictions();
+      expect(addon.predictText('hello')).toBe(false);
+      expect(addon.state.outstanding).toBe(0);
+      expect(spansOf(mock)).toHaveLength(0);
+    });
+
+    it('returns false without mutation when terminal, container, dimensions, or cursor support is missing', () => {
+      const fresh = new PredictiveEchoAddon();
+      expect(fresh.predictText('hello')).toBe(false);
+
+      // Exercise each post-activation defensive gate independently.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const internals = addon as any;
+      const container = internals._container;
+      internals._container = null;
+      expect(addon.predictText('hello')).toBe(false);
+      internals._container = container;
+
+      const core = mock.terminal._core;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mock.terminal as any)._core;
+      expect(addon.predictText('hello')).toBe(false);
+      mock.terminal._core = core;
+
+      const cursorX = mock.terminal.buffer.active.cursorX;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mock.terminal.buffer.active as any).cursorX = undefined;
+      expect(addon.predictText('hello')).toBe(false);
+      mock.terminal.buffer.active.cursorX = cursorX;
+
+      expect(addon.state.outstanding).toBe(0);
+      expect(spansOf(mock)).toHaveLength(0);
+    });
+
+    it('requires getCell support for any run containing a wide character', () => {
+      const bare = composerMock({ getCellSupport: false });
+      const a = new PredictiveEchoAddon();
+      a.activate(bare.terminal as never);
+      expect(a.predictText('ascii')).toBe(true);
+      a.clearPredictions();
+      a.reconcile();
+      expect(a.predictText('a你b')).toBe(false);
+      expect(a.state.outstanding).toBe(0);
+      expect(spansOf(bare)).toHaveLength(0);
+      a.dispose();
+      bare.cleanup();
+    });
+
+    it('validates maxPending and the final edge before mutating an existing run', () => {
+      const capped = new PredictiveEchoAddon({ maxPending: 3 });
+      capped.activate(mock.terminal as never);
+      expect(capped.predictChar('x')).toBe(true);
+      const before = spansOf(mock).map((span) => ({ node: span, text: span.textContent, left: span.style.left }));
+      expect(capped.predictText('abc')).toBe(false);
+      expect(capped.state.outstanding).toBe(1);
+      expect(spansOf(mock).map((span) => ({ node: span, text: span.textContent, left: span.style.left }))).toEqual(
+        before
+      );
+      capped.dispose();
+
+      const edgeMock = composerMock({ cols: 10, buffer: { lines: ['› ', ''], cursorX: 4, cursorY: 0 } });
+      const edge = new PredictiveEchoAddon({ edgeMarginCells: 2 });
+      edge.activate(edgeMock.terminal as never);
+      expect(edge.predictChar('x')).toBe(true);
+      const edgeBefore = spansOf(edgeMock)[0];
+      expect(edge.predictText('abcd')).toBe(false);
+      expect(edge.state.outstanding).toBe(1);
+      expect(spansOf(edgeMock)).toEqual([edgeBefore]);
+      edge.dispose();
+      edgeMock.cleanup();
+    });
+
+    it('leaves an existing run and spans unchanged when a late buffer read throws', () => {
+      expect(addon.predictChar('x')).toBe(true);
+      const beforeState = addon.state;
+      const beforeSpans = spansOf(mock);
+      const beforeTimers = vi.getTimerCount();
+      const line = mock.terminal.buffer.active.getLine(0)!;
+      const getCell = line.getCell!;
+      let reads = 0;
+      line.getCell = (col: number) => {
+        reads++;
+        if (reads >= 4) throw new Error('late buffer failure');
+        return getCell(col);
+      };
+
+      expect(addon.predictText('ab')).toBe(false);
+      expect(addon.state).toEqual(beforeState);
+      expect(spansOf(mock)).toEqual(beforeSpans);
+      expect(vi.getTimerCount()).toBe(beforeTimers);
+    });
+
+    it('records suppression when the initial inline reconcile throws', () => {
+      expect(addon.predictChar('x')).toBe(true);
+      const beforeState = addon.state;
+      const beforeSpans = spansOf(mock);
+      const line = mock.terminal.buffer.active.getLine(0)!;
+      line.getCell = () => {
+        throw new Error('reconcile failure');
+      };
+
+      expect(addon.predictText('ab')).toBe(false);
+      expect(addon.state).toEqual(beforeState);
+      expect(spansOf(mock)).toEqual(beforeSpans);
+      expect(addon.debugState.totalPredictCalls).toBe(2);
+      expect(addon.debugState.totalSuppressed).toBe(1);
+      expect(addon.debugState.counts.exception).toBe(1);
+    });
+
+    it('leaves an existing run and spans unchanged when the final DOM append throws', () => {
+      expect(addon.predictChar('x')).toBe(true);
+      const beforeState = addon.state;
+      const beforeSpans = spansOf(mock);
+      const beforeTimers = vi.getTimerCount();
+      const container = mock.terminal.element.querySelector('[data-predictive-echo]') as HTMLDivElement;
+      const appendChild = container.appendChild.bind(container);
+      container.appendChild = (() => {
+        throw new Error('late DOM failure');
+      }) as typeof container.appendChild;
+
+      expect(addon.predictText('ab')).toBe(false);
+      expect(addon.state).toEqual(beforeState);
+      expect(spansOf(mock)).toEqual(beforeSpans);
+      expect(vi.getTimerCount()).toBe(beforeTimers);
+      expect(addon.debugState.totalSuppressed).toBe(1);
+      expect(addon.debugState.counts.exception).toBe(1);
+      container.appendChild = appendChild;
+    });
+
+    it('appends at the current run offset only when every candidate fits', () => {
+      expect(addon.predictChar('你')).toBe(true);
+      expect(addon.predictText('ab')).toBe(true);
+      expect(spansOf(mock).map((span) => span.style.left)).toEqual([`${2 * 8.4}px`, `${4 * 8.4}px`, `${5 * 8.4}px`]);
+      expect(addon.state.outstanding).toBe(3);
+    });
+
+    it('reconciles and TTL-expires every record in a committed run', async () => {
+      expect(addon.predictText('hi')).toBe(true);
+      mock.setLine(0, '› hi');
+      mock.setCursor(4, 0);
+      mock.fireWriteParsed();
+      await flushMicrotasks();
+      expect(addon.state.outstanding).toBe(0);
+      expect(addon.state.confirmedTotal).toBe(2);
+      expect(spansOf(mock)).toHaveLength(0);
+
+      expect(addon.predictText('bye')).toBe(true);
+      vi.advanceTimersByTime(1100);
+      expect(addon.state.outstanding).toBe(0);
+      expect(addon.state.droppedTotal).toBe(3);
+      expect(spansOf(mock)).toHaveLength(0);
+    });
   });
 
   it('stacks predictions at anchor+cumulative width while the cursor is unmoved', () => {
@@ -255,11 +517,14 @@ describe('PredictiveEchoAddon', () => {
   });
 
   it('maxPending: the 33rd predictChar returns false', () => {
+    const capped = new PredictiveEchoAddon({ maxPending: 32 });
+    capped.activate(mock.terminal as never);
     for (let i = 0; i < 32; i++) {
-      expect(addon.predictChar('x')).toBe(true);
+      expect(capped.predictChar('x')).toBe(true);
     }
-    expect(addon.predictChar('y')).toBe(false);
-    expect(addon.state.outstanding).toBe(32);
+    expect(capped.predictChar('y')).toBe(false);
+    expect(capped.state.outstanding).toBe(32);
+    capped.dispose();
   });
 
   it('edge margin: a prediction landing within edgeMarginCells of cols returns false', () => {
@@ -411,6 +676,7 @@ describe('PredictiveEchoAddon', () => {
   it('every public method is safe before activate and after dispose', () => {
     const fresh = new PredictiveEchoAddon();
     expect(fresh.predictChar('a')).toBe(false);
+    expect(fresh.predictText('abc')).toBe(false);
     expect(fresh.predictBackspace()).toBe(false);
     fresh.clearPredictions();
     fresh.reconcile();
@@ -421,6 +687,7 @@ describe('PredictiveEchoAddon', () => {
 
     addon.dispose();
     expect(addon.predictChar('a')).toBe(false);
+    expect(addon.predictText('abc')).toBe(false);
     expect(addon.predictBackspace()).toBe(false);
     addon.clearPredictions();
     addon.reconcile();

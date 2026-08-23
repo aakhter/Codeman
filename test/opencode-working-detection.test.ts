@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { detectExternalCliWorkingFrame, Session } from '../src/session.js';
+import { workingFramePollCoordinator } from '../src/working-frame-poll-coordinator.js';
 
 describe('Opencode working detection', () => {
   it('detects esc to interrupt as working', () => {
@@ -102,10 +103,12 @@ describe('Opencode idle transition (spinner latch regression)', () => {
 describe('Opencode rendered-frame poller', () => {
   let session: Session;
   let frame: string;
+  let asyncCapture: ReturnType<typeof vi.fn>;
+  let syncCapture: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    session = new Session({ workingDir: '/tmp', mode: 'opencode' });
+    session = new Session({ id: 'opencode-poller', workingDir: '/tmp', mode: 'opencode' });
     frame = 'idle frame\n› prompt\n  opencode · /tmp';
     const s = session as unknown as {
       _mux: unknown;
@@ -114,7 +117,15 @@ describe('Opencode rendered-frame poller', () => {
       _resetBuffers(): void;
       _armExternalCliIdleTimer(): void;
     };
-    s._mux = { captureActivePaneBuffer: vi.fn(() => frame) };
+    asyncCapture = vi.fn(async () => frame);
+    syncCapture = vi.fn(() => {
+      throw new Error('activity polling must not use synchronous capture');
+    });
+    s._mux = {
+      capturePaneTextAsync: asyncCapture,
+      captureActivePaneBuffer: syncCapture,
+      killSession: vi.fn(async () => false),
+    };
     s._muxSession = { muxName: 'codeman-test1234' };
     s._resetBuffers();
     s._armExternalCliIdleTimer();
@@ -126,28 +137,58 @@ describe('Opencode rendered-frame poller', () => {
     vi.useRealTimers();
   });
 
-  it('flips to busy from a rendered esc to interrupt frame', () => {
+  it('flips to busy from an asynchronously captured rendered esc to interrupt frame', async () => {
     frame = '\x1b[1mWorking\x1b[0m (2s • esc to interrupt) opencode TUI\r\n› prompt';
-    vi.advanceTimersByTime(2100);
+    await vi.advanceTimersByTimeAsync(4200);
     expect(session.isWorking).toBe(true);
     expect(session.status).toBe('busy');
+    expect(asyncCapture).toHaveBeenCalledWith(
+      'codeman-test1234',
+      expect.objectContaining({ lastLines: expect.any(Number) })
+    );
+    expect(syncCapture).not.toHaveBeenCalled();
   });
 
-  it('stays busy while frame keeps showing working', () => {
+  it('stays busy while frame keeps showing working', async () => {
     frame = 'Working (2s • esc to interrupt)';
-    vi.advanceTimersByTime(2100);
+    await vi.advanceTimersByTimeAsync(4200);
     expect(session.isWorking).toBe(true);
-    vi.advanceTimersByTime(30000);
+    await vi.advanceTimersByTimeAsync(30000);
     expect(session.isWorking).toBe(true);
   });
 
-  it('flips to idle once working line disappears', () => {
+  it('flips to idle once working line disappears', async () => {
     frame = 'Working (2s • esc to interrupt)';
-    vi.advanceTimersByTime(4200);
+    await vi.advanceTimersByTimeAsync(4200);
     expect(session.isWorking).toBe(true);
     frame = 'idle again\n› prompt';
-    vi.advanceTimersByTime(7000);
+    await vi.advanceTimersByTimeAsync(7000);
     expect(session.isWorking).toBe(false);
     expect(session.status).toBe('idle');
+  });
+
+  it('fails quietly when async capture is unavailable without falling back synchronously', async () => {
+    const internals = session as unknown as { _mux: unknown; _startWorkingFramePoller(): void };
+    internals._mux = { captureActivePaneBuffer: syncCapture };
+    internals._startWorkingFramePoller();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(syncCapture).not.toHaveBeenCalled();
+  });
+
+  it('backs off null failures from the real Session capture path while treating empty text as success', async () => {
+    const failuresBefore = workingFramePollCoordinator.getStats().captureFailures;
+    const callTimes: number[] = [];
+    asyncCapture.mockImplementation(async () => {
+      callTimes.push(Date.now());
+      return callTimes.length < 3 ? null : '';
+    });
+    const internals = session as unknown as { _startWorkingFramePoller(): void };
+    internals._startWorkingFramePoller();
+
+    await vi.advanceTimersByTimeAsync(15_999);
+    expect(callTimes).toHaveLength(3);
+    expect(callTimes[1] - callTimes[0]).toBe(4_000);
+    expect(callTimes[2] - callTimes[1]).toBe(8_000);
+    expect(workingFramePollCoordinator.getStats().captureFailures - failuresBefore).toBe(2);
   });
 });
