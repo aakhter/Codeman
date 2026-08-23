@@ -629,6 +629,7 @@ export class Session extends EventEmitter {
   /** Shared rendered-frame poll registration for external-CLI sessions (local AND remote). */
   private _workingFramePollUnregister: (() => void) | null = null;
   private _workingFramePollGeneration = 0;
+  private _workingFrameFirstPollCompleted = false;
   private _workingFrameCapture: {
     generation: number;
     mux: TerminalMultiplexer;
@@ -3506,11 +3507,13 @@ export class Session extends EventEmitter {
   private _startWorkingFramePoller(): void {
     this._stopWorkingFramePoller();
     const generation = this._workingFramePollGeneration;
+    this._workingFrameFirstPollCompleted = false;
     this._workingFramePollUnregister = workingFramePollCoordinator.register({
       key: this.id,
       capture: () => this._captureWorkingFrameAsync(generation),
       onFrame: (frame) => {
         if (generation !== this._workingFramePollGeneration || this._isStopped) return;
+        this._workingFrameFirstPollCompleted = true;
         if (!frame) return;
         // The async capture may carry SGR escapes that can sit inside the
         // pattern (e.g. bold around "Working") — strip before matching.
@@ -3526,6 +3529,7 @@ export class Session extends EventEmitter {
     this._workingFramePollGeneration += 1;
     this._workingFramePollUnregister?.();
     this._workingFramePollUnregister = null;
+    this._workingFrameFirstPollCompleted = false;
     this._workingFrameCapture?.controller.abort();
     this._workingFrameCapture = null;
   }
@@ -3550,7 +3554,7 @@ export class Session extends EventEmitter {
       promise: Promise.resolve<string | null>(null),
     };
     capture.promise = mux
-      .capturePaneTextAsync(muxName, { lastLines: 80, signal: controller.signal })
+      .capturePaneTextAsync(muxName, { signal: controller.signal })
       .then((frame) => {
         if (
           generation !== this._workingFramePollGeneration ||
@@ -3564,6 +3568,14 @@ export class Session extends EventEmitter {
       })
       .finally(() => {
         if (this._workingFrameCapture === capture) this._workingFrameCapture = null;
+        if (
+          generation === this._workingFramePollGeneration &&
+          !this._isStopped &&
+          this._mux === mux &&
+          this._muxSession?.muxName === muxName
+        ) {
+          this._workingFrameFirstPollCompleted = true;
+        }
       });
     this._workingFrameCapture = capture;
     return capture.promise;
@@ -3583,6 +3595,27 @@ export class Session extends EventEmitter {
       if (this._isStopped || idleGeneration !== this._externalCliIdleGeneration) return;
       const wasWorking = this._isWorking;
       const isInitialReady = this._status === 'busy' && !this._isWorking;
+      if (isInitialReady && workingFramePollCoordinator.has(this.id) && !this._workingFrameFirstPollCompleted) {
+        const pollGeneration = this._workingFramePollGeneration;
+        // The shared poller can be queue-bound when many sessions register at
+        // once. Wait for this session's first/current capture before declaring
+        // startup idle so a queued Working frame cannot arrive after a false
+        // initial-ready transition.
+        const frame = await workingFramePollCoordinator.captureNow(this.id);
+        if (this._isStopped || idleGeneration !== this._externalCliIdleGeneration) return;
+        if (pollGeneration !== this._workingFramePollGeneration) {
+          if (this._status === 'busy' && !this._isWorking) this._armExternalCliIdleTimer();
+          return;
+        }
+        if (this._isWorking) return;
+        if (frame) {
+          const plain = frame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
+          if (detectExternalCliWorkingFrame(plain, this.mode)) {
+            this._noteExternalWorkingFrame();
+            return;
+          }
+        }
+      }
       if (wasWorking && this.mode === 'codex') {
         const frame = await workingFramePollCoordinator.captureNow(this.id);
         if (this._isStopped || idleGeneration !== this._externalCliIdleGeneration || !this._isWorking) return;

@@ -144,7 +144,7 @@ describe('Opencode rendered-frame poller', () => {
     expect(session.status).toBe('busy');
     expect(asyncCapture).toHaveBeenCalledWith(
       'codeman-test1234',
-      expect.objectContaining({ lastLines: expect.any(Number) })
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
     expect(syncCapture).not.toHaveBeenCalled();
   });
@@ -175,6 +175,77 @@ describe('Opencode rendered-frame poller', () => {
     expect(syncCapture).not.toHaveBeenCalled();
   });
 
+  it('does not emit initial-ready while the first rendered-frame capture is still pending', async () => {
+    let resolveCapture!: (value: string | null) => void;
+    asyncCapture.mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveCapture = resolve;
+        })
+    );
+    const idleEvents: unknown[] = [];
+    session.on('idle', (event) => idleEvents.push(event));
+    const internals = session as unknown as { _startWorkingFramePoller(): void };
+    internals._startWorkingFramePoller();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(asyncCapture).toHaveBeenCalledTimes(1);
+    expect(idleEvents).toEqual([]);
+
+    resolveCapture('Working (5s • esc to interrupt)');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.isWorking).toBe(true);
+    expect(session.status).toBe('busy');
+    expect(idleEvents).toEqual([]);
+  });
+
+  it('does not let an awaiting initial-ready check escape a poller restart fence', async () => {
+    let captureCount = 0;
+    asyncCapture.mockImplementation((_muxName: string, options: { signal?: AbortSignal }) =>
+      ++captureCount === 1
+        ? new Promise<string | null>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () =>
+              reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+            );
+          })
+        : Promise.resolve('idle frame')
+    );
+    const idleEvents: unknown[] = [];
+    session.on('idle', (event) => idleEvents.push(event));
+    const internals = session as unknown as { _startWorkingFramePoller(): void };
+    internals._startWorkingFramePoller();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    internals._startWorkingFramePoller();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(session.status).toBe('busy');
+    expect(idleEvents).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(session.status).toBe('idle');
+    expect(idleEvents).toEqual([{ reason: 'initial-ready' }]);
+  });
+
+  it('keeps first-capture rejection retries on the coordinator backoff schedule', async () => {
+    const callTimes: number[] = [];
+    asyncCapture.mockImplementation(async () => {
+      callTimes.push(Date.now());
+      if (callTimes.length === 1) throw new Error('capture failed');
+      return '';
+    });
+    const internals = session as unknown as { _startWorkingFramePoller(): void };
+    internals._startWorkingFramePoller();
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(callTimes).toHaveLength(1);
+    const retryAt = callTimes[0]! + 4_000;
+    await vi.advanceTimersByTimeAsync(retryAt - Date.now() - 1);
+    expect(callTimes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(callTimes).toHaveLength(2);
+  });
+
   it('backs off null failures from the real Session capture path while treating empty text as success', async () => {
     const failuresBefore = workingFramePollCoordinator.getStats().captureFailures;
     const callTimes: number[] = [];
@@ -185,7 +256,11 @@ describe('Opencode rendered-frame poller', () => {
     const internals = session as unknown as { _startWorkingFramePoller(): void };
     internals._startWorkingFramePoller();
 
-    await vi.advanceTimersByTimeAsync(15_999);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(callTimes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(callTimes).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(8_000);
     expect(callTimes).toHaveLength(3);
     expect(callTimes[1] - callTimes[0]).toBe(4_000);
     expect(callTimes[2] - callTimes[1]).toBe(8_000);
