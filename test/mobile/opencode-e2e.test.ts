@@ -1111,6 +1111,7 @@ describe.runIf(FONT_COMPARATOR_ENABLED)('COD-370 mobile OpenCode font comparator
     let initialResizeEvents: BrowserTrace['resizes'] = [];
     let observedFontSize: number | null = null;
     let observedPhoneDimensions: Dimensions | null = null;
+    let failureDiagnostics: Record<string, unknown> | null = null;
     try {
       await fixture.start();
       const phone = fixture.phonePage!;
@@ -1174,6 +1175,50 @@ describe.runIf(FONT_COMPARATOR_ENABLED)('COD-370 mobile OpenCode font comparator
       expect(pageErrors).toEqual([]);
       expect(seriousConsoleErrors).toEqual([]);
     } catch (error) {
+      try {
+        const phone = fixture.phonePage;
+        if (phone && !phone.isClosed()) {
+          failureDiagnostics = {
+            browser: await phone.evaluate(() => {
+              const browserWindow = window as unknown as {
+                app?: Record<string, any>;
+                cjkActive?: boolean;
+                __cod370Trace?: BrowserTrace;
+                __cod370Wire?: { keydowns: number[] };
+              };
+              const active = document.activeElement;
+              const cjk = document.getElementById('cjkInput');
+              return {
+                activeElement: { id: active?.id ?? '', className: active?.className ?? '' },
+                cjkActive: !!browserWindow.cjkActive,
+                cjkVisible: !!cjk?.classList.contains('cjk-input-visible'),
+                wsReady: browserWindow.app?._wsReady,
+                wsState: browserWindow.app?._wsState,
+                wsSessionId: browserWindow.app?._wsSessionId,
+                activeSessionId: browserWindow.app?.activeSessionId,
+                pendingInput: browserWindow.app?._pendingInput,
+                pendingDeliveries: browserWindow.app?._pendingDeliveries?.get(browserWindow.app?.activeSessionId)
+                  ?.length,
+                trace: browserWindow.__cod370Trace
+                  ? {
+                      logical: [...browserWindow.__cod370Trace.logical],
+                      durable: [...browserWindow.__cod370Trace.durable],
+                      resizes: [...browserWindow.__cod370Trace.resizes],
+                      longTasks: [...browserWindow.__cod370Trace.longTasks],
+                    }
+                  : null,
+                keydowns: [...(browserWindow.__cod370Wire?.keydowns ?? [])],
+              };
+            }),
+            paneText: fixture.pane ? fixture.paneText() : null,
+            identity: fixture.pane ? fixture.identities() : null,
+          };
+        }
+      } catch (diagnosticError) {
+        failureDiagnostics = {
+          diagnosticError: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
+        };
+      }
       failures.push(error instanceof Error ? error : new Error(String(error)));
     } finally {
       if (phoneCdp) {
@@ -1232,6 +1277,7 @@ describe.runIf(FONT_COMPARATOR_ENABLED)('COD-370 mobile OpenCode font comparator
       pageErrors,
       consoleWarningsAndErrors,
       seriousConsoleErrors,
+      failureDiagnostics,
       cleanup: fixture.cleanupProof,
       passed: failures.length === 0,
       failures: failures.map((error) => ({ name: error.name, message: error.message, stack: error.stack })),
