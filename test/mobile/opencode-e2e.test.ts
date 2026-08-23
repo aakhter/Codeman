@@ -624,11 +624,21 @@ async function activatePhone(page: Page): Promise<void> {
   await screen.tap({ position: { x: 30, y: Math.max(20, box.height - 35) } });
 }
 
-async function focusPhoneKeyboard(page: Page): Promise<void> {
+async function focusPhoneKeyboard(fixture: Cod370OpenCodeFixture, page: Page): Promise<void> {
   const screen = page.locator('#terminalContainer .xterm-screen');
   const box = await screen.boundingBox();
   if (!box) throw new Error('Phone xterm screen has no bounding box');
-  await screen.click({ position: { x: 30, y: Math.max(20, box.height - 35) } });
+  const composerRow = await waitUntil(
+    'OpenCode composer visible in phone pane and xterm',
+    async () => {
+      const paneLines = fixture.paneText().split('\n');
+      const row = paneLines.findIndex((line) => line.includes('Ask anything'));
+      return row >= 0 && (await terminalText(page)).includes('Ask anything') ? row : false;
+    },
+    20_000
+  );
+  const rows = await page.evaluate(() => (window as unknown as { app: Record<string, any> }).app.terminal.rows);
+  await screen.click({ position: { x: 30, y: ((composerRow + 0.5) * box.height) / rows } });
   await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'), undefined, {
     timeout: 2_000,
   });
@@ -704,10 +714,33 @@ async function waitForExactComposerProgress(
         if (paneToken === expected && xtermToken === expected) return true;
         throw new Error(`tokens pane=${JSON.stringify(paneToken)} xterm=${JSON.stringify(xtermToken)}`);
       } catch (error) {
+        const diagnostics = await page.evaluate(() => {
+          const browserWindow = window as unknown as {
+            app: Record<string, any>;
+            __cod370Trace?: BrowserTrace;
+            __cod370Wire?: { keydowns: number[] };
+          };
+          const app = browserWindow.app;
+          return {
+            activeElement: {
+              id: document.activeElement?.id ?? '',
+              className: document.activeElement?.className ?? '',
+            },
+            wsReady: app._wsReady,
+            wsState: app._wsState,
+            wsSessionId: app._wsSessionId,
+            activeSessionId: app.activeSessionId,
+            pendingInput: app._pendingInput,
+            pendingDeliveries: app._pendingDeliveries.get(app.activeSessionId)?.length ?? 0,
+            logical: [...(browserWindow.__cod370Trace?.logical ?? [])],
+            durable: [...(browserWindow.__cod370Trace?.durable ?? [])],
+            keydowns: [...(browserWindow.__cod370Wire?.keydowns ?? [])],
+          };
+        });
         throw new Error(
           `${error instanceof Error ? error.message : String(error)}; pane=${JSON.stringify(
             pane.slice(-2_000)
-          )}; xterm=${JSON.stringify(xterm.slice(-2_000))}`
+          )}; xterm=${JSON.stringify(xterm.slice(-2_000))}; input=${JSON.stringify(diagnostics)}`
         );
       }
     },
@@ -828,7 +861,7 @@ async function runRate(
     expect(passiveWindow.explicitEvents).toEqual([]);
     expect(sessionResizeCount(await readTrace(phone), fixture.sessionId)).toBe(phoneResizeEvents);
 
-    await focusPhoneKeyboard(phone);
+    await focusPhoneKeyboard(fixture, phone);
     const samples: number[] = [];
     let cumulative = '';
     const inputs = [marker, ...payload.slice(marker.length)];
