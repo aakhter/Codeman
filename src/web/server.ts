@@ -360,8 +360,10 @@ export class WebServer extends EventEmitter {
       sessions: this.sessions,
       readWebviews: () => readWebviews(getDataDir()),
       broadcast: this.broadcast.bind(this),
-      // Task 7 wires recipient-aware legacy session-order SSE dispatch.
-      broadcastSessionOrder: () => undefined,
+      broadcastSessionOrder: (change) => {
+        this.cachedLightState = null;
+        this.sse.broadcastSessionOrder(change);
+      },
     });
     if (this.testMode) this.tabLayouts.markRestorationSkipped();
 
@@ -2051,11 +2053,13 @@ export class WebServer extends EventEmitter {
 
   /** Shallow-filter the light-state blob to what a non-admin user may see. */
   private filterLightStateForUser(base: Record<string, unknown>, username: string): Record<string, unknown> {
-    const ownedIds = new Set<string>();
+    const authoritativeOwners = new Map<string, string | undefined>();
+    for (const [id, session] of Object.entries(this.store.getSessions())) authoritativeOwners.set(id, session.owner);
+    for (const [id, session] of this.sessions) authoritativeOwners.set(id, session.owner);
+    const ownedIds = new Set([...authoritativeOwners].filter(([, owner]) => owner === username).map(([id]) => id));
     const ownedClaudeIds = new Set<string>();
-    for (const [id, s] of this.sessions) {
+    for (const s of this.sessions.values()) {
       if (s.owner === username) {
-        ownedIds.add(id);
         if (s.claudeSessionId) ownedClaudeIds.add(s.claudeSessionId);
       }
     }
@@ -2073,6 +2077,9 @@ export class WebServer extends EventEmitter {
     const filtered: Record<string, unknown> = {
       ...base,
       sessions,
+      sessionOrder: Array.isArray(base.sessionOrder)
+        ? (base.sessionOrder as string[]).filter((id) => ownedIds.has(id))
+        : [],
       respawnStatus,
       scheduledRuns: [], // legacy ScheduledRun has no owner yet → admin-only
       subagents: bySession(base.subagents, 'sessionId'),
@@ -2109,6 +2116,7 @@ export class WebServer extends EventEmitter {
     const result = {
       version: APP_VERSION,
       sessions: this.getLightSessionsState(),
+      sessionOrder: this.store.getSessionOrder(),
       scheduledRuns: Array.from(this.scheduledRuns.values()),
       respawnStatus,
       globalStats: this.store.getAggregateStats(activeSessionTokens),

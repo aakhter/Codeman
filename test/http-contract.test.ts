@@ -6,7 +6,7 @@
  * These behaviors live in server.ts (preSerialization hook, setNotFoundHandler),
  * which the route-test harness does not install — so they need a real WebServer.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { WebServer } from '../src/web/server.js';
 
 const PORT = 3168;
@@ -33,11 +33,64 @@ describe('Stable HTTP contract (live server)', () => {
     expect(body.data.version).toBeDefined();
   });
 
-  it('does not expose global or owner tab ordering in shared light state', async () => {
+  it('preserves the legacy global session order in single-user light state without exposing layouts', async () => {
     const res = await fetch(`${base}/api/status`);
     const body = await res.json();
-    expect(body.data).not.toHaveProperty('sessionOrder');
+    expect(body.data.sessionOrder).toEqual([]);
     expect(body.data).not.toHaveProperty('tabLayouts');
+  });
+
+  it('filters status order for regular users while admins and single-user mode retain the global projection', () => {
+    type FakeSession = {
+      id: string;
+      owner: string;
+      inputTokens: number;
+      outputTokens: number;
+      totalCost: number;
+      toLightDetailedState(): { id: string; owner: string };
+    };
+    type StatusInternals = {
+      sessions: Map<string, FakeSession>;
+      store: { getSessionOrder(): string[]; setSessionOrder(order: string[]): void };
+      cachedLightState: unknown;
+      cachedSessionsList: unknown;
+      getLightState(identity?: { username: string; role: 'admin' | 'user' }): Record<string, unknown>;
+    };
+    const internals = server as unknown as StatusInternals;
+    const previousOrder = internals.store.getSessionOrder();
+    const previousSessions = new Map(internals.sessions);
+    const fakeSession = (id: string, owner: string): FakeSession => ({
+      id,
+      owner,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalCost: 0,
+      toLightDetailedState: () => ({ id, owner }),
+    });
+
+    try {
+      internals.sessions.clear();
+      internals.sessions.set('a1', fakeSession('a1', 'alice'));
+      internals.sessions.set('b1', fakeSession('b1', 'bob'));
+      internals.sessions.set('a2', fakeSession('a2', 'alice'));
+      internals.store.setSessionOrder(['b1', 'a1', 'a2']);
+      internals.cachedLightState = null;
+      internals.cachedSessionsList = null;
+
+      vi.stubEnv('CODEMAN_MULTIUSER', '1');
+      expect(internals.getLightState({ username: 'alice', role: 'user' }).sessionOrder).toEqual(['a1', 'a2']);
+      expect(internals.getLightState({ username: 'root', role: 'admin' }).sessionOrder).toEqual(['b1', 'a1', 'a2']);
+
+      vi.stubEnv('CODEMAN_MULTIUSER', '0');
+      expect(internals.getLightState().sessionOrder).toEqual(['b1', 'a1', 'a2']);
+    } finally {
+      vi.unstubAllEnvs();
+      internals.sessions.clear();
+      for (const [id, session] of previousSessions) internals.sessions.set(id, session);
+      internals.store.setSessionOrder(previousOrder);
+      internals.cachedLightState = null;
+      internals.cachedSessionsList = null;
+    }
   });
 
   it('serves the same envelope on the /api/v1 alias', async () => {

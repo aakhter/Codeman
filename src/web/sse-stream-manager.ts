@@ -17,9 +17,11 @@
 
 import type { FastifyReply } from 'fastify';
 import type { BackgroundTask } from '../session.js';
+import type { SessionOrderProjectionChange } from '../tab-layout-service.js';
 import type { AuthUser } from '../types.js';
 import { CleanupManager, StaleExpirationMap } from '../utils/index.js';
 import { SseEvent } from './sse-events.js';
+import { sessionOrderPayloadFor } from './session-order-sse.js';
 import {
   TERMINAL_BATCH_INTERVAL,
   TASK_UPDATE_BATCH_INTERVAL,
@@ -276,6 +278,16 @@ export class SseStreamManager {
     for (const [client] of this.sseClients) {
       // Multi-user ownership routing (no-op for identity-less single-user clients).
       if (!this.canDeliver(client, hint)) continue;
+      this.sendSSEPreformatted(client, message);
+    }
+  }
+
+  /** Dispatch the legacy order projection selected from each trusted client identity. */
+  broadcastSessionOrder(change: SessionOrderProjectionChange): void {
+    for (const [client] of this.sseClients) {
+      const payload = sessionOrderPayloadFor(this.sseClientIdentity.get(client), change);
+      if (!payload) continue;
+      const message = `event: ${SseEvent.SessionOrderChanged}\ndata: ${JSON.stringify(payload)}\n\n`;
       this.sendSSEPreformatted(client, message);
     }
   }

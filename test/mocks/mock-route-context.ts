@@ -39,6 +39,12 @@ export function createMockRouteContext(options?: {
     tabLayouts: {
       get: vi.fn(),
       put: vi.fn(),
+      putLegacyOrder: vi.fn(async (_actor: unknown, order: readonly string[]) => ({
+        order: [...order],
+        changedOwnerOrders: {},
+        globalOrder: [...order],
+        globalChanged: false,
+      })),
       sessionCreated: vi.fn(),
       webviewCreated: vi.fn(),
       sessionsRemoved: vi.fn(async () => {}),
