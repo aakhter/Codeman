@@ -513,6 +513,35 @@ describe('OpenCode device-local terminal font policy', () => {
     expect(harness.fetchMock).not.toHaveBeenCalled();
   });
 
+  it('queues the latest typed desktop throttle resize when WS is down or send throws', () => {
+    const harness = createApp('desktop', {}, 'opencode');
+    const first = { t: 'z', c: 100, r: 30, v: 'desktop' };
+    const latest = { t: 'z', c: 110, r: 35, v: 'desktop' };
+    harness.app._wsReady = false;
+    harness.app._wsSessionId = 'session-1';
+
+    expect(harness.app._sendOrQueueTerminalResize('session-1', first)).toBe(false);
+    expect(harness.app._sendOrQueueTerminalResize('session-1', latest)).toBe(false);
+    expect(harness.app._pendingTerminalResize).toEqual({ sessionId: 'session-1', frame: latest });
+
+    harness.app._wsReady = true;
+    harness.app._ws = {
+      send: vi.fn(() => {
+        throw new Error('socket failed');
+      }),
+    };
+    const afterThrow = { t: 'z', c: 120, r: 40, v: 'desktop' };
+    expect(harness.app._sendOrQueueTerminalResize('session-1', afterThrow)).toBe(false);
+    expect(harness.app._pendingTerminalResize).toEqual({ sessionId: 'session-1', frame: afterThrow });
+    expect(harness.fetchMock).not.toHaveBeenCalled();
+
+    const resizeThrottle = terminalSource.slice(
+      terminalSource.indexOf('const throttledResize = () => {'),
+      terminalSource.indexOf("window.addEventListener('resize', throttledResize)")
+    );
+    expect(resizeThrottle).toContain('this._sendOrQueueTerminalResize');
+  });
+
   it('restores an explicitly selected nonowner by activating before the forced resize', async () => {
     const harness = createApp('mobile', {}, 'opencode');
     harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));

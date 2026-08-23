@@ -849,7 +849,6 @@ class CodemanApp {
     // Last rendered connection-indicator tuple; the hot input path skips DOM
     // writes when the freshly computed descriptor is identical (COD-136).
     this._lastIndicatorDescriptor = null;
-    this._postDraining = new Set(); // sessionIds with an in-flight POST drainer
     this._persistReliableTimer = null;
     this._reliableAckTimeoutMs = 4000; // unacked WS frame older than this ⇒ socket likely dead
     this._reliableMaxBytes = 256 * 1024; // cap on the persisted backlog
@@ -4208,8 +4207,8 @@ class CodemanApp {
       // reconnects we've already made (pure policy in constants.js):
       //   reconnect      → transient (server restart, network blip, ping timeout);
       //                    schedule a backoff retry while this session stays active.
-      //   retry-fallback → too-many-connections / unknown rejection; show the HTTP
-      //                    fallback but keep retrying so we return to WS when it clears.
+      //   retry-fallback → too-many-connections / unknown rejection; keep input
+      //                    queued and retry until ownership-capable WS returns.
       //   give-up        → 4004 (not found) / 4009 (terminated); the session is gone.
       // _disconnectWs() nulls onclose for intentional disconnects, so we never land here for those.
       const plan = window.CodemanWsReconnect.plan(event.code, this._wsReconnectAttempts || 0);
@@ -4241,8 +4240,8 @@ class CodemanApp {
           this._updateConnectionIndicator();
         }
       } else {
-        // retry-fallback: surface the HTTP fallback, but keep trying on a bounded
-        // timer so the transport returns to WS once the transient condition clears.
+        // retry-fallback: surface queued reconnect state and keep trying on a
+        // bounded timer until ownership-capable WS returns.
         this._wsState = stillActive ? 'fallback' : 'disconnected';
         this._updateConnectionIndicator();
         if (stillActive) {
@@ -4339,10 +4338,11 @@ class CodemanApp {
    * blocks the keystroke flush; never silently drops on a half-open socket.
    * @param {string} sessionId
    * @param {string} input
-   * @param {{useMux?: boolean}} [opts] - useMux only affects the POST fallback.
+   * @param {{useMux?: boolean}} [opts] - retained in durable records for compatibility.
    */
   _sendInputAsync(sessionId, input, opts) {
     if (!sessionId || !input) return;
+    if (sessionId === this.activeSessionId) this._terminalViewerActivity?.activate?.('terminal-input');
     this._reliableSend(sessionId, input, opts?.useMux === true);
   }
 
@@ -4405,6 +4405,10 @@ class CodemanApp {
     const list = this._pendingDeliveries.get(sessionId);
     if (!list || list.length === 0) return;
 
+    // Input typed while ownership activation is pending must stay durable but
+    // undelivered. ws.onopen flushes va, then latest z, then calls _onWsReady.
+    if (this._terminalViewerActivity?.hasPending?.(sessionId)) return;
+
     // Fast path: WebSocket open for this session — fire each not-yet-sent record
     // over the single ordered stream. They stay pending until the server ACKs
     // them ({t:'ia'}); a frame swallowed by a half-open socket is re-sent after
@@ -4423,50 +4427,9 @@ class CodemanApp {
       return;
     }
 
-    // Slow path: no WS — POST records in order, awaiting each (the HTTP 2xx is
-    // the ACK). Serialized per session so seq order survives async fetches.
-    if (this._postDraining.has(sessionId)) return;
-    this._postDraining.add(sessionId);
-    (async () => {
-      try {
-        for (;;) {
-          const cur = this._pendingDeliveries.get(sessionId);
-          if (!cur || cur.length === 0) break;
-          // If the WebSocket came back mid-drain, yield to it (the acked stream)
-          // so we don't redundantly re-POST what onopen is already re-sending.
-          if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
-            break;
-          }
-          const rec = cur[0];
-          rec.tries++;
-          rec.sentAt = Date.now();
-          let resp = null;
-          try {
-            const body = { input: rec.data, seq: rec.seq, clientId: this._clientId };
-            if (rec.useMux) body.useMux = true;
-            resp = await fetch(`/api/sessions/${sessionId}/input`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-              keepalive: rec.data.length < 65536,
-            });
-          } catch {
-            resp = null;
-          }
-          if (resp && resp.ok) {
-            this._ackDelivery(sessionId, rec.seq);
-          } else if (resp && (resp.status === 404 || resp.status === 410)) {
-            // Session no longer exists — the input can never land. Drop it
-            // rather than retry forever (not a "lost" prompt: the target is gone).
-            this._ackDelivery(sessionId, rec.seq);
-          } else {
-            break; // offline / 5xx — leave queued; sweep + reconnect retry later
-          }
-        }
-      } finally {
-        this._postDraining.delete(sessionId);
-      }
-    })();
+    // No ownership-capable WS: retain the exact durable queue. Browser input
+    // must never bypass viewer ownership through the trusted HTTP API. The
+    // bounded WS reconnect path will call _onWsReady and redeliver in order.
   }
 
   /** Drop an ACKed record (by exact seq) and persist. */
@@ -4510,8 +4473,8 @@ class CodemanApp {
   /**
    * Periodic retry. For the active WS session, an oldest frame unacked past the
    * timeout means the socket is (half-)dead — close it to force a fast reconnect
-   * (onclose → reconnect → onopen → _onWsReady re-sends). Other sessions just
-   * (re)drain over POST.
+   * (onclose → reconnect → onopen → _onWsReady re-sends). Other sessions remain
+   * queued until their ownership-capable WS is active.
    */
   _redeliverSweep() {
     if (this._pendingDeliveries.size === 0) return;
@@ -4684,7 +4647,7 @@ class CodemanApp {
       };
     }
 
-    // With an active terminal, show its transport (WebSocket vs HTTP fallback).
+    // With an active terminal, show its WebSocket delivery state.
     if (this.activeSessionId) {
       let cls, label, detail;
       switch (this._wsState) {
@@ -4692,7 +4655,7 @@ class CodemanApp {
           cls = 'connected'; label = 'WS'; detail = 'Terminal connected over WebSocket';
           break;
         case 'fallback':
-          cls = 'fallback'; label = 'HTTP'; detail = 'WebSocket unavailable — input sent over HTTP';
+          cls = 'reconnecting'; label = 'WS…'; detail = 'WebSocket unavailable — input queued until reconnect';
           break;
         case 'reconnecting':
           cls = 'reconnecting'; label = 'WS…'; detail = 'Reconnecting WebSocket';
@@ -8560,7 +8523,7 @@ class CodemanApp {
     this._updateSseSubscription(sessionId);
     // Open WebSocket as soon as the active session is known. It does not
     // depend on terminal buffer loading, and opening it early keeps normal
-    // typing on the ordered WS path instead of temporary HTTP fallback.
+    // typing on the ordered WS path instead of briefly accumulating offline.
     this._connectWs(sessionId);
     this.hideWelcome();
     // Terminal-pane entrance: plays for a freshly created session, and on every
@@ -9085,7 +9048,6 @@ class CodemanApp {
     // real session removal, never on a tab switch.
     this._pendingDeliveries?.delete(sessionId);
     this._seqCounters?.delete(sessionId);
-    this._postDraining?.delete(sessionId);
     this._persistReliableState();
     this.ralphStates.delete(sessionId);
     this.ralphClosedSessions.delete(sessionId);

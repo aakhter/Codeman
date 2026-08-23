@@ -6,10 +6,9 @@
  * durable per-(clientId, seq) layer in commit 1255e28 (docs/reliable-input-
  * delivery.md). This suite verifies the client-side ordering guarantees of that
  * layer: each input is a distinct seq-tagged frame, delivered in order over the
- * WebSocket when open, serialized over HTTP POST when not, and only dropped on a
- * server ACK (HTTP 2xx). Exactly-once application is covered server-side in
- * test/reliable-input-dedup.test.ts; the header transport indicator ("WS"/"HTTP")
- * is covered in test/connection-indicator.test.ts.
+ * WebSocket when ownership-capable transport is open and retained durably when
+ * it is not. Exactly-once application is covered server-side in
+ * test/reliable-input-dedup.test.ts.
  *
  * Loaded via `vm` with a stubbed context (no jsdom).
  */
@@ -54,15 +53,7 @@ function loadCodemanAppClass() {
 
 const CodemanApp = loadCodemanAppClass();
 
-async function waitForCalls(calls: unknown[], count: number) {
-  for (let i = 0; i < 50; i++) {
-    if (calls.length >= count) return;
-    await new Promise((r) => setTimeout(r, 0));
-  }
-}
-
 type Frame = { t: string; d: string; seq: number; cid: string };
-type PostBody = { input: string; seq: number; clientId: string };
 
 type App = {
   _sendInputAsync: (sessionId: string, input: string, opts?: { useMux?: boolean }) => void;
@@ -84,7 +75,6 @@ function makeApp(): App {
   app._clientId = 'c-test';
   app._seqCounters = new Map();
   app._pendingDeliveries = new Map();
-  app._postDraining = new Set();
   app._persistReliableState = vi.fn();
   app._persistReliableNow = vi.fn();
   app._updateConnectionIndicator = vi.fn();
@@ -101,6 +91,107 @@ function makeApp(): App {
 }
 
 describe('durable input delivery — send ordering', () => {
+  it('retains input without HTTP while WS activation is unavailable', async () => {
+    const app = makeApp() as App & Record<string, any>;
+    const activate = vi.fn(() => false);
+    app._terminalViewerActivity = { activate, hasPending: vi.fn(() => true) };
+    global.fetch = vi.fn();
+
+    app._sendInputAsync('session-1', 'owned-after-reconnect');
+    await new Promise((resolveWait) => setTimeout(resolveWait, 0));
+
+    expect(activate).toHaveBeenCalledWith('terminal-input');
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(app._pendingDeliveries.get('session-1')).toMatchObject([
+      { seq: 1, data: 'owned-after-reconnect', tries: 0, sentAt: 0 },
+    ]);
+  });
+
+  it('redelivers send-throw input exactly once over the replacement WS', () => {
+    const app = makeApp() as App & Record<string, any>;
+    const activate = vi.fn(() => true);
+    app._terminalViewerActivity = { activate, hasPending: vi.fn(() => false) };
+    app._wsSessionId = 'session-1';
+    app._ws = {
+      readyState: 1,
+      send: vi.fn(() => {
+        throw new Error('socket failed');
+      }),
+    };
+
+    app._sendInputAsync('session-1', 'retry-on-fresh-socket');
+    expect(app._pendingDeliveries.get('session-1')).toMatchObject([
+      { seq: 1, data: 'retry-on-fresh-socket', sentAt: 0 },
+    ]);
+
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
+    app._onWsReady('session-1');
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ t: 'i', d: 'retry-on-fresh-socket', seq: 1, cid: 'c-test' });
+    app._onWsInputAck(1);
+    app._onWsReady('session-1');
+    expect(frames).toHaveLength(1);
+  });
+
+  it('does not send input after activation throws and replays it after activation recovery', () => {
+    const app = makeApp() as App & Record<string, any>;
+    let activationPending = false;
+    app._wsSessionId = 'session-1';
+    app._ws = {
+      readyState: 1,
+      send: vi.fn(() => {
+        throw new Error('activation socket failed');
+      }),
+    };
+    app._terminalViewerActivity = {
+      activate: vi.fn(() => {
+        try {
+          app._ws.send(JSON.stringify({ t: 'va', c: 80, r: 24, v: 'desktop' }));
+          return true;
+        } catch {
+          activationPending = true;
+          return false;
+        }
+      }),
+      hasPending: vi.fn(() => activationPending),
+    };
+
+    app._sendInputAsync('session-1', 'after-owned-reconnect');
+    expect(app._ws.send).toHaveBeenCalledOnce();
+    expect(app._pendingDeliveries.get('session-1')).toMatchObject([
+      { seq: 1, data: 'after-owned-reconnect', sentAt: 0, tries: 0 },
+    ]);
+
+    activationPending = false;
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
+    app._onWsReady('session-1');
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ t: 'i', d: 'after-owned-reconnect', seq: 1 });
+  });
+
+  it('sends ownership activation before input on the same live WS', () => {
+    const app = makeApp() as App & Record<string, any>;
+    const frames: Array<Record<string, unknown>> = [];
+    app._wsSessionId = 'session-1';
+    app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
+    app._terminalViewerActivity = {
+      activate: vi.fn(() => {
+        app._ws.send(JSON.stringify({ t: 'va', c: 80, r: 24, v: 'desktop' }));
+        return true;
+      }),
+      hasPending: vi.fn(() => false),
+    };
+
+    app._sendInputAsync('session-1', 'after-va');
+
+    expect(frames).toEqual([
+      { t: 'va', c: 80, r: 24, v: 'desktop' },
+      { t: 'i', d: 'after-va', seq: 1, cid: 'c-test' },
+    ]);
+  });
+
   it.each(INPUT_CASES)('preserves %s as one exact WebSocket record', (_label, input) => {
     const app = makeApp();
     const frames: Frame[] = [];
@@ -114,20 +205,23 @@ describe('durable input delivery — send ordering', () => {
     expect(Buffer.from(frames[0].d)).toEqual(Buffer.from(input));
   });
 
-  it.each(INPUT_CASES)('preserves %s through the serialized HTTP fallback', async (_label, input) => {
+  it.each(INPUT_CASES)('preserves %s while offline and replays it over the replacement WS', (_label, input) => {
     const app = makeApp();
-    const calls: PostBody[] = [];
-    global.fetch = vi.fn(async (_url, init) => {
-      calls.push(JSON.parse(String(init?.body)) as PostBody);
-      return new Response('{}', { status: 200 });
-    });
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
 
     app._sendInputAsync('session-1', input);
-    await waitForCalls(calls, 1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(app._pendingDeliveries.get('session-1')).toMatchObject([{ seq: 1, data: input, sentAt: 0 }]);
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ input, seq: 1, clientId: 'c-test' });
-    expect(Buffer.from(calls[0].input)).toEqual(Buffer.from(input));
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
+    app._wsSessionId = 'session-1';
+    app._onWsReady('session-1');
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ t: 'i', d: input, seq: 1, cid: 'c-test' });
+    expect(Buffer.from(frames[0].d)).toEqual(Buffer.from(input));
   });
 
   it('delivers rapid input as distinct ordered seq frames over an open WebSocket (no coalescing)', () => {
@@ -146,58 +240,45 @@ describe('durable input delivery — send ordering', () => {
     expect(frames.every((f) => f.t === 'i' && f.cid === 'c-test')).toBe(true);
   });
 
-  it('POSTs queued input one frame at a time in seq order when no socket is open', async () => {
+  it('retains rapid queued input in seq order and replays it over the replacement WS', () => {
     const app = makeApp();
-    const calls: PostBody[] = [];
-    const completions: Array<() => void> = [];
-    global.fetch = vi.fn(async (_url, init) => {
-      calls.push(JSON.parse(String(init?.body)) as PostBody);
-      await new Promise<void>((r) => completions.push(r));
-      return new Response('{}', { status: 200 });
-    });
+    global.fetch = vi.fn();
 
     app._sendInputAsync('session-1', 'a');
     app._sendInputAsync('session-1', 'b');
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(app._pendingDeliveries.get('session-1')?.map((record) => record.data)).toEqual(['a', 'b']);
 
-    // Serialized: only the first frame is in flight until its 2xx ACK lands.
-    await waitForCalls(calls, 1);
-    expect(calls.map((c) => c.input)).toEqual(['a']);
-
-    completions.shift()?.(); // ACK 'a'
-    await waitForCalls(calls, 2);
-    expect(calls.map((c) => c.input)).toEqual(['a', 'b']);
-    expect(calls.map((c) => c.seq)).toEqual([1, 2]);
-
-    completions.shift()?.();
-    await waitForCalls(calls, 2);
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
+    app._wsSessionId = 'session-1';
+    app._onWsReady('session-1');
+    expect(frames.map((frame) => frame.d)).toEqual(['a', 'b']);
+    expect(frames.map((frame) => frame.seq)).toEqual([1, 2]);
   });
 
-  it('leaves a frame queued (unacked) when HTTP delivery fails', async () => {
+  it('leaves a frame queued without attempting HTTP while WS is unavailable', async () => {
     const app = makeApp();
-    const calls: PostBody[] = [];
-    global.fetch = vi.fn(async (_url, init) => {
-      calls.push(JSON.parse(String(init?.body)) as PostBody);
-      return new Response('busy', { status: 503 });
-    });
+    global.fetch = vi.fn();
 
     app._sendInputAsync('session-1', 'a');
-    await waitForCalls(calls, 1);
     await new Promise((r) => setTimeout(r, 0));
 
-    // 5xx is not an ACK — the frame must survive for the sweep/reconnect to retry.
+    expect(global.fetch).not.toHaveBeenCalled();
     expect(app._pendingDeliveries.get('session-1')).toHaveLength(1);
     expect(app._pendingDeliveries.get('session-1')?.[0].data).toBe('a');
   });
 
-  it('drops a frame addressed to a vanished session (404) instead of retrying forever', async () => {
+  it('does not let an HTTP 404 consume a browser record that was never posted', async () => {
     const app = makeApp();
-    global.fetch = vi.fn(async () => new Response('gone', { status: 404 }));
+    const fetchMock = vi.fn(async () => new Response('gone', { status: 404 }));
+    global.fetch = fetchMock;
 
     app._sendInputAsync('session-1', 'a');
     await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
 
-    expect(app._pendingDeliveries.get('session-1')).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(app._pendingDeliveries.get('session-1')).toHaveLength(1);
   });
 });
 

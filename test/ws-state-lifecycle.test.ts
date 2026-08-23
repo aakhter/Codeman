@@ -190,7 +190,7 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     expect(ws.closed).toBe(true);
   });
 
-  it("a retry-fallback close (4010) shows 'HTTP', and the successful retry returns the chip to 'WS'", () => {
+  it("a retry-fallback close (4010) shows queued WS retry, and success returns the chip to 'WS'", () => {
     const { CodemanApp, timers } = loadHarness();
     const { app, els } = makeApp(CodemanApp);
 
@@ -202,9 +202,9 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
 
     ws1.onclose?.({ code: 4010, reason: 'Superseded by reconnect' });
     expect(app._wsState).toBe('fallback');
-    expect(els.connectionText.textContent).toBe('HTTP');
+    expect(els.connectionText.textContent).toBe('WS…');
 
-    // The bounded 5s retry succeeds → the chip must NOT stay stuck on "HTTP".
+    // The bounded 5s retry succeeds → the chip returns to connected WS.
     const timer = fireNextTimer(timers);
     expect(timer.delay).toBe(5000);
     const ws2 = FakeWebSocket.instances[1];
@@ -241,6 +241,43 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     expect(send).toHaveBeenCalledWith(JSON.stringify({ t: 'z', c: 75, r: 62, v: 'mobile', f: true }));
     expect((app as Record<string, unknown>)._pendingTerminalResize).toBeNull();
     expect(app.sendResize).not.toHaveBeenCalled();
+  });
+
+  it('opens with pending activation, then latest resize, then durable input', () => {
+    const { CodemanApp } = loadHarness();
+    const order: string[] = [];
+    const { app } = makeApp(CodemanApp, {
+      _terminalViewerActivity: {
+        flushPending: vi.fn(() => {
+          order.push('va');
+          return true;
+        }),
+      },
+      _pendingTerminalResize: {
+        sessionId: 's1',
+        frame: { t: 'z', c: 75, r: 62, v: 'mobile' },
+      },
+      _pendingDeliveries: new Map([
+        ['s1', [{ seq: 1, data: 'exact-input', useMux: false, ts: 1, tries: 0, sentAt: 0 }]],
+      ]),
+    });
+    delete (app as unknown as Record<string, unknown>)._onWsReady;
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    vi.spyOn(ws, 'send').mockImplementation((raw: string) => {
+      const frame = JSON.parse(raw) as { t: string; d?: string };
+      order.push(frame.t === 'i' ? `input:${frame.d}` : frame.t);
+    });
+    ws.readyState = FakeWebSocket.OPEN;
+    ws.onopen?.();
+
+    expect(order).toEqual(['va', 'z', 'input:exact-input']);
+    expect((app as unknown as Record<string, any>)._pendingDeliveries.get('s1')[0]).toMatchObject({
+      seq: 1,
+      tries: 1,
+      sentAt: expect.any(Number),
+    });
   });
 
   it('keeps pending passive resize session-bound and ignores a stale socket open', () => {

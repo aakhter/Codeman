@@ -1807,11 +1807,12 @@ Object.assign(CodemanApp.prototype, {
               typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
                 ? MobileDetection.getDeviceType()
                 : 'desktop';
-            if (this._wsReady && this._wsSessionId === this.activeSessionId) {
-              try {
-                this._ws.send(JSON.stringify({ t: 'z', c: cols, r: rows, v: viewportType }));
-              } catch {}
-            }
+            this._sendOrQueueTerminalResize(this.activeSessionId, {
+              t: 'z',
+              c: cols,
+              r: rows,
+              v: viewportType,
+            });
           }
         }
         // Update subagent connection lines and local echo at new dimensions.
@@ -6803,6 +6804,21 @@ Object.assign(CodemanApp.prototype, {
 
   _queuePendingTerminalResize(sessionId, frame) {
     this._pendingTerminalResize = { sessionId, frame: { ...frame } };
+  },
+
+  _sendOrQueueTerminalResize(sessionId, frame) {
+    if (!sessionId || sessionId !== this.activeSessionId) return false;
+    if (this._wsReady && this._wsSessionId === sessionId && this._ws) {
+      try {
+        this._ws.send(JSON.stringify(frame));
+        if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+        return true;
+      } catch {
+        // Retain the exact latest typed resize for the replacement socket.
+      }
+    }
+    this._queuePendingTerminalResize(sessionId, frame);
+    return false;
   },
 
   /**

@@ -3,7 +3,7 @@
  *
  * A disposable Codeman child owns a unique data directory and tmux socket. A
  * PATH-first Codex shim runs the benchmark input probe inside the real PTY.
- * Each assertion correlates the production browser record, serialized WS/HTTP
+ * Each assertion correlates the production browser record, serialized WS
  * frame, probe-received PTY bytes, and xterm-visible output.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -564,24 +564,6 @@ async function terminalContains(token: string): Promise<boolean> {
   }, token);
 }
 
-async function withForcedHttp<T>(transport: 'ws' | 'http', operation: () => Promise<T>): Promise<T> {
-  if (transport === 'ws') return operation();
-  const current = await page.evaluate(() => {
-    const app = (window as any).app;
-    const active = app._wsSessionId;
-    app._wsSessionId = '__cod356_force_http__';
-    return active;
-  });
-  try {
-    return await operation();
-  } finally {
-    await page.evaluate((active) => {
-      const app = (window as any).app;
-      if (app._wsSessionId === '__cod356_force_http__') app._wsSessionId = active;
-    }, current);
-  }
-}
-
 async function restoreAckDelivery(): Promise<void> {
   if (!page || page.isClosed()) return;
   await page.evaluate(() => {
@@ -655,35 +637,26 @@ async function assertCurrentLayers(
   await expect.poll(() => terminalContains(visibleTokens.at(-1)!.slice(-48)), { timeout: 10_000 }).toBe(true);
 }
 
-async function deliverAndTrace(transport: 'ws' | 'http', inputs: readonly string[]): Promise<void> {
+async function deliverAndTrace(inputs: readonly string[]): Promise<void> {
   const before = await resetTrace();
   const expected = Buffer.from(inputs.join(''));
-  await withForcedHttp(transport, async () => {
-    await page.evaluate(
-      ({ id, records }) => {
-        const app = (window as any).app;
-        for (const data of records) app._sendInputAsync(id, data);
-      },
-      { id: sessionId, records: inputs }
-    );
+  await page.evaluate(
+    ({ id, records }) => {
+      const app = (window as any).app;
+      for (const data of records) app._sendInputAsync(id, data);
+    },
+    { id: sessionId, records: inputs }
+  );
 
-    expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
-    await page.waitForFunction(
-      ({ index, transport, count }) => {
-        const entries =
-          transport === 'ws'
-            ? (window as any).__cod356Wire.ws.slice(index).filter((entry: any) => entry.frame?.t === 'i')
-            : (window as any).__cod356Wire.http
-                .slice(index)
-                .filter((entry: any) => typeof entry.body?.input === 'string');
-        return entries.length >= count;
-      },
-      { index: transport === 'ws' ? before.wsIndex : before.httpIndex, transport, count: inputs.length },
-      { timeout: 10_000 }
-    );
-    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, { timeout: 10_000 });
-    await assertCurrentLayers(before, inputs, transport);
-  });
+  expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
+  await page.waitForFunction(
+    ({ index, count }) =>
+      (window as any).__cod356Wire.ws.slice(index).filter((entry: any) => entry.frame?.t === 'i').length >= count,
+    { index: before.wsIndex, count: inputs.length },
+    { timeout: 10_000 }
+  );
+  await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, { timeout: 10_000 });
+  await assertCurrentLayers(before, inputs);
 }
 
 beforeAll(async () => {
@@ -772,58 +745,48 @@ const payloadCases = [
   ['500 identical printable characters', ['x'.repeat(500)]],
   ['repeated runs', ['aaabbb111___']],
   ['rapid printable/control/Enter boundaries', ['ab', '\x03', 'cd', '\x1b', 'ef', '\r']],
-  // Leave room for the reliable-delivery JSON envelope so the HTTP fallback's
-  // keepalive request remains below Chromium's 64 KiB serialized-body cap.
+  // Leave room for the reliable-delivery JSON envelope.
   ['paste near the configured input limit', ['p'.repeat(MAX_INPUT_LENGTH - 1024)]],
 ] as const;
 
 describe('terminal input real browser/server/probe correlation', () => {
-  it.each(['ws', 'http'] as const)(
-    '%s preserves deterministic payloads at every production layer',
-    async (transport) => {
-      for (const [_label, inputs] of payloadCases) await deliverAndTrace(transport, inputs);
-    },
-    120_000
-  );
+  it('WS preserves deterministic payloads at every production layer', async () => {
+    for (const [_label, inputs] of payloadCases) await deliverAndTrace(inputs);
+  }, 120_000);
 
-  it.each(['ws', 'http'] as const)(
-    '%s sends one real CJK composition commit without intermediates',
-    async (transport) => {
-      const before = await resetTrace();
-      await withForcedHttp(transport, async () => {
-        await page.evaluate(() => {
-          const app = (window as any).app;
-          const cjk = document.querySelector<HTMLTextAreaElement>('#cjkInput')!;
-          // app.js declares CjkInput as a global lexical binding rather than a
-          // window property. Direct eval reaches that exact production helper.
-          const cjkInput = eval('CjkInput');
-          cjkInput.init({ send: (text: string) => app._handleCjkInput(text) });
-          cjk.value = '\u200b';
-          cjk.dispatchEvent(new CompositionEvent('compositionstart'));
-          cjk.value = '\u200b你';
-          cjk.dispatchEvent(new InputEvent('input', { data: '你', inputType: 'insertCompositionText' }));
-          cjk.value = '\u200b你好';
-          cjk.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertCompositionText' }));
-          cjk.dispatchEvent(new CompositionEvent('compositionend', { data: '你好' }));
-          cjk.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertFromComposition' }));
-        });
-        const expected = Buffer.from('你好');
-        expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
-        await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, {
-          timeout: 10_000,
-        });
-        await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-        const bytes = Buffer.concat(
-          readProbeEvents()
-            .slice(before.probeIndex)
-            .filter((event) => event.type === 'stdin')
-            .map((event) => Buffer.from(event.base64, 'base64'))
-        );
-        expect(bytes).toEqual(expected);
-        await assertCurrentLayers(before, ['你好'], transport);
-      });
-    }
-  );
+  it('WS sends one real CJK composition commit without intermediates', async () => {
+    const before = await resetTrace();
+    await page.evaluate(() => {
+      const app = (window as any).app;
+      const cjk = document.querySelector<HTMLTextAreaElement>('#cjkInput')!;
+      // app.js declares CjkInput as a global lexical binding rather than a
+      // window property. Direct eval reaches that exact production helper.
+      const cjkInput = eval('CjkInput');
+      cjkInput.init({ send: (text: string) => app._handleCjkInput(text) });
+      cjk.value = '\u200b';
+      cjk.dispatchEvent(new CompositionEvent('compositionstart'));
+      cjk.value = '\u200b你';
+      cjk.dispatchEvent(new InputEvent('input', { data: '你', inputType: 'insertCompositionText' }));
+      cjk.value = '\u200b你好';
+      cjk.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertCompositionText' }));
+      cjk.dispatchEvent(new CompositionEvent('compositionend', { data: '你好' }));
+      cjk.dispatchEvent(new InputEvent('input', { data: '你好', inputType: 'insertFromComposition' }));
+    });
+    const expected = Buffer.from('你好');
+    expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
+    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, {
+      timeout: 10_000,
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    const bytes = Buffer.concat(
+      readProbeEvents()
+        .slice(before.probeIndex)
+        .filter((event) => event.type === 'stdin')
+        .map((event) => Buffer.from(event.base64, 'base64'))
+    );
+    expect(bytes).toEqual(expected);
+    await assertCurrentLayers(before, ['你好']);
+  });
 
   it('holds a five-second mobile composition visually without sending provisional PTY bytes', async () => {
     const before = await resetTrace();
@@ -1022,15 +985,33 @@ describe('terminal input real browser/server/probe correlation', () => {
     );
   });
 
-  it('restores the real WebSocket target when an HTTP-scoped assertion fails', async () => {
-    const active = await page.evaluate(() => (window as any).app._wsSessionId);
-    await expect(
-      withForcedHttp('http', async () => {
-        expect(await page.evaluate(() => (window as any).app._wsSessionId)).toBe('__cod356_force_http__');
-        throw new Error('intentional cleanup probe');
-      })
-    ).rejects.toThrow('intentional cleanup probe');
-    expect(await page.evaluate(() => (window as any).app._wsSessionId)).toBe(active);
+  it('queues without HTTP while WS is unavailable, then replays once after activation recovery', async () => {
+    const before = await resetTrace();
+    const active = await page.evaluate((id) => {
+      const app = (window as any).app;
+      const current = app._wsSessionId;
+      app._wsSessionId = '__cod370_ws_unavailable__';
+      app._sendInputAsync(id, 'ownership-recovered-input');
+      return current;
+    }, sessionId);
+    await page.waitForTimeout(100);
+    expect(readProbeBytes(before.probeIndex)).toEqual(Buffer.alloc(0));
+    expect(await readInputLayers(before)).toEqual({
+      logical: ['ownership-recovered-input'],
+      ws: [],
+      http: [],
+    });
+
+    await page.evaluate((current) => {
+      const app = (window as any).app;
+      app._wsSessionId = current;
+      app._terminalViewerActivity.flushPending('test-reconnect');
+      app._onWsReady(current);
+    }, active);
+    const expected = Buffer.from('ownership-recovered-input');
+    expect(await waitForProbeBytes(before.probeIndex, expected)).toEqual(expected);
+    await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0);
+    await assertCurrentLayers(before, ['ownership-recovered-input']);
   });
 
   it('scopes current-trial traces without clearing the shared real-session terminal', async () => {
