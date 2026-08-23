@@ -634,6 +634,13 @@ async function focusPhoneKeyboard(page: Page): Promise<void> {
   });
 }
 
+async function focusComparatorKeyboard(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as { app: Record<string, any> }).app.terminal.focus());
+  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'), undefined, {
+    timeout: 2_000,
+  });
+}
+
 async function waitForExactComposerProgress(
   fixture: Cod370OpenCodeFixture,
   page: Page,
@@ -893,7 +900,7 @@ async function runFontComparatorRate(
 ): Promise<FontComparatorRateEvidence> {
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuRate });
   try {
-    await focusPhoneKeyboard(page);
+    await focusComparatorKeyboard(page);
     await resetTrace(page);
     await page.evaluate(
       () =>
