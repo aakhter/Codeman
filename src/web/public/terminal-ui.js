@@ -1767,7 +1767,7 @@ Object.assign(CodemanApp.prototype, {
         // causes Ink to re-render at the new row count, garbling terminal output.
         // Local fit() still runs so xterm knows the viewport size for scrolling.
         const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
-        if (this.activeSessionId && !keyboardUp) {
+        if (this.activeSessionId && !keyboardUp && document.visibilityState !== 'hidden') {
           const dims = this.fitAddon.proposeDimensions();
           // Enforce minimum dimensions to prevent layout issues
           const cols = dims ? Math.max(dims.cols, MIN_COLS) : MIN_COLS;
@@ -1807,21 +1807,10 @@ Object.assign(CodemanApp.prototype, {
               typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
                 ? MobileDetection.getDeviceType()
                 : 'desktop';
-            let sentViaWs = false;
             if (this._wsReady && this._wsSessionId === this.activeSessionId) {
               try {
                 this._ws.send(JSON.stringify({ t: 'z', c: cols, r: rows, v: viewportType }));
-                sentViaWs = true;
-              } catch {
-                // Fall through to HTTP POST
-              }
-            }
-            if (!sentViaWs) {
-              fetch(`/api/sessions/${this.activeSessionId}/resize`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cols, rows, viewportType }),
-              }).catch(() => {});
+              } catch {}
             }
           }
         }
@@ -6800,13 +6789,13 @@ Object.assign(CodemanApp.prototype, {
   /**
    * Send resize to a session with minimum dimension enforcement.
    * @param {string} sessionId
-   * @param {{ forceHttp?: boolean, force?: boolean }} [options]
+   * @param {{ force?: boolean }} [options]
    * @returns {Promise<boolean>} Whether dimensions changed from the last send
    */
   async sendResize(sessionId, options = {}) {
     // Terminal dimensions belong only to the currently active browser view.
     // A delayed selection must never report the winner's shared xterm as its own.
-    if (!sessionId || sessionId !== this.activeSessionId) return false;
+    if (!sessionId || sessionId !== this.activeSessionId || document.visibilityState === 'hidden') return false;
     // Fit terminal to container before reading dimensions — ensures local
     // terminal size matches what we report to the server PTY.
     this.applyTerminalFontPolicyForActiveSession();
@@ -6832,28 +6821,23 @@ Object.assign(CodemanApp.prototype, {
           : window.innerWidth < 768
             ? 'tablet'
             : 'desktop';
-    // Fast path: WebSocket resize
-    if (!options.forceHttp && this._wsReady && this._wsSessionId === sessionId) {
+    // Viewer geometry is ownership-sensitive. Only the sizing token attached to
+    // this socket may resize the shared PTY; HTTP has no equivalent identity and
+    // therefore cannot be a safe fallback.
+    if (
+      this._wsReady &&
+      this._wsSessionId === sessionId &&
+      this._ws
+    ) {
       if (sessionId !== this.activeSessionId) return false;
       try {
         const msg = { t: 'z', c: dims.cols, r: dims.rows, v: viewportType };
         if (options.force) msg.f = true;
         this._ws.send(JSON.stringify(msg));
         return changed;
-      } catch {
-        // Fall through to HTTP POST
-      }
+      } catch {}
     }
-    const body = { ...dims, viewportType };
-    if (options.force) body.force = true;
-    if (sessionId !== this.activeSessionId) return false;
-    await fetch(`/api/sessions/${sessionId}/resize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (sessionId !== this.activeSessionId) return false;
-    return changed;
+    return false;
   },
 
   /**

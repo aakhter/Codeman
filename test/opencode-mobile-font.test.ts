@@ -239,6 +239,7 @@ function loadMobileBehaviorHarness(app: Record<string, any>) {
     configurable: true,
     value: { setProperty: setAppHeight },
   });
+  const fetchMock = vi.fn(() => Promise.resolve());
   const context = vm.createContext({
     console,
     URLSearchParams,
@@ -248,7 +249,7 @@ function loadMobileBehaviorHarness(app: Record<string, any>) {
     document: dom.window.document,
     app,
     KeyboardAccessoryBar: { show: vi.fn(), hide: vi.fn() },
-    fetch: vi.fn(() => Promise.resolve()),
+    fetch: fetchMock,
     getComputedStyle: vi.fn(() => ({ getPropertyValue: vi.fn(() => '') })),
     setTimeout: vi.fn((callback: () => void) => {
       timers.push(callback);
@@ -268,6 +269,10 @@ function loadMobileBehaviorHarness(app: Record<string, any>) {
     windowTarget,
     visualViewport,
     setAppHeight,
+    fetchMock,
+    setVisibility(value: 'visible' | 'hidden') {
+      Object.defineProperty(dom.window.document, 'visibilityState', { configurable: true, value });
+    },
     timers,
     setWidth(value: number) {
       width = value;
@@ -477,27 +482,42 @@ describe('OpenCode device-local terminal font policy', () => {
     expect(wsSend).not.toHaveBeenCalled();
   });
 
-  it('returns false when an HTTP resize finishes after another session becomes active', async () => {
+  it('does not bypass viewer ownership through HTTP when the sizing socket is unavailable', async () => {
     const harness = createApp('mobile', {}, 'opencode');
     harness.app.fitAddon = {
       fit: vi.fn(),
       proposeDimensions: vi.fn(() => ({ cols: 75, rows: 62 })),
     };
-    let resolveFetch!: () => void;
-    harness.fetchMock.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveFetch = resolve;
-        })
-    );
 
-    const resize = harness.app.sendResize('session-1', { forceHttp: true });
-    expect(harness.fetchMock).toHaveBeenCalledOnce();
-    harness.app.activeSessionId = 'session-2';
-    resolveFetch();
+    expect(await harness.app.sendResize('session-1')).toBe(false);
+    expect(harness.fetchMock).not.toHaveBeenCalled();
+  });
 
-    expect(await resize).toBe(false);
-    expect(harness.fetchMock).toHaveBeenCalledOnce();
+  it('keeps a delayed hidden keyboard settle local and off every resize transport', () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    harness.app.sendResize = vi.fn();
+    const mobile = loadMobileBehaviorHarness(harness.app);
+    mobile.setVisibility('hidden');
+
+    mobile.KeyboardHandler._sendTerminalResize();
+
+    expect(harness.app.sendResize).not.toHaveBeenCalled();
+    expect(mobile.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('routes a visible keyboard settle through the ownership-fenced canonical resize path', () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    harness.app.sendResize = vi.fn(async () => true);
+    const mobile = loadMobileBehaviorHarness(harness.app);
+    mobile.setVisibility('visible');
+
+    mobile.KeyboardHandler._sendTerminalResize();
+
+    expect(harness.app.sendResize).toHaveBeenCalledOnce();
+    expect(harness.app.sendResize).toHaveBeenCalledWith('session-1');
+    expect(mobile.fetchMock).not.toHaveBeenCalled();
   });
 
   it('executes the already-active selection with policy before fit and activation', async () => {
@@ -565,7 +585,7 @@ describe('OpenCode device-local terminal font policy', () => {
     expect(app.terminal.options.fontSize).toBe(10);
     expect(order).toEqual(winnerOrder);
     expect(app.sendResize).toHaveBeenCalledTimes(1);
-    expect(app.sendResize).toHaveBeenCalledWith('b', { forceHttp: true });
+    expect(app.sendResize).toHaveBeenCalledWith('b');
   });
 
   it('executes keyboard reset, show, hide, and settlement with the active mode policy before fit', () => {

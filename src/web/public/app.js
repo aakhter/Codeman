@@ -8660,8 +8660,8 @@ class CodemanApp {
       // a small region with empty rows below the status bar.
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
-      const dimsChanged = document.visibilityState === 'visible'
-        ? await this.sendResize(sessionId, { forceHttp: true }).catch(() => false)
+      const dimsChanged = userInitiated && document.visibilityState === 'visible'
+        ? await this.sendResize(sessionId).catch(() => false)
         : false;
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
@@ -8933,7 +8933,7 @@ class CodemanApp {
       // conversation. Stale Ink frames in the tailed buffer are a cosmetic
       // annoyance that disappear on the user's next keypress; data loss is not
       // acceptable. Do NOT re-introduce Ctrl+L here.
-      if (document.visibilityState === 'visible') this.sendResize(sessionId);
+      if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);
 
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.

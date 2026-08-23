@@ -723,6 +723,18 @@ describe('terminal viewer activity browser integration', () => {
     expect(app.sendResize).not.toHaveBeenCalled();
   });
 
+  it('keeps a visible unfocused automatic main-path selection off the resize transport', async () => {
+    const h = loadAppHarness();
+    h.documentTarget.visibilityState = 'visible';
+    h.setFocused(false);
+    const app = makeMainSelectionApp(h.CodemanApp, vi.fn(), vi.fn());
+
+    await app.selectSession('s1', { auto: true });
+
+    expect(app.activeSessionId).toBe('s1');
+    expect(app.sendResize).not.toHaveBeenCalled();
+  });
+
   it('switches the main path and activates a user selection exactly once after fitting s1 dimensions', async () => {
     const h = loadAppHarness();
     const order: string[] = [];
@@ -888,15 +900,20 @@ describe('terminal viewer activity browser integration', () => {
     expect(onOpen).not.toContain('this.sendResize(sessionId)');
   });
 
-  it('does not issue canonical HTTP resize while hidden', () => {
+  it('keeps selection resize ownership on explicit activity and never forces HTTP', () => {
     const selection = appSource.slice(
       appSource.indexOf('async selectSession('),
       appSource.indexOf('_cleanupSessionData(', appSource.indexOf('async selectSession('))
     );
-    expect(selection).toMatch(
-      /document\.visibilityState === 'visible'[\s\S]*sendResize\(sessionId, \{ forceHttp: true \}\)/
+    expect(selection).not.toContain('forceHttp');
+    expect(selection).toMatch(/userInitiated[\s\S]*_terminalViewerActivity\?\.activate\('session-select'\)/);
+    expect(selection).toContain(
+      "if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);"
     );
-    expect(selection).toContain("if (document.visibilityState === 'visible') this.sendResize(sessionId);");
+  });
+
+  it('keeps ordinary browser resize observation off the unowned HTTP endpoint', () => {
+    expect(terminalUiSource).not.toMatch(/fetch\(`\/api\/sessions\/\$\{[^}]+\}\/resize`/);
   });
 
   it('exposes fitted dimensions without fitting or sending and cleans the controller up', () => {
