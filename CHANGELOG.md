@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.22.0
+
+### Minor Changes
+
+- 9851aaf: Add an optional resizable vertical session rail with responsive layout, complete labels, accessible controls, and stable inline rename.
+
 ## 1.21.1
 
 ### Patch Changes
