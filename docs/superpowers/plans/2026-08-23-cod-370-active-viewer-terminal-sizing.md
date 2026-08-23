@@ -447,7 +447,7 @@ git commit -m "feat(web): COD-370 activate terminal sizing by viewer"
 - Modify: `src/web/public/app.js:4028-4075,4195-4230,8438-8465`
 - Modify: `src/web/public/terminal-ui.js:6685-6755`
 
-- [ ] **Step 1: Write failing controller tests**
+- [x] **Step 1: Write failing controller tests**
 
 Build the controller around injected functions so Node tests do not require a browser:
 
@@ -473,7 +473,7 @@ it('does not activate from install, resize, or reconnect while the document is h
 });
 ```
 
-- [ ] **Step 2: Run controller tests RED**
+- [x] **Step 2: Run controller tests RED**
 
 Run:
 
@@ -483,7 +483,7 @@ npm test -- test/terminal-viewer-activity.test.ts
 
 Expected: FAIL because the activity module does not exist.
 
-- [ ] **Step 3: Implement the focused controller**
+- [x] **Step 3: Implement the focused controller**
 
 Expose `window.CodemanTerminalViewerActivity.create(deps)`. Install listeners for `visibilitychange`, `window.focus`, terminal `pointerdown`, `touchstart`, and `focusin`. Only send when `document.visibilityState === 'visible'`, `document.hasFocus()` is true for focus-based events, the selected session and its WebSocket match, and valid fitted dimensions exist.
 
@@ -511,7 +511,7 @@ function activate(reason) {
 
 `flushPending(reason)` retries `activate(reason)` only when a prior explicit event set `pending`; WebSocket open without pending activity is a no-op. Keep `reason` in local diagnostics only; never serialize it.
 
-- [ ] **Step 4: Integrate with WebSocket lifecycle**
+- [x] **Step 4: Integrate with WebSocket lifecycle**
 
 Load the module before `app.js`. Create the controller once after terminal setup and destroy it during app cleanup. Installing the controller must not activate a viewer merely because the document is currently visible. A real `visibilitychange` to visible, `focus` transition, pointer/touch, or user-initiated session selection queues activation. On `ws.onopen`, replace unconditional `sendResize(sessionId)` with a flush of that queued explicit activation:
 
@@ -542,7 +542,10 @@ npm run check:frontend-syntax
 
 Expected: controller tests pass and all public JavaScript parses.
 
-- [ ] **Step 6: Commit Task 4**
+Gate exception confirmed against base `067cc1c`: the combined gate has 155 passed and 2 base-identical structural
+assertion failures in `test/codex-tab-resize.test.ts`; Step 5 remains unchecked until that out-of-scope baseline is repaired.
+
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add src/web/public/terminal-viewer-activity.js src/web/public/index.html src/web/public/app.js src/web/public/terminal-ui.js test/terminal-viewer-activity.test.ts

@@ -771,6 +771,8 @@ class CodemanApp {
     this._wsCloseRefreshTimer = null;
     this._wsInputSendCount = 0;
     this._httpFallbackSendCount = 0;
+    this._terminalViewerActivity = null;
+    this._terminalViewerActivityPagehideHandler = null;
 
     // Terminal write batching with DEC 2026 sync support
     this.pendingWrites = [];
@@ -1078,6 +1080,7 @@ class CodemanApp {
     requestAnimationFrame(() => {
       this.initTerminal();
       this.loadFontSize();
+      this._initTerminalViewerActivity();
       this.connectSSE();
       // Only fetch state if SSE init event hasn't arrived within 3s (avoids duplicate handleInit)
       this._initFallbackTimer = setTimeout(() => {
@@ -1162,6 +1165,57 @@ class CodemanApp {
       console.log('[CRASH-DIAG] WebGL renderer enabled');
       this._installWebGLLongTaskGuard();
     } catch (_e) { /* WebGL2 unavailable — canvas renderer used */ }
+  }
+
+  _initTerminalViewerActivity() {
+    if (this._terminalViewerActivityPagehideHandler) {
+      window.removeEventListener('pagehide', this._terminalViewerActivityPagehideHandler);
+      this._terminalViewerActivityPagehideHandler = null;
+    }
+    this._terminalViewerActivity?.destroy();
+    const terminalTarget = document.getElementById('terminalContainer');
+    if (!terminalTarget || !window.CodemanTerminalViewerActivity) return;
+
+    const controller = window.CodemanTerminalViewerActivity.create({
+      documentTarget: document,
+      windowTarget: window,
+      terminalTarget,
+      isVisible: () => document.visibilityState === 'visible',
+      isFocused: () => document.hasFocus(),
+      activeSessionId: () => this.activeSessionId,
+      dimensions: () => this.getFittedTerminalDimensions?.() ?? null,
+      send: (frame) => {
+        if (
+          !this._wsReady ||
+          this._wsSessionId !== this.activeSessionId ||
+          !this._ws ||
+          this._ws?.readyState !== WebSocket.OPEN
+        ) return false;
+        try {
+          this._ws.send(JSON.stringify(frame));
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      now: () =>
+        typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now(),
+    });
+    this._terminalViewerActivity = controller;
+
+    const pagehideHandler = (event) => {
+      if (event.persisted) return;
+      if (
+        this._terminalViewerActivity !== controller ||
+        this._terminalViewerActivityPagehideHandler !== pagehideHandler
+      ) return;
+      controller.destroy();
+      this._terminalViewerActivity = null;
+      window.removeEventListener('pagehide', pagehideHandler);
+      this._terminalViewerActivityPagehideHandler = null;
+    };
+    this._terminalViewerActivityPagehideHandler = pagehideHandler;
+    window.addEventListener('pagehide', pagehideHandler);
   }
 
   /**
@@ -4063,11 +4117,9 @@ class CodemanApp {
             this._reconcileForeignResize(sessionId);
           }, FOREIGN_RESIZE_SETTLE_MS);
         }
-        // Send a typed resize over the fresh socket: syncs PTY dims after
-        // (re)connects AND registers the desktop sizing claim server-side —
-        // selectSession's earlier resizes ran before this WS existed, so they
-        // went over HTTP, which never claims (see ws-routes sizingToken).
-        this.sendResize(sessionId)?.catch?.(() => {});
+        // A reconnect cannot claim sizing by itself. Retry only explicit viewer
+        // activity that occurred while its matching socket was unavailable.
+        this._terminalViewerActivity?.flushPending('ws-open');
         this._startMobileResizeRetry(sessionId);
         // Flush any durably-queued input over the fresh socket (covers frames a
         // prior half-open socket silently dropped, and input typed while offline).
@@ -8381,6 +8433,8 @@ class CodemanApp {
     // site nobody tagged fails toward acknowledging rather than toward an
     // alert that can never be cleared.
     const userInitiated = options?.auto !== true;
+    // Terminal sizing activity currently shares this audited `auto: true`
+    // intent contract: app-restored selections stay passive, human choices own.
     // `!activeWebviewId`: with a dashboard foregrounded, re-selecting the
     // session behind it is a real switch, not a no-op, so it must not early-return.
     if (this.activeSessionId === sessionId && !this.activeWebviewId && !forceReload) {
@@ -8389,7 +8443,11 @@ class CodemanApp {
       // which tab is showing, and so does the reload seed), and every other
       // clear path runs on the switch this early return skips, leaving a
       // yellow tab that no tap could clear.
-      if (userInitiated) this.markIdleAlertSeen(sessionId);
+      if (userInitiated) {
+        this.markIdleAlertSeen(sessionId);
+        try { this.fitAddon?.fit(); } catch {}
+        this._terminalViewerActivity?.activate('session-select');
+      }
       return;
     }
     if (this.activeSessionId === sessionId && forceReload) {
@@ -8412,7 +8470,17 @@ class CodemanApp {
     // Desktop always focuses; touch focuses only while the on-screen keyboard
     // is already open (so a tab switch doesn't pop the keyboard).
     const shouldFocusTerminal = this._shouldFocusTerminalForTabSwitch();
-    if (shouldFocusTerminal && this.terminal) this.terminal.focus();
+    const focusTerminalWithoutActivation = () => {
+      const focusTerminal = () => this.terminal.focus();
+      if (this._terminalViewerActivity?.runWithoutActivation) {
+        this._terminalViewerActivity.runWithoutActivation(focusTerminal);
+      } else {
+        focusTerminal();
+      }
+    };
+    if (shouldFocusTerminal && this.terminal) {
+      focusTerminalWithoutActivation();
+    }
 
     const _selStart = performance.now();
     const _selName = this.sessions.get(sessionId)?.name || sessionId.slice(0,8);
@@ -8572,6 +8640,7 @@ class CodemanApp {
         try { this.terminal?.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
       }
       this._syncTerminalTouchAction?.();
+      if (userInitiated) this._terminalViewerActivity?.activate('session-select');
 
       // Also push the new dimensions to the PTY. Without this, codex/codeman
       // sees the size that was set the last time the throttled resize handler
@@ -8580,7 +8649,9 @@ class CodemanApp {
       // a small region with empty rows below the status bar.
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
-      const dimsChanged = await this.sendResize(sessionId, { forceHttp: true }).catch(() => false);
+      const dimsChanged = document.visibilityState === 'visible'
+        ? await this.sendResize(sessionId, { forceHttp: true }).catch(() => false)
+        : false;
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
@@ -8851,7 +8922,7 @@ class CodemanApp {
       // conversation. Stale Ink frames in the tailed buffer are a cosmetic
       // annoyance that disappear on the user's next keypress; data loss is not
       // acceptable. Do NOT re-introduce Ctrl+L here.
-      this.sendResize(sessionId);
+      if (document.visibilityState === 'visible') this.sendResize(sessionId);
 
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.
@@ -8905,7 +8976,7 @@ class CodemanApp {
       });
 
       _crashDiag.log('FOCUS');
-      if (shouldFocusTerminal && this.terminal) this.terminal.focus();
+      if (shouldFocusTerminal && this.terminal) focusTerminalWithoutActivation();
       this.scrollToLastNonEmptyLine();
       // If we switched INTO this tab while the soft keyboard is already up, no
       // viewport-resize transition fires (handleViewportResize only runs

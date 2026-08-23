@@ -6696,6 +6696,23 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Return the dimensions already fitted into xterm without fitting or sending.
+   * @returns {{cols: number, rows: number, viewportType: string}|null}
+   */
+  getFittedTerminalDimensions() {
+    if (!this.terminal) return null;
+    const viewportType =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : window.innerWidth < 430
+          ? 'mobile'
+          : window.innerWidth < 768
+            ? 'tablet'
+            : 'desktop';
+    return { cols: this.terminal.cols, rows: this.terminal.rows, viewportType };
+  },
+
+  /**
    * Send resize to a session with minimum dimension enforcement.
    * @param {string} sessionId
    * @param {{ forceHttp?: boolean, force?: boolean }} [options]
