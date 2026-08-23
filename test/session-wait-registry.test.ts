@@ -120,14 +120,15 @@ describe('hooksAvailableForMode', () => {
 });
 
 describe('approvalsAvailableForMode', () => {
-  it('accepts Claude and Codex without widening hook-only wait support', () => {
+  it('accepts Claude, Codex and OpenCode without widening hook-only wait support', () => {
     expect(approvalsAvailableForMode('claude')).toBe(true);
     expect(approvalsAvailableForMode('codex')).toBe(true);
+    expect(approvalsAvailableForMode('opencode')).toBe(true);
     expect(hooksAvailableForMode('codex')).toBe(false);
   });
 
   it('rejects modes that do not have approval ingestion', () => {
-    for (const mode of ['shell', 'opencode', 'gemini', 'antigravity', 'pi'] as const) {
+    for (const mode of ['shell', 'gemini', 'antigravity', 'pi'] as const) {
       expect(approvalsAvailableForMode(mode)).toBe(false);
     }
   });
