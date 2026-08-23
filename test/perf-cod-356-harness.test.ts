@@ -35,6 +35,7 @@ import {
 import {
   CleanupRegistry,
   SignalCleanupController,
+  registerOwnedProcessTreeOrCleanup,
   validateDisposableTmuxSocket,
   withCleanup,
 } from '../scripts/perf/cod-356-cleanup.mjs';
@@ -56,7 +57,11 @@ import {
   verifyPostRunGeneratedAssets,
   writePairedJsonArtifacts,
 } from '../scripts/perf/cod-356-provenance.mjs';
-import { proveReachedServerOwnership } from '../scripts/perf/cod-356-safety.mjs';
+import {
+  createLinuxOwnedProcessTreeResource,
+  proveReachedServerOwnership,
+  terminateLinuxProcessIdentities,
+} from '../scripts/perf/cod-356-safety.mjs';
 import { runFixedOfferSchedule, summarizeFixedOfferSchedule } from '../scripts/perf/cod-356-scheduler.mjs';
 import {
   assertBrowserSampleClean,
@@ -933,27 +938,29 @@ describe('COD-356 benchmark statistics', () => {
 });
 
 describe('COD-356 benchmark provenance', () => {
-  const branchPointRevision = 'a445cdaf645309ce51d8b1431733afa8f0bc55ac';
+  const branchBaseRevision = 'a5ec3ce4830ff671e686568c72cd966a8cd4c52b';
+  const comparisonRevision = 'a445cdaf645309ce51d8b1431733afa8f0bc55ac';
   const postChangeRevision = '4a149c42af57e1c473ab196b1a39efd0f1a7d52d';
 
   const resolvePolicy = (phase: string, requestedRevision?: string, overrides = {}) =>
     resolveRuntimeRevisionPolicy({
       phase,
       requestedRevision,
-      branchPointRevision,
+      branchBaseRevision,
+      comparisonRevision,
       headRevision: postChangeRevision,
       resolveCommit: async (revision: string) => revision,
       isAncestor: async () => true,
       ...overrides,
     });
 
-  it('pins before runs to the implicit or explicit immutable branch point', async () => {
+  it('pins before runs to the implicit or explicit immutable comparison revision', async () => {
     await expect(resolvePolicy('before')).resolves.toMatchObject({
-      runtimeRevision: branchPointRevision,
+      runtimeRevision: comparisonRevision,
       explicit: false,
     });
-    await expect(resolvePolicy('before', branchPointRevision)).resolves.toMatchObject({
-      runtimeRevision: branchPointRevision,
+    await expect(resolvePolicy('before', comparisonRevision)).resolves.toMatchObject({
+      runtimeRevision: comparisonRevision,
       explicit: true,
     });
     await expect(resolvePolicy('before', postChangeRevision)).rejects.toThrow('before phase');
@@ -980,16 +987,16 @@ describe('COD-356 benchmark provenance', () => {
     ).toThrow();
   });
 
-  it('rejects post-change revisions outside the branch-point-to-HEAD ancestry', async () => {
-    await expect(resolvePolicy('after-poller', branchPointRevision)).rejects.toThrow('strict descendant');
+  it('rejects post-change revisions outside the comparison-to-HEAD ancestry', async () => {
+    await expect(resolvePolicy('after-poller', comparisonRevision)).rejects.toThrow('strict descendant');
     await expect(
       resolvePolicy('after-poller', postChangeRevision, {
-        isAncestor: async (ancestor: string) => ancestor !== branchPointRevision,
+        isAncestor: async (ancestor: string) => ancestor !== comparisonRevision,
       })
-    ).rejects.toThrow('descendant of branch point');
+    ).rejects.toThrow('descendant of comparison revision');
     await expect(
       resolvePolicy('after-poller', postChangeRevision, {
-        isAncestor: async (ancestor: string) => ancestor === branchPointRevision,
+        isAncestor: async (ancestor: string) => ancestor === comparisonRevision,
       })
     ).rejects.toThrow('reachable from current HEAD');
   });
@@ -998,7 +1005,9 @@ describe('COD-356 benchmark provenance', () => {
     await expect(resolvePolicy('after-poller', postChangeRevision)).resolves.toEqual({
       runtimeRevision: postChangeRevision,
       explicit: true,
-      comparisonBaselineRevision: branchPointRevision,
+      branchBaseRevision,
+      comparisonRevision,
+      comparisonBaselineRevision: comparisonRevision,
       headRevision: postChangeRevision,
     });
   });
@@ -1033,7 +1042,8 @@ describe('COD-356 benchmark provenance', () => {
           root: repository,
           phase: 'after-poller',
           requestedRevision: after,
-          branchPointRevision: before,
+          branchBaseRevision: before,
+          comparisonRevision: before,
         })
       ).resolves.toMatchObject({ runtimeRevision: after });
       await expect(
@@ -1041,7 +1051,8 @@ describe('COD-356 benchmark provenance', () => {
           root: repository,
           phase: 'after-poller',
           requestedRevision: before,
-          branchPointRevision: before,
+          branchBaseRevision: before,
+          comparisonRevision: before,
         })
       ).rejects.toThrow('strict descendant');
       await expect(
@@ -1049,7 +1060,8 @@ describe('COD-356 benchmark provenance', () => {
           root: repository,
           phase: 'after-poller',
           requestedRevision: unrelated,
-          branchPointRevision: before,
+          branchBaseRevision: before,
+          comparisonRevision: before,
         })
       ).rejects.toThrow('descendant');
       await expect(
@@ -1057,7 +1069,8 @@ describe('COD-356 benchmark provenance', () => {
           root: repository,
           phase: 'after-poller',
           requestedRevision: after.slice(0, 8),
-          branchPointRevision: before,
+          branchBaseRevision: before,
+          comparisonRevision: before,
         })
       ).rejects.toThrow('full 40-character');
       await expect(
@@ -1065,7 +1078,8 @@ describe('COD-356 benchmark provenance', () => {
           root: repository,
           phase: 'after-poller',
           requestedRevision: 'f'.repeat(40),
-          branchPointRevision: before,
+          branchBaseRevision: before,
+          comparisonRevision: before,
         })
       ).rejects.toThrow('unknown runtime revision');
     } finally {
@@ -1083,7 +1097,8 @@ describe('COD-356 benchmark provenance', () => {
 
   it('records dirty harness content independently from informational HEAD', () => {
     const inputs = {
-      branchPointRevision,
+      branchBaseRevision,
+      comparisonRevision,
       runtimeRevision: postChangeRevision,
       headRevision: 'deadbeef',
       runtimeTreeHash: 'runtime-tree-hash',
@@ -1103,8 +1118,9 @@ describe('COD-356 benchmark provenance', () => {
 
     expect(first).toMatchObject({
       runtimeRevision: postChangeRevision,
-      branchPointRevision,
-      comparisonBaselineRevision: branchPointRevision,
+      branchBaseRevision,
+      comparisonRevision,
+      comparisonBaselineRevision: comparisonRevision,
       headRevision: {
         value: 'deadbeef',
         semantics: 'informational only; not the measured runtime or harness identity',
@@ -1114,6 +1130,27 @@ describe('COD-356 benchmark provenance', () => {
       outOfScopeTrackedDirtyPaths: ['src/outside-task.ts'],
     });
     expect(first.harness.contentHash).not.toBe(changedContent.harness.contentHash);
+  });
+
+  it('records the actual branch base separately from the runtime comparison revision', () => {
+    const provenance = buildHarnessProvenance({
+      branchBaseRevision,
+      comparisonRevision,
+      runtimeRevision: postChangeRevision,
+      headRevision: postChangeRevision,
+      runtimeTreeHash: 'runtime-tree-hash',
+      harnessFiles: [{ path: 'scripts/perf/cod-356-benchmark.mjs', content: 'content' }],
+      dirtyHarnessPaths: [],
+      dirtyTrackedPaths: [],
+      ownedPaths: ['scripts/perf/cod-356-benchmark.mjs'],
+    });
+
+    expect(provenance).toMatchObject({
+      branchBaseRevision,
+      comparisonRevision,
+      comparisonBaselineRevision: comparisonRevision,
+    });
+    expect(provenance).not.toHaveProperty('branchPointRevision');
   });
 
   it('rejects a runtime tree that differs from the declared runtime revision', () => {
@@ -1682,7 +1719,10 @@ describe('COD-356 reached-target ownership', () => {
         spawnedPid: 100,
         authenticate: async () => ({ cookie: 'codeman_session=nonce', payload: { sessions: [] } }),
         findListenerOwners: async () => [999],
-        findDescendantPids: async () => [100, 101],
+        findDescendantProcesses: async () => [
+          { pid: 100, parentPid: 1, startTimeTicks: '1000', depth: 0 },
+          { pid: 101, parentPid: 100, startTimeTicks: '1001', depth: 1 },
+        ],
       })
     ).rejects.toThrow('listener is not owned by spawned server process tree');
   });
@@ -1695,9 +1735,71 @@ describe('COD-356 reached-target ownership', () => {
         spawnedPid: 100,
         authenticate: async () => ({ cookie: 'codeman_session=nonce', payload: { sessions: [] } }),
         findListenerOwners: async () => [101],
-        findDescendantPids: async () => [100, 101],
+        findDescendantProcesses: async () => [
+          { pid: 100, parentPid: 1, startTimeTicks: '1000', depth: 0 },
+          { pid: 101, parentPid: 100, startTimeTicks: '1001', depth: 1 },
+        ],
       })
-    ).resolves.toMatchObject({ listenerPid: 101, spawnedPid: 100 });
+    ).resolves.toMatchObject({
+      listenerPid: 101,
+      spawnedPid: 100,
+      descendantPids: [100, 101],
+      processIdentities: [
+        { pid: 100, startTimeTicks: '1000', depth: 0 },
+        { pid: 101, startTimeTicks: '1001', depth: 1 },
+      ],
+    });
+  });
+
+  it('signals only matching process identities deepest-first and never a reused PID', async () => {
+    const kill = vi.fn();
+    const result = await terminateLinuxProcessIdentities({
+      rootPid: 100,
+      processIdentities: [
+        { pid: 100, parentPid: 1, startTimeTicks: '1000', depth: 0 },
+        { pid: 101, parentPid: 100, startTimeTicks: '1001', depth: 1 },
+        { pid: 102, parentPid: 101, startTimeTicks: '1002', depth: 2 },
+      ],
+      signal: 'SIGTERM',
+      readProcessIdentity: async (pid: number) => ({
+        pid,
+        parentPid: pid === 102 ? 101 : 1,
+        startTimeTicks: pid === 101 ? 'reused' : String(900 + pid),
+      }),
+      kill,
+    });
+
+    expect(kill).toHaveBeenCalledExactlyOnceWith(102, 'SIGTERM');
+    expect(result).toEqual({
+      signaledPids: [102],
+      skippedPids: [{ pid: 101, reason: 'identity-mismatch' }],
+    });
+  });
+
+  it('builds cleanup verification from the same proven identities plus listener and port checks', async () => {
+    const resource = createLinuxOwnedProcessTreeResource({
+      ownership: {
+        spawnedPid: 100,
+        listenerPid: 101,
+        processIdentities: [
+          { pid: 100, parentPid: 1, startTimeTicks: '1000', depth: 0 },
+          { pid: 101, parentPid: 100, startTimeTicks: '1001', depth: 1 },
+        ],
+      },
+      host: '127.0.0.1',
+      port: 43123,
+      readProcessIdentity: async (pid: number) =>
+        pid === 101 ? { pid, parentPid: 100, startTimeTicks: '1001' } : null,
+      findListenerOwners: async () => [101],
+      isPortClosed: async () => false,
+      kill: vi.fn(),
+    });
+
+    await expect(resource.verify()).resolves.toEqual({
+      exactPidsStillAlive: [101],
+      listenerPidsStillBound: [101],
+      portClosed: false,
+    });
   });
 });
 
@@ -1793,6 +1895,66 @@ describe('COD-356 exact fallback cleanup', () => {
 });
 
 describe('COD-356 exact cleanup registry', () => {
+  it('does not report clean until the owned listener process tree and port are proven released', async () => {
+    const registry = new CleanupRegistry();
+    const order: string[] = [];
+    const child = Object.assign(new EventEmitter(), {
+      pid: 424240,
+      exitCode: null as number | null,
+      kill: vi.fn(function (this: EventEmitter & { exitCode: number | null }, signal: string) {
+        order.push(`root:${signal}`);
+        setImmediate(() => {
+          this.exitCode = 0;
+          this.emit('exit', 0);
+        });
+        return true;
+      }),
+    });
+    const terminate = vi.fn(async (signal: string) => {
+      order.push(`descendants:${signal}`);
+      return { signaledPids: [424241], skippedPids: [] };
+    });
+    const verify = vi
+      .fn()
+      .mockResolvedValueOnce({
+        exactPidsStillAlive: [424241],
+        listenerPidsStillBound: [424241],
+        portClosed: false,
+      })
+      .mockResolvedValueOnce({ exactPidsStillAlive: [], listenerPidsStillBound: [], portClosed: true });
+
+    registry.registerChild(child);
+    registry.registerOwnedProcessTree({
+      rootPid: 424240,
+      listenerPid: 424241,
+      port: 43123,
+      processIdentities: [
+        { pid: 424240, parentPid: 1, startTimeTicks: 100n, depth: 0 },
+        { pid: 424241, parentPid: 424240, startTimeTicks: 101n, depth: 1 },
+      ],
+      terminate,
+      verify,
+    });
+
+    const evidence = await registry.cleanup();
+
+    expect(order).toEqual(['descendants:SIGTERM', 'root:SIGTERM', 'descendants:SIGKILL']);
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(evidence).toMatchObject({
+      clean: true,
+      ownedProcessTrees: [
+        {
+          rootPid: 424240,
+          listenerPid: 424241,
+          port: 43123,
+          exactPidsStillAlive: [],
+          listenerPidsStillBound: [],
+          portClosed: true,
+        },
+      ],
+    });
+  });
+
   it('cleans exact child PIDs, temp dirs, browsers, and disposable session IDs once', async () => {
     const registry = new CleanupRegistry();
     const kill = vi.fn();
@@ -1817,6 +1979,7 @@ describe('COD-356 exact cleanup registry', () => {
       tempRoots: [dataDir],
       browserCount: 1,
       sessionIds: ['cod356-benchmark-session-7'],
+      ownedProcessTrees: [],
       tmuxSocket: null,
       tmuxSocketFallback: false,
       warnings: [],
@@ -1888,5 +2051,43 @@ describe('COD-356 exact cleanup registry', () => {
     await new Promise((resolve) => setImmediate(resolve));
     releaseClose();
     await cleanup;
+  });
+
+  it('performs exact owned-tree fallback cleanup when a signal wins the registration race', async () => {
+    const registry = new CleanupRegistry();
+    await registry.cleanup();
+    const terminate = vi.fn(async () => ({ signaledPids: [424247], skippedPids: [] }));
+    const verify = vi
+      .fn()
+      .mockResolvedValueOnce({
+        exactPidsStillAlive: [424247],
+        listenerPidsStillBound: [424247],
+        portClosed: false,
+      })
+      .mockResolvedValueOnce({ exactPidsStillAlive: [], listenerPidsStillBound: [], portClosed: true });
+    const finishRootCleanup = vi.fn(async () => ({ clean: true }));
+
+    await expect(
+      registerOwnedProcessTreeOrCleanup({
+        registry,
+        resource: {
+          rootPid: 424246,
+          listenerPid: 424247,
+          port: 43123,
+          processIdentities: [
+            { pid: 424246, parentPid: 1, startTimeTicks: '100', depth: 0 },
+            { pid: 424247, parentPid: 424246, startTimeTicks: '101', depth: 1 },
+          ],
+          terminate,
+          verify,
+        },
+        finishRootCleanup,
+      })
+    ).rejects.toThrow('resource registration is closed');
+
+    expect(terminate).toHaveBeenNthCalledWith(1, 'SIGTERM');
+    expect(terminate).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(finishRootCleanup).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledTimes(2);
   });
 });

@@ -3403,15 +3403,6 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * COD-181/182 — external-CLI sessions never reliably match the working
-   * pattern on stream chunks: every Codeman session runs inside tmux, and the
-   * attach client delivers the Working line as partial cell updates (doubly
-   * so for remote nested-tmux sessions). Poll the local tmux window's
-   * RENDERED visible frame instead — it always has the line fully assembled.
-   * Local capture-pane only — no ssh, a few ms every 2s. Only positive
-   * signals feed in; idle still comes from the existing quiet-window timer.
-   */
-  /**
    * COD-189 — detect a large shell output burst and, once it settles, tell
    * clients to reload from the canonical capture. During bursts tmux repaints
    * in place (jump-scroll), so live-streamed scrollback is sparse or absent;

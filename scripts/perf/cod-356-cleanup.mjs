@@ -27,6 +27,7 @@ export class CleanupRegistry {
   #tempRoots = new Set();
   #browsers = new Set();
   #sessions = new Map();
+  #ownedProcessTrees = new Map();
   #tmuxSocket = null;
   #cleanupPromise;
   #state = 'open';
@@ -75,6 +76,54 @@ export class CleanupRegistry {
     return sessionId;
   }
 
+  registerOwnedProcessTree(resource) {
+    this.#assertOpen();
+    const identities = resource?.processIdentities;
+    if (
+      !Number.isSafeInteger(resource?.rootPid) ||
+      resource.rootPid < 1 ||
+      !Number.isSafeInteger(resource?.listenerPid) ||
+      resource.listenerPid < 1 ||
+      !Number.isSafeInteger(resource?.port) ||
+      resource.port < 1 ||
+      resource.port > 65_535 ||
+      !Array.isArray(identities) ||
+      identities.length === 0 ||
+      typeof resource?.terminate !== 'function' ||
+      typeof resource?.verify !== 'function'
+    ) {
+      throw new Error('owned process tree requires exact root/listener PIDs, port, identities, terminate, and verify');
+    }
+    const pids = new Set();
+    for (const identity of identities) {
+      const validStartTime =
+        (typeof identity?.startTimeTicks === 'string' && /^\d+$/.test(identity.startTimeTicks)) ||
+        typeof identity?.startTimeTicks === 'bigint' ||
+        (Number.isSafeInteger(identity?.startTimeTicks) && identity.startTimeTicks >= 0);
+      if (
+        !Number.isSafeInteger(identity?.pid) ||
+        identity.pid < 1 ||
+        !Number.isSafeInteger(identity?.parentPid) ||
+        identity.parentPid < 0 ||
+        !Number.isSafeInteger(identity?.depth) ||
+        identity.depth < 0 ||
+        !validStartTime ||
+        pids.has(identity.pid)
+      ) {
+        throw new Error('owned process tree identities must be exact and unique');
+      }
+      pids.add(identity.pid);
+    }
+    if (!pids.has(resource.rootPid) || !pids.has(resource.listenerPid)) {
+      throw new Error('owned process tree identities must include the exact root and listener PIDs');
+    }
+    if (this.#ownedProcessTrees.has(resource.rootPid)) {
+      throw new Error('owned process tree root PID is already registered');
+    }
+    this.#ownedProcessTrees.set(resource.rootPid, resource);
+    return resource;
+  }
+
   registerTmuxSocket(socket) {
     this.#assertOpen();
     if (typeof socket?.name !== 'string' || !isAbsolute(socket?.path ?? '') || typeof socket?.cleanup !== 'function') {
@@ -100,6 +149,17 @@ export class CleanupRegistry {
       tempRoots: [...this.#tempRoots],
       browserCount: this.#browsers.size,
       sessionIds: [...this.#sessions.keys()],
+      ownedProcessTrees: [...this.#ownedProcessTrees.values()].map((resource) => ({
+        rootPid: resource.rootPid,
+        listenerPid: resource.listenerPid,
+        port: resource.port,
+        processPids: resource.processIdentities.map(({ pid }) => pid),
+        termSignal: null,
+        killSignal: null,
+        exactPidsStillAlive: resource.processIdentities.map(({ pid }) => pid),
+        listenerPidsStillBound: [resource.listenerPid],
+        portClosed: false,
+      })),
       tmuxSocket: this.#tmuxSocket ? { name: this.#tmuxSocket.name, path: this.#tmuxSocket.path } : null,
       tmuxSocketFallback: false,
       warnings: [],
@@ -138,6 +198,16 @@ export class CleanupRegistry {
       }
     }
 
+    const ownedEvidence = new Map(evidence.ownedProcessTrees.map((entry) => [entry.rootPid, entry]));
+    await Promise.all(
+      [...this.#ownedProcessTrees].map(([rootPid, resource]) =>
+        attempt(`owned descendants of PID ${rootPid} SIGTERM`, async () => {
+          const result = await resource.terminate('SIGTERM');
+          ownedEvidence.get(rootPid).termSignal = result;
+        })
+      )
+    );
+
     await Promise.all([
       ...[...this.#browsers].map((browser) => attempt('browser', () => browser.close())),
       ...[...this.#children].map(([pid, child]) =>
@@ -173,6 +243,32 @@ export class CleanupRegistry {
         })
       ),
     ]);
+    for (const [rootPid, resource] of this.#ownedProcessTrees) {
+      let verification = await attempt(`owned process tree PID ${rootPid} verification`, () => resource.verify());
+      if (
+        verification &&
+        (verification.exactPidsStillAlive.length > 0 ||
+          verification.listenerPidsStillBound.length > 0 ||
+          verification.portClosed !== true)
+      ) {
+        const result = await attempt(`owned descendants of PID ${rootPid} SIGKILL`, () =>
+          resource.terminate('SIGKILL')
+        );
+        ownedEvidence.get(rootPid).killSignal = result;
+        verification = await attempt(`owned process tree PID ${rootPid} final verification`, () => resource.verify());
+      }
+      if (!verification) continue;
+      Object.assign(ownedEvidence.get(rootPid), verification);
+      if (
+        verification.exactPidsStillAlive.length > 0 ||
+        verification.listenerPidsStillBound.length > 0 ||
+        verification.portClosed !== true
+      ) {
+        evidence.errors.push(
+          `owned process tree PID ${rootPid} was not fully released: live=${verification.exactPidsStillAlive.join(',') || 'none'} listeners=${verification.listenerPidsStillBound.join(',') || 'none'} portClosed=${verification.portClosed}`
+        );
+      }
+    }
     await Promise.all(
       [...this.#tempRoots].map((tempRoot) => attempt(`temp root ${tempRoot}`, () => rm(tempRoot, { recursive: true })))
     );
@@ -218,6 +314,43 @@ export class SignalCleanupController {
       for (const [signal, handler] of this.handlers) this.processLike.removeListener(signal, handler);
       this.handlers.clear();
     }
+  }
+}
+
+function ownedProcessTreeReleased(verification) {
+  return (
+    verification &&
+    verification.exactPidsStillAlive.length === 0 &&
+    verification.listenerPidsStillBound.length === 0 &&
+    verification.portClosed === true
+  );
+}
+
+export async function registerOwnedProcessTreeOrCleanup({ registry, resource, finishRootCleanup }) {
+  try {
+    return registry.registerOwnedProcessTree(resource);
+  } catch (registrationError) {
+    const cleanupErrors = [];
+    await resource.terminate('SIGTERM').catch((error) => cleanupErrors.push(error));
+    await finishRootCleanup().catch((error) => cleanupErrors.push(error));
+    let verification = await resource.verify().catch((error) => {
+      cleanupErrors.push(error);
+      return null;
+    });
+    if (verification && !ownedProcessTreeReleased(verification)) {
+      await resource.terminate('SIGKILL').catch((error) => cleanupErrors.push(error));
+      verification = await resource.verify().catch((error) => {
+        cleanupErrors.push(error);
+        return null;
+      });
+    }
+    if (cleanupErrors.length > 0 || !ownedProcessTreeReleased(verification)) {
+      throw new AggregateError(
+        [registrationError, ...cleanupErrors],
+        'owned server cleanup failed after resource registration race'
+      );
+    }
+    throw registrationError;
   }
 }
 

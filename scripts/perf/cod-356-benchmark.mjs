@@ -39,8 +39,13 @@ import {
   validateBenchmarkOptions,
   writeJsonArtifact,
 } from './cod-356-metrics.mjs';
-import { CleanupRegistry, SignalCleanupController, validateDisposableTmuxSocket } from './cod-356-cleanup.mjs';
-import { proveReachedServerOwnership } from './cod-356-safety.mjs';
+import {
+  CleanupRegistry,
+  SignalCleanupController,
+  registerOwnedProcessTreeOrCleanup,
+  validateDisposableTmuxSocket,
+} from './cod-356-cleanup.mjs';
+import { createLinuxOwnedProcessTreeResource, proveReachedServerOwnership } from './cod-356-safety.mjs';
 import { runFixedOfferSchedule, summarizeFixedOfferSchedule } from './cod-356-scheduler.mjs';
 import {
   assertCurrentHeadRevision,
@@ -67,7 +72,8 @@ const SAMPLE_WINDOW_MS = 2_250;
 const API_OFFER_INTERVAL_MS = 50;
 const API_OFFERED_COUNT = SAMPLE_WINDOW_MS / API_OFFER_INTERVAL_MS;
 const SERIOUS_CONSOLE = /(?:uncaught|unhandled|failed|fatal|error)/i;
-const BRANCH_POINT_REVISION = 'a445cdaf645309ce51d8b1431733afa8f0bc55ac';
+const BRANCH_BASE_REVISION = 'a5ec3ce4830ff671e686568c72cd966a8cd4c52b';
+const COMPARISON_REVISION = 'a445cdaf645309ce51d8b1431733afa8f0bc55ac';
 const RUNTIME_PATHS = ['src', 'packages', 'config', 'scripts/build.mjs', 'package-lock.json'];
 const GENERATED_ASSET_POLICY = {
   repositoryRoot: ROOT,
@@ -1098,7 +1104,8 @@ async function main() {
     root: ROOT,
     phase: options.phase,
     requestedRevision: options.runtimeRevision,
-    branchPointRevision: BRANCH_POINT_REVISION,
+    branchBaseRevision: BRANCH_BASE_REVISION,
+    comparisonRevision: COMPARISON_REVISION,
   });
 
   if (options.dryRun) {
@@ -1117,7 +1124,13 @@ async function main() {
           fixtureCount: FIXTURE_COUNT,
           target: { host: HOST, port: 'auto (never 3002)', instance: 'cod356-benchmark-<nonce>' },
           loadProfile,
-          cleanup: ['exact child PIDs', 'exact session IDs', 'registered browser', 'temporary Codeman data directory'],
+          cleanup: [
+            'identity-safe listener/process tree and closed port',
+            'exact child PIDs',
+            'exact session IDs',
+            'registered browser',
+            'temporary Codeman data directory',
+          ],
         },
         null,
         2
@@ -1130,7 +1143,8 @@ async function main() {
     root: ROOT,
     phase: options.phase,
     requestedRuntimeRevision: options.runtimeRevision,
-    branchPointRevision: BRANCH_POINT_REVISION,
+    branchBaseRevision: BRANCH_BASE_REVISION,
+    comparisonRevision: COMPARISON_REVISION,
     runtimePaths: RUNTIME_PATHS,
     harnessPaths: HARNESS_PATHS,
     ownedPaths: OWNED_TASK_PATHS,
@@ -1257,6 +1271,16 @@ async function main() {
     server.stderr.on('data', appendLog);
 
     targetOwnership = await waitForAuthenticatedStatus(baseUrl, server, credentials);
+    const targetCleanupResource = createLinuxOwnedProcessTreeResource({
+      ownership: targetOwnership,
+      host: HOST,
+      port,
+    });
+    await registerOwnedProcessTreeOrCleanup({
+      registry,
+      resource: targetCleanupResource,
+      finishRootCleanup: () => signalCleanup.finish(),
+    });
     auth = { authorization: targetOwnership.authorization, cookie: targetOwnership.cookie };
     const status = targetOwnership.payload;
     if (!Array.isArray((status.data ?? status).sessions) || (status.data ?? status).sessions.length !== 0) {
@@ -1350,14 +1374,17 @@ async function main() {
     if (artifactDir) await writeJsonArtifact(join(artifactDir, 'cleanup.json'), cleanupEvidence);
   }
 
-  const exactPidsStillAlive = cleanupEvidence.childPids.filter((pid) => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  });
+  const ownedProcessPids = new Set(cleanupEvidence.ownedProcessTrees.flatMap(({ processPids }) => processPids));
+  const exactPidsStillAlive = cleanupEvidence.childPids
+    .filter((pid) => !ownedProcessPids.has(pid))
+    .filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
   const cleanup = {
     ...cleanupEvidence,
     signal: signalName,
@@ -1368,6 +1395,11 @@ async function main() {
     stable:
       cleanupEvidence.clean &&
       exactPidsStillAlive.length === 0 &&
+      cleanupEvidence.ownedProcessTrees.length === 1 &&
+      cleanupEvidence.ownedProcessTrees.every(
+        ({ exactPidsStillAlive: alive, listenerPidsStillBound, portClosed }) =>
+          alive.length === 0 && listenerPidsStillBound.length === 0 && portClosed === true
+      ) &&
       cleanupEvidence.tmuxSocketFallback &&
       cleanupEvidence.errors.length === 0 &&
       (!browser || !browser.isConnected()),
@@ -1407,6 +1439,7 @@ async function main() {
         listenerPid: targetOwnership.listenerPid,
         spawnedPid: targetOwnership.spawnedPid,
         descendantPids: targetOwnership.descendantPids,
+        processIdentities: targetOwnership.processIdentities,
       },
     },
     fixtures: {

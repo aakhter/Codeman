@@ -320,7 +320,8 @@ export function assertRuntimeTreeMatchesRevision({ runtimeRevision, changedPaths
 export async function resolveRuntimeRevisionPolicy({
   phase,
   requestedRevision,
-  branchPointRevision,
+  branchBaseRevision,
+  comparisonRevision,
   headRevision,
   resolveCommit,
   isAncestor,
@@ -329,12 +330,12 @@ export async function resolveRuntimeRevisionPolicy({
   if (phase !== 'before' && !explicit) {
     throw new Error(`phase ${phase} requires --runtime-revision with a full commit SHA`);
   }
-  const declaredRevision = requestedRevision ?? branchPointRevision;
+  const declaredRevision = requestedRevision ?? comparisonRevision;
   if (!/^[0-9a-f]{40}$/.test(declaredRevision)) {
     throw new Error('--runtime-revision must be a full 40-character lowercase commit SHA');
   }
-  if (phase === 'before' && declaredRevision !== branchPointRevision) {
-    throw new Error(`before phase requires immutable branch point ${branchPointRevision}`);
+  if (phase === 'before' && declaredRevision !== comparisonRevision) {
+    throw new Error(`before phase requires immutable comparison revision ${comparisonRevision}`);
   }
   let resolvedRevision;
   try {
@@ -344,11 +345,11 @@ export async function resolveRuntimeRevisionPolicy({
   }
   if (resolvedRevision !== declaredRevision) throw new Error(`unknown runtime revision: ${declaredRevision}`);
   if (phase !== 'before') {
-    if (declaredRevision === branchPointRevision) {
-      throw new Error('post-change runtime revision must be a strict descendant of branch point');
+    if (declaredRevision === comparisonRevision) {
+      throw new Error('post-change runtime revision must be a strict descendant of comparison revision');
     }
-    if (!(await isAncestor(branchPointRevision, declaredRevision))) {
-      throw new Error('post-change runtime revision must be a descendant of branch point');
+    if (!(await isAncestor(comparisonRevision, declaredRevision))) {
+      throw new Error('post-change runtime revision must be a descendant of comparison revision');
     }
     if (!(await isAncestor(declaredRevision, headRevision))) {
       throw new Error('post-change runtime revision must be reachable from current HEAD');
@@ -357,13 +358,16 @@ export async function resolveRuntimeRevisionPolicy({
   return {
     runtimeRevision: declaredRevision,
     explicit,
-    comparisonBaselineRevision: branchPointRevision,
+    branchBaseRevision,
+    comparisonRevision,
+    comparisonBaselineRevision: comparisonRevision,
     headRevision,
   };
 }
 
 export function buildHarnessProvenance({
-  branchPointRevision,
+  branchBaseRevision,
+  comparisonRevision,
   runtimeRevision,
   headRevision,
   runtimeTreeHash,
@@ -383,8 +387,9 @@ export function buildHarnessProvenance({
   const dirtyHarnessFiles = dirtyHarnessPaths.filter((path) => harnessPathSet.has(path)).sort();
   return {
     runtimeRevision,
-    branchPointRevision,
-    comparisonBaselineRevision: branchPointRevision,
+    branchBaseRevision,
+    comparisonRevision,
+    comparisonBaselineRevision: comparisonRevision,
     runtimeTreeHash,
     headRevision: {
       value: headRevision,
@@ -521,12 +526,19 @@ export async function loadCommittedBaselineAssetManifest({ root, reportPath, sou
   };
 }
 
-export async function resolveRuntimeRevisionPolicyFromGit({ root, phase, requestedRevision, branchPointRevision }) {
+export async function resolveRuntimeRevisionPolicyFromGit({
+  root,
+  phase,
+  requestedRevision,
+  branchBaseRevision,
+  comparisonRevision,
+}) {
   const headRevision = (await git(root, 'rev-parse', 'HEAD')).trim();
   return resolveRuntimeRevisionPolicy({
     phase,
     requestedRevision,
-    branchPointRevision,
+    branchBaseRevision,
+    comparisonRevision,
     headRevision,
     resolveCommit: async (revision) => (await git(root, 'rev-parse', '--verify', `${revision}^{commit}`)).trim(),
     isAncestor: async (ancestor, descendant) =>
@@ -540,7 +552,8 @@ export async function collectBenchmarkProvenance({
   root,
   phase,
   requestedRuntimeRevision,
-  branchPointRevision,
+  branchBaseRevision,
+  comparisonRevision,
   runtimePaths,
   harnessPaths,
   ownedPaths,
@@ -551,7 +564,8 @@ export async function collectBenchmarkProvenance({
     root,
     phase,
     requestedRevision: requestedRuntimeRevision,
-    branchPointRevision,
+    branchBaseRevision,
+    comparisonRevision,
   });
   const { runtimeRevision } = revisionPolicy;
   const changedPaths = (await git(root, 'diff', '--name-only', runtimeRevision, '--', ...runtimePaths))
@@ -598,7 +612,8 @@ export async function collectBenchmarkProvenance({
   await assertCurrentHeadRevision({ root, sourceCommit: revisionPolicy.headRevision });
   return {
     ...buildHarnessProvenance({
-      branchPointRevision,
+      branchBaseRevision,
+      comparisonRevision,
       runtimeRevision,
       headRevision: revisionPolicy.headRevision,
       runtimeTreeHash: sha256(runtimeManifest),
