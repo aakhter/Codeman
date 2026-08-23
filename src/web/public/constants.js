@@ -441,8 +441,8 @@ function r1(n) {
 //   - 4004 (session not found) / 4009 (session terminated) → 'give-up': the
 //     session is gone, retrying only wastes connections.
 //   - 4008 (too many connections) and any other code >= 4004 → 'retry-fallback':
-//     show the HTTP fallback but keep retrying on a bounded 5s timer so the
-//     transport returns to WS once the transient condition clears (un-stick).
+//     keep browser input queued and retry on a bounded 5s timer so an
+//     ownership-capable WS returns once the transient condition clears.
 // Pure: no DOM, no side effects.
 function planWsReconnect(code, attempt) {
   if (code === 4004 || code === 4009) {

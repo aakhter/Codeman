@@ -154,6 +154,20 @@
       );
     }
 
+    function clearSession(sessionId) {
+      if (pendingSessionId === sessionId) {
+        pending = false;
+        pendingSessionId = null;
+        pendingRequiresFocus = false;
+      }
+      if (lastActivatedSessionId === sessionId) {
+        lastSignature = null;
+        lastTransportIdentity = null;
+        lastActivatedSessionId = null;
+        lastSentAt = 0;
+      }
+    }
+
     function destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -165,7 +179,15 @@
       for (const [target, type, listener, options] of listeners) target.removeEventListener(type, listener, options);
     }
 
-    return { activate, flushPending, hasPending, isCurrentTransportActivated, runWithoutActivation, destroy };
+    return {
+      activate,
+      flushPending,
+      hasPending,
+      isCurrentTransportActivated,
+      clearSession,
+      runWithoutActivation,
+      destroy,
+    };
   }
 
   global.CodemanTerminalViewerActivity = { create };

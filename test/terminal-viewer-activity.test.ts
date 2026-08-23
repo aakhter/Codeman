@@ -64,6 +64,7 @@ function loadApi(globals: Record<string, unknown> = {}) {
       flushPending: (reason: string) => boolean;
       hasPending: (sessionId?: string | null) => boolean;
       isCurrentTransportActivated: (sessionId?: string | null) => boolean;
+      clearSession: (sessionId: string) => void;
       runWithoutActivation: <T>(callback: () => T) => T;
       destroy: () => void;
     };
@@ -494,6 +495,29 @@ describe('terminal viewer activity controller', () => {
     h.setNow(103);
     expect(h.controller.activate('pointerdown')).toBe(false);
     expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it('clears only the dead session pending and transport activation state', () => {
+    let ready = true;
+    const oldSocket = { id: 'old' };
+    const h = harness({
+      send: vi.fn(() => ready),
+      transportIdentity: () => oldSocket,
+    });
+
+    expect(h.controller.activate('pointerdown')).toBe(true);
+    expect(h.controller.isCurrentTransportActivated('s1')).toBe(true);
+    ready = false;
+    expect(h.controller.activate('restore-terminal-size')).toBe(false);
+    expect(h.controller.hasPending('s1')).toBe(true);
+    h.controller.clearSession('other-session');
+    expect(h.controller.hasPending('s1')).toBe(true);
+    expect(h.controller.isCurrentTransportActivated('s1')).toBe(true);
+
+    h.controller.clearSession('s1');
+    expect(h.controller.hasPending('s1')).toBe(false);
+    expect(h.controller.flushPending('ws-open')).toBe(false);
+    expect(h.controller.isCurrentTransportActivated('s1')).toBe(false);
   });
 
   it('keeps a pending focus-based activation queued until focus returns', () => {

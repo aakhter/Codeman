@@ -214,6 +214,119 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     expect(els.connectionText.textContent).toBe('WS');
   });
 
+  it.each([
+    [4004, 'Session not found'],
+    [4009, 'Session terminated'],
+  ])('a terminal close %i fails exact-session durable input closed without retry or HTTP', (code, reason) => {
+    const { CodemanApp, timers } = loadHarness();
+    const persistReliableNow = vi.fn();
+    const clearSession = vi.fn();
+    const showToast = vi.fn();
+    const dead = [{ seq: 1, data: 'cannot-deliver', useMux: false, ts: 1, tries: 0, sentAt: 0 }];
+    const other = [{ seq: 2, data: 'other-session', useMux: false, ts: 1, tries: 0, sentAt: 0 }];
+    const { app, els } = makeApp(CodemanApp, {
+      _pendingDeliveries: new Map([
+        ['s1', dead],
+        ['s2', other],
+      ]),
+      _pendingTerminalResize: {
+        sessionId: 's1',
+        frame: { t: 'z', c: 80, r: 30, v: 'desktop' },
+      },
+      _terminalViewerActivity: { clearSession },
+      _persistReliableNow: persistReliableNow,
+      showToast,
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('HTTP must not run'));
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    ws.onclose?.({ code, reason });
+
+    const internal = app as unknown as Record<string, any>;
+    expect(internal._pendingDeliveries.has('s1')).toBe(false);
+    expect(internal._pendingDeliveries.get('s2')).toBe(other);
+    expect(internal._pendingTerminalResize).toBeNull();
+    expect(clearSession).toHaveBeenCalledOnce();
+    expect(clearSession).toHaveBeenCalledWith('s1');
+    expect(persistReliableNow).toHaveBeenCalledOnce();
+    expect(timers.filter((timer) => !timer.cleared)).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(app._wsState).toBe('gone');
+    expect(els.connectionText.textContent).toBe('Ended');
+    expect(els.connectionIndicator.title).toBe('Terminal session is no longer available');
+    expect(showToast).toHaveBeenCalledWith('Session ended — queued terminal input could not be delivered', 'error');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('a terminal give-up close preserves another session pending resize and durable input', () => {
+    const { CodemanApp } = loadHarness();
+    const otherResize = {
+      sessionId: 's2',
+      frame: { t: 'z', c: 60, r: 20, v: 'mobile' },
+    };
+    const otherInput = [{ seq: 2, data: 'keep-me', useMux: false, ts: 1, tries: 0, sentAt: 0 }];
+    const { app } = makeApp(CodemanApp, {
+      _pendingDeliveries: new Map([['s2', otherInput]]),
+      _pendingTerminalResize: otherResize,
+      _terminalViewerActivity: { clearSession: vi.fn() },
+      _persistReliableNow: vi.fn(),
+      showToast: vi.fn(),
+    });
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    // Re-seed after _connectWs's ordinary session-switch stale-resize cleanup;
+    // the close handler itself must remain exact-session scoped.
+    (app as unknown as Record<string, unknown>)._pendingTerminalResize = otherResize;
+    ws.onclose?.({ code: 4004, reason: 'Session not found' });
+
+    const internal = app as unknown as Record<string, any>;
+    expect(internal._pendingDeliveries.get('s2')).toBe(otherInput);
+    expect(internal._pendingTerminalResize).toBe(otherResize);
+  });
+
+  it('a transient close preserves durable input and viewer state for reconnect', () => {
+    const { CodemanApp, timers } = loadHarness();
+    const pending = [{ seq: 1, data: 'retry-me', useMux: false, ts: 1, tries: 1, sentAt: 10 }];
+    const clearSession = vi.fn();
+    const persistReliableNow = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _pendingDeliveries: new Map([['s1', pending]]),
+      _terminalViewerActivity: { clearSession },
+      _persistReliableNow: persistReliableNow,
+    });
+
+    app._connectWs('s1');
+    FakeWebSocket.instances[0].onclose?.({ code: 1006, reason: '' });
+
+    expect((app as unknown as Record<string, any>)._pendingDeliveries.get('s1')).toBe(pending);
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(persistReliableNow).not.toHaveBeenCalled();
+    expect(timers.some((timer) => !timer.cleared)).toBe(true);
+    expect(app._wsState).toBe('reconnecting');
+  });
+
+  it('does not create a new never-reconnect queue after the active session is gone', () => {
+    const { CodemanApp } = loadHarness();
+    const { app } = makeApp(CodemanApp, {
+      _wsState: 'gone',
+      _seqCounters: new Map(),
+      _persistReliableState: vi.fn(),
+      _drainSession: vi.fn(),
+    });
+
+    (app as unknown as { _reliableSend: (sessionId: string, data: string, useMux: boolean) => void })._reliableSend(
+      's1',
+      'after-end',
+      false
+    );
+
+    expect((app as unknown as Record<string, any>)._pendingDeliveries.has('s1')).toBe(false);
+    expect((app as unknown as Record<string, any>)._seqCounters.has('s1')).toBe(false);
+  });
+
   it('flushes one exact latest passive z after pending explicit va, without HTTP or a new activation', () => {
     const { CodemanApp } = loadHarness();
     const order: string[] = [];

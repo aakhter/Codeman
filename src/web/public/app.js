@@ -765,7 +765,7 @@ class CodemanApp {
     this._ws = null;            // WebSocket instance for active session
     this._wsSessionId = null;   // Session ID the WS is connected to
     this._wsReady = false;      // True when WS is open and ready for I/O
-    this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | disconnected
+    this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | gone | disconnected
     this._wsLastClose = null; // { code, reason, at } for transport diagnostics
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
     this._wsCloseRefreshTimer = null;
@@ -4120,8 +4120,9 @@ class CodemanApp {
 
   /**
    * Open a WebSocket for terminal I/O on the given session.
-   * Replaces HTTP POST input and SSE terminal output with a single
-   * bidirectional connection. Falls back to SSE+POST if WS fails.
+   * Browser terminal input requires this ownership-capable bidirectional
+   * connection. SSE can still carry output while a transient WS outage queues
+   * reliable browser input for the next activated socket.
    */
   _connectWs(sessionId) {
     // A passive resize belongs to the session measured when it was queued. A
@@ -4242,8 +4243,21 @@ class CodemanApp {
         this._scheduleWsCloseRefresh(sessionId);
       }
       if (plan.action === 'give-up') {
-        this._wsState = stillActive ? 'fallback' : 'disconnected';
+        this._clearTimer('_wsReconnectTimer');
+        const hadQueuedInput = this._pendingDeliveries.delete(sessionId);
+        if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+        this._terminalViewerActivity?.clearSession?.(sessionId);
+        if (hadQueuedInput) this._persistReliableNow();
+        this._wsState = stillActive ? 'gone' : 'disconnected';
         this._updateConnectionIndicator();
+        if (stillActive) {
+          this.showToast?.(
+            hadQueuedInput
+              ? 'Session ended — queued terminal input could not be delivered'
+              : 'Terminal session is no longer available',
+            hadQueuedInput ? 'error' : 'warning'
+          );
+        }
       } else if (plan.action === 'reconnect') {
         if (stillActive) {
           this._wsState = 'reconnecting';
@@ -4402,6 +4416,9 @@ class CodemanApp {
 
   /** Record one input frame and kick delivery. The record lives until ACKed. */
   _reliableSend(sessionId, data, useMux) {
+    // A 4004/4009 close is authoritative: no reconnect will ever drain new
+    // records for this still-selected dead terminal.
+    if (this._wsState === 'gone' && this.activeSessionId === sessionId) return;
     const seq = this._nextSeq(sessionId);
     const rec = { seq, data, useMux: !!useMux, ts: Date.now(), tries: 0, sentAt: 0 };
     let list = this._pendingDeliveries.get(sessionId);
@@ -4442,7 +4459,7 @@ class CodemanApp {
           rec.sentAt = Date.now();
           rec.tries++;
         } catch {
-          break; // socket died mid-send — reconnect/POST drainer retries
+          break; // socket died mid-send — the reconnect drainer retries
         }
       }
       return;
@@ -4682,6 +4699,13 @@ class CodemanApp {
         case 'fallback':
           cls = 'reconnecting'; label = 'WS…'; detail = 'WebSocket unavailable — input queued until reconnect';
           break;
+        case 'gone':
+          return {
+            display: 'flex',
+            dotClass: 'connection-dot offline',
+            text: 'Ended',
+            title: 'Terminal session is no longer available',
+          };
         case 'reconnecting':
           cls = 'reconnecting'; label = 'WS…'; detail = 'Reconnecting WebSocket';
           break;
