@@ -33,6 +33,14 @@
           "sha256": "b656113abe5f9b5f2c30c8b10462b7b4e947e10a49f561058822bc48e9601b4a"
         },
         {
+          "path": "exceljs.min.js",
+          "sha256": "b35a8b1fd1a5fe3e853a7dc4006294281dd2430ee3108fd30d5417ab7c9a5d56"
+        },
+        {
+          "path": "fflate.min.js",
+          "sha256": "c3b34f2e9f5e74d4d7d64e01cac7a0c01954c6c406414d42185c7b53d6875ddf"
+        },
+        {
           "path": "marked.min.js",
           "sha256": "934e3e36e9e2da0afb1a6e75075bb0f09af05293a844e84a7477ef40911c349a"
         },
@@ -58,7 +66,7 @@
         },
         {
           "path": "xterm-zerolag-input.js",
-          "sha256": "dc453df4aafd788849bbfcba3f361a52ee8d1839754141f93c389fde23b57292"
+          "sha256": "565860ab32098f0d98558ad3f2cf0c899fd2329320c15905497ceb2ff0b369f1"
         },
         {
           "path": "xterm.css",
@@ -72,8 +80,8 @@
     },
     "harness": {
       "root": "/opt/projects/Codeman/.worktrees/COD-370-active-viewer-terminal-sizing",
-      "sha": "6c026f49df8d410b56efd4385abf102a475f95d8",
-      "tree": "1d897902d65182685b150669ce6d7ecd4ee8aeaa",
+      "sha": "1b1c7ecf088895baab4e17c1a72e29052f2ff1ec",
+      "tree": "7b2f59c84e4b03f80cdcd6249f98d697e99f423e",
       "packageLockSha256": "b8af0c8d6066ca77d68766d70dd13cfb57bbce605997006ac613ca84ab8e01d9",
       "generatedVendor": [
         {
@@ -128,8 +136,8 @@
       "files": [
         {
           "path": "test/mobile/opencode-e2e.test.ts",
-          "blob": "66d6d2b2cfba4f900d70e0c73c1dfe38786b864e",
-          "sha256": "3262b28ac6182f98d61ccc64f129ede484a143ec0d69c03b721afc551d42f410"
+          "blob": "956622203c8a74baaa86157cb229396d072da5ea",
+          "sha256": "3109e293edc1ee8cdd71e9ceccbdc76fdf0feb541764dcfc38e61831aa84931d"
         },
         {
           "path": "test/utils/cod370-opencode-fixture.ts",
@@ -149,45 +157,45 @@
     }
   },
   "timing": {
-    "startedAt": "2026-08-23T22:16:00.762Z",
-    "endedAt": "2026-08-23T22:16:13.582Z",
-    "durationMs": 12820,
+    "startedAt": "2026-08-23T23:29:20.125Z",
+    "endedAt": "2026-08-23T23:29:36.188Z",
+    "durationMs": 16063,
     "loadAverage": {
       "before": [
-        0.54,
-        0.71,
-        0.85
+        2.17,
+        1.61,
+        1.71
       ],
       "after": [
-        1.5,
-        0.9,
-        0.91
+        3.09,
+        1.84,
+        1.78
       ]
     }
   },
   "session": {
-    "id": "79ec8802-ecd2-4f62-b83e-a546839c3885",
-    "launcherPid": 4103096,
-    "listenerPid": 4103107,
+    "id": "068f3fc9-f4bc-4243-b802-91e5e90edbfd",
+    "launcherPid": 52563,
+    "listenerPid": 52574,
     "identity": {
-      "muxName": "codeman-79ec8802",
+      "muxName": "codeman-068f3fc9",
       "tmuxSessionId": "$0",
       "windowId": "@0",
       "paneId": "%0",
-      "panePid": 4103322,
-      "paneStartTimeTicks": "486513906",
+      "panePid": 52816,
+      "paneStartTimeTicks": "486953938",
       "opencode": {
-        "pid": 4103322,
-        "startTimeTicks": "486513906",
+        "pid": 52816,
+        "startTimeTicks": "486953938",
         "executable": "/home/ubuntu/.opencode/bin/opencode",
         "command": "opencode",
         "parentChain": [
           {
-            "pid": 4103322,
-            "startTimeTicks": "486513906"
+            "pid": 52816,
+            "startTimeTicks": "486953938"
           }
         ],
-        "panePid": 4103322
+        "panePid": 52816
       }
     }
   },
@@ -199,10 +207,10 @@
   },
   "initialResizeEvents": [
     {
-      "id": "79ec8802-ecd2-4f62-b83e-a546839c3885",
+      "id": "068f3fc9-f4bc-4243-b802-91e5e90edbfd",
       "cols": 62,
       "rows": 49,
-      "at": 853.3999996185303
+      "at": 1074.5
     }
   ],
   "rates": [
@@ -228,132 +236,132 @@
       "logicalFrames": [
         {
           "data": "q",
-          "at": 5622.89999961853
+          "at": 7058.800000190735
         },
         {
           "data": "z",
-          "at": 5711.89999961853
+          "at": 7190.900000572205
         },
         {
           "data": "1",
-          "at": 5795.699999809265
+          "at": 7309.700000762939
         },
         {
           "data": "a",
-          "at": 5891.5
+          "at": 7514.200000762939
         },
         {
           "data": "2",
-          "at": 5966.299999237061
+          "at": 7636.10000038147
         },
         {
           "data": "b",
-          "at": 6042.699999809265
+          "at": 7742
         },
         {
           "data": "3",
-          "at": 6128.099999427795
+          "at": 7841.200000762939
         },
         {
           "data": "c",
-          "at": 6211.39999961853
+          "at": 7945
         },
         {
           "data": "4",
-          "at": 6392.5
+          "at": 8046.5
         },
         {
           "data": "d",
-          "at": 6473.89999961853
+          "at": 8144.5
         }
       ],
       "durableFrames": [
         {
           "data": "q",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 1,
           "rawBytes": 56,
-          "at": 5623.099999427795
+          "at": 7059.200000762939
         },
         {
           "data": "z",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 2,
           "rawBytes": 56,
-          "at": 5712
+          "at": 7191
         },
         {
           "data": "1",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 3,
           "rawBytes": 56,
-          "at": 5795.699999809265
+          "at": 7309.800000190735
         },
         {
           "data": "a",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 4,
           "rawBytes": 56,
-          "at": 5891.699999809265
+          "at": 7514.300000190735
         },
         {
           "data": "2",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 5,
           "rawBytes": 56,
-          "at": 5966.39999961853
+          "at": 7636.10000038147
         },
         {
           "data": "b",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 6,
           "rawBytes": 56,
-          "at": 6042.699999809265
+          "at": 7742.10000038147
         },
         {
           "data": "3",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 7,
           "rawBytes": 56,
-          "at": 6128.199999809265
+          "at": 7841.300000190735
         },
         {
           "data": "c",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 8,
           "rawBytes": 56,
-          "at": 6211.5
+          "at": 7945.10000038147
         },
         {
           "data": "4",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 9,
           "rawBytes": 56,
-          "at": 6392.5
+          "at": 8046.5
         },
         {
           "data": "d",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 10,
           "rawBytes": 57,
-          "at": 6473.89999961853
+          "at": 8144.60000038147
         }
       ],
       "samples": [
-        41.79999923706055,
-        29.100000381469727,
-        49.19999980926514,
-        25.100000381469727,
-        25.09999942779541,
-        36.60000038146973,
-        32.59999942779541,
-        130,
-        33.79999923706055,
-        37
+        68.69999980926514,
+        45.10000038146973,
+        135.60000038146973,
+        51.19999980926514,
+        42.69999980926514,
+        39,
+        38.39999961853027,
+        36.80000019073486,
+        32.10000038146973,
+        38.69999980926514
       ],
-      "medianMs": 33.79999923706055,
-      "p95Ms": 130,
-      "maxMs": 130,
+      "medianMs": 39,
+      "p95Ms": 135.60000038146973,
+      "maxMs": 135.60000038146973,
       "fontSize": 10,
       "phoneDims": {
         "cols": 62,
@@ -361,12 +369,12 @@
         "viewportType": "mobile"
       },
       "paneDims": {
-        "muxName": "codeman-79ec8802",
+        "muxName": "codeman-068f3fc9",
         "tmuxSessionId": "$0",
         "windowId": "@0",
         "paneId": "%0",
-        "panePid": 4103322,
-        "opencodePid": 4103322,
+        "panePid": 52816,
+        "opencodePid": 52816,
         "command": "opencode",
         "cols": 62,
         "rows": 49
@@ -374,8 +382,8 @@
       "resizeEvents": [],
       "longTasks": [],
       "longTaskWindow": {
-        "startedAt": 5616.599999427795,
-        "endedAt": 6561.5
+        "startedAt": 7048.10000038147,
+        "endedAt": 8261.900000572205
       },
       "paneComposerToken": "qz1a2b3c4d",
       "xtermComposerToken": "qz1a2b3c4d",
@@ -383,288 +391,288 @@
         {
           "checkpoint": "before-dispatch",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:q",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a2",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a2b",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a2b3",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a2b3c",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a2b3c4",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:qz1a2b3c4d",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "after-delivery-drain",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         }
@@ -693,132 +701,132 @@
       "logicalFrames": [
         {
           "data": "w",
-          "at": 7389.5
+          "at": 9223.10000038147
         },
         {
           "data": "x",
-          "at": 7508.89999961853
+          "at": 9393
         },
         {
           "data": "5",
-          "at": 7623.799999237061
+          "at": 9579.70000076294
         },
         {
           "data": "e",
-          "at": 7741.299999237061
+          "at": 9764.20000076294
         },
         {
           "data": "6",
-          "at": 7860.199999809265
+          "at": 9929.70000076294
         },
         {
           "data": "f",
-          "at": 7975.199999809265
+          "at": 10113.800000190735
         },
         {
           "data": "7",
-          "at": 8109.699999809265
+          "at": 10327.70000076294
         },
         {
           "data": "g",
-          "at": 8235.29999923706
+          "at": 10497.60000038147
         },
         {
           "data": "8",
-          "at": 8373.5
+          "at": 10657.10000038147
         },
         {
           "data": "h",
-          "at": 8498.699999809265
+          "at": 10812.70000076294
         }
       ],
       "durableFrames": [
         {
           "data": "w",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 12,
           "rawBytes": 57,
-          "at": 7389.5
+          "at": 9223.60000038147
         },
         {
           "data": "x",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 13,
           "rawBytes": 57,
-          "at": 7509.199999809265
+          "at": 9393.10000038147
         },
         {
           "data": "5",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 14,
           "rawBytes": 57,
-          "at": 7623.799999237061
+          "at": 9579.800000190735
         },
         {
           "data": "e",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 15,
           "rawBytes": 57,
-          "at": 7741.39999961853
+          "at": 9764.20000076294
         },
         {
           "data": "6",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 16,
           "rawBytes": 57,
-          "at": 7860.199999809265
+          "at": 9929.800000190735
         },
         {
           "data": "f",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 17,
           "rawBytes": 57,
-          "at": 7976
+          "at": 10114.10000038147
         },
         {
           "data": "7",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 18,
           "rawBytes": 57,
-          "at": 8109.799999237061
+          "at": 10327.800000190735
         },
         {
           "data": "g",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 19,
           "rawBytes": 57,
-          "at": 8235.39999961853
+          "at": 10498.300000190735
         },
         {
           "data": "8",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 20,
           "rawBytes": 57,
-          "at": 8373.5
+          "at": 10657.10000038147
         },
         {
           "data": "h",
-          "clientId": "c-676fydgw3w8-mt6d9bde",
+          "clientId": "c-6dfq1vswc6q-mt6fvmmp",
           "seq": 21,
           "rawBytes": 57,
-          "at": 8498.79999923706
+          "at": 10812.70000076294
         }
       ],
       "samples": [
-        71.5,
-        68.5,
-        69.30000019073486,
-        71.5,
-        68.19999980926514,
-        69.89999961853027,
-        77.19999980926514,
-        90,
-        74.39999961853027,
-        58.19999980926514
+        94.80000019073486,
+        111.59999942779541,
+        117,
+        88,
+        105.80000019073486,
+        137.19999980926514,
+        98.30000019073486,
+        97.80000019073486,
+        91.5,
+        102.5
       ],
-      "medianMs": 69.89999961853027,
-      "p95Ms": 90,
-      "maxMs": 90,
+      "medianMs": 98.30000019073486,
+      "p95Ms": 137.19999980926514,
+      "maxMs": 137.19999980926514,
       "fontSize": 10,
       "phoneDims": {
         "cols": 62,
@@ -826,21 +834,54 @@
         "viewportType": "mobile"
       },
       "paneDims": {
-        "muxName": "codeman-79ec8802",
+        "muxName": "codeman-068f3fc9",
         "tmuxSessionId": "$0",
         "windowId": "@0",
         "paneId": "%0",
-        "panePid": 4103322,
-        "opencodePid": 4103322,
+        "panePid": 52816,
+        "opencodePid": 52816,
         "command": "opencode",
         "cols": 62,
         "rows": 49
       },
       "resizeEvents": [],
-      "longTasks": [],
+      "longTasks": [
+        {
+          "duration": 60,
+          "at": 9248.10000038147
+        },
+        {
+          "duration": 53,
+          "at": 9419.400000572205
+        },
+        {
+          "duration": 68,
+          "at": 9616.10000038147
+        },
+        {
+          "duration": 53,
+          "at": 9965.20000076294
+        },
+        {
+          "duration": 88,
+          "at": 10151.10000038147
+        },
+        {
+          "duration": 50,
+          "at": 10532.900000572205
+        },
+        {
+          "duration": 54,
+          "at": 10683.10000038147
+        },
+        {
+          "duration": 58,
+          "at": 10848.10000038147
+        }
+      ],
       "longTaskWindow": {
-        "startedAt": 7385.89999961853,
-        "endedAt": 8604.29999923706
+        "startedAt": 9217.60000038147,
+        "endedAt": 10989.300000190735
       },
       "paneComposerToken": "wx5e6f7g8h",
       "xtermComposerToken": "wx5e6f7g8h",
@@ -848,288 +889,288 @@
         {
           "checkpoint": "before-dispatch",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:w",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e6",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e6f",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e6f7",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e6f7g",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e6f7g8",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "visible:wx5e6f7g8h",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         },
         {
           "checkpoint": "after-delivery-drain",
           "identity": {
-            "muxName": "codeman-79ec8802",
+            "muxName": "codeman-068f3fc9",
             "tmuxSessionId": "$0",
             "windowId": "@0",
             "paneId": "%0",
-            "panePid": 4103322,
-            "paneStartTimeTicks": "486513906",
+            "panePid": 52816,
+            "paneStartTimeTicks": "486953938",
             "opencode": {
-              "pid": 4103322,
-              "startTimeTicks": "486513906",
+              "pid": 52816,
+              "startTimeTicks": "486953938",
               "executable": "/home/ubuntu/.opencode/bin/opencode",
               "command": "opencode",
               "parentChain": [
                 {
-                  "pid": 4103322,
-                  "startTimeTicks": "486513906"
+                  "pid": 52816,
+                  "startTimeTicks": "486953938"
                 }
               ],
-              "panePid": 4103322
+              "panePid": 52816
             }
           }
         }
