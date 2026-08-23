@@ -11,7 +11,7 @@
  * @globals {function} getEventCoords - Unified mouse/touch coordinate extractor
  * @globals {function} escapeHtml - XSS-safe HTML escaping
  * @globals {object} CodemanTabOverflow - Tab overflow layout policy helper
- * @globals {object} SSE_EVENTS - Centralized SSE event type constants (122 event types; must match backend src/web/sse-events.ts)
+ * @globals {object} SSE_EVENTS - Centralized SSE event type constants (161 event types; must match backend src/web/sse-events.ts)
  * @globals {Array} BUILTIN_RESPAWN_PRESETS - Built-in respawn configuration presets
  *
  * @dependency None (first in load order)
@@ -1097,6 +1097,7 @@ const SSE_EVENTS = {
   HOOK_STOP: 'hook:stop',
   HOOK_TEAMMATE_IDLE: 'hook:teammate_idle',
   HOOK_TASK_COMPLETED: 'hook:task_completed',
+  HOOK_SUPPRESSED: 'hook:suppressed',
 
   // Approvals Inbox
   APPROVAL_PENDING: 'approval:pending',

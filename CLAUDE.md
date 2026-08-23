@@ -343,7 +343,7 @@ Frontend JS modules have `@fileoverview` with `@dependency`/`@loadorder` tags. L
 
 ### SSE Event Registry
 
-155 event constants in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). **Both must be kept in sync**, and `test/sse-registry-parity.test.ts` is the guard that pins it (currently exactly in sync, 155 = 155, no drift either direction). The backend file's `@fileoverview` carries the per-category breakdown.
+161 event constants in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). **Both must be kept in sync**, and `test/sse-registry-parity.test.ts` is the guard that pins it (currently exactly in sync, 161 = 161, no drift either direction). The backend file's `@fileoverview` carries the per-category breakdown.
 
 ### API Routes
 
