@@ -12,6 +12,10 @@ function parseWriteBody(body: unknown): { baseVersion: number; layout: unknown }
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new TabLayoutValidationError('body must be an object');
   }
+  const keys = Object.keys(body);
+  if (keys.length !== 2 || !Object.hasOwn(body, 'baseVersion') || !Object.hasOwn(body, 'layout')) {
+    throw new TabLayoutValidationError('body must contain exactly baseVersion and layout');
+  }
   const input = body as { baseVersion?: unknown; layout?: unknown };
   if (!Number.isSafeInteger(input.baseVersion) || (input.baseVersion as number) < 0 || input.layout === undefined) {
     throw new TabLayoutValidationError('baseVersion must be a non-negative safe integer and layout is required');

@@ -79,6 +79,20 @@ describe('tab layout routes', () => {
     await app.close();
   });
 
+  it('rejects extra write keys before invoking the service', async () => {
+    const { app, service } = await harness();
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/tab-layout',
+      payload: { baseVersion: 3, layout: layout(), owner: 'foreign' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().errorCode).toBe('INVALID_INPUT');
+    expect(service.put).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it('has an explicit conservative body limit', async () => {
     const { app } = await harness();
     const response = await app.inject({
