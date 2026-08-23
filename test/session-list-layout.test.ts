@@ -34,6 +34,7 @@ const SCHEMAS = readFileSync(new URL('../src/web/schemas.ts', import.meta.url), 
 
 interface LayoutApp {
   soloSessionId: string | null;
+  isSoloWindow: boolean;
   sessions: Map<string, unknown>;
   sessionOrder: string[];
   _tallTabsEnabled?: boolean;
@@ -156,6 +157,7 @@ function boot(
   // terminal stack. Only the layout surface is under test here.
   const app = Object.create(win.__CodemanApp.prototype) as LayoutApp;
   app.soloSessionId = options.solo ?? null;
+  app.isSoloWindow = !!app.soloSessionId;
   app.sessions = new Map();
   app.sessionOrder = [];
   app._elemCache = new Map();
@@ -258,6 +260,20 @@ describe('session list layout', () => {
     app.applySessionListLayout();
     expect(win.document.documentElement.dataset.sessionList).toBe('header');
     expect(tabsEl(win).parentElement?.id).toBe('sessionTabsHost');
+  });
+
+  it('forces horizontal tabs in a solo window even when vertical orientation is preferred', () => {
+    const { win, app } = boot({
+      stored: { sessionListLayout: 'header', tabOrientation: 'vertical' },
+      solo: 'sess-1',
+    });
+
+    app.applySessionListLayout();
+    app.applyTabOrientation();
+
+    expect(win.document.documentElement.dataset.tabOrientation).toBe('horizontal');
+    expect(tabsEl(win).parentElement?.id).toBe('sessionTabsHost');
+    expect(tabsEl(win).getAttribute('aria-orientation')).toBe('horizontal');
   });
 
   it('round-trips the collapse state through its own storage key', () => {

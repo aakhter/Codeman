@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 
 const styles = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
+const controller = readFileSync(resolve(import.meta.dirname, '../src/web/public/tab-rail-resize.js'), 'utf8');
 
 function fixture(surface: 'sidebar' | 'rail', active = false) {
   const root =
@@ -20,8 +21,22 @@ function fixture(surface: 'sidebar' | 'rail', active = false) {
         </span></span>
       </div>
     </div></div>
-    <script>document.querySelector('.tab-more').onclick=()=>{const m=document.createElement('div');m.className='tab-rail-action-menu';document.body.appendChild(m)}</script>
   </body></html>`;
+}
+
+async function installActionMenuController(page: Page) {
+  await page.addScriptTag({ content: 'class CodemanApp {}; window.CodemanApp = CodemanApp;' });
+  await page.addScriptTag({ content: controller });
+  await page.evaluate(() => {
+    const app = new (window as any).CodemanApp();
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.openSessionOptions = () => undefined;
+    app.requestCloseSession = () => undefined;
+    document
+      .querySelector('.tab-more')
+      ?.addEventListener('click', (event) => app.openTabRailActionMenu(event, 'session-1'));
+    (window as any).app = app;
+  });
 }
 
 async function actionState(page: Page) {
@@ -47,6 +62,7 @@ describe('expanded vertical session actions in Chromium', () => {
   for (const surface of ['sidebar', 'rail'] as const) {
     it(`${surface} hides inactive actions, reveals them contextually, and opens the menu`, async () => {
       await page.setContent(fixture(surface));
+      await installActionMenuController(page);
       await page.mouse.move(1200, 760);
       const tab = page.locator('.session-tab');
       expect(await actionState(page)).toEqual({ visibility: 'hidden', pointerEvents: 'none' });
@@ -56,10 +72,12 @@ describe('expanded vertical session actions in Chromium', () => {
       expect(await page.locator('.tab-rail-action-menu').count()).toBe(1);
 
       await page.setContent(fixture(surface));
+      await installActionMenuController(page);
       await page.locator('.session-tab').focus();
       expect(await actionState(page)).toEqual({ visibility: 'visible', pointerEvents: 'auto' });
 
       await page.setContent(fixture(surface, true));
+      await installActionMenuController(page);
       expect(await actionState(page)).toEqual({ visibility: 'visible', pointerEvents: 'auto' });
     });
   }
@@ -75,5 +93,14 @@ describe('expanded vertical session actions in Chromium', () => {
     } finally {
       await context.close();
     }
+  });
+
+  it('closes the real controller menu when viewport geometry changes', async () => {
+    await page.setContent(fixture('rail', true));
+    await installActionMenuController(page);
+    await page.locator('.tab-more').click();
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(1);
+    await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(0);
   });
 });

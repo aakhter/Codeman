@@ -79,14 +79,22 @@ Object.assign(CodemanApp.prototype, {
     clearTimeout(this._tabRailResizeWatchdog);
     clearTimeout(this._tabRailReleaseTimer);
     if (this._tabRailReleaseRaf) cancelAnimationFrame(this._tabRailReleaseRaf);
-    this._tabRailResizeWatchdog = setTimeout(() => {
-      this._tabRailResizeWatchdog = null;
-      this._tabRailResizeOwnsObserver = false;
-    }, 1000);
+    this._armTabRailResizeWatchdog();
     if (this._resizeRaf) cancelAnimationFrame(this._resizeRaf);
     if (this._resizeTimeout) clearTimeout(this._resizeTimeout);
     this._resizeRaf = null;
     this._resizeTimeout = null;
+  },
+
+  _armTabRailResizeWatchdog() {
+    this._tabRailResizeWatchdog = setTimeout(() => {
+      this._tabRailResizeWatchdog = null;
+      if (document.body.classList.contains('tab-rail-resizing')) {
+        this._armTabRailResizeWatchdog();
+        return;
+      }
+      this._tabRailResizeOwnsObserver = false;
+    }, 1000);
   },
 
   _releaseTabRailResize() {
@@ -242,6 +250,10 @@ Object.assign(CodemanApp.prototype, {
       document.removeEventListener('pointerdown', this._tabRailActionMenuOutside, true);
       this._tabRailActionMenuOutside = null;
     }
+    if (this._tabRailActionMenuViewport) {
+      window.removeEventListener('resize', this._tabRailActionMenuViewport);
+      this._tabRailActionMenuViewport = null;
+    }
     this._tabRailActionMenuTrigger = null;
     if (options.restoreFocus) trigger?.focus?.();
   },
@@ -285,6 +297,8 @@ Object.assign(CodemanApp.prototype, {
       if (!menu.contains(pointerEvent.target) && pointerEvent.target !== trigger) this.closeTabRailActionMenu();
     };
     document.addEventListener('pointerdown', this._tabRailActionMenuOutside, true);
+    this._tabRailActionMenuViewport = () => this.closeTabRailActionMenu();
+    window.addEventListener('resize', this._tabRailActionMenuViewport, { once: true });
     menu.addEventListener('keydown', (keyEvent) => {
       const buttons = [...menu.querySelectorAll('button')];
       const index = buttons.indexOf(document.activeElement);
