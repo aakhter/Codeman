@@ -12,6 +12,8 @@ type ResizeCompletion = (success: boolean) => void;
 type SizingLifecycleInternals = {
   _mux: { killSession: () => Promise<boolean> } | null;
   _respawnBlocked: boolean;
+  _suspendTerminalViewerSizing: () => void;
+  _resumeTerminalViewerSizing: () => void;
 };
 
 type InteractiveExit = (event: { exitCode: number }) => void;
@@ -130,6 +132,53 @@ describe('Session resize ownership', () => {
     expect((session as unknown as ResizeableSessionInternals)._ptyRows).toBe(44);
   });
 
+  it('reconciles confirmed dimensions after a dimensionless ownership transfer makes completion stale', () => {
+    const { session, resizeWindow, completions } = sessionWithAuthoritativeResize(140, 44);
+    const phone = Symbol('phone');
+    const desktop = Symbol('desktop');
+
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    session.activateTerminalViewer(desktop);
+    completions.shift()!(true);
+
+    session.activateTerminalViewer(desktop, { cols: 140, rows: 44, viewportType: 'desktop' });
+
+    expect(resizeWindow).toHaveBeenCalledTimes(2);
+    expect(resizeWindow).toHaveBeenLastCalledWith('codeman-resize', 140, 44, expect.any(Function));
+  });
+
+  it('reconciles confirmed dimensions after release makes an in-flight completion stale', () => {
+    const { session, resizeWindow, completions } = sessionWithAuthoritativeResize(140, 44);
+    const phone = Symbol('phone');
+    const desktop = Symbol('desktop');
+
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    session.releaseTerminalViewer(phone);
+    completions.shift()!(true);
+
+    session.activateTerminalViewer(desktop, { cols: 140, rows: 44, viewportType: 'desktop' });
+
+    expect(resizeWindow).toHaveBeenCalledTimes(2);
+    expect(resizeWindow).toHaveBeenLastCalledWith('codeman-resize', 140, 44, expect.any(Function));
+  });
+
+  it('reconciles confirmed dimensions after lifecycle suspension invalidates an in-flight completion', () => {
+    const { session, resizeWindow, completions } = sessionWithAuthoritativeResize(140, 44);
+    const phone = Symbol('phone');
+    const desktop = Symbol('desktop');
+    const lifecycle = session as unknown as SizingLifecycleInternals;
+
+    session.activateTerminalViewer(phone, { cols: 75, rows: 62, viewportType: 'mobile' });
+    lifecycle._suspendTerminalViewerSizing();
+    completions.shift()!(true);
+    lifecycle._resumeTerminalViewerSizing();
+
+    session.activateTerminalViewer(desktop, { cols: 140, rows: 44, viewportType: 'desktop' });
+
+    expect(resizeWindow).toHaveBeenCalledTimes(2);
+    expect(resizeWindow).toHaveBeenLastCalledWith('codeman-resize', 140, 44, expect.any(Function));
+  });
+
   it('immediately hands an idle connected desktop pane to an explicitly active phone', () => {
     const session = new Session({ workingDir: '/tmp', mode: 'opencode' });
     const resize = attachFakePty(session, 140, 44);
@@ -193,6 +242,22 @@ describe('Session resize ownership', () => {
 
     expect(resize).toHaveBeenNthCalledWith(1, 48, 28);
     expect(resize).toHaveBeenNthCalledWith(2, 100, 30);
+  });
+
+  it('admits trusted initializer resize only while terminal sizing has no active viewer', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell' });
+    const resize = attachFakePty(session, 160, 48);
+    const viewer = Symbol('viewer');
+
+    session.activateTerminalViewer(viewer, { cols: 140, rows: 44, viewportType: 'desktop' });
+    resize.mockClear();
+
+    expect(session.resizeIfNoActiveTerminalViewer(75, 62)).toBe(false);
+    expect(resize).not.toHaveBeenCalled();
+
+    session.releaseTerminalViewer(viewer);
+    expect(session.resizeIfNoActiveTerminalViewer(75, 62)).toBe(true);
+    expect(resize).toHaveBeenCalledWith(75, 62);
   });
 
   it('forwards force from the owning viewer for a same-size resize', () => {

@@ -4201,6 +4201,8 @@ export class Session extends EventEmitter {
   private _ptyRows = 40;
 
   private _terminalResizeRequestSequence = 0;
+  private _terminalResizeConfirmedSequence = 0;
+  private _terminalGeometryDirty = false;
   private _pendingTerminalResize: {
     sequence: number;
     cols: number;
@@ -4295,6 +4297,12 @@ export class Session extends EventEmitter {
     this._resizeTerminal(cols, rows, options);
   }
 
+  resizeIfNoActiveTerminalViewer(cols: number, rows: number): boolean {
+    if (this._terminalSizing.ownerToken !== null) return false;
+    this.resize(cols, rows);
+    return true;
+  }
+
   private _resizeTerminal(
     cols: number,
     rows: number,
@@ -4304,33 +4312,43 @@ export class Session extends EventEmitter {
     const pty = this.ptyProcess;
     if (!pty) return;
 
+    const authoritativeResize = this._mux && this._muxSession ? this._mux.resizeWindow : undefined;
     const dimsChanged = cols !== this._ptyCols || rows !== this._ptyRows;
     const pending = this._pendingTerminalResize;
     const correctsStaleAuthority = !!pending && !!authority && pending.authority?.generation !== authority.generation;
+    const needsAuthoritativeReconcile = !!authoritativeResize && this._terminalGeometryDirty;
     const duplicatesPending =
       !!pending && pending.cols === cols && pending.rows === rows && !correctsStaleAuthority && !options.force;
-    if ((!dimsChanged && !options.force && !correctsStaleAuthority) || duplicatesPending) return;
+    if (
+      (!dimsChanged && !options.force && !correctsStaleAuthority && !needsAuthoritativeReconcile) ||
+      duplicatesPending
+    ) {
+      return;
+    }
 
     const sequence = ++this._terminalResizeRequestSequence;
     const request = { sequence, cols, rows, authority };
     this._pendingTerminalResize = request;
 
-    const confirm = (success: boolean): void => {
-      if (this._pendingTerminalResize?.sequence !== sequence) return;
-      this._pendingTerminalResize = null;
-      if (!success) return;
-      if (
-        authority &&
-        (!this._acceptsTerminalViewerSizing ||
-          this._terminalSizing.currentGeneration !== authority.generation ||
-          !this._terminalSizing.isOwner(authority.token))
-      ) {
+    const confirm = (success: boolean, authoritativeGeometryMayHaveChanged = false): void => {
+      const isLatestRequest = this._pendingTerminalResize?.sequence === sequence;
+      if (isLatestRequest) this._pendingTerminalResize = null;
+      const hasCurrentAuthority =
+        !authority ||
+        (this._acceptsTerminalViewerSizing &&
+          this._terminalSizing.currentGeneration === authority.generation &&
+          this._terminalSizing.isOwner(authority.token));
+      if (!isLatestRequest || !success || !hasCurrentAuthority) {
+        if (authoritativeGeometryMayHaveChanged && sequence > this._terminalResizeConfirmedSequence) {
+          this._terminalGeometryDirty = true;
+        }
         return;
       }
-
       const confirmedChange = cols !== this._ptyCols || rows !== this._ptyRows;
       this._ptyCols = cols;
       this._ptyRows = rows;
+      this._terminalResizeConfirmedSequence = sequence;
+      if (authoritativeResize) this._terminalGeometryDirty = false;
       // COD-179: tell every connected client the shared geometry changed. A
       // viewer whose xterm has different dims renders the subsequent TUI
       // repaint frames misaligned (orphan "Working" rows in scrollback) and
@@ -4341,7 +4359,6 @@ export class Session extends EventEmitter {
       }
     };
 
-    const authoritativeResize = this._mux && this._muxSession ? this._mux.resizeWindow : undefined;
     if (authoritativeResize && this._muxSession) {
       let admissionKnown = false;
       let synchronousCompletion: boolean | undefined;
@@ -4349,7 +4366,7 @@ export class Session extends EventEmitter {
       try {
         accepted = authoritativeResize.call(this._mux, this._muxSession.muxName, cols, rows, (success) => {
           if (!admissionKnown) synchronousCompletion = success;
-          else confirm(success);
+          else confirm(success, true);
         });
       } catch {
         admissionKnown = true;
@@ -4366,7 +4383,7 @@ export class Session extends EventEmitter {
       } catch {
         if (this.ptyProcess === pty) this.ptyProcess = null;
       }
-      if (synchronousCompletion !== undefined) confirm(synchronousCompletion);
+      if (synchronousCompletion !== undefined) confirm(synchronousCompletion, true);
       return;
     }
 
