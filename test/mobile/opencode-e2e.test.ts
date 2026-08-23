@@ -641,6 +641,50 @@ async function focusComparatorKeyboard(page: Page): Promise<void> {
   });
 }
 
+async function waitForComparatorComposerReady(
+  fixture: Cod370OpenCodeFixture,
+  page: Page,
+  stableMs = 500
+): Promise<void> {
+  let stableSince = 0;
+  await waitUntil(
+    `empty OpenCode composer stable for ${stableMs}ms`,
+    async () => {
+      const browser = await page.evaluate(() => {
+        const app = (window as unknown as { app: Record<string, any> }).app;
+        const terminal = app.terminal;
+        const buffer = terminal?.buffer?.active;
+        const lines: string[] = [];
+        if (buffer) {
+          for (let row = 0; row < buffer.length; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? '');
+        }
+        return {
+          activeSessionId: app.activeSessionId,
+          wsReady: app._wsReady,
+          wsSessionId: app._wsSessionId,
+          activeElementIsXterm: document.activeElement?.classList.contains('xterm-helper-textarea') === true,
+          text: lines.join('\n'),
+        };
+      });
+      const paneText = fixture.paneText();
+      const ready =
+        browser.activeSessionId === fixture.sessionId &&
+        browser.wsReady === true &&
+        browser.wsSessionId === fixture.sessionId &&
+        browser.activeElementIsXterm &&
+        /┃\s*\n\s*┃\s+Ask anything/.test(browser.text) &&
+        /┃\s*\n\s*┃\s+Ask anything/.test(paneText);
+      if (!ready) {
+        stableSince = 0;
+        return false;
+      }
+      stableSince ||= Date.now();
+      return Date.now() - stableSince >= stableMs;
+    },
+    20_000
+  );
+}
+
 async function waitForExactComposerProgress(
   fixture: Cod370OpenCodeFixture,
   page: Page,
@@ -1148,6 +1192,9 @@ describe.runIf(FONT_COMPARATOR_ENABLED)('COD-370 mobile OpenCode font comparator
       expect(sessions).toHaveLength(1);
       expect(sessions[0]?.id).toBe(fixture.sessionId);
       initialResizeEvents = (await readTrace(phone)).resizes;
+      await focusComparatorKeyboard(phone);
+      await waitForComparatorComposerReady(fixture, phone);
+      expect(fixture.identities()).toEqual(baselineIdentity);
       phoneCdp = await fixture.phoneContext!.newCDPSession(phone);
 
       rates.push(
@@ -1164,6 +1211,7 @@ describe.runIf(FONT_COMPARATOR_ENABLED)('COD-370 mobile OpenCode font comparator
       );
       await phone.keyboard.press('Control+u');
       await waitUntil('1x comparator payload cleared', () => !fixture.paneText().includes('qz1a2b3c4d'));
+      await waitForComparatorComposerReady(fixture, phone);
       expect(fixture.identities()).toEqual(baselineIdentity);
       rates.push(
         await runFontComparatorRate(
