@@ -33,6 +33,17 @@ const ownerLayout = (ids: readonly string[], version = 1): TabLayout => ({
 });
 
 describe('StateStore.commitTabLayoutProjection', () => {
+  it('returns a defensive snapshot of all stored owner layouts for trusted owner discovery', () => {
+    const alice = ownerLayout(['a1'], 1);
+    const store = createStore({ tabLayouts: { alice, constructor: ownerLayout(['c1'], 2) } });
+
+    const layouts = store.getTabLayouts();
+
+    expect(Object.keys(layouts)).toEqual(['alice', 'constructor']);
+    layouts.alice.ungrouped[0].id = 'caller-mutated';
+    expect(store.getTabLayout('alice')).toEqual(alice);
+  });
+
   it('validates all layouts and publishes them with a latest-state projection using one save schedule', () => {
     const originalAlice = ownerLayout(['a1'], 1);
     const store = createStore({ sessionOrder: ['a1'], tabLayouts: { alice: originalAlice } });

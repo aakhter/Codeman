@@ -681,6 +681,11 @@ export class StateStore {
     return layouts && Object.hasOwn(layouts, owner) ? layouts[owner] : null;
   }
 
+  /** Returns a defensive snapshot of every stored owner layout. */
+  getTabLayouts(): Record<string, TabLayout> {
+    return structuredClone(this.state.tabLayouts ?? {});
+  }
+
   /** Validates and atomically persists one owner layout. */
   setTabLayout(owner: string, layout: TabLayout): void {
     const validated = validateTabLayout(layout);

@@ -6,7 +6,10 @@
  * completed server action; this service performs at most one versioned write.
  */
 import type { StateStore } from './state-store.js';
+import { mergeSessionOrder, normalizeSessionOrder } from './session-order.js';
+import { applyLegacySessionRank, recomposeGlobalSessionOrder } from './tab-layout-legacy-order.js';
 import {
+  flattenOwnerSessionOrder,
   materializeOrphans,
   normalizeTabLayout,
   TabLayoutValidationError,
@@ -31,14 +34,33 @@ export interface TabLayoutSessionLike {
 }
 
 interface TabLayoutServiceDeps {
-  store: Pick<StateStore, 'getTabLayout' | 'setTabLayout' | 'getSessions' | 'getSessionOrder'>;
+  store: Pick<
+    StateStore,
+    'getTabLayout' | 'getTabLayouts' | 'getSessions' | 'getSessionOrder' | 'commitTabLayoutProjection'
+  >;
   sessions: ReadonlyMap<string, TabLayoutSessionLike>;
   readWebviews(): Promise<readonly TabLayoutWebviewRecord[]>;
   broadcast(event: string, data: unknown): void;
+  broadcastSessionOrder(change: SessionOrderProjectionChange): void;
   now?: () => string;
 }
 
 export type TabLayoutPutResult = { status: 'updated'; layout: TabLayout } | { status: 'conflict'; layout: TabLayout };
+
+export interface LegacyOrderActor {
+  owner: string;
+  isAdmin: boolean;
+}
+
+export interface SessionOrderProjectionChange {
+  changedOwnerOrders: Record<string, string[]>;
+  globalOrder: string[];
+  globalChanged: boolean;
+}
+
+export interface LegacyOrderPutResult extends SessionOrderProjectionChange {
+  order: string[];
+}
 
 export interface RemovedTabLayoutSession {
   id: string;
@@ -52,9 +74,19 @@ interface PreparedOwnerLayout {
   needsReconciliationCommit: boolean;
 }
 
+interface OwnerProjectionPublication {
+  owner: string;
+  previous: TabLayout | null;
+  next: TabLayout;
+  metadata: readonly TabRefMetadata[];
+  excludedSessionIds?: ReadonlySet<string>;
+}
+
 const ownerOf = (record: { owner?: string }): string => record.owner ?? SINGLE_USER_LAYOUT_OWNER;
 const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000${ref.id}`;
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
+const sameOrder = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((id, index) => id === b[index]);
 
 export class TabLayoutService {
   private restorationState: 'pending' | 'complete' | 'failed' | 'skipped' = 'pending';
@@ -170,14 +202,73 @@ export class TabLayoutService {
     });
   }
 
-  private commitPrepared(owner: string, stored: TabLayout): TabLayout {
-    this.deps.store.setTabLayout(owner, stored);
-    this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: stored.version });
-    return stored;
+  private publish(
+    layouts: Readonly<Record<string, TabLayout>>,
+    publications: readonly OwnerProjectionPublication[],
+    preferred?: readonly string[]
+  ): SessionOrderProjectionChange {
+    const projections = publications.map((item) => {
+      const excluded = item.excludedSessionIds ?? new Set<string>();
+      const previous = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
+      const next = flattenOwnerSessionOrder(item.next).filter((id) => !excluded.has(id));
+      const facts = item.metadata
+        .filter((fact) => fact.kind === 'session' && fact.ownerValid && fact.visible && !excluded.has(fact.id))
+        .map((fact) => fact.id);
+      const claimedIds = normalizeSessionOrder([...previous, ...flattenOwnerSessionOrder(item.next), ...facts]);
+      const currentIds = normalizeSessionOrder([...next, ...facts]);
+      return {
+        owner: item.owner,
+        previousOrder: previous,
+        claimedIds,
+        currentIds,
+        order: next,
+      };
+    });
+    let beforeOrder: string[] = [];
+    const accepted = this.deps.store.commitTabLayoutProjection(layouts, (latest) => {
+      beforeOrder = normalizeSessionOrder(latest);
+      const removed = new Set(
+        projections.flatMap((projection) => projection.claimedIds.filter((id) => !projection.currentIds.includes(id)))
+      );
+      const base = beforeOrder.filter((id) => !removed.has(id));
+      return recomposeGlobalSessionOrder(
+        base,
+        projections.map((projection) => ({
+          owner: projection.owner,
+          ownedIds: projection.currentIds,
+          order: projection.order,
+        })),
+        preferred
+      );
+    });
+    const changedEntries: Array<[string, string[]]> = [];
+    for (const projection of projections) {
+      if (!sameOrder(projection.previousOrder, projection.order)) {
+        changedEntries.push([projection.owner, [...projection.order]]);
+      }
+    }
+    const change: SessionOrderProjectionChange = {
+      changedOwnerOrders: Object.fromEntries(changedEntries),
+      globalOrder: [...accepted.sessionOrder],
+      globalChanged: !sameOrder(beforeOrder, accepted.sessionOrder),
+    };
+    for (const [owner, layout] of Object.entries(accepted.layouts)) {
+      this.deps.broadcast(SseEvent.TabLayoutChanged, { owner, version: layout.version });
+    }
+    if (changedEntries.length > 0 || change.globalChanged) this.deps.broadcastSessionOrder(change);
+    return change;
   }
 
-  private commit(owner: string, base: TabLayout, next: TabLayout): TabLayout {
-    return this.commitPrepared(owner, this.prepareCommit(base, next));
+  private commit(
+    owner: string,
+    base: TabLayout,
+    next: TabLayout,
+    metadata: readonly TabRefMetadata[],
+    previous: TabLayout | null = base.version < 0 ? null : base
+  ): TabLayout {
+    const stored = this.prepareCommit(base, next);
+    this.publish({ [owner]: stored }, [{ owner, previous, next: stored, metadata }]);
+    return stored;
   }
 
   private async prepareUnlocked(owner: string): Promise<PreparedOwnerLayout> {
@@ -204,7 +295,7 @@ export class TabLayoutService {
     const prepared = await this.prepareUnlocked(owner);
     if (!prepared.needsReconciliationCommit) return prepared.authoritative;
     const base = prepared.current ?? { ...prepared.authoritative, version: -1 };
-    return this.commit(owner, base, prepared.authoritative);
+    return this.commit(owner, base, prepared.authoritative, prepared.metadata);
   }
 
   async get(owner: string): Promise<TabLayout> {
@@ -225,8 +316,84 @@ export class TabLayoutService {
         { ...validated, version: prepared.authoritative.version },
         prepared.metadata
       );
-      return { status: 'updated', layout: this.commit(owner, prepared.authoritative, normalized) };
+      return {
+        status: 'updated',
+        layout: this.commit(owner, prepared.authoritative, normalized, prepared.metadata, prepared.current),
+      };
     });
+  }
+
+  async putLegacyOrder(actor: LegacyOrderActor, requested: readonly string[]): Promise<LegacyOrderPutResult> {
+    return actor.isAdmin ? this.putAdminLegacyOrder(requested) : this.putOwnerLegacyOrder(actor.owner, requested);
+  }
+
+  private async putOwnerLegacyOrder(owner: string, requested: readonly string[]): Promise<LegacyOrderPutResult> {
+    return this.withOwner(owner, async () => {
+      const prepared = await this.prepareUnlocked(owner);
+      const normalized = normalizeSessionOrder(requested);
+      const visible = new Set(
+        prepared.metadata
+          .filter((item) => item.kind === 'session' && item.ownerValid && item.visible)
+          .map((item) => item.id)
+      );
+      const invalid = normalized.find((id) => !visible.has(id));
+      if (invalid) throw new TabLayoutValidationError(`session is not owned by layout owner: ${invalid}`);
+      const currentKnown = flattenOwnerSessionOrder(prepared.authoritative).filter((id) => visible.has(id));
+      const effective = mergeSessionOrder(normalized, currentKnown);
+      const ranked = applyLegacySessionRank(prepared.authoritative, effective, prepared.metadata);
+      const needsLayout = prepared.needsReconciliationCommit || !sameLayout(prepared.authoritative, ranked);
+      const base = prepared.current ?? { ...prepared.authoritative, version: -1 };
+      const next = needsLayout ? this.prepareCommit(base, ranked) : prepared.authoritative;
+      const change = this.publish(needsLayout ? { [owner]: next } : {}, [
+        { owner, previous: prepared.current, next, metadata: prepared.metadata },
+      ]);
+      return { order: flattenOwnerSessionOrder(next), ...change };
+    });
+  }
+
+  private async putAdminLegacyOrder(requested: readonly string[]): Promise<LegacyOrderPutResult> {
+    const discoverOwners = (): string[] => {
+      const owners = new Set(Object.keys(this.deps.store.getTabLayouts()));
+      const { persisted, live } = this.sessionRecords();
+      for (const record of [...persisted, ...live]) owners.add(ownerOf(record));
+      return [...owners].sort();
+    };
+    for (;;) {
+      const owners = discoverOwners();
+      const result = await this.withOwners(owners, async (): Promise<LegacyOrderPutResult | null> => {
+        if (!sameOrder(owners, discoverOwners())) return null;
+        const normalized = normalizeSessionOrder(requested);
+        const knownOwners = new Map<string, string>();
+        const { persisted, live } = this.sessionRecords();
+        for (const record of persisted) knownOwners.set(record.id, ownerOf(record));
+        for (const record of live) knownOwners.set(record.id, ownerOf(record));
+        const invalid = normalized.find((id) => !knownOwners.has(id));
+        if (invalid) throw new TabLayoutValidationError(`session is not visible machine-wide: ${invalid}`);
+
+        const publications: OwnerProjectionPublication[] = [];
+        const updates: Record<string, TabLayout> = Object.create(null) as Record<string, TabLayout>;
+        for (const owner of owners) {
+          const prepared = await this.prepareUnlocked(owner);
+          const visible = new Set(
+            prepared.metadata
+              .filter((item) => item.kind === 'session' && item.ownerValid && item.visible)
+              .map((item) => item.id)
+          );
+          const requestedOwner = normalized.filter((id) => visible.has(id));
+          const currentKnown = flattenOwnerSessionOrder(prepared.authoritative).filter((id) => visible.has(id));
+          const effective = mergeSessionOrder(requestedOwner, currentKnown);
+          const ranked = applyLegacySessionRank(prepared.authoritative, effective, prepared.metadata);
+          const needsLayout = prepared.needsReconciliationCommit || !sameLayout(prepared.authoritative, ranked);
+          const base = prepared.current ?? { ...prepared.authoritative, version: -1 };
+          const next = needsLayout ? this.prepareCommit(base, ranked) : prepared.authoritative;
+          if (needsLayout) updates[owner] = next;
+          publications.push({ owner, previous: prepared.current, next, metadata: prepared.metadata });
+        }
+        const change = this.publish(updates, publications, normalized);
+        return { order: [...change.globalOrder], ...change };
+      });
+      if (result) return result;
+    }
   }
 
   /** Reconcile one completed session creation into one versioned mutation. */
@@ -248,10 +415,14 @@ export class TabLayoutService {
       ids.push(item.id);
       byOwner.set(owner, ids);
     }
-    for (const [owner, ids] of byOwner) {
-      await this.withOwner(owner, async () => {
+    const owners = [...byOwner.keys()].sort();
+    await this.withOwners(owners, async () => {
+      const publications: OwnerProjectionPublication[] = [];
+      const updates: Record<string, TabLayout> = Object.create(null) as Record<string, TabLayout>;
+      for (const owner of owners) {
+        const ids = byOwner.get(owner) ?? [];
         const current = this.deps.store.getTabLayout(owner);
-        if (!current) return;
+        if (!current) continue;
         const { metadata } = await this.facts(owner);
         // Normalize and prune together so stale cleanup, orphan materialization,
         // and missing-ref repair remain one versioned server mutation.
@@ -259,9 +430,19 @@ export class TabLayoutService {
           materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata),
           metadata
         );
-        if (!sameLayout(current, next)) this.commit(owner, current, next);
-      });
-    }
+        if (sameLayout(current, next)) continue;
+        const stored = this.prepareCommit(current, next);
+        updates[owner] = stored;
+        publications.push({
+          owner,
+          previous: current,
+          next: stored,
+          metadata,
+          excludedSessionIds: new Set(ids),
+        });
+      }
+      if (publications.length > 0) this.publish(updates, publications);
+    });
   }
 
   /**
@@ -279,14 +460,21 @@ export class TabLayoutService {
     return this.withOwner(owner, async () => {
       const current = this.deps.store.getTabLayout(owner);
       let next: TabLayout | null = null;
+      let stored: TabLayout | null = null;
+      let metadata: TabRefMetadata[] = [];
       if (current) {
-        const { metadata } = await this.facts(owner);
+        ({ metadata } = await this.facts(owner));
         // Prepare while the soon-to-be-deleted sessions are still known, so
         // direct children can be materialized before their parent ref is removed.
         next = materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata);
+        if (!sameLayout(current, next)) stored = this.prepareCommit(current, next);
       }
       const result = await action();
-      if (current && next && !sameLayout(current, next)) this.commit(owner, current, next);
+      if (current && stored) {
+        this.publish({ [owner]: stored }, [
+          { owner, previous: current, next: stored, metadata, excludedSessionIds: new Set(ids) },
+        ]);
+      }
       return result;
     });
   }
@@ -343,7 +531,13 @@ export class TabLayoutService {
         confirmedByOwner.set(owner, ids);
       }
 
-      const prepared: Array<{ owner: string; stored: TabLayout }> = [];
+      const prepared: Array<{
+        owner: string;
+        current: TabLayout;
+        stored: TabLayout;
+        metadata: TabRefMetadata[];
+        excludedSessionIds: ReadonlySet<string>;
+      }> = [];
       for (const owner of owners) {
         const ids = confirmedByOwner.get(owner) ?? [];
         if (ids.length === 0) continue;
@@ -375,11 +569,30 @@ export class TabLayoutService {
           })
         );
         const next = materializeOrphans(normalizeTabLayout(current, metadata), ids, metadata);
-        if (!sameLayout(current, next)) prepared.push({ owner, stored: this.prepareCommit(current, next) });
+        if (!sameLayout(current, next)) {
+          prepared.push({
+            owner,
+            current,
+            stored: this.prepareCommit(current, next),
+            metadata,
+            excludedSessionIds: new Set(ids),
+          });
+        }
       }
 
       const result = await action(new Set(confirmed.map((item) => item.id)));
-      for (const item of prepared) this.commitPrepared(item.owner, item.stored);
+      if (prepared.length > 0) {
+        this.publish(
+          Object.fromEntries(prepared.map((item) => [item.owner, item.stored])),
+          prepared.map((item) => ({
+            owner: item.owner,
+            previous: item.current,
+            next: item.stored,
+            metadata: item.metadata,
+            excludedSessionIds: item.excludedSessionIds,
+          }))
+        );
+      }
       return result;
     });
   }
@@ -399,7 +612,7 @@ export class TabLayoutService {
       };
       const { metadata } = await this.facts(owner);
       const next = normalizeTabLayout(stripped, metadata);
-      if (!sameLayout(current, next)) this.commit(owner, current, next);
+      if (!sameLayout(current, next)) this.commit(owner, current, next, metadata);
     });
   }
 }

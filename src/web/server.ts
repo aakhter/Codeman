@@ -360,6 +360,8 @@ export class WebServer extends EventEmitter {
       sessions: this.sessions,
       readWebviews: () => readWebviews(getDataDir()),
       broadcast: this.broadcast.bind(this),
+      // Task 7 wires recipient-aware legacy session-order SSE dispatch.
+      broadcastSessionOrder: () => undefined,
     });
     if (this.testMode) this.tabLayouts.markRestorationSkipped();
 

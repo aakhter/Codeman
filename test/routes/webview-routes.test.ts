@@ -123,6 +123,7 @@ describe('POST /api/webviews', () => {
           Array<{ id: string; owner?: string }>
         >,
       broadcast: atomicBroadcast,
+      broadcastSessionOrder: vi.fn(),
     });
     const atomicApp = Fastify({ logger: false });
     await atomicApp.register(fastifyCookie);
