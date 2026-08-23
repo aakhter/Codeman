@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.22.2
+
+### Patch Changes
+
+- Enable yellow idle tile for opencode (same as codex/claude) - idle turn-end now creates approval inbox item
+
 ## 1.22.1
 
 ### Patch Changes
