@@ -82,7 +82,7 @@ npm run perf:cod356 -- --dry-run
 
 Expected: tests pass; dry run prints the resolved matrix and cleanup plan without starting load or a server.
 
-- [x] **Step 6: Capture the branch-point baseline**
+- [x] **Step 6: Capture the comparison-revision baseline**
 
 Run:
 
@@ -91,6 +91,9 @@ npm run perf:cod356 -- --phase before --conditions idle,cpu --samples 5
 ```
 
 Expected: all four cells complete, compact baseline files are written under `docs/reports/cod-356/`, raw artifacts are stored in the reported temporary artifact directory, and post-run checks show no remaining benchmark server, CPU worker, browser, or disposable session.
+
+The stored baseline uses comparison revision `a445cdaf`; the actual branch base is `a5ec3ce4`. Intervening design/plan
+commits are documentation-only, so the two revisions have identical runtime trees.
 
 - [x] **Step 7: Review baseline evidence before optimizing**
 
@@ -178,7 +181,7 @@ git commit -m "perf(tmux): COD-356 add async activity capture"
 - Modify: `test/opencode-working-detection.test.ts`
 - Modify: `test/session-cleanup.test.ts`
 
-- [ ] **Step 1: Write failing coordinator tests**
+- [x] **Step 1: Write failing coordinator tests**
 
 With fake time and controlled promises, require:
 
@@ -192,7 +195,7 @@ With fake time and controlled promises, require:
 - no unhandled rejection when capture fails;
 - a scheduler with zero registrations owns no live timer.
 
-- [ ] **Step 2: Write failing Session integration tests**
+- [x] **Step 2: Write failing Session integration tests**
 
 Extend Codex and OpenCode coverage to prove:
 
@@ -204,7 +207,7 @@ Extend Codex and OpenCode coverage to prove:
 - remote-wrapper and local external sessions remain eligible;
 - timer cleanup unregisters from the coordinator.
 
-- [ ] **Step 3: Run focused tests and observe RED**
+- [x] **Step 3: Run focused tests and observe RED**
 
 ```bash
 npm test -- test/working-frame-poll-coordinator.test.ts test/codex-working-detection.test.ts test/opencode-working-detection.test.ts test/session-cleanup.test.ts
@@ -212,15 +215,15 @@ npm test -- test/working-frame-poll-coordinator.test.ts test/codex-working-detec
 
 Expected: new coordinator and async lifecycle assertions fail.
 
-- [ ] **Step 4: Implement the shared coordinator**
+- [x] **Step 4: Implement the shared coordinator**
 
 `WorkingFramePollCoordinator` owns registrations keyed by stable session identity. It schedules the nearest due item, uses deterministic ID-based offsets, caps active captures at two, and advances due times after settlement. Registration callbacks carry a generation token; unregistering makes every pending completion stale.
 
-- [ ] **Step 5: Integrate Session lifecycle**
+- [x] **Step 5: Integrate Session lifecycle**
 
 Replace `_workingFramePollTimer` with a coordinator registration and a generation-fenced async frame helper. Convert the Codex idle confirmation capture to the same helper. Preserve existing frame classifiers and state-transition semantics. Do not alter route/full-history capture call sites.
 
-- [ ] **Step 6: Run focused verification**
+- [x] **Step 6: Run focused verification**
 
 ```bash
 npm test -- test/working-frame-poll-coordinator.test.ts test/codex-working-detection.test.ts test/opencode-working-detection.test.ts test/session-cleanup.test.ts test/session-listener-wiring.test.ts test/background-agent-wait.integration.test.ts
@@ -229,7 +232,7 @@ npm run lint
 git diff --check
 ```
 
-- [ ] **Step 7: Commit the polling change**
+- [x] **Step 7: Commit the polling change**
 
 ```bash
 git add src/working-frame-poll-coordinator.ts src/session.ts test/working-frame-poll-coordinator.test.ts test/codex-working-detection.test.ts test/opencode-working-detection.test.ts test/session-cleanup.test.ts
@@ -246,6 +249,11 @@ git commit -m "test(perf): COD-356 record after-poller evidence"
 ```
 
 Require zero synchronous activity captures, no per-session poll overlap, no more than two concurrent captures, and lower event-loop/API p95 in both idle-session cells. The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`. If the coordinator regresses interactive metrics materially, stop and diagnose before continuing.
+
+**Checkpoint outcome (2026-08-22):** The report pair is valid, reachable, complete, byte-exact within the measured
+live-server scope, provenance-clean, and cleanup-stable, but the performance gate was only partially met. Idle-idle
+event-loop p95 improved from 38.666 ms to 18.399 ms while API p95 regressed from 38.246 ms to 44.190 ms. The pair is
+retained as partial/negative evidence and Step 8 remains unchecked.
 
 ## Task 4: Instrument and lock down terminal input byte identity
 
@@ -333,7 +341,9 @@ Before code, add a short decision table to `input-findings.md` with measured tim
 - session dedup lookup and PTY write;
 - predictor reconciliation and xterm rendering.
 
-Select only contributors that materially affect median or p95. Preserve immediate `pagehide` durability and server-authoritative exactly-once semantics.
+Select only contributors that materially affect median or p95. Preserve immediate `pagehide` durability and
+server-authoritative exactly-once semantics while the server process remains live; restart-before-ACK dedup persistence is
+the separate COD-363 boundary.
 
 - [x] **Step 2: Write the focused failing test for the selected change**
 
@@ -367,7 +377,9 @@ git add docs/reports/cod-356/after-input-summary.json docs/reports/cod-356/after
 git commit -m "test(perf): COD-356 record after-input evidence"
 ```
 
-Keep the change only if byte identity remains exact and the targeted median or p95 improves without a material opposite-condition regression. The evidence report records the content-equivalent pre-report runtime commit in `runtimeRevision`.
+Keep the change only if byte identity remains exact within the measured live-server scope and the targeted median or p95
+improves without a material opposite-condition regression. The evidence report records the content-equivalent pre-report
+runtime commit in `runtimeRevision`.
 
 ## Task 6: Profile and defer noncritical frontend startup work
 
@@ -505,16 +517,17 @@ without an architecture checkpoint and a newly profiled design.
 - Create: `.changeset/cod-356-performance-improvements.md`
 - Modify: this plan's checkboxes only
 
-- [ ] **Step 1: Run the identical final matrix**
+- [x] **Step 1: Run the identical final matrix**
 
 ```bash
 COD356_RUNTIME_REVISION=$(git rev-parse HEAD)
 npm run perf:cod356 -- --phase after --conditions idle,cpu --samples 5 --runtime-revision "$COD356_RUNTIME_REVISION"
 ```
 
-Compare branch-point baseline and final results by matrix cell. Report median/p95 deltas, raw artifact locations, byte identity, cleanup, and any metric that did not improve.
+Compare comparison-revision baseline and final results by matrix cell. Report median/p95 deltas, raw artifact locations,
+the measured live-server byte-identity scope and restart limitation, cleanup, and any metric that did not improve.
 
-- [ ] **Step 2: Run scoped regressions**
+- [x] **Step 2: Run scoped regressions**
 
 Run the union of touched focused suites, explicitly including:
 
@@ -523,7 +536,7 @@ npm test -- test/tmux-capture-text.test.ts test/working-frame-poll-coordinator.t
 npm run test:browser -- test/codex-predictive-echo.test.ts test/terminal-input-performance.browser.test.ts test/tab-activation.browser.test.ts test/session-sidebar-ux.browser.test.ts
 ```
 
-- [ ] **Step 3: Run repository gates**
+- [x] **Step 3: Run repository gates**
 
 ```bash
 npm run typecheck
@@ -536,21 +549,40 @@ npm run build
 git diff --check
 ```
 
-- [ ] **Step 4: Run realistic temporary-instance smoke**
+- [x] **Step 4: Run realistic temporary-instance smoke**
 
 Use the `codeman-prod-realistic-smoke` skill against the built branch. Require realistic Codex and shell input, tab switching, reload/replay, long scrollback, no page errors or serious console errors, and exact cleanup evidence.
 
-- [ ] **Step 5: Request specification and quality review**
+**Smoke outcome (2026-08-23):** The branch passed 130/132 installed-run checks twice with zero page/serious-console errors
+and exact post-run cleanup, but both runs failed the same two post-reload shell viewport-navigation checks. An installed-run
+exact-runtime-source `ca11a1d7` control passed 132/132. A single observational copy on the unchanged branch then passed all
+132 original assertions; the old fixed-300 ms condition passed, so its added condition poll never executed and its
+diagnostics array is empty. Step 4 is checked as a qualified equivalent full-smoke pass, not as a reproduced RCA or smoke
+skill fix. All four artifacts, runner hashes, warnings, and cleanup are documented in
+`docs/reports/cod-356/final-comparison.md`.
+
+**Quality-remediation outcome (2026-08-23):** Specification and quality reviews are approved with no remaining findings. The
+identity-safe listener/process-tree/port cleanup correction was developed RED/GREEN and committed separately as
+`cc15b593`. A fresh corrected-harness comparison matrix at `a445cdaf` and final matrix at `cc15b593` both completed all
+four cells x five samples plus warmups, fixed 7-worker CPU cohorts/deadlines, 160/160 exact steady-state WebSocket trials,
+empty browser error arrays, and stable cleanup. The numeric exact-byte claim is WebSocket-only; focused real
+browser/server regressions separately cover HTTP, delayed/lost ACK, reconnect, and reload.
+
+- [x] **Step 5: Request specification and quality review**
 
 Review the complete branch against the approved design, performance evidence, input correctness, lifecycle safety, and cleanup. Resolve every Critical or Important finding and rerun affected measurements/tests.
 
-- [ ] **Step 6: Add release metadata and commit verification**
+- [x] **Step 6: Add release metadata and commit verification**
 
 ```bash
 git add docs/reports/cod-356 .changeset/cod-356-performance-improvements.md docs/superpowers/plans/2026-08-22-cod-356-performance-improvements.md
 git commit -m "chore: COD-356 document performance release"
 ```
 
-- [ ] **Step 7: Update Jira without marking Done prematurely**
+- [x] **Step 7: Update Jira without marking Done prematurely**
 
 Comment with branch commits, exact benchmark deltas, test/gate output, smoke artifacts, warnings, and cleanup. Leave COD-356 out of Done until the separately authorized merge/push/deploy and live LAN acceptance complete.
+
+**Jira outcome (2026-08-23):** Comment `21576` records the complete ledger, corrected matrix, input-scope limitation,
+tests/gates, smoke qualification, cleanup proof, and review approvals. COD-356 remains `To Do`; no transition, push,
+merge, deploy, restart, or production mutation was performed.
