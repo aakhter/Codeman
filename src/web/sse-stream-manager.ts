@@ -81,6 +81,8 @@ export class SseStreamManager {
   private backpressuredClients: Set<FastifyReply> = new Set();
   /** Latest already recipient-filtered legacy order frame awaiting a client's drain. */
   private pendingSessionOrderFrames: Map<FastifyReply, string> = new Map();
+  /** Latest owner-filtered tab-layout invalidation awaiting a client's drain. */
+  private pendingTabLayoutFrames: Map<FastifyReply, string> = new Map();
 
   // ─── Tunnel State ───────────────────────────────────────
   /** Cached tunnel active state — updated on TunnelStarted/TunnelStopped to avoid getUrl() on every broadcast */
@@ -159,6 +161,7 @@ export class SseStreamManager {
     this.remoteSseClients.delete(reply);
     this.backpressuredClients.delete(reply);
     this.pendingSessionOrderFrames.delete(reply);
+    this.pendingTabLayoutFrames.delete(reply);
     this.sseClientIdentity.delete(reply);
     // Clear any clientId mappings pointing at this reply
     for (const [id, r] of this.sseClientsById) {
@@ -230,6 +233,12 @@ export class SseStreamManager {
         this.markBackpressured(reply);
         return;
       }
+      const pendingLayout = this.pendingTabLayoutFrames.get(reply);
+      if (pendingLayout) {
+        this.pendingTabLayoutFrames.delete(reply);
+        this.sendSSEPreformatted(reply, pendingLayout);
+        if (!this.sseClients.has(reply) || this.backpressuredClients.has(reply)) return;
+      }
       const pendingOrder = this.pendingSessionOrderFrames.get(reply);
       if (!pendingOrder) return;
       this.pendingSessionOrderFrames.delete(reply);
@@ -288,6 +297,10 @@ export class SseStreamManager {
     for (const [client] of this.sseClients) {
       // Multi-user ownership routing (no-op for identity-less single-user clients).
       if (!this.canDeliver(client, hint)) continue;
+      if (event === SseEvent.TabLayoutChanged && this.backpressuredClients.has(client)) {
+        this.pendingTabLayoutFrames.set(client, message);
+        continue;
+      }
       this.sendSSEPreformatted(client, message);
     }
   }
@@ -578,6 +591,7 @@ export class SseStreamManager {
     this.remoteSseClients.clear();
     this.backpressuredClients.clear();
     this.pendingSessionOrderFrames.clear();
+    this.pendingTabLayoutFrames.clear();
 
     // Clear per-session batch timers
     for (const timer of this.terminalBatchTimers.values()) {
