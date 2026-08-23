@@ -44,6 +44,7 @@ interface LayoutApp {
   isSessionSidebarActive(): boolean;
   isSessionSidebarCollapsed(): boolean;
   applySessionListLayout(): void;
+  applyTabOrientation(): void;
   toggleSessionSidebar(): void;
   updateSidebarCount(): void;
   closeSessionSidebarOnHandheld(): void;
@@ -86,6 +87,7 @@ const SHELL = `
     </div>
   </header>
   <main class="main">
+    <div class="tab-rail" id="tabRail"></div>
     <aside class="session-sidebar" id="sessionSidebar" aria-label="Sessions">
       <div class="session-sidebar-head">
         <span class="session-sidebar-title">Sessions</span>
@@ -175,6 +177,39 @@ describe('session list layout', () => {
     expect(app.isSessionSidebarActive()).toBe(false);
     expect(tabsEl(win).parentElement?.id).toBe('sessionTabsHost');
     expect(toggleBtn(win).classList.contains('btn-sidebar-toggle--hidden')).toBe(true);
+  });
+
+  it('preserves vertical rail ownership when the session-list layout reapplies', () => {
+    const { win, app } = boot({ stored: { sessionListLayout: 'header', tabOrientation: 'vertical' } });
+
+    app.applySessionListLayout();
+    app.applyTabOrientation();
+    expect(tabsEl(win).parentElement?.id).toBe('tabRail');
+
+    app.applySessionListLayout();
+
+    expect(tabsEl(win).parentElement?.id).toBe('tabRail');
+    expect(tabsEl(win).getAttribute('aria-orientation')).toBe('vertical');
+  });
+
+  it('keeps aria orientation synchronized when tab orientation moves hosts', () => {
+    const { win, app } = boot({ stored: { sessionListLayout: 'header', tabOrientation: 'vertical' } });
+
+    app.applySessionListLayout();
+    app.applyTabOrientation();
+
+    expect(tabsEl(win).parentElement?.id).toBe('tabRail');
+    expect(tabsEl(win).getAttribute('aria-orientation')).toBe('vertical');
+
+    win.localStorage.setItem(
+      'codeman-app-settings',
+      JSON.stringify({ sessionListLayout: 'header', tabOrientation: 'horizontal' })
+    );
+    delete (app as unknown as { _cachedAppSettings?: unknown })._cachedAppSettings;
+    app.applyTabOrientation();
+
+    expect(tabsEl(win).parentElement?.id).toBe('sessionTabsHost');
+    expect(tabsEl(win).getAttribute('aria-orientation')).toBe('horizontal');
   });
 
   it('re-parents the tab list into the sidebar and flips the a11y state', () => {

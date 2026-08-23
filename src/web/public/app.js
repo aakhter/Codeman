@@ -3871,7 +3871,10 @@ class CodemanApp {
     const sidebarList = document.getElementById('sessionSidebarList');
     if (!tabsEl || !headerHost || !sidebarList) return;
 
-    const host = sidebar ? sidebarList : headerHost;
+    const rail = document.getElementById('tabRail');
+    const railOwnsTabs =
+      !sidebar && document.documentElement.getAttribute('data-tab-orientation') === 'vertical';
+    const host = sidebar ? sidebarList : railOwnsTabs && rail ? rail : headerHost;
     if (tabsEl.parentElement !== host) host.appendChild(tabsEl);
 
     document.documentElement.dataset.sessionList = sidebar ? 'sidebar' : 'header';
@@ -3880,7 +3883,7 @@ class CodemanApp {
     // would let the sidebar CSS style a strip that has nothing to style.
     document.documentElement.dataset.sidebarDetail = mode === 'sidebar-rich' ? 'rich' : 'simple';
     document.documentElement.dataset.sidebar = collapsed ? 'collapsed' : 'expanded';
-    tabsEl.setAttribute('aria-orientation', sidebar ? 'vertical' : 'horizontal');
+    tabsEl.setAttribute('aria-orientation', host === headerHost ? 'horizontal' : 'vertical');
 
     const btn = document.getElementById('sidebarToggleBtn');
     if (btn) {
