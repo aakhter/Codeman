@@ -40,6 +40,23 @@ describe('owner layout key', () => {
 });
 
 describe('normalizeOrMigrateOwnerTabLayout', () => {
+  it('migrates a prototype-like owner when the layouts object has no matching own key', () => {
+    const result = normalizeOrMigrateOwnerTabLayout(
+      baseInput({
+        owner: 'constructor',
+        layouts: {},
+        persistedSessions: [{ id: 'owned', owner: 'constructor', createdAt: 1 }],
+      })
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.layout).toMatchObject({
+      version: 0,
+      ungrouped: [{ kind: 'session', id: 'owned' }],
+    });
+    expect(Object.hasOwn(result.layouts, 'constructor')).toBe(true);
+  });
+
   it('filters global sessionOrder by owner and appends remaining sessions deterministically', () => {
     const result = normalizeOrMigrateOwnerTabLayout(
       baseInput({
