@@ -45,6 +45,13 @@ export interface RemovedTabLayoutSession {
   owner?: string;
 }
 
+interface PreparedOwnerLayout {
+  current: TabLayout | null;
+  authoritative: TabLayout;
+  metadata: TabRefMetadata[];
+  needsReconciliationCommit: boolean;
+}
+
 const ownerOf = (record: { owner?: string }): string => record.owner ?? SINGLE_USER_LAYOUT_OWNER;
 const refKey = (ref: Pick<TabRef, 'kind' | 'id'>): string => `${ref.kind}\u0000${ref.id}`;
 const sameLayout = (a: TabLayout, b: TabLayout): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -173,10 +180,10 @@ export class TabLayoutService {
     return this.commitPrepared(owner, this.prepareCommit(base, next));
   }
 
-  private async getUnlocked(owner: string): Promise<TabLayout> {
+  private async prepareUnlocked(owner: string): Promise<PreparedOwnerLayout> {
     const facts = await this.facts(owner);
     const current = this.deps.store.getTabLayout(owner);
-    const migrated = normalizeOrMigrateOwnerTabLayout({
+    const authoritative = normalizeOrMigrateOwnerTabLayout({
       owner,
       layouts: current ? { [owner]: current } : undefined,
       sessionOrder: this.deps.store.getSessionOrder(),
@@ -185,11 +192,19 @@ export class TabLayoutService {
       webviews: facts.webviews,
       updatedAt: (this.deps.now ?? (() => new Date().toISOString()))(),
     }).layout;
-    if (!current) {
-      const initialBase = { ...migrated, version: -1 };
-      return this.commit(owner, initialBase, migrated);
-    }
-    return sameLayout(current, migrated) ? current : this.commit(owner, current, migrated);
+    return {
+      current,
+      authoritative,
+      metadata: facts.metadata,
+      needsReconciliationCommit: !current || !sameLayout(current, authoritative),
+    };
+  }
+
+  private async getUnlocked(owner: string): Promise<TabLayout> {
+    const prepared = await this.prepareUnlocked(owner);
+    if (!prepared.needsReconciliationCommit) return prepared.authoritative;
+    const base = prepared.current ?? { ...prepared.authoritative, version: -1 };
+    return this.commit(owner, base, prepared.authoritative);
   }
 
   async get(owner: string): Promise<TabLayout> {
@@ -198,17 +213,19 @@ export class TabLayoutService {
 
   async put(owner: string, desired: unknown, baseVersion: number): Promise<TabLayoutPutResult> {
     return this.withOwner(owner, async () => {
-      const current = await this.getUnlocked(owner);
-      if (baseVersion !== current.version) return { status: 'conflict', layout: current };
+      const prepared = await this.prepareUnlocked(owner);
+      if (baseVersion !== prepared.authoritative.version) return { status: 'conflict', layout: prepared.authoritative };
       const validated = validateTabLayout(desired);
-      const { metadata } = await this.facts(owner);
-      const owned = new Set(metadata.filter((item) => item.ownerValid && item.visible).map(refKey));
+      const owned = new Set(prepared.metadata.filter((item) => item.ownerValid && item.visible).map(refKey));
       const refs = [...validated.groups.flatMap((group) => group.refs), ...validated.ungrouped];
       const invalid = refs.find((ref) => !owned.has(refKey(ref)));
       if (invalid)
         throw new TabLayoutValidationError(`ref is not owned by layout owner: ${invalid.kind}:${invalid.id}`);
-      const normalized = normalizeTabLayout({ ...validated, version: current.version }, metadata);
-      return { status: 'updated', layout: this.commit(owner, current, normalized) };
+      const normalized = normalizeTabLayout(
+        { ...validated, version: prepared.authoritative.version },
+        prepared.metadata
+      );
+      return { status: 'updated', layout: this.commit(owner, prepared.authoritative, normalized) };
     });
   }
 

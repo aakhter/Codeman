@@ -266,6 +266,94 @@ describe('TabLayoutService', () => {
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
   });
 
+  it('returns an unpersisted prepared layout for a stale first write without broadcasting', async () => {
+    const h = createHarness({
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+    });
+
+    await expect(h.service.put('alice', existing([{ kind: 'session', id: 'mine' }]), 7)).resolves.toEqual({
+      status: 'conflict',
+      layout: {
+        version: 0,
+        groups: [],
+        ungrouped: [{ kind: 'session', id: 'mine' }],
+        updatedAt: '2026-08-16T12:00:00.000Z',
+      },
+    });
+    expect(h.layouts.alice).toBeUndefined();
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('returns a normalized prepared layout for a stale write without persisting the reconciliation', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'unknown' }]) },
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+    });
+
+    await expect(h.service.put('alice', existing([{ kind: 'session', id: 'mine' }]), 6)).resolves.toEqual({
+      status: 'conflict',
+      layout: existing([
+        { kind: 'session', id: 'unknown' },
+        { kind: 'session', id: 'mine' },
+      ]),
+    });
+    expect(h.layouts.alice).toEqual(existing([{ kind: 'session', id: 'unknown' }]));
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('folds first-write initialization and the requested update into one commit', async () => {
+    const h = createHarness({
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+    });
+    const desired = {
+      ...existing([]),
+      groups: [{ id: 'g', name: 'Mine', refs: [{ kind: 'session', id: 'mine' }] }],
+    };
+
+    const result = await h.service.put('alice', desired, 0);
+
+    expect(result).toEqual({
+      status: 'updated',
+      layout: {
+        version: 1,
+        groups: [{ id: 'g', name: 'Mine', refs: [{ kind: 'session', id: 'mine' }] }],
+        ungrouped: [],
+        updatedAt: '2026-08-16T12:00:00.000Z',
+      },
+    });
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+    expect(h.store.setTabLayout).toHaveBeenCalledWith('alice', result.layout);
+    expect(h.broadcast).toHaveBeenCalledExactlyOnceWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 1 });
+  });
+
+  it('folds normalization and a matching requested update into one commit', async () => {
+    const h = createHarness({
+      layouts: { alice: existing([{ kind: 'session', id: 'unknown' }]) },
+      live: [{ id: 'mine', owner: 'alice', createdAt: 1 }],
+    });
+    const desired = {
+      ...existing([]),
+      groups: [{ id: 'g', name: 'Mine', refs: [{ kind: 'session', id: 'mine' }] }],
+    };
+
+    const result = await h.service.put('alice', desired, 7);
+
+    expect(result).toEqual({
+      status: 'updated',
+      layout: {
+        version: 8,
+        groups: [{ id: 'g', name: 'Mine', refs: [{ kind: 'session', id: 'mine' }] }],
+        ungrouped: [],
+        updatedAt: '2026-08-16T12:00:00.000Z',
+      },
+    });
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+    expect(h.store.setTabLayout).toHaveBeenCalledWith('alice', result.layout);
+    expect(h.broadcast).toHaveBeenCalledExactlyOnceWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 8 });
+  });
+
   it('stores a matching write with one fresh version and minimal event payload', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'mine' }]) },

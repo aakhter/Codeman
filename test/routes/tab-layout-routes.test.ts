@@ -63,6 +63,8 @@ describe('tab layout routes', () => {
       payload: { baseVersion, layout: layout(baseVersion) },
     });
     expect(response.statusCode).toBe(409);
+    expect(response.json().success).toBe(false);
+    expect(response.json().errorCode).toBe('CONFLICT');
     expect(response.json().data.layout).toEqual(layout(3));
     await app.close();
   });
