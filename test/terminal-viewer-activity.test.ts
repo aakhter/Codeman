@@ -76,6 +76,7 @@ function harness(
     sessionId?: string | null;
     dimensions?: Dimensions;
     send?: (frame: unknown) => boolean;
+    transportIdentity?: () => unknown;
   } = {}
 ) {
   const api = loadApi();
@@ -104,6 +105,7 @@ function harness(
     activeSessionId: () => sessionId,
     dimensions: () => dimensions,
     send,
+    ...(overrides.transportIdentity ? { transportIdentity: overrides.transportIdentity } : {}),
     now: () => now,
   });
 
@@ -464,6 +466,32 @@ describe('terminal viewer activity controller', () => {
     expect(send).toHaveBeenCalledTimes(3);
   });
 
+  it('does not inherit activity dedupe from an unavailable or replacement transport', () => {
+    const oldSocket = { id: 'old' };
+    const newSocket = { id: 'new' };
+    let socket: object | null = oldSocket;
+    const send = vi.fn(() => socket !== null);
+    const h = harness({ send, transportIdentity: () => socket });
+    h.setNow(100);
+    expect(h.controller.activate('pointerdown')).toBe(true);
+
+    socket = null;
+    h.setNow(101);
+    expect(h.controller.activate('pointerdown')).toBe(false);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(h.controller.hasPending()).toBe(true);
+
+    socket = newSocket;
+    h.setNow(102);
+    expect(h.controller.flushPending('ws-open')).toBe(true);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(h.controller.hasPending()).toBe(false);
+
+    h.setNow(103);
+    expect(h.controller.activate('pointerdown')).toBe(false);
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
   it('keeps a pending focus-based activation queued until focus returns', () => {
     let ready = false;
     const send = vi.fn(() => ready);
@@ -677,10 +705,13 @@ describe('terminal viewer activity browser integration', () => {
     });
     app._initTerminalViewerActivity();
     const send = capturedDeps?.send as (frame: unknown) => boolean;
+    const transportIdentity = capturedDeps?.transportIdentity as () => unknown;
 
+    expect(transportIdentity()).toBeNull();
     expect(send({ t: 'va' })).toBe(false);
     expect((app._ws as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
     app._wsSessionId = 's1';
+    expect(transportIdentity()).toBe(app._ws);
     expect(send({ t: 'va' })).toBe(true);
     expect((app._ws as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledOnce();
     app._ws = {

@@ -12,6 +12,7 @@
     const terminalTarget = deps.terminalTarget;
     const isVisible = deps.isVisible || (() => documentTarget.visibilityState === 'visible');
     const isFocused = deps.isFocused || (() => documentTarget.hasFocus());
+    const transportIdentity = deps.transportIdentity || (() => deps.send);
     const now =
       deps.now ||
       (() =>
@@ -23,6 +24,7 @@
     let pendingSessionId = null;
     let pendingRequiresFocus = false;
     let lastSignature = null;
+    let lastTransportIdentity = null;
     let lastSentAt = 0;
     let wasVisible = isVisible();
 
@@ -48,12 +50,15 @@
       if (!validDimensions(dimensions)) return false;
 
       const signature = `${sessionId}:${dimensions.viewportType}:${dimensions.cols}x${dimensions.rows}`;
+      const currentTransportIdentity = transportIdentity();
       const currentTime = now();
       const elapsed = currentTime - lastSentAt;
       const explicitRestore = reason === 'restore-terminal-size';
       if (
         !bypassDedupe &&
         !explicitRestore &&
+        currentTransportIdentity !== null &&
+        currentTransportIdentity === lastTransportIdentity &&
         signature === lastSignature &&
         Number.isFinite(elapsed) &&
         elapsed >= 0 &&
@@ -78,6 +83,7 @@
       pendingSessionId = null;
       pendingRequiresFocus = false;
       lastSignature = signature;
+      lastTransportIdentity = currentTransportIdentity;
       lastSentAt = currentTime;
       return true;
     }
@@ -142,6 +148,7 @@
       pending = false;
       pendingSessionId = null;
       pendingRequiresFocus = false;
+      lastTransportIdentity = null;
       for (const [target, type, listener, options] of listeners) target.removeEventListener(type, listener, options);
     }
 

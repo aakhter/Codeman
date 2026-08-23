@@ -1185,6 +1185,15 @@ class CodemanApp {
       isFocused: () => document.hasFocus(),
       activeSessionId: () => this.activeSessionId,
       dimensions: () => this.getFittedTerminalDimensions?.() ?? null,
+      transportIdentity: () => {
+        if (
+          !this._wsReady ||
+          this._wsSessionId !== this.activeSessionId ||
+          !this._ws ||
+          this._ws.readyState !== WebSocket.OPEN
+        ) return null;
+        return this._ws;
+      },
       send: (frame) => {
         if (
           !this._wsReady ||
