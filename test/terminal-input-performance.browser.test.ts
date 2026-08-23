@@ -251,6 +251,287 @@ type TraceCursor = {
   terminalIndex: number;
 };
 
+type ImePreviewMetrics = {
+  pendingFrames: number;
+  maxPendingFrames: number;
+  pendingTimers: number;
+  provisionalRenders: number;
+  committedRenders: number;
+  provisionalValues: string[];
+  committedValues: string[];
+  commitTransitions: Array<{ data: string; consumed: boolean; committed: boolean; latest: string }>;
+  authoritativeTransitions: Array<{ beforeCommitted: boolean; afterCommitted: boolean }>;
+  latestPreview: string;
+  lastUpdateAt: number;
+  lastRenderAt: number;
+  dispatchElapsedMs: number;
+  maxHandlerMs: number;
+};
+
+async function installMobileImePreviewTrace(): Promise<void> {
+  await page.evaluate(() => {
+    const app = (window as any).app;
+    const api = (window as any).MobileImePreview;
+    app._destroyMobileImePreview();
+    const textarea = app.terminal.textarea;
+
+    const metrics: ImePreviewMetrics = {
+      pendingFrames: 0,
+      maxPendingFrames: 0,
+      pendingTimers: 0,
+      provisionalRenders: 0,
+      committedRenders: 0,
+      provisionalValues: [],
+      committedValues: [],
+      commitTransitions: [],
+      authoritativeTransitions: [],
+      latestPreview: '',
+      lastUpdateAt: 0,
+      lastRenderAt: 0,
+      dispatchElapsedMs: 0,
+      maxHandlerMs: 0,
+    };
+    const activeTextareaListeners = new Map<EventListenerOrEventListenerObject, { type: string; capture: boolean }>();
+    const activeWindowListeners = new Map<EventListenerOrEventListenerObject, string>();
+    const removedWindowListeners: Array<{ type: string; listener: EventListenerOrEventListenerObject }> = [];
+    const originalTextareaAdd = textarea.addEventListener.bind(textarea);
+    const originalTextareaRemove = textarea.removeEventListener.bind(textarea);
+    const originalWindowAdd = window.addEventListener.bind(window);
+    const originalWindowRemove = window.removeEventListener.bind(window);
+    const trackedTextareaTypes = new Set([
+      'compositionstart',
+      'compositionupdate',
+      'input',
+      'compositionend',
+      'keydown',
+      'blur',
+    ]);
+    const capture = (options?: boolean | AddEventListenerOptions) =>
+      options === true || (typeof options === 'object' && options?.capture === true);
+    textarea.addEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions
+    ) => {
+      if (trackedTextareaTypes.has(type)) activeTextareaListeners.set(listener, { type, capture: capture(options) });
+      return originalTextareaAdd(type, listener, options);
+    }) as typeof textarea.addEventListener;
+    textarea.removeEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions
+    ) => {
+      const tracked = activeTextareaListeners.get(listener);
+      if (tracked?.type === type && tracked.capture === capture(options)) activeTextareaListeners.delete(listener);
+      return originalTextareaRemove(type, listener, options);
+    }) as typeof textarea.removeEventListener;
+    window.addEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions
+    ) => {
+      if (type === 'offline' || type === 'pagehide') activeWindowListeners.set(listener, type);
+      return originalWindowAdd(type, listener, options);
+    }) as typeof window.addEventListener;
+    window.removeEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions
+    ) => {
+      if (activeWindowListeners.get(listener) === type) {
+        activeWindowListeners.delete(listener);
+        removedWindowListeners.push({ type, listener });
+      }
+      return originalWindowRemove(type, listener, options);
+    }) as typeof window.removeEventListener;
+    (window as any).__cod368 = {
+      metrics,
+      localEcho: { enabled: app._localEchoEnabled, policy: app._localEchoPolicy },
+      seams: {
+        textarea,
+        originalTextareaAdd,
+        originalTextareaRemove,
+        originalWindowAdd,
+        originalWindowRemove,
+        activeTextareaListeners,
+        activeWindowListeners,
+        removedWindowListeners,
+      },
+    };
+
+    const originalCreate = api.create;
+    const originalEligibility = api.isIosWebKitTouch;
+    api.isIosWebKitTouch = () => true;
+    api.create = (options: Record<string, any>) => {
+      const scheduled = new Map<number, boolean>();
+      const scheduledTimers = new Map<number, boolean>();
+      const controller = originalCreate({
+        ...options,
+        scheduleFrame(callback: FrameRequestCallback) {
+          metrics.pendingFrames += 1;
+          metrics.maxPendingFrames = Math.max(metrics.maxPendingFrames, metrics.pendingFrames);
+          const id = requestAnimationFrame((timestamp) => {
+            if (scheduled.delete(id)) metrics.pendingFrames -= 1;
+            callback(timestamp);
+          });
+          scheduled.set(id, true);
+          return id;
+        },
+        cancelFrame(id: number) {
+          if (scheduled.delete(id)) metrics.pendingFrames -= 1;
+          cancelAnimationFrame(id);
+        },
+        setTimer(callback: () => void, delay: number) {
+          const id = window.setTimeout(() => {
+            if (scheduledTimers.delete(id)) metrics.pendingTimers -= 1;
+            callback();
+          }, delay);
+          scheduledTimers.set(id, true);
+          metrics.pendingTimers += 1;
+          return id;
+        },
+        clearTimer(id: number) {
+          if (scheduledTimers.delete(id)) metrics.pendingTimers -= 1;
+          clearTimeout(id);
+        },
+        render(value: { text: string; phase: 'provisional' | 'committed' }) {
+          metrics.lastRenderAt = performance.now();
+          metrics.latestPreview = value.text;
+          if (value.phase === 'provisional') {
+            metrics.provisionalRenders += 1;
+            metrics.provisionalValues.push(value.text);
+          } else {
+            metrics.committedRenders += 1;
+            metrics.committedValues.push(value.text);
+          }
+          return options.render(value);
+        },
+      });
+      const originalConsume = controller.consumeTerminalData.bind(controller);
+      controller.consumeTerminalData = (data: string) => {
+        const consumed = originalConsume(data);
+        const state = controller.state;
+        if (consumed)
+          metrics.commitTransitions.push({ data, consumed, committed: state.committed, latest: state.latest });
+        return consumed;
+      };
+      const originalAuthoritative = controller.noteAuthoritativeOutput.bind(controller);
+      controller.noteAuthoritativeOutput = () => {
+        const beforeCommitted = controller.state.committed;
+        originalAuthoritative();
+        metrics.authoritativeTransitions.push({
+          beforeCommitted,
+          afterCommitted: controller.state.committed,
+        });
+      };
+      return controller;
+    };
+    try {
+      app._initMobileImePreview();
+    } finally {
+      api.create = originalCreate;
+      api.isIosWebKitTouch = originalEligibility;
+    }
+    if (!app._mobileImePreview) throw new Error('mobile IME preview did not initialize');
+    (window as any).__cod368.registrations = {
+      textarea: activeTextareaListeners.size,
+      window: activeWindowListeners.size,
+    };
+  });
+}
+
+async function destroyMobileImePreviewTrace(): Promise<void> {
+  if (!page || page.isClosed()) return;
+  await page.evaluate(async () => {
+    const app = (window as any).app;
+    const textarea = app.terminal.textarea;
+    const trace = (window as any).__cod368;
+    if (!trace) {
+      app._destroyMobileImePreview();
+      return;
+    }
+    const seams = trace.seams;
+    try {
+      if (app._mobileImePreview?.state?.composing) {
+        textarea.value = '';
+        textarea.dispatchEvent(new CompositionEvent('compositionend', { data: '' }));
+        await new Promise((resolveTask) => setTimeout(resolveTask, 0));
+      }
+      const before = {
+        provisional: trace.metrics.provisionalRenders,
+        committed: trace.metrics.committedRenders,
+      };
+      app._destroyMobileImePreview();
+      textarea.dispatchEvent(new CompositionEvent('compositionstart'));
+      textarea.dispatchEvent(new CompositionEvent('compositionupdate', { data: 'after-destroy' }));
+      textarea.value = '';
+      textarea.dispatchEvent(new CompositionEvent('compositionend', { data: '' }));
+      const detachedWindowTarget = new EventTarget();
+      for (const { type, listener } of seams.removedWindowListeners) {
+        detachedWindowTarget.addEventListener(type, listener);
+      }
+      detachedWindowTarget.dispatchEvent(new Event('offline'));
+      detachedWindowTarget.dispatchEvent(new PageTransitionEvent('pagehide'));
+      await new Promise((resolveFrame) => requestAnimationFrame(() => resolveFrame(undefined)));
+      await new Promise((resolveTask) => setTimeout(resolveTask, 0));
+      trace.cleanup = {
+        controller: app._mobileImePreview,
+        previewCount: document.querySelectorAll('.codeman-ime-preview').length,
+        pendingFrames: trace.metrics.pendingFrames,
+        pendingTimers: trace.metrics.pendingTimers,
+        activeTextareaListeners: seams.activeTextareaListeners.size,
+        activeWindowListeners: seams.activeWindowListeners.size,
+        detachedWindowEvents: seams.removedWindowListeners.length,
+        provisionalRendersAfterDestroy: trace.metrics.provisionalRenders - before.provisional,
+        committedRendersAfterDestroy: trace.metrics.committedRenders - before.committed,
+      };
+    } finally {
+      textarea.addEventListener = seams.originalTextareaAdd;
+      textarea.removeEventListener = seams.originalTextareaRemove;
+      window.addEventListener = seams.originalWindowAdd;
+      window.removeEventListener = seams.originalWindowRemove;
+      app._localEchoEnabled = trace.localEcho.enabled;
+      app._localEchoPolicy = trace.localEcho.policy;
+      app._initMobileImePreview();
+    }
+  });
+}
+
+function readProbeBytes(startIndex: number): Buffer {
+  return Buffer.concat(
+    readProbeEvents()
+      .slice(startIndex)
+      .filter((event) => event.type === 'stdin')
+      .map((event) => Buffer.from(event.base64, 'base64'))
+  );
+}
+
+type SerializedInputRecord = { data: string; seq: number; clientId: string };
+
+async function readInputLayers(
+  before: TraceCursor
+): Promise<{ logical: string[]; ws: SerializedInputRecord[]; http: SerializedInputRecord[] }> {
+  return page.evaluate((cursor) => {
+    const trace = (window as any).__cod356InputTrace;
+    const wire = (window as any).__cod356Wire;
+    return {
+      logical: trace.logical.slice(cursor.logicalIndex).map((entry: any) => entry.data),
+      ws: wire.ws
+        .slice(cursor.wsIndex)
+        .filter((entry: any) => entry.frame?.t === 'i')
+        .map((entry: any) => ({ data: entry.frame.d, seq: entry.frame.seq, clientId: entry.frame.cid })),
+      http: wire.http
+        .slice(cursor.httpIndex)
+        .filter((entry: any) => typeof entry.body?.input === 'string')
+        .map((entry: any) => ({
+          data: entry.body.input,
+          seq: entry.body.seq,
+          clientId: entry.body.clientId,
+        })),
+    };
+  }, before);
+}
+
 async function resetTrace(): Promise<TraceCursor> {
   const counts = await page.evaluate(() => {
     return {
@@ -309,7 +590,7 @@ async function assertCurrentLayers(
   before: TraceCursor,
   inputs: readonly string[],
   transport: 'ws' | 'http' = 'ws',
-  serializedCopies = 1
+  serializedCopies?: number
 ): Promise<void> {
   const visibleTokens = readProbeEvents()
     .slice(before.probeIndex)
@@ -335,17 +616,31 @@ async function assertCurrentLayers(
           ? (window as any).__cod356Wire.ws
               .slice(before.wsIndex)
               .filter((entry: any) => entry.frame?.t === 'i')
-              .map((entry: any) => entry.frame.d)
+              .map((entry: any) => ({ data: entry.frame.d, seq: entry.frame.seq, clientId: entry.frame.cid }))
           : (window as any).__cod356Wire.http
               .slice(before.httpIndex)
               .filter((entry: any) => typeof entry.body?.input === 'string')
-              .map((entry: any) => entry.body.input),
+              .map((entry: any) => ({
+                data: entry.body.input,
+                seq: entry.body.seq,
+                clientId: entry.body.clientId,
+              })),
       terminal: (window as any).__cod356InputTrace.terminal.slice(before.terminalIndex),
     }),
     { before, transport }
   );
   expect(layers.logical).toEqual(inputs);
-  expect(layers.serialized).toEqual(Array.from({ length: serializedCopies }, () => [...inputs]).flat());
+  expect(layers.serialized.length).toBeGreaterThanOrEqual(inputs.length);
+  if (serializedCopies !== undefined) expect(layers.serialized).toHaveLength(inputs.length * serializedCopies);
+  const records = new Map<string, string>();
+  for (const record of layers.serialized) {
+    expect(record).toMatchObject({ data: expect.any(String), seq: expect.any(Number), clientId: expect.any(String) });
+    const key = `${record.clientId}:${record.seq}`;
+    const prior = records.get(key);
+    if (prior !== undefined) expect(record.data).toBe(prior);
+    else records.set(key, record.data);
+  }
+  expect([...records.values()]).toEqual(inputs);
   const terminalOutput = layers.terminal.map((entry: any) => entry.data).join('');
   for (const token of visibleTokens) expect(terminalOutput).toContain(token.slice(-48));
   await expect.poll(() => terminalContains(visibleTokens.at(-1)!.slice(-48)), { timeout: 10_000 }).toBe(true);
@@ -520,6 +815,183 @@ describe('terminal input real browser/server/probe correlation', () => {
       });
     }
   );
+
+  it('holds a five-second mobile composition visually without sending provisional PTY bytes', async () => {
+    const before = await resetTrace();
+    const committedText = 'held-mobile-composition';
+    let stableLayers: Awaited<ReturnType<typeof readInputLayers>> | undefined;
+    let stableBytes: Buffer | undefined;
+    let previewInstallAttempted = false;
+    try {
+      previewInstallAttempted = true;
+      await installMobileImePreviewTrace();
+      expect(await page.evaluate(() => (window as any).__cod368.registrations)).toEqual({ textarea: 6, window: 2 });
+      await page.evaluate(async () => {
+        const app = (window as any).app;
+        app._localEchoEnabled = false;
+        app._localEchoPolicy = 'off';
+        const textarea = app.terminal.textarea;
+        textarea.value = '';
+        textarea.dispatchEvent(new CompositionEvent('compositionstart'));
+        for (let index = 1; index <= 20; index++) {
+          const value = index === 20 ? 'held-mobile-composition' : `held-mobile-${index}`;
+          textarea.value = value;
+          (window as any).__cod368.metrics.lastUpdateAt = performance.now();
+          textarea.dispatchEvent(new CompositionEvent('compositionupdate', { data: value }));
+          await new Promise((resolveUpdate) => setTimeout(resolveUpdate, 250));
+        }
+      });
+      await expect.poll(() => page.locator('.codeman-ime-preview').textContent()).toBe(committedText);
+      await expect.poll(() => page.locator('.codeman-ime-preview').getAttribute('data-phase')).toBe('provisional');
+
+      expect(readProbeBytes(before.probeIndex)).toEqual(Buffer.alloc(0));
+      expect(await readInputLayers(before)).toEqual({ logical: [], ws: [], http: [] });
+
+      await page.evaluate((text) => {
+        const app = (window as any).app;
+        const textarea = app.terminal.textarea;
+        textarea.value = text;
+        textarea.dispatchEvent(new CompositionEvent('compositionend', { data: text }));
+      }, committedText);
+
+      expect(await waitForProbeBytes(before.probeIndex, Buffer.from(committedText))).toEqual(
+        Buffer.from(committedText)
+      );
+      await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, {
+        timeout: 10_000,
+      });
+      await assertCurrentLayers(before, [committedText]);
+      await page.waitForTimeout(200);
+      stableBytes = readProbeBytes(before.probeIndex);
+      stableLayers = await readInputLayers(before);
+      expect(stableBytes).toEqual(Buffer.from(committedText));
+      expect(stableLayers.logical).toEqual([committedText]);
+      expect(stableLayers.http).toEqual([]);
+      expect(stableLayers.ws.length).toBeGreaterThanOrEqual(1);
+      expect(stableLayers.ws.every((record) => record.data === committedText)).toBe(true);
+      expect(new Set(stableLayers.ws.map((record) => `${record.clientId}:${record.seq}`)).size).toBe(1);
+
+      const settled = await page.evaluate(() => ({
+        metrics: (window as any).__cod368.metrics as ImePreviewMetrics,
+        state: (window as any).app._mobileImePreview?.state,
+        preview: document.querySelector('.codeman-ime-preview')?.textContent ?? null,
+      }));
+      expect(settled.metrics.commitTransitions).toEqual([
+        { data: committedText, consumed: true, committed: true, latest: committedText },
+      ]);
+      expect(settled.metrics.committedRenders).toBeLessThanOrEqual(1);
+      expect(settled.metrics.committedValues).toEqual(settled.metrics.committedRenders === 1 ? [committedText] : []);
+      if (settled.metrics.committedRenders === 0) {
+        expect(settled.metrics.authoritativeTransitions).toContainEqual({
+          beforeCommitted: true,
+          afterCommitted: false,
+        });
+      }
+      expect(settled).toMatchObject({
+        state: {
+          committed: false,
+          framePending: false,
+          timerPending: false,
+        },
+        preview: '',
+      });
+    } finally {
+      if (previewInstallAttempted) await destroyMobileImePreviewTrace();
+    }
+
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => (window as any).__cod368.cleanup)).toEqual({
+      controller: null,
+      previewCount: 0,
+      pendingFrames: 0,
+      pendingTimers: 0,
+      activeTextareaListeners: 0,
+      activeWindowListeners: 0,
+      detachedWindowEvents: 2,
+      provisionalRendersAfterDestroy: 0,
+      committedRendersAfterDestroy: 0,
+    });
+    expect(readProbeBytes(before.probeIndex)).toEqual(stableBytes);
+    expect(await readInputLayers(before)).toEqual(stableLayers);
+  }, 30_000);
+
+  it.each([
+    ['unthrottled desktop viewport', 1, { width: 1280, height: 800 }],
+    ['4x CPU throttling at keyboard-sized mobile viewport', 4, { width: 390, height: 520 }],
+  ] as const)('collapses a 500-update IME burst under %s', async (_label, cpuRate, viewport) => {
+    const before = await resetTrace();
+    const originalViewport = page.viewportSize() ?? { width: 1280, height: 800 };
+    let cdp: Awaited<ReturnType<BrowserContext['newCDPSession']>> | undefined;
+    let previewInstallAttempted = false;
+    try {
+      cdp = await context.newCDPSession(page);
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuRate });
+      await page.setViewportSize(viewport);
+      await page.waitForFunction(
+        ({ width, height }) => window.innerWidth === width && window.innerHeight === height,
+        viewport
+      );
+      expect(await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))).toEqual(viewport);
+      previewInstallAttempted = true;
+      await installMobileImePreviewTrace();
+      expect(await page.evaluate(() => (window as any).__cod368.registrations)).toEqual({ textarea: 6, window: 2 });
+      await page.evaluate(() => {
+        const app = (window as any).app;
+        const textarea = app.terminal.textarea;
+        textarea.value = '';
+        textarea.dispatchEvent(new CompositionEvent('compositionstart'));
+        const dispatchStartedAt = performance.now();
+        let maxHandlerMs = 0;
+        for (let index = 1; index <= 500; index++) {
+          (window as any).__cod368.metrics.lastUpdateAt = performance.now();
+          const handlerStartedAt = performance.now();
+          textarea.dispatchEvent(new CompositionEvent('compositionupdate', { data: `value-${index}` }));
+          maxHandlerMs = Math.max(maxHandlerMs, performance.now() - handlerStartedAt);
+        }
+        (window as any).__cod368.metrics.dispatchElapsedMs = performance.now() - dispatchStartedAt;
+        (window as any).__cod368.metrics.maxHandlerMs = maxHandlerMs;
+      });
+      await expect.poll(() => page.locator('.codeman-ime-preview').textContent()).toBe('value-500');
+      const metrics = await page.evaluate(() => (window as any).__cod368.metrics as ImePreviewMetrics);
+      expect(metrics.maxPendingFrames).toBe(1);
+      expect(metrics.provisionalRenders).toBeLessThanOrEqual(2);
+      expect(metrics.provisionalValues.at(-1)).toBe('value-500');
+      expect(metrics.latestPreview).toBe('value-500');
+      expect(metrics.lastRenderAt - metrics.lastUpdateAt).toBeLessThanOrEqual(100);
+      expect(metrics.dispatchElapsedMs).toBeLessThanOrEqual(500);
+      expect(metrics.maxHandlerMs).toBeLessThanOrEqual(50);
+      expect(readProbeBytes(before.probeIndex)).toEqual(Buffer.alloc(0));
+      expect(await readInputLayers(before)).toEqual({ logical: [], ws: [], http: [] });
+    } finally {
+      try {
+        if (previewInstallAttempted) await destroyMobileImePreviewTrace();
+      } finally {
+        try {
+          if (cdp) await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+        } finally {
+          try {
+            if (cdp) await cdp.detach();
+          } finally {
+            await page.setViewportSize(originalViewport);
+          }
+        }
+      }
+    }
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => (window as any).__cod368.cleanup)).toEqual({
+      controller: null,
+      previewCount: 0,
+      pendingFrames: 0,
+      pendingTimers: 0,
+      activeTextareaListeners: 0,
+      activeWindowListeners: 0,
+      detachedWindowEvents: 2,
+      provisionalRendersAfterDestroy: 0,
+      committedRendersAfterDestroy: 0,
+    });
+    expect(readProbeBytes(before.probeIndex)).toEqual(Buffer.alloc(0));
+    expect(await readInputLayers(before)).toEqual({ logical: [], ws: [], http: [] });
+  });
 
   it('restores the real WebSocket target when an HTTP-scoped assertion fails', async () => {
     const active = await page.evaluate(() => (window as any).app._wsSessionId);
