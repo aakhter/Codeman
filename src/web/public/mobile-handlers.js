@@ -400,14 +400,52 @@ const KeyboardHandler = {
       // above the mobile toolbar on iPhone. Measure the controls instead of
       // relying on a constant because toolbar height changes across phone
       // widths, safe-area padding, and button wrapping.
+      // For opencode on small iPhones with keyboard, shrink font and collapse toolbar to reclaim rows (6 rows -> 14 rows on SE).
+      const isOpencodeMobile = (() => {
+        try {
+          return (
+            typeof app !== 'undefined' &&
+            app.sessions?.get?.(app.activeSessionId)?.mode === 'opencode' &&
+            MobileDetection.isMobile?.()
+          );
+        } catch {
+          return false;
+        }
+      })();
+      const vvH = window.visualViewport?.height || window.innerHeight;
+      if (isOpencodeMobile && vvH < 350 && this.keyboardVisible) {
+        // Hide toolbar to gain 40px (~3 rows) - accessory bar already gives dismiss
+        if (toolbar) toolbar.style.display = 'none';
+      } else if (toolbar) {
+        toolbar.style.display = '';
+      }
       const keyboardHeight = this.initialViewportHeight - (window.visualViewport.height || window.innerHeight);
       if (main && keyboardHeight > 0) {
         const cjkInputHeight = cjkInput?.classList.contains('cjk-input-visible') ? 44 : 0;
-        const toolbarHeight = toolbar?.offsetHeight || toolbar?.getBoundingClientRect?.().height || 40;
+        const toolbarHeight =
+          toolbar && toolbar.style.display !== 'none'
+            ? toolbar?.offsetHeight || toolbar?.getBoundingClientRect?.().height || 40
+            : 0;
         const accessoryHeight = accessoryBar?.classList.contains('visible')
           ? accessoryBar.offsetHeight || accessoryBar.getBoundingClientRect?.().height || 44
           : 0;
         main.style.paddingBottom = `${Math.ceil(toolbarHeight + accessoryHeight + cjkInputHeight)}px`;
+      }
+      // Dynamic font size for opencode small viewport: 10 -> 8 to gain ~2 rows
+      if (isOpencodeMobile && typeof app !== 'undefined' && app.terminal) {
+        const targetFont = vvH < 360 && this.keyboardVisible ? 8 : MobileDetection.isMobile?.() ? 10 : 14;
+        if (app.terminal.options.fontSize !== targetFont) {
+          try {
+            app.terminal.options.fontSize = targetFont;
+            // force re-measure cell height now; settle will fit again after layout settles
+            try {
+              app.fitAddon?.fit();
+            } catch {}
+            try {
+              app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
+            } catch {}
+          } catch {}
+        }
       }
     } else {
       this.resetLayout();
@@ -423,6 +461,7 @@ const KeyboardHandler = {
 
     if (toolbar) {
       toolbar.style.transform = '';
+      toolbar.style.display = '';
     }
     if (accessoryBar) {
       accessoryBar.style.transform = '';
@@ -435,6 +474,14 @@ const KeyboardHandler = {
     if (main) {
       main.style.paddingBottom = '';
     }
+    // restore opencode font
+    try {
+      if (typeof app !== 'undefined' && app.terminal && app.terminal.options) {
+        const isMobile = typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.();
+        const target = isMobile ? 10 : 14;
+        if (app.terminal.options.fontSize !== target) app.terminal.options.fontSize = target;
+      }
+    } catch {}
   },
 
   /** Called when keyboard appears */

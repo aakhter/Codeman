@@ -1,5 +1,17 @@
 # aicodeman
 
+## 1.22.2
+
+### Patch Changes
+
+- Enable yellow idle tile for opencode (same as codex/claude) - idle turn-end now creates approval inbox item
+
+## 1.22.1
+
+### Patch Changes
+
+- Fix iPhone opencode mobile: scroll was janky due to double-batched 16ms wheel/touch forwarding and mistyped isOpencodeMobile gate; collapse toolbar and shrink terminal font to 8pt when keyboard visible on small viewport (SE 6→11 rows, 15 Pro 12→19 rows) and restore on hide; immediate per-frame SGR forwarding for opencode touch/momentum
+
 ## 1.22.0
 
 ### Minor Changes
