@@ -16,7 +16,11 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 
 const PREFIX = 'cod370-opencode-';
 const POLL_MS = 20;
-const ROOT = resolve(import.meta.dirname, '../..');
+const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
+
+export interface Cod370OpenCodeFixtureOptions {
+  runtimeRoot?: string;
+}
 
 export interface PaneIdentity {
   muxName: string;
@@ -257,6 +261,7 @@ function liveOpenCodeIdentity(panePid: number): LiveProcessIdentity {
 }
 
 export class Cod370OpenCodeFixture {
+  readonly runtimeRoot: string;
   root = '';
   dataDir = '';
   homeDir = '';
@@ -298,6 +303,10 @@ export class Cod370OpenCodeFixture {
     rootAbsent: false,
   };
 
+  constructor(options: Cod370OpenCodeFixtureOptions = {}) {
+    this.runtimeRoot = resolve(options.runtimeRoot ?? HARNESS_ROOT);
+  }
+
   private tmux(args: string[], ignoreError = false): string {
     try {
       return execFileSync('tmux', ['-L', this.socketName, ...args], {
@@ -313,7 +322,7 @@ export class Cod370OpenCodeFixture {
   private serverPidStillOwned(pid: number): boolean {
     const current = commandLine(pid);
     return (
-      current.includes(resolve(ROOT, 'node_modules/tsx/dist/cli.mjs')) &&
+      current.includes(resolve(HARNESS_ROOT, 'node_modules/tsx/dist/cli.mjs')) &&
       current.includes('src/index.ts web') &&
       current.includes(String(this.port))
     );
@@ -370,7 +379,7 @@ export class Cod370OpenCodeFixture {
     const child = spawn(
       process.execPath,
       [
-        resolve(ROOT, 'node_modules/tsx/dist/cli.mjs'),
+        resolve(HARNESS_ROOT, 'node_modules/tsx/dist/cli.mjs'),
         'src/index.ts',
         'web',
         '--host',
@@ -378,7 +387,7 @@ export class Cod370OpenCodeFixture {
         '--port',
         String(this.port),
       ],
-      { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: false }
+      { cwd: this.runtimeRoot, env, stdio: ['ignore', 'pipe', 'pipe'], detached: false }
     );
     this.server = child;
     if (!child.pid) throw new Error('Codeman child has no PID');

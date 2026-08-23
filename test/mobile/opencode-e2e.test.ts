@@ -1,3 +1,8 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { cpus, hostname, loadavg, platform, release } from 'node:os';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CDPSession, Page } from 'playwright';
 import * as fixtureContracts from '../utils/cod370-opencode-fixture.js';
@@ -47,7 +52,45 @@ type RateEvidence = {
   cpuTarget: 'phone-page';
 };
 
+type FontComparatorRateEvidence = {
+  cpuRate: 1 | 4;
+  payload: string;
+  inputs: string[];
+  expectedBytes: number;
+  logicalBytes: number;
+  wsPayloadBytes: number;
+  wsSerializedBytes: number;
+  logicalFrames: BrowserTrace['logical'];
+  durableFrames: DurableFrame[];
+  samples: number[];
+  medianMs: number;
+  p95Ms: number;
+  maxMs: number;
+  fontSize: number;
+  phoneDims: Dimensions;
+  paneDims: PaneIdentity;
+  resizeEvents: BrowserTrace['resizes'];
+  longTasks: BrowserTrace['longTasks'];
+  longTaskWindow: { startedAt: number; endedAt: number };
+  paneComposerToken: string;
+  xtermComposerToken: string;
+  identityCheckpoints: Array<{ checkpoint: string; identity: LiveScenarioIdentity }>;
+  cpuTarget: 'phone-page';
+};
+
+type FontComparatorConfig = {
+  label: 'baseline' | 'candidate';
+  repetition: 1 | 2;
+  runtimeRoot: string;
+  expectedRuntimeSha: string;
+  expectedFontSize: 8 | 9 | 10;
+  outputPath: string;
+};
+
 const POLL_MS = 5;
+const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
+const FONT_COMPARATOR_ENABLED = process.env.COD370_FONT_COMPARATOR === '1';
+const FONT_COMPARATOR_BASE_SHA = 'd080481690dc62ffc0d0d4f8e7daae2cc8bf8613';
 
 function validateAcceptedPhoneGeometry(dimensions: { cols: number; rows: number }): boolean {
   return dimensions.cols === 75 && dimensions.rows >= 45;
@@ -91,7 +134,7 @@ function hasNoExplicitViewerActivity(frames: Array<Record<string, unknown>>): bo
   return frames.every((frame) => frame.t !== 'va');
 }
 
-describe('COD-370 review contracts', () => {
+describe.skipIf(FONT_COMPARATOR_ENABLED)('COD-370 review contracts', () => {
   const contracts = fixtureContracts as Record<string, any>;
 
   it('keeps scenario acceptance predicates out of the lifecycle fixture', () => {
@@ -111,6 +154,11 @@ describe('COD-370 review contracts', () => {
     expect(fixture).toHaveProperty('desktopContext', null);
     expect(fixture).toHaveProperty('phoneContext', null);
     expect(fixture).not.toHaveProperty('context');
+  });
+
+  it('binds comparator server launches to an explicit runtime root', () => {
+    const fixture = new Cod370OpenCodeFixture({ runtimeRoot: '/tmp/cod370-runtime-contract' });
+    expect(fixture.runtimeRoot).toBe('/tmp/cod370-runtime-contract');
   });
 
   it('rejects any phone geometry other than exactly 75 columns and at least 45 rows', () => {
@@ -221,6 +269,126 @@ async function waitUntil<T>(
 function percentile(samples: number[], ratio: number): number {
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.max(0, Math.ceil(sorted.length * ratio) - 1)] ?? 0;
+}
+
+function gitOutput(root: string, args: string[]): string {
+  return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
+}
+
+function sha256(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function vendorManifest(root: string): Array<{ path: string; sha256: string }> {
+  const vendorRoot = resolve(root, 'src/web/public/vendor');
+  return readdirSync(vendorRoot)
+    .sort()
+    .map((path) => ({ path, sha256: sha256(resolve(vendorRoot, path)) }));
+}
+
+function isWithin(parent: string, child: string): boolean {
+  const path = relative(parent, child);
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
+}
+
+function readFontComparatorConfig(): FontComparatorConfig {
+  const label = process.env.COD370_FONT_COMPARATOR_LABEL;
+  const repetition = Number(process.env.COD370_FONT_COMPARATOR_REPETITION);
+  const runtimeRootRaw = process.env.COD370_FONT_COMPARATOR_RUNTIME_ROOT;
+  const expectedRuntimeSha = process.env.COD370_FONT_COMPARATOR_EXPECTED_SHA;
+  const expectedFontSize = Number(process.env.COD370_FONT_COMPARATOR_EXPECTED_FONT);
+  const outputRaw = process.env.COD370_FONT_COMPARATOR_OUTPUT;
+  if (label !== 'baseline' && label !== 'candidate') throw new Error(`invalid comparator label: ${label}`);
+  if (repetition !== 1 && repetition !== 2) throw new Error(`invalid comparator repetition: ${repetition}`);
+  if (!runtimeRootRaw) throw new Error('COD370_FONT_COMPARATOR_RUNTIME_ROOT is required');
+  if (!/^[0-9a-f]{40}$/.test(expectedRuntimeSha ?? '')) {
+    throw new Error(`invalid comparator runtime SHA: ${expectedRuntimeSha}`);
+  }
+  if (expectedFontSize !== 8 && expectedFontSize !== 9 && expectedFontSize !== 10) {
+    throw new Error(`invalid comparator expected font: ${expectedFontSize}`);
+  }
+  if (label === 'baseline' && (expectedRuntimeSha !== FONT_COMPARATOR_BASE_SHA || expectedFontSize !== 10)) {
+    throw new Error('baseline comparator cell must bind exact d0804816 runtime at 10px');
+  }
+  if (label === 'candidate' && expectedFontSize === 10) {
+    throw new Error('candidate comparator cell must bind the 8px policy or explicit 9px fallback');
+  }
+  if (!outputRaw || !isAbsolute(outputRaw)) throw new Error('comparator output must be an absolute path');
+  const runtimeRoot = realpathSync(runtimeRootRaw);
+  const outputPath = resolve(outputRaw);
+  if (existsSync(outputPath)) throw new Error(`refusing to overwrite comparator output: ${outputPath}`);
+  if (isWithin(runtimeRoot, outputPath) || isWithin(HARNESS_ROOT, outputPath)) {
+    throw new Error(`comparator output must be outside runtime and harness roots: ${outputPath}`);
+  }
+  return {
+    label,
+    repetition,
+    runtimeRoot,
+    expectedRuntimeSha: expectedRuntimeSha!,
+    expectedFontSize: expectedFontSize as 8 | 9 | 10,
+    outputPath,
+  };
+}
+
+function collectComparatorProvenance(config: FontComparatorConfig) {
+  const runtimeSha = gitOutput(config.runtimeRoot, ['rev-parse', 'HEAD']);
+  const runtimeTree = gitOutput(config.runtimeRoot, ['rev-parse', 'HEAD^{tree}']);
+  const runtimeStatus = gitOutput(config.runtimeRoot, ['status', '--porcelain', '--untracked-files=all']);
+  const harnessSha = gitOutput(HARNESS_ROOT, ['rev-parse', 'HEAD']);
+  const harnessTree = gitOutput(HARNESS_ROOT, ['rev-parse', 'HEAD^{tree}']);
+  const harnessStatus = gitOutput(HARNESS_ROOT, ['status', '--porcelain', '--untracked-files=all']);
+  if (runtimeSha !== config.expectedRuntimeSha) {
+    throw new Error(`runtime SHA mismatch: expected ${config.expectedRuntimeSha}, observed ${runtimeSha}`);
+  }
+  const expectedDependencyRoot = realpathSync(resolve(HARNESS_ROOT, 'node_modules'));
+  if (runtimeStatus !== '?? node_modules') {
+    throw new Error(`runtime worktree has changes beyond the dependency symlink:\n${runtimeStatus || '(none)'}`);
+  }
+  const runtimeDependencyRoot = realpathSync(resolve(config.runtimeRoot, 'node_modules'));
+  if (runtimeDependencyRoot !== expectedDependencyRoot) {
+    throw new Error(`runtime dependency symlink mismatch: ${runtimeDependencyRoot} != ${expectedDependencyRoot}`);
+  }
+  if (harnessStatus) throw new Error(`harness worktree is dirty:\n${harnessStatus}`);
+  const runtimeLockHash = sha256(resolve(config.runtimeRoot, 'package-lock.json'));
+  const harnessLockHash = sha256(resolve(HARNESS_ROOT, 'package-lock.json'));
+  if (runtimeLockHash !== harnessLockHash) {
+    throw new Error(`runtime/harness lockfile mismatch: ${runtimeLockHash} != ${harnessLockHash}`);
+  }
+  const runtimeVendorManifest = vendorManifest(config.runtimeRoot);
+  const harnessVendorManifest = vendorManifest(HARNESS_ROOT);
+  const harnessFiles = ['test/mobile/opencode-e2e.test.ts', 'test/utils/cod370-opencode-fixture.ts'].map((path) => ({
+    path,
+    blob: gitOutput(HARNESS_ROOT, ['hash-object', path]),
+    sha256: sha256(resolve(HARNESS_ROOT, path)),
+  }));
+  return {
+    runtime: {
+      root: config.runtimeRoot,
+      sha: runtimeSha,
+      tree: runtimeTree,
+      worktreeStatus: runtimeStatus,
+      dependencyRoot: runtimeDependencyRoot,
+      packageLockSha256: runtimeLockHash,
+      generatedVendor: runtimeVendorManifest,
+    },
+    harness: {
+      root: HARNESS_ROOT,
+      sha: harnessSha,
+      tree: harnessTree,
+      packageLockSha256: harnessLockHash,
+      generatedVendor: harnessVendorManifest,
+      files: harnessFiles,
+    },
+    host: {
+      hostname: hostname(),
+      platform: platform(),
+      release: release(),
+      node: process.version,
+      cpuCount: cpus().length,
+      cpuModel: cpus()[0]?.model ?? 'unknown',
+      opencodeVersion: execFileSync('opencode', ['--version'], { encoding: 'utf8' }).trim(),
+    },
+  };
 }
 
 async function addWireInitScript(page: Page): Promise<void> {
@@ -400,6 +568,16 @@ async function selectSession(page: Page, sessionId: string, auto: boolean): Prom
 
 async function terminalDimensions(page: Page): Promise<Dimensions> {
   return page.evaluate(() => (window as unknown as { app: Record<string, any> }).app.getFittedTerminalDimensions());
+}
+
+async function comparatorTerminalDimensions(page: Page): Promise<Dimensions> {
+  return page.evaluate(() => {
+    const terminal = (window as unknown as { app: Record<string, any> }).app.terminal;
+    if (!Number.isInteger(terminal?.cols) || !Number.isInteger(terminal?.rows)) {
+      throw new Error('xterm dimensions are unavailable');
+    }
+    return { cols: terminal.cols, rows: terminal.rows, viewportType: 'mobile' };
+  });
 }
 
 async function terminalFont(page: Page): Promise<number> {
@@ -703,7 +881,116 @@ async function runRate(
   }
 }
 
-describe('COD-370 real OpenCode active-viewer acceptance', () => {
+async function runFontComparatorRate(
+  fixture: Cod370OpenCodeFixture,
+  page: Page,
+  cdp: CDPSession,
+  cpuRate: 1 | 4,
+  payload: string,
+  marker: string,
+  expectedFontSize: number,
+  baselineIdentity: LiveScenarioIdentity
+): Promise<FontComparatorRateEvidence> {
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuRate });
+  try {
+    await focusPhoneKeyboard(page);
+    await resetTrace(page);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(() => resolveFrame())))
+    );
+    const phoneDims = await comparatorTerminalDimensions(page);
+    const fontSize = await terminalFont(page);
+    expect(fontSize).toBe(expectedFontSize);
+    const paneDims = (await waitForPaneDimensions(fixture, phoneDims, 2_000)).identity;
+    expect(paneDims).toMatchObject({ cols: phoneDims.cols, rows: phoneDims.rows });
+    expect(fixture.identities()).toEqual(baselineIdentity);
+
+    const inputs = [marker, ...payload.slice(marker.length)];
+    const samples: number[] = [];
+    const identityCheckpoints: FontComparatorRateEvidence['identityCheckpoints'] = [
+      { checkpoint: 'before-dispatch', identity: fixture.identities() },
+    ];
+    let cumulative = '';
+    const longTaskStartedAt = await page.evaluate(() => performance.now());
+    for (const input of inputs) {
+      cumulative += input;
+      const armedAt = await armInputTiming(page);
+      await page.keyboard.type(input);
+      samples.push(await waitForExactComposerProgress(fixture, page, marker, cumulative, armedAt));
+      const identity = fixture.identities();
+      expect(identity).toEqual(baselineIdentity);
+      identityCheckpoints.push({ checkpoint: `visible:${cumulative}`, identity });
+    }
+    await page.waitForFunction(
+      () => {
+        const app = (window as unknown as { app: Record<string, any> }).app;
+        return !app._pendingInput && (app._pendingDeliveries.get(app.activeSessionId)?.length ?? 0) === 0;
+      },
+      undefined,
+      { timeout: 10_000 }
+    );
+    const longTaskEndedAt = await page.evaluate(() => performance.now());
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(() => resolveFrame())))
+    );
+    const trace = await readTrace(page);
+    const logicalFrames = trace.logical;
+    const durableFrames = trace.durable;
+    const logical = logicalFrames.map((entry) => entry.data).join('');
+    const durable = durableFrames.map((entry) => entry.data).join('');
+    expect(logicalFrames.map((entry) => entry.data)).toEqual(inputs);
+    expect(durableFrames.map((entry) => entry.data)).toEqual(inputs);
+    expect(logical).toBe(payload);
+    expect(durable).toBe(payload);
+    expect(durableFrames).toHaveLength(inputs.length);
+    expect(new Set(durableFrames.map((entry) => `${entry.clientId}:${entry.seq}`)).size).toBe(inputs.length);
+    const paneComposerToken = extractExactComposerToken(fixture.paneText(), marker);
+    const xtermComposerToken = extractExactComposerToken(await terminalText(page), marker);
+    expect(paneComposerToken).toBe(payload);
+    expect(xtermComposerToken).toBe(payload);
+    const finalIdentity = fixture.identities();
+    expect(finalIdentity).toEqual(baselineIdentity);
+    identityCheckpoints.push({ checkpoint: 'after-delivery-drain', identity: finalIdentity });
+
+    const expectedBytes = Buffer.byteLength(payload);
+    const logicalBytes = Buffer.byteLength(logical);
+    const wsPayloadBytes = Buffer.byteLength(durable);
+    expect(logicalBytes).toBe(expectedBytes);
+    expect(wsPayloadBytes).toBe(expectedBytes);
+    const longTasks = trace.longTasks.filter((entry) => entry.at >= longTaskStartedAt && entry.at <= longTaskEndedAt);
+    return {
+      cpuRate,
+      payload,
+      inputs,
+      expectedBytes,
+      logicalBytes,
+      wsPayloadBytes,
+      wsSerializedBytes: durableFrames.reduce((total, entry) => total + entry.rawBytes, 0),
+      logicalFrames,
+      durableFrames,
+      samples,
+      medianMs: percentile(samples, 0.5),
+      p95Ms: percentile(samples, 0.95),
+      maxMs: Math.max(...samples),
+      fontSize,
+      phoneDims,
+      paneDims,
+      resizeEvents: trace.resizes,
+      longTasks,
+      longTaskWindow: { startedAt: longTaskStartedAt, endedAt: longTaskEndedAt },
+      paneComposerToken,
+      xtermComposerToken,
+      identityCheckpoints,
+      cpuTarget: 'phone-page',
+    };
+  } finally {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  }
+}
+
+describe.skipIf(FONT_COMPARATOR_ENABLED)('COD-370 real OpenCode active-viewer acceptance', () => {
   it('preserves one OpenCode pane while phone and desktop hand off sizing at 1x and 4x CPU', async () => {
     const fixture = new Cod370OpenCodeFixture();
     const failures: Error[] = [];
@@ -804,5 +1091,161 @@ describe('COD-370 real OpenCode active-viewer acceptance', () => {
       }
     }
     if (failures.length) throw new AggregateError(failures, 'COD-370 real OpenCode acceptance failed');
+  }, 180_000);
+});
+
+describe.runIf(FONT_COMPARATOR_ENABLED)('COD-370 mobile OpenCode font comparator', () => {
+  it('records one complete 1x and 4x phone-viewer repetition', async () => {
+    const config = readFontComparatorConfig();
+    const provenance = collectComparatorProvenance(config);
+    const fixture = new Cod370OpenCodeFixture({ runtimeRoot: config.runtimeRoot });
+    const failures: Error[] = [];
+    const pageErrors: string[] = [];
+    const consoleWarningsAndErrors: Array<{ type: string; text: string }> = [];
+    const seriousConsoleErrors: string[] = [];
+    const rates: FontComparatorRateEvidence[] = [];
+    const startedAt = new Date().toISOString();
+    const startedLoadAverage = loadavg();
+    let phoneCdp: CDPSession | null = null;
+    let baselineIdentity: LiveScenarioIdentity | null = null;
+    let initialResizeEvents: BrowserTrace['resizes'] = [];
+    let observedFontSize: number | null = null;
+    let observedPhoneDimensions: Dimensions | null = null;
+    try {
+      await fixture.start();
+      const phone = fixture.phonePage!;
+      phone.on('pageerror', (error) => pageErrors.push(error.message));
+      phone.on('console', (message) => {
+        const type = message.type();
+        const text = message.text();
+        if (type === 'error' || type === 'warning') consoleWarningsAndErrors.push({ type, text });
+        if (type === 'error' || (type === 'warning' && /(?:crash|exception|uncaught|failed|fatal)/i.test(text))) {
+          seriousConsoleErrors.push(`${type}: ${text}`);
+        }
+      });
+      await addWireInitScript(phone);
+      await phone.goto(fixture.baseUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+      await phone.waitForFunction(() => document.body.classList.contains('app-loaded'), undefined, { timeout: 20_000 });
+      await installBehaviorTrace(phone);
+      await fixture.createOpenCodeSession();
+      await selectSession(phone, fixture.sessionId, false);
+      await waitUntil('real OpenCode TUI output', () => fixture.paneText().trim().length > 20, 20_000);
+      observedFontSize = await terminalFont(phone);
+      expect(observedFontSize).toBe(config.expectedFontSize);
+      observedPhoneDimensions = await comparatorTerminalDimensions(phone);
+      await waitForPaneDimensions(fixture, observedPhoneDimensions, 2_000);
+      baselineIdentity = fixture.identities();
+      expect(fixture.paneCount()).toBe(1);
+      const sessions = await fixture.api('GET', '/api/sessions');
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.id).toBe(fixture.sessionId);
+      initialResizeEvents = (await readTrace(phone)).resizes;
+      phoneCdp = await fixture.phoneContext!.newCDPSession(phone);
+
+      rates.push(
+        await runFontComparatorRate(
+          fixture,
+          phone,
+          phoneCdp,
+          1,
+          'qz1a2b3c4d',
+          'q',
+          config.expectedFontSize,
+          baselineIdentity
+        )
+      );
+      await phone.keyboard.press('Control+u');
+      await waitUntil('1x comparator payload cleared', () => !fixture.paneText().includes('qz1a2b3c4d'));
+      expect(fixture.identities()).toEqual(baselineIdentity);
+      rates.push(
+        await runFontComparatorRate(
+          fixture,
+          phone,
+          phoneCdp,
+          4,
+          'wx5e6f7g8h',
+          'w',
+          config.expectedFontSize,
+          baselineIdentity
+        )
+      );
+      expect(fixture.identities()).toEqual(baselineIdentity);
+      expect(fixture.paneCount()).toBe(1);
+      expect(pageErrors).toEqual([]);
+      expect(seriousConsoleErrors).toEqual([]);
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      if (phoneCdp) {
+        try {
+          await phoneCdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+          await phoneCdp.detach();
+        } catch (error) {
+          failures.push(new Error(`CDP cleanup: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      }
+      try {
+        await uninstallBehaviorTrace(fixture.phonePage);
+      } catch (error) {
+        failures.push(new Error(`trace cleanup: ${error instanceof Error ? error.message : String(error)}`));
+      }
+      try {
+        await fixture.cleanup();
+        if (!hasMandatoryCleanupProof(fixture.cleanupProof)) {
+          throw new Error(`incomplete cleanup proof: ${JSON.stringify(fixture.cleanupProof)}`);
+        }
+      } catch (error) {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    const endedAt = new Date().toISOString();
+    const result = {
+      schemaVersion: 1,
+      config: {
+        label: config.label,
+        repetition: config.repetition,
+        expectedRuntimeSha: config.expectedRuntimeSha,
+        expectedFontSize: config.expectedFontSize,
+        connectedViewers: ['phone'],
+        desktopContextNavigated: false,
+        viewport: { width: 390, height: 844, deviceScaleFactor: 3 },
+        cpuRates: [1, 4],
+      },
+      provenance,
+      timing: {
+        startedAt,
+        endedAt,
+        durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+        loadAverage: { before: startedLoadAverage, after: loadavg() },
+      },
+      session: {
+        id: fixture.sessionId,
+        launcherPid: fixture.serverIdentity?.pid ?? null,
+        listenerPid: fixture.listenerIdentity?.pid ?? null,
+        identity: baselineIdentity,
+      },
+      observedFontSize,
+      observedPhoneDimensions,
+      initialResizeEvents,
+      rates,
+      pageErrors,
+      consoleWarningsAndErrors,
+      seriousConsoleErrors,
+      cleanup: fixture.cleanupProof,
+      passed: failures.length === 0,
+      failures: failures.map((error) => ({ name: error.name, message: error.message, stack: error.stack })),
+    };
+    try {
+      writeFileSync(config.outputPath, `${JSON.stringify(result, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+      process.stdout.write(
+        `COD370_FONT_COMPARATOR ${config.label} repetition=${config.repetition} output=${config.outputPath} passed=${
+          failures.length === 0
+        }\n`
+      );
+    } catch (error) {
+      failures.push(new Error(`raw evidence write failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    if (failures.length) throw new AggregateError(failures, 'COD-370 font comparator repetition failed');
   }, 180_000);
 });
