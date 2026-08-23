@@ -99,9 +99,12 @@ describe('Stable HTTP contract (live server)', () => {
     type TabLayoutInternals = {
       sessions: Map<string, { id: string; createdAt: number; owner?: string }>;
       store: {
+        getState(): { sessionOrder?: string[]; tabLayouts?: Record<string, TabLayout> };
         getSessionOrder(): string[];
         getTabLayout(owner: string): TabLayout | null;
+        getTabLayouts(): Record<string, TabLayout>;
         commitTabLayoutProjection: (...args: unknown[]) => unknown;
+        save(): void;
       };
       sse: {
         addClient(reply: unknown, sessionFilter: Set<string> | null, isRemote: boolean): void;
@@ -115,6 +118,9 @@ describe('Stable HTTP contract (live server)', () => {
     const layoutEvent = vi.spyOn(internals.sse, 'broadcast');
     const orderEvent = vi.spyOn(internals.sse, 'broadcastSessionOrder');
     const previousSessions = new Map(internals.sessions);
+    const storeState = internals.store.getState();
+    const previousSessionOrder = storeState.sessionOrder ? [...storeState.sessionOrder] : undefined;
+    const previousTabLayouts = storeState.tabLayouts ? structuredClone(storeState.tabLayouts) : undefined;
     const recipientWrites: string[] = [];
     const recipient = { raw: { write: (chunk: string) => (recipientWrites.push(chunk), true) } };
     internals.sse.addClient(recipient, null, false);
@@ -192,10 +198,18 @@ describe('Stable HTTP contract (live server)', () => {
       internals.sse.removeClient(recipient);
       internals.sessions.clear();
       for (const [id, session] of previousSessions) internals.sessions.set(id, session);
+      if (previousSessionOrder) storeState.sessionOrder = [...previousSessionOrder];
+      else delete storeState.sessionOrder;
+      if (previousTabLayouts) storeState.tabLayouts = structuredClone(previousTabLayouts);
+      else delete storeState.tabLayouts;
+      internals.store.save();
       commit.mockRestore();
       layoutEvent.mockRestore();
       orderEvent.mockRestore();
     }
+
+    expect(internals.store.getSessionOrder()).toEqual(previousSessionOrder ?? []);
+    expect(internals.store.getTabLayouts()).toEqual(previousTabLayouts ?? {});
   });
 
   it('serves the same envelope on the /api/v1 alias', async () => {
