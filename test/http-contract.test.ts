@@ -93,6 +93,66 @@ describe('Stable HTTP contract (live server)', () => {
     }
   });
 
+  it('keeps the tab layout foundation smoke contract atomic and writable', async () => {
+    type TabLayoutInternals = {
+      store: {
+        getTabLayout(owner: string): { version: number } | null;
+        commitTabLayoutProjection: (...args: unknown[]) => unknown;
+      };
+      sse: {
+        broadcast: (...args: unknown[]) => void;
+        broadcastSessionOrder: (...args: unknown[]) => void;
+      };
+    };
+    const internals = server as unknown as TabLayoutInternals;
+    const commit = vi.spyOn(internals.store, 'commitTabLayoutProjection');
+    const layoutEvent = vi.spyOn(internals.sse, 'broadcast');
+    const orderEvent = vi.spyOn(internals.sse, 'broadcastSessionOrder');
+    const requested = {
+      version: 0,
+      groups: [],
+      ungrouped: [],
+      updatedAt: '2026-08-23T00:00:00.000Z',
+    };
+
+    expect(internals.store.getTabLayout('@single')).toBeNull();
+
+    const direct = await fetch(`${base}/api/tab-layout`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseVersion: 0, layout: requested }),
+    });
+    expect(direct.status).toBe(200);
+    expect((await direct.json()).data.layout.version).toBe(1);
+    expect(commit).toHaveBeenCalledTimes(1);
+
+    const writesBeforeConflict = commit.mock.calls.length;
+    const layoutEventsBeforeConflict = layoutEvent.mock.calls.length;
+    const orderEventsBeforeConflict = orderEvent.mock.calls.length;
+    const stale = await fetch(`${base}/api/tab-layout`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseVersion: 0, layout: requested }),
+    });
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).errorCode).toBe('CONFLICT');
+    expect(commit).toHaveBeenCalledTimes(writesBeforeConflict);
+    expect(layoutEvent).toHaveBeenCalledTimes(layoutEventsBeforeConflict);
+    expect(orderEvent).toHaveBeenCalledTimes(orderEventsBeforeConflict);
+
+    const ownerGet = await fetch(`${base}/api/tab-layout`);
+    expect(ownerGet.status).toBe(200);
+    expect((await ownerGet.json()).data.layout.version).toBe(1);
+
+    const legacyPut = await fetch(`${base}/api/session-order`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: [] }),
+    });
+    expect(legacyPut.status).toBe(200);
+    expect((await legacyPut.json()).data.order).toEqual([]);
+  });
+
   it('serves the same envelope on the /api/v1 alias', async () => {
     const res = await fetch(`${base}/api/v1/status`);
     expect(res.status).toBe(200);
