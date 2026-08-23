@@ -40,6 +40,7 @@ import {
 } from './types.js';
 import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
 import { dataPath, CODEMAN_INSTANCE } from './config/instance.js';
+import { normalizeSessionOrder } from './session-order.js';
 import { validateTabLayout, type TabLayout } from './tab-layout.js';
 
 /** Debounce delay for batching state writes (ms) */
@@ -685,6 +686,23 @@ export class StateStore {
     const validated = validateTabLayout(layout);
     this.state.tabLayouts = { ...(this.state.tabLayouts ?? {}), [owner]: validated };
     this.save();
+  }
+
+  /** Atomically publishes validated owner layouts and their latest global compatibility projection. */
+  commitTabLayoutProjection(
+    layouts: Readonly<Record<string, TabLayout>>,
+    projectOrder: (latest: readonly string[]) => readonly string[]
+  ): { layouts: Record<string, TabLayout>; sessionOrder: string[] } {
+    const validated = Object.fromEntries(
+      Object.entries(layouts).map(([owner, layout]) => [owner, validateTabLayout(layout)])
+    );
+    const sessionOrder = normalizeSessionOrder(projectOrder([...(this.state.sessionOrder ?? [])]));
+    const nextLayouts = { ...(this.state.tabLayouts ?? {}), ...validated };
+
+    this.state.tabLayouts = nextLayouts;
+    this.state.sessionOrder = sessionOrder;
+    this.save();
+    return { layouts: structuredClone(validated), sessionOrder: [...sessionOrder] };
   }
 
   /** Resets all state to initial values and saves immediately. */
