@@ -1534,6 +1534,25 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
   display: inline;
 }
 
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name.tab-name-renaming {
+  display: flex;
+  align-items: center;
+  -webkit-box-orient: initial;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+}
+
+html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-prefix {
+  flex: 0 0 auto;
+}
+
+html[data-tab-orientation='vertical'] .tab-name-renaming .tab-rename-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+
 /* Tab folder path — hidden by default, shown via .tabs-show-folder on container */
 .session-tab .tab-folder {
   font-size: 0.6rem;
