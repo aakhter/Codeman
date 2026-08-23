@@ -627,7 +627,7 @@ git commit -m "fix(mobile): COD-370 compact OpenCode terminal text"
 - Replace: `test/mobile/opencode-e2e.test.ts`
 - Optionally create: `test/utils/cod370-opencode-fixture.ts` if the fixture exceeds 250 lines; keep lifecycle ownership there only.
 
-- [ ] **Step 1: Replace the empty-xterm test with a failing real fixture**
+- [x] **Step 1: Replace the empty-xterm test with a failing real fixture**
 
 The fixture must own a unique loopback port, `CODEMAN_DATA_DIR`, `CODEMAN_INSTANCE`, tmux socket, working directory, server child, browser, desktop context, phone context, and created OpenCode session. It must start the session via:
 
@@ -644,7 +644,7 @@ await api('POST', `/api/sessions/${created.id}/interactive`);
 
 Open desktop at 1440x900 and phone at 390x844. Select the same session in both pages. Record the exact server PID, OpenCode child PID, tmux session name, and pane identity before handoff.
 
-- [ ] **Step 2: Add the failing handoff assertions**
+- [x] **Step 2: Add the failing handoff assertions**
 
 Use `page.bringToFront()` plus a real terminal tap to activate phone. Read authoritative tmux dimensions with the fixture socket:
 
@@ -657,7 +657,7 @@ expect(await identities()).toEqual(beforeIdentities);
 
 Then send a passive desktop resize and assert dimensions remain mobile. Type one deterministic prompt payload on phone and assert the logical durable frame and pane input contain exactly one copy. Bring desktop forward, click the terminal, and assert its stored dimensions return without any identity change.
 
-- [ ] **Step 3: Run the real browser test RED**
+- [x] **Step 3: Run the real browser test RED**
 
 Run:
 
@@ -667,7 +667,7 @@ npm run test:mobile -- test/mobile/opencode-e2e.test.ts
 
 Expected: FAIL on immediate mobile ownership, 8px font, or backend rows because the old desktop claim still controls sizing.
 
-- [ ] **Step 4: Add handoff timing and resize-count instrumentation**
+- [x] **Step 4: Add handoff timing and resize-count instrumentation**
 
 Instrument `session:resized` events and browser performance marks without altering production behavior. Require:
 
@@ -680,7 +680,7 @@ expect(effectiveResizeEvents.desktop).toBeLessThanOrEqual(1);
 
 Do not count local FitAddon measurements; count authoritative changed-dimension events only.
 
-- [ ] **Step 5: Run the phone scenario at 1x and 4x CPU**
+- [x] **Step 5: Run the phone scenario at 1x and 4x CPU**
 
 Use a CDP session for the phone page:
 
@@ -695,11 +695,11 @@ try {
 
 Record typing-to-visible median/p95, long tasks, WebSocket bytes, resize events, exact input bytes, and pane dimensions for both rates. Fail on any missing/duplicate/reordered byte, page error, serious console error, resize storm, or handoff above 300ms. If 8px materially regresses the accepted baseline, change only the fallback constant to 9px and rerun the complete 1x/4x scenario; never combine selective samples.
 
-- [ ] **Step 6: Make cleanup fail closed**
+- [x] **Step 6: Make cleanup fail closed**
 
 In `afterAll`/fixture `finally`, close both contexts and browser, DELETE only the created session, stop the exact child, verify its PID and OpenCode PID are gone, verify the exact tmux session/socket is absent, prove the port can rebind, and remove only the validated scenario root. Aggregate cleanup errors and fail the test if any resource survives.
 
-- [ ] **Step 7: Run the real browser test GREEN twice**
+- [x] **Step 7: Run the real browser test GREEN twice**
 
 Run twice from a clean resource state:
 
@@ -710,7 +710,7 @@ npm run test:mobile -- test/mobile/opencode-e2e.test.ts
 
 Expected: both runs pass with one process/session/pane identity, exact input, bounded handoffs, and clean teardown.
 
-- [ ] **Step 8: Commit Task 6**
+- [x] **Step 8: Commit Task 6**
 
 ```bash
 git add test/mobile/opencode-e2e.test.ts test/utils/cod370-opencode-fixture.ts
@@ -718,6 +718,23 @@ git commit -m "test(mobile): COD-370 exercise real OpenCode handoff"
 ```
 
 Omit the optional fixture path from `git add` if the helper was not needed.
+
+Evidence (2026-08-23): review REDs failed for omitted exact geometry, cached/replaced PID identity, duplicate composer
+content, post-dispatch timing, foreground proof, mandatory DELETE/GET404, and passive desktop `va`. The final two clean
+runs of the exact command each passed 10/10 tests with one API session and pane: run 1 used session `3f7135b7`, launcher
+`3984960`, listener `3984974`, and live OpenCode/pane PID `3985220` at start tick `486177742`; run 2 used `98a4f261`,
+`3986075`, `3986086`, and `3986321` at `486179719`. Both rates kept the same live `/proc` command/executable,
+tmux-session/window/pane identity, phone `75x62` at exactly 8px, desktop `178x38`, and one authoritative changed-size
+event per handoff. Exact ordered phone payloads were 10/10 logical and durable bytes with ten per-character pane and
+xterm composer convergence samples; serialized WebSocket totals were `555/560` bytes in run 1 and `564/570` in run 2.
+Run 1 median/p95 was `38.7/60.2ms` at 1x and `79.0/89.8ms` at 4x, worst handoff `136.9ms`, with no 1x long task and
+4x tasks `50/53/73ms`. Run 2 was `59.1/214.8ms` and `81.3/168.1ms`, worst handoff `148.8ms`, with no 1x long task and
+4x tasks `53/54/70ms`. Headless Chromium reported both independently owned context pages visible/focused despite
+target-specific CDP focus-control attempts; the decisive passive interval proved zero desktop `va`, pointer, focus, or selection events, exactly one raw
+desktop `z`, and unchanged phone-owned dimensions. Page and serious-console errors were empty. Both all-true cleanup
+proofs included both desktop and phone contexts independently closed, exact authenticated DELETE then GET 404,
+OpenCode/pane/launcher/listener PIDs dead, tmux target/socket absent, loopback port rebound, fixture Chromium/tagged
+processes absent, and validated scenario root absent.
 
 ### Task 7: Regression gates, release note, Jira evidence, and physical handoff
 
