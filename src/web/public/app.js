@@ -8445,6 +8445,7 @@ class CodemanApp {
       // yellow tab that no tap could clear.
       if (userInitiated) {
         this.markIdleAlertSeen(sessionId);
+        this.applyTerminalFontPolicy?.(this.sessions.get(sessionId)?.mode);
         try { this.fitAddon?.fit(); } catch {}
         this._terminalViewerActivity?.activate('session-select');
       }
@@ -8504,6 +8505,9 @@ class CodemanApp {
     // back. The ONLY other writers are _enterHistoryView/_exitHistoryView.
     this.terminal.options.scrollback = this._isMirrorSession(sessionId) ? 0 : this._userScrollback();
     this.activeSessionId = sessionId;
+    // Font metrics must match the selected mode before the socket can flush an
+    // activation and before the first fit/resize measures this viewer.
+    this.applyTerminalFontPolicy?.(this.sessions.get(sessionId)?.mode);
     // Repaint the partial-history banner for the tab being switched TO. The
     // replay paths refresh it when their fetch lands; without this the previous
     // session's notice stays on screen until then (#258).
@@ -8609,6 +8613,13 @@ class CodemanApp {
           console.error('Failed to attach to restored session:', err);
         }
       }
+    }
+
+    // A restored-session attach can outlive a newer tab selection. Do not let
+    // its continuation measure or resize the winner's shared terminal.
+    if (this._isStaleSelect(selectGen)) {
+      this._clearTerminalLoadState(sessionId, selectGen);
+      return;
     }
 
     // Load terminal buffer for this session

@@ -510,10 +510,9 @@ class NotificationManager {
     if (this.isDrawerOpen) {
       this.markAllRead();
     }
-    // Re-fit terminal and send resize to PTY so this client's dimensions win.
-    // Fixes broken layout when switching between desktop and mobile on the same session.
-    if (this.app?.fitAddon && this.app?.activeSessionId) {
-      this.app.fitAddon.fit();
+    // Canonical resize applies the active mode/device font policy before its
+    // single fit, avoiding a one-frame stale-metric jump on visibility return.
+    if (this.app?.activeSessionId) {
       this.app.sendResize(this.app.activeSessionId);
     }
   }

@@ -560,7 +560,7 @@ git commit -m "feat(web): COD-370 hand off sizing on viewer activity"
 - Modify: `src/web/public/mobile-handlers.js:425-487`
 - Create: `test/opencode-mobile-font.test.ts`
 
-- [ ] **Step 1: Write the failing font-policy tests**
+- [x] **Step 1: Write the failing font-policy tests**
 
 Test a pure exported browser helper:
 
@@ -579,7 +579,7 @@ it('keeps other mobile agent modes at 10px', () => {
 });
 ```
 
-- [ ] **Step 2: Run the font test RED**
+- [x] **Step 2: Run the font test RED**
 
 Run:
 
@@ -589,7 +589,7 @@ npm test -- test/opencode-mobile-font.test.ts
 
 Expected: FAIL because mode-aware resolution does not exist and `decreaseFontSize()` clamps at 10.
 
-- [ ] **Step 3: Implement and apply the font policy before fitting**
+- [x] **Step 3: Implement and apply the font policy before fitting**
 
 Add `window.CodemanTerminalFont.resolveSize({ deviceType, mode, stored })` to the existing terminal-font helper surface, or a focused adjacent helper if that surface only handles families. Use:
 
@@ -602,7 +602,7 @@ const min = isOpenCodePhone ? 8 : 10;
 
 Before `fitAddon.fit()` and `sendResize()` in `selectSession()`, resolve the selected session's mode and set the terminal font. `setFontSize()` stores to the active policy key. `decreaseFontSize()` uses the active policy minimum. `KeyboardHandler.resetLayout()` and viewport settlement call the same policy instead of hardcoding mobile 10 / desktop 14.
 
-- [ ] **Step 4: Run font, mobile layout, and IME structure tests GREEN**
+- [x] **Step 4: Run font, mobile layout, and IME structure tests GREEN**
 
 Run:
 
@@ -613,7 +613,7 @@ npm run check:frontend-syntax
 
 Expected: OpenCode mobile is 8px, other modes and desktop remain unchanged, and IME geometry still follows xterm cells.
 
-- [ ] **Step 5: Commit Task 5**
+- [x] **Step 5: Commit Task 5**
 
 ```bash
 git add src/web/public/terminal-ui.js src/web/public/mobile-handlers.js test/opencode-mobile-font.test.ts
