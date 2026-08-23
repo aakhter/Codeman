@@ -54,8 +54,9 @@ describe('tab layout routes', () => {
     await app.close();
   });
 
-  it.each([2, 4])('returns 409 with the current layout when baseVersion=%s', async (baseVersion) => {
-    const { app, service } = await harness();
+  it.each([2, 4])('returns 409 with the authoritative prepared layout when baseVersion=%s', async (baseVersion) => {
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
+    const { app, service } = await harness('alice');
     service.put.mockResolvedValueOnce({ status: 'conflict', layout: layout(3) });
     const response = await app.inject({
       method: 'PUT',
@@ -66,6 +67,7 @@ describe('tab layout routes', () => {
     expect(response.json().success).toBe(false);
     expect(response.json().errorCode).toBe('CONFLICT');
     expect(response.json().data.layout).toEqual(layout(3));
+    expect(service.put).toHaveBeenCalledWith('alice', layout(baseVersion), baseVersion);
     await app.close();
   });
 

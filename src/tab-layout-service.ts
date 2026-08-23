@@ -139,7 +139,7 @@ export class TabLayoutService {
     for (const record of live) sessions.set(record.id, record);
     const ownedSessions = [...sessions.values()]
       .filter((record) => ownerOf(record) === owner)
-      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const sessionOrder = new Map(ownedSessions.map((record, index) => [record.id, index]));
     const metadata: TabRefMetadata[] = [...sessions.values()].map((record) => ({
       kind: 'session',
@@ -354,7 +354,7 @@ export class TabLayoutService {
         for (const record of this.deps.sessions.values()) sessions.set(record.id, record);
         const ownedSessions = [...sessions.values()]
           .filter((record) => ownerOf(record) === owner)
-          .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+          .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
         const sessionOrder = new Map(ownedSessions.map((record, index) => [record.id, index]));
         const metadata: TabRefMetadata[] = [...sessions.values()].map((record) => ({
           kind: 'session',

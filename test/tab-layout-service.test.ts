@@ -328,6 +328,30 @@ describe('TabLayoutService', () => {
     expect(h.broadcast).toHaveBeenCalledExactlyOnceWith(SseEvent.TabLayoutChanged, { owner: 'alice', version: 1 });
   });
 
+  it('uses the prepared authoritative ordering for a matching folded first write with tied session timestamps', async () => {
+    const h = createHarness({
+      live: [
+        { id: 'a', owner: 'alice', createdAt: 1 },
+        { id: 'B', owner: 'alice', createdAt: 1 },
+      ],
+    });
+
+    const result = await h.service.put('alice', existing([]), 0);
+
+    expect(result).toEqual({
+      status: 'updated',
+      layout: {
+        version: 1,
+        groups: [],
+        ungrouped: [
+          { kind: 'session', id: 'B' },
+          { kind: 'session', id: 'a' },
+        ],
+        updatedAt: '2026-08-16T12:00:00.000Z',
+      },
+    });
+  });
+
   it('folds normalization and a matching requested update into one commit', async () => {
     const h = createHarness({
       layouts: { alice: existing([{ kind: 'session', id: 'unknown' }]) },
