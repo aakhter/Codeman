@@ -213,6 +213,64 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     expect(app._wsState).toBe('connected');
     expect(els.connectionText.textContent).toBe('WS');
   });
+
+  it('flushes one exact latest passive z after pending explicit va, without HTTP or a new activation', () => {
+    const { CodemanApp } = loadHarness();
+    const order: string[] = [];
+    const flushPending = vi.fn(() => {
+      order.push('va');
+      return true;
+    });
+    const { app } = makeApp(CodemanApp, {
+      _terminalViewerActivity: { flushPending },
+      _pendingTerminalResize: {
+        sessionId: 's1',
+        frame: { t: 'z', c: 75, r: 62, v: 'mobile', f: true },
+      },
+    });
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    const send = vi.spyOn(ws, 'send').mockImplementation(() => order.push('z'));
+    ws.readyState = FakeWebSocket.OPEN;
+    ws.onopen?.();
+    ws.onopen?.();
+
+    expect(order).toEqual(['va', 'z', 'va']);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(JSON.stringify({ t: 'z', c: 75, r: 62, v: 'mobile', f: true }));
+    expect((app as Record<string, unknown>)._pendingTerminalResize).toBeNull();
+    expect(app.sendResize).not.toHaveBeenCalled();
+  });
+
+  it('keeps pending passive resize session-bound and ignores a stale socket open', () => {
+    const { CodemanApp } = loadHarness();
+    const { app } = makeApp(CodemanApp, {
+      _terminalViewerActivity: { flushPending: vi.fn(() => false) },
+      _pendingTerminalResize: {
+        sessionId: 's1',
+        frame: { t: 'z', c: 80, r: 40, v: 'desktop' },
+      },
+    });
+
+    app._connectWs('s1');
+    const stale = FakeWebSocket.instances[0];
+    const staleSend = vi.spyOn(stale, 'send');
+    app._connectWs('s1');
+    const current = FakeWebSocket.instances[1];
+    const currentSend = vi.spyOn(current, 'send');
+    stale.readyState = FakeWebSocket.OPEN;
+    stale.onopen?.();
+    expect(staleSend).not.toHaveBeenCalled();
+    expect((app as Record<string, unknown>)._pendingTerminalResize).not.toBeNull();
+
+    app.activeSessionId = 's2';
+    app._connectWs('s2');
+    current.readyState = FakeWebSocket.OPEN;
+    current.onopen?.();
+    expect(currentSend).not.toHaveBeenCalled();
+    expect((app as Record<string, unknown>)._pendingTerminalResize).toBeNull();
+  });
 });
 
 describe('WS reconnect backoff — attempts survive the _connectWs → _disconnectWs call', () => {

@@ -489,8 +489,121 @@ describe('OpenCode device-local terminal font policy', () => {
       proposeDimensions: vi.fn(() => ({ cols: 75, rows: 62 })),
     };
 
-    expect(await harness.app.sendResize('session-1')).toBe(false);
+    expect(await harness.app.sendResize('session-1')).toBeNull();
+    expect(harness.app._pendingTerminalResize?.sessionId).toBe('session-1');
     expect(harness.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps only the latest passive resize pending while the sizing socket is unavailable', async () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    let dims = { cols: 70, rows: 50 };
+    harness.app.fitAddon = {
+      fit: vi.fn(),
+      proposeDimensions: vi.fn(() => dims),
+    };
+
+    expect(await harness.app.sendResize('session-1')).toBeNull();
+    dims = { cols: 75, rows: 62 };
+    expect(await harness.app.sendResize('session-1')).toBeNull();
+
+    expect(harness.app._pendingTerminalResize).toEqual({
+      sessionId: 'session-1',
+      frame: { t: 'z', c: 75, r: 62, v: 'mobile' },
+    });
+    expect(harness.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('restores an explicitly selected nonowner by activating before the forced resize', async () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    const frames: unknown[] = [];
+    harness.app._wsReady = true;
+    harness.app._wsSessionId = 'session-1';
+    harness.app._ws = { send: vi.fn((raw: string) => frames.push(JSON.parse(raw))) };
+    harness.app._terminalViewerActivity = {
+      activate: vi.fn(() => {
+        harness.app._ws.send(JSON.stringify({ t: 'va', c: 75, r: 62, v: 'mobile' }));
+        return true;
+      }),
+    };
+    harness.app.showToast = vi.fn();
+
+    expect(await harness.app.restoreTerminalSize()).toBe(true);
+
+    expect(frames).toEqual([
+      { t: 'va', c: 75, r: 62, v: 'mobile' },
+      { t: 'z', c: 75, r: 62, v: 'mobile', f: true },
+    ]);
+    expect(harness.app._terminalViewerActivity.activate).toHaveBeenCalledWith('restore-terminal-size');
+    expect(harness.app.showToast).toHaveBeenCalledWith('Terminal restored to 75x62', 'success');
+  });
+
+  it('queues explicit restore intent during WS outage without a false success toast', async () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    harness.app._terminalViewerActivity = { activate: vi.fn(() => false) };
+    harness.app.showToast = vi.fn();
+
+    expect(await harness.app.restoreTerminalSize()).toBe(false);
+
+    expect(harness.app._terminalViewerActivity.activate).toHaveBeenCalledWith('restore-terminal-size');
+    expect(harness.app._pendingTerminalResize).toEqual({
+      sessionId: 'session-1',
+      frame: { t: 'z', c: 75, r: 62, v: 'mobile', f: true },
+    });
+    expect(harness.app.showToast).not.toHaveBeenCalledWith(expect.any(String), 'success');
+    expect(harness.app.showToast).toHaveBeenCalledWith('Terminal restore queued until connection recovers', 'warning');
+    expect(harness.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a ready-socket send failure as queued instead of restored', async () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    harness.app._wsReady = true;
+    harness.app._wsSessionId = 'session-1';
+    harness.app._ws = {
+      send: vi.fn(() => {
+        throw new Error('socket failed');
+      }),
+    };
+    harness.app._terminalViewerActivity = { activate: vi.fn(() => false) };
+    harness.app.showToast = vi.fn();
+
+    expect(await harness.app.restoreTerminalSize()).toBe(false);
+
+    expect(harness.app._pendingTerminalResize?.frame).toEqual({
+      t: 'z',
+      c: 75,
+      r: 62,
+      v: 'mobile',
+      f: true,
+    });
+    expect(harness.app.showToast).not.toHaveBeenCalledWith(expect.any(String), 'success');
+    expect(harness.app.showToast).toHaveBeenCalledWith('Terminal restore queued until connection recovers', 'warning');
+  });
+
+  it('keeps restore queued when activation fails even if the following resize frame sends', async () => {
+    const harness = createApp('mobile', {}, 'opencode');
+    harness.app.fitAddon.proposeDimensions = vi.fn(() => ({ cols: 75, rows: 62 }));
+    const frames: unknown[] = [];
+    harness.app._wsReady = true;
+    harness.app._wsSessionId = 'session-1';
+    harness.app._ws = { send: vi.fn((raw: string) => frames.push(JSON.parse(raw))) };
+    harness.app._terminalViewerActivity = {
+      activate: vi.fn(() => false),
+      hasPending: vi.fn(() => true),
+    };
+    harness.app.showToast = vi.fn();
+
+    expect(await harness.app.restoreTerminalSize()).toBe(false);
+
+    expect(frames).toEqual([{ t: 'z', c: 75, r: 62, v: 'mobile', f: true }]);
+    expect(harness.app._pendingTerminalResize).toEqual({
+      sessionId: 'session-1',
+      frame: { t: 'z', c: 75, r: 62, v: 'mobile', f: true },
+    });
+    expect(harness.app.showToast).not.toHaveBeenCalledWith(expect.any(String), 'success');
+    expect(harness.app.showToast).toHaveBeenCalledWith('Terminal restore queued until connection recovers', 'warning');
   });
 
   it('keeps a delayed hidden keyboard settle local and off every resize transport', () => {

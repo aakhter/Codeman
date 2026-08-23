@@ -50,7 +50,15 @@
       const signature = `${sessionId}:${dimensions.viewportType}:${dimensions.cols}x${dimensions.rows}`;
       const currentTime = now();
       const elapsed = currentTime - lastSentAt;
-      if (signature === lastSignature && Number.isFinite(elapsed) && elapsed >= 0 && elapsed < DEDUPE_MS) return false;
+      const explicitRestore = reason === 'restore-terminal-size';
+      if (
+        !explicitRestore &&
+        signature === lastSignature &&
+        Number.isFinite(elapsed) &&
+        elapsed >= 0 &&
+        elapsed < DEDUPE_MS
+      )
+        return false;
 
       let sent = false;
       try {
@@ -121,6 +129,10 @@
       return activate(reason, pendingRequiresFocus);
     }
 
+    function hasPending(sessionId = deps.activeSessionId()) {
+      return !destroyed && pending && sessionId === pendingSessionId;
+    }
+
     function destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -130,7 +142,7 @@
       for (const [target, type, listener, options] of listeners) target.removeEventListener(type, listener, options);
     }
 
-    return { activate, flushPending, runWithoutActivation, destroy };
+    return { activate, flushPending, hasPending, runWithoutActivation, destroy };
   }
 
   global.CodemanTerminalViewerActivity = { create };

@@ -5713,25 +5713,40 @@ Object.assign(CodemanApp.prototype, {
   async restoreTerminalSize() {
     if (!this.activeSessionId) {
       this.showToast('No active session', 'warning');
-      return;
+      return false;
     }
 
     const dims = this.getTerminalDimensions();
     if (!dims) {
       this.showToast('Could not determine terminal size', 'error');
-      return;
+      return false;
     }
 
     try {
+      if (typeof this._terminalViewerActivity?.activate !== 'function') {
+        this.showToast('Failed to restore terminal size', 'error');
+        return false;
+      }
+      // This button is an explicit viewer action, so transfer sizing ownership
+      // before sending the forced passive z frame. If the socket is down, the
+      // controller queues va and sendResize queues the matching z for reconnect.
+      this._terminalViewerActivity.activate('restore-terminal-size');
+      const activationPending = this._terminalViewerActivity.hasPending?.(this.activeSessionId) === true;
       // Force resize even when dimensions match the server's last known state —
       // another device may have changed the PTY size since this client last sent,
       // and force guarantees a SIGWINCH → Ink redraw at the current device's size.
-      await this.sendResize(this.activeSessionId, { force: true });
+      const sent = await this.sendResize(this.activeSessionId, { force: true, retainPending: activationPending });
+      if (activationPending || sent === null) {
+        this.showToast('Terminal restore queued until connection recovers', 'warning');
+        return false;
+      }
 
       this.showToast(`Terminal restored to ${dims.cols}x${dims.rows}`, 'success');
+      return true;
     } catch (err) {
       console.error('Failed to restore terminal size:', err);
       this.showToast('Failed to restore terminal size', 'error');
+      return false;
     }
   },
 
@@ -6786,11 +6801,15 @@ Object.assign(CodemanApp.prototype, {
     return { cols: this.terminal.cols, rows: this.terminal.rows, viewportType };
   },
 
+  _queuePendingTerminalResize(sessionId, frame) {
+    this._pendingTerminalResize = { sessionId, frame: { ...frame } };
+  },
+
   /**
    * Send resize to a session with minimum dimension enforcement.
    * @param {string} sessionId
-   * @param {{ force?: boolean }} [options]
-   * @returns {Promise<boolean>} Whether dimensions changed from the last send
+   * @param {{ force?: boolean, retainPending?: boolean }} [options]
+   * @returns {Promise<boolean|null>} Whether dimensions changed, or null when transport did not accept the frame
    */
   async sendResize(sessionId, options = {}) {
     // Terminal dimensions belong only to the currently active browser view.
@@ -6821,6 +6840,8 @@ Object.assign(CodemanApp.prototype, {
           : window.innerWidth < 768
             ? 'tablet'
             : 'desktop';
+    const msg = { t: 'z', c: dims.cols, r: dims.rows, v: viewportType };
+    if (options.force) msg.f = true;
     // Viewer geometry is ownership-sensitive. Only the sizing token attached to
     // this socket may resize the shared PTY; HTTP has no equivalent identity and
     // therefore cannot be a safe fallback.
@@ -6831,13 +6852,14 @@ Object.assign(CodemanApp.prototype, {
     ) {
       if (sessionId !== this.activeSessionId) return false;
       try {
-        const msg = { t: 'z', c: dims.cols, r: dims.rows, v: viewportType };
-        if (options.force) msg.f = true;
         this._ws.send(JSON.stringify(msg));
+        if (options.retainPending) this._queuePendingTerminalResize(sessionId, msg);
+        else if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
         return changed;
       } catch {}
     }
-    return false;
+    this._queuePendingTerminalResize(sessionId, msg);
+    return null;
   },
 
   /**

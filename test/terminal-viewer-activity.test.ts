@@ -62,6 +62,7 @@ function loadApi(globals: Record<string, unknown> = {}) {
     create: (deps: Record<string, unknown>) => {
       activate: (reason: string) => boolean;
       flushPending: (reason: string) => boolean;
+      hasPending: (sessionId?: string | null) => boolean;
       runWithoutActivation: <T>(callback: () => T) => T;
       destroy: () => void;
     };
@@ -313,6 +314,17 @@ describe('terminal viewer activity controller', () => {
     expect(h.sent).toHaveLength(2);
   });
 
+  it('never deduplicates an explicit terminal-size restore ownership claim', () => {
+    const h = harness();
+
+    expect(h.controller.activate('pointerdown')).toBe(true);
+    expect(h.controller.activate('restore-terminal-size')).toBe(true);
+    expect(h.sent).toEqual([
+      { t: 'va', c: 75, r: 62, v: 'mobile' },
+      { t: 'va', c: 75, r: 62, v: 'mobile' },
+    ]);
+  });
+
   it('dedupes only finite nonnegative deltas below 250ms', () => {
     const h = harness();
     h.setNow(0);
@@ -414,12 +426,15 @@ describe('terminal viewer activity controller', () => {
     expect(send).not.toHaveBeenCalled();
 
     expect(h.controller.activate('session-select')).toBe(false);
+    expect(h.controller.hasPending()).toBe(true);
+    expect(h.controller.hasPending('other-session')).toBe(false);
     expect(send).toHaveBeenCalledTimes(1);
     expect(h.controller.flushPending('ws-open')).toBe(false);
     expect(send).toHaveBeenCalledTimes(2);
 
     ready = true;
     expect(h.controller.flushPending('ws-open')).toBe(true);
+    expect(h.controller.hasPending()).toBe(false);
     expect(send).toHaveBeenCalledTimes(3);
     expect(h.controller.flushPending('ws-open')).toBe(false);
     expect(send).toHaveBeenCalledTimes(3);

@@ -1959,10 +1959,15 @@ export function registerSessionRoutes(
 
   app.post('/api/sessions/:id/resize', async (req) => {
     const { id } = req.params as { id: string };
-    const { cols, rows, viewportType, force } = parseBody(ResizeSchema, req.body);
+    const { cols, rows } = parseBody(ResizeSchema, req.body);
     const session = findSessionOrFail(ctx, id, req);
 
-    session.resize(cols, rows, { viewportType, force });
+    if (!session.resizeIfNoActiveTerminalViewer(cols, rows)) {
+      return createErrorResponse(
+        ApiErrorCode.CONFLICT,
+        'Resize rejected because an active terminal viewer owns sizing; reconnect to use viewer-aware resizing'
+      );
+    }
     return {};
   });
 

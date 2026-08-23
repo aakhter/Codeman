@@ -773,6 +773,7 @@ class CodemanApp {
     this._httpFallbackSendCount = 0;
     this._terminalViewerActivity = null;
     this._terminalViewerActivityPagehideHandler = null;
+    this._pendingTerminalResize = null; // latest ownership-fenced z frame retained during a WS outage
 
     // Terminal write batching with DEC 2026 sync support
     this.pendingWrites = [];
@@ -4074,12 +4075,33 @@ class CodemanApp {
   // WebSocket Terminal I/O
   // ═══════════════════════════════════════════════════════════════
 
+  _flushPendingTerminalResize(sessionId, socket) {
+    const pending = this._pendingTerminalResize;
+    if (
+      !pending ||
+      pending.sessionId !== sessionId ||
+      this.activeSessionId !== sessionId ||
+      this._ws !== socket ||
+      !this._wsReady
+    ) return false;
+    try {
+      socket.send(JSON.stringify(pending.frame));
+      if (this._pendingTerminalResize === pending) this._pendingTerminalResize = null;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Open a WebSocket for terminal I/O on the given session.
    * Replaces HTTP POST input and SSE terminal output with a single
    * bidirectional connection. Falls back to SSE+POST if WS fails.
    */
   _connectWs(sessionId) {
+    // A passive resize belongs to the session measured when it was queued. A
+    // real tab switch must not carry that geometry into the next session.
+    if (this._pendingTerminalResize?.sessionId !== sessionId) this._pendingTerminalResize = null;
     this._disconnectWs();
     this._wsState = 'connecting';
     this._updateConnectionIndicator();
@@ -4120,6 +4142,10 @@ class CodemanApp {
         // A reconnect cannot claim sizing by itself. Retry only explicit viewer
         // activity that occurred while its matching socket was unavailable.
         this._terminalViewerActivity?.flushPending('ws-open');
+        // Then replay the latest passive geometry on the exact fresh socket.
+        // z never activates: the server applies it only if this token owns the
+        // session, otherwise it merely remembers the dimensions for later va.
+        this._flushPendingTerminalResize(sessionId, ws);
         this._startMobileResizeRetry(sessionId);
         // Flush any durably-queued input over the fresh socket (covers frames a
         // prior half-open socket silently dropped, and input typed while offline).

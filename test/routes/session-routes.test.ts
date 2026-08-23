@@ -1425,7 +1425,9 @@ and effort involved in moving workloads.
   // ========== POST /api/sessions/:id/resize ==========
 
   describe('POST /api/sessions/:id/resize', () => {
-    it('resizes session terminal', async () => {
+    it('allows ownerless new-session initialization through the legacy HTTP route', async () => {
+      const resizeIfOwnerless = vi.fn(() => true);
+      Object.assign(harness.ctx._session, { resizeIfNoActiveTerminalViewer: resizeIfOwnerless });
       const res = await harness.app.inject({
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/resize`,
@@ -1434,31 +1436,41 @@ and effort involved in moving workloads.
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      expect(harness.ctx._session.resize).toHaveBeenCalledWith(120, 40, { viewportType: undefined, force: undefined });
+      expect(resizeIfOwnerless).toHaveBeenCalledWith(120, 40);
+      expect(harness.ctx._session.resize).not.toHaveBeenCalled();
     });
 
-    it('passes viewport type through for resize arbitration', async () => {
+    it('rejects a cached-tab HTTP resize while an active viewer owns sizing', async () => {
+      const resizeIfOwnerless = vi.fn(() => false);
+      Object.assign(harness.ctx._session, { resizeIfNoActiveTerminalViewer: resizeIfOwnerless });
       const res = await harness.app.inject({
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/resize`,
         payload: { cols: 48, rows: 28, viewportType: 'mobile' },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(409);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(harness.ctx._session.resize).toHaveBeenCalledWith(48, 28, { viewportType: 'mobile', force: undefined });
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe('CONFLICT');
+      expect(body.error).toContain('active terminal viewer');
+      expect(resizeIfOwnerless).toHaveBeenCalledWith(48, 28);
+      expect(harness.ctx._session.resize).not.toHaveBeenCalled();
     });
 
-    it('passes force resize through for redraw requests', async () => {
+    it('keeps cached force flags from bypassing the ownerless admission gate', async () => {
+      const resizeIfOwnerless = vi.fn(() => false);
+      Object.assign(harness.ctx._session, { resizeIfNoActiveTerminalViewer: resizeIfOwnerless });
       const res = await harness.app.inject({
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/resize`,
         payload: { cols: 120, rows: 40, force: true },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(409);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(harness.ctx._session.resize).toHaveBeenCalledWith(120, 40, { viewportType: undefined, force: true });
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe('CONFLICT');
+      expect(resizeIfOwnerless).toHaveBeenCalledWith(120, 40);
+      expect(harness.ctx._session.resize).not.toHaveBeenCalled();
     });
 
     it('rejects cols exceeding max (500)', async () => {
