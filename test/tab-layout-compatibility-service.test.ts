@@ -144,6 +144,63 @@ describe('TabLayoutService COD-359 compatibility', () => {
     expect((await h.service.get('alice')).groups[0].refs).toEqual(h.layouts.alice.groups[0].refs);
   });
 
+  it('preserves an unmapped global slot while a legacy PUT reorders authoritative owner sessions', async () => {
+    const h = createHarness({
+      layouts: { alice: layout(['unknown', 'a', 'b']) },
+      order: ['unknown', 'a', 'b'],
+      live: [
+        { id: 'a', owner: 'alice', createdAt: 1 },
+        { id: 'b', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    const result = await h.service.putLegacyOrder({ owner: 'alice', isAdmin: false }, ['b', 'a']);
+
+    expect(h.layouts.alice.ungrouped).toEqual([
+      { kind: 'session', id: 'unknown' },
+      { kind: 'session', id: 'b' },
+      { kind: 'session', id: 'a' },
+    ]);
+    expect(result.globalOrder).toEqual(['unknown', 'b', 'a']);
+    expect(h.order).toEqual(['unknown', 'b', 'a']);
+    expect(result.order).toEqual(['b', 'a']);
+  });
+
+  it('preserves an unmapped global slot during a GET order repair', async () => {
+    const h = createHarness({
+      layouts: { alice: layout(['unknown', 'b', 'a']) },
+      order: ['unknown', 'a', 'b'],
+      live: [
+        { id: 'a', owner: 'alice', createdAt: 1 },
+        { id: 'b', owner: 'alice', createdAt: 2 },
+      ],
+    });
+
+    await h.service.get('alice');
+
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    expect(h.order).toEqual(['unknown', 'b', 'a']);
+    expect(h.broadcastSessionOrder).toHaveBeenCalledWith({
+      changedOwnerOrders: { alice: ['b', 'a'] },
+      globalOrder: ['unknown', 'b', 'a'],
+      globalChanged: true,
+    });
+  });
+
+  it('removes an unmapped global id only when a trusted deletion explicitly excludes it', async () => {
+    const h = createHarness({
+      layouts: { alice: layout(['unknown', 'a']) },
+      order: ['unknown', 'a'],
+      live: [{ id: 'a', owner: 'alice', createdAt: 1 }],
+    });
+    h.service.markRestorationComplete();
+
+    await h.service.runSessionDeletion([{ id: 'unknown', owner: 'alice' }], async () => undefined);
+
+    expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'a' }]);
+    expect(h.order).toEqual(['a']);
+  });
+
   it('rejects foreign, unknown, and prototype-inherited regular legacy ids without publication', async () => {
     const h = createHarness({
       layouts: { alice: layout(['a']) },

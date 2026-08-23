@@ -102,7 +102,7 @@ interface PreparedOrderProjection {
   owner: string;
   previousOrder: string[];
   authoritativeBeforeIds: string[];
-  claimedIds: string[];
+  excludedIds: string[];
   currentIds: string[];
   order: string[];
 }
@@ -353,24 +353,16 @@ export class TabLayoutService {
       .map((fact) => fact.id);
     const facts = authoritativeBeforeIds.filter((id) => !excluded.has(id));
     const visible = new Set(facts);
-    const foreign = new Set(
-      item.metadata.filter((fact) => fact.kind === 'session' && !fact.ownerValid && fact.visible).map((fact) => fact.id)
-    );
     const rawPrevious = item.previous ? flattenOwnerSessionOrder(item.previous) : [];
     const rawNext = flattenOwnerSessionOrder(item.next);
     const previousOrder = rawPrevious.filter((id) => visible.has(id) || excluded.has(id));
     const order = rawNext.filter((id) => visible.has(id) && !excluded.has(id));
-    const claimedIds = normalizeSessionOrder([
-      ...rawPrevious.filter((id) => !foreign.has(id)),
-      ...rawNext.filter((id) => !foreign.has(id)),
-      ...excluded,
-      ...facts,
-    ]);
+    const excludedIds = normalizeSessionOrder([...excluded]);
     return {
       owner: item.owner,
       previousOrder,
       authoritativeBeforeIds: normalizeSessionOrder([...authoritativeBeforeIds, ...excluded]),
-      claimedIds,
+      excludedIds,
       currentIds: normalizeSessionOrder([...order, ...facts]),
       order,
     };
@@ -383,7 +375,7 @@ export class TabLayoutService {
   ): string[] {
     const before = normalizeSessionOrder(latest);
     const removed = new Set(
-      projections.flatMap((projection) => projection.claimedIds.filter((id) => !projection.currentIds.includes(id)))
+      projections.flatMap((projection) => projection.excludedIds.filter((id) => !projection.currentIds.includes(id)))
     );
     return recomposeGlobalSessionOrder(
       before.filter((id) => !removed.has(id)),
