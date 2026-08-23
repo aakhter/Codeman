@@ -30,20 +30,13 @@ export function applyLegacySessionRank(
     sessionMetadata.set(item.id, item);
   }
 
-  const represented = new Set<string>();
-  for (const group of layout.groups) {
-    for (const ref of group.refs) if (ref.kind === 'session') represented.add(ref.id);
-  }
-  for (const ref of layout.ungrouped) if (ref.kind === 'session') represented.add(ref.id);
-
   const isRanked = (ref: TabRef): boolean =>
     ref.kind === 'session' && sessionMetadata.has(ref.id) && requestedRank.has(ref.id);
   const prepare = (ref: TabRef): TabRef => {
     if (ref.kind !== 'session') return { ...ref };
     const item = sessionMetadata.get(ref.id);
-    const representedParent =
-      item?.parentSessionId && sessionMetadata.has(item.parentSessionId) && represented.has(item.parentSessionId);
-    return representedParent ? { ...ref, placement: 'manual' } : { ...ref };
+    const ownerValidParent = item?.parentSessionId && sessionMetadata.has(item.parentSessionId);
+    return ownerValidParent ? { ...ref, placement: 'manual' } : { ...ref };
   };
   const rankContainer = (refs: readonly TabRef[]): TabRef[] => {
     const ranked = refs

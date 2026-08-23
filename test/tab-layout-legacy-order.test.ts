@@ -83,6 +83,19 @@ describe('applyLegacySessionRank', () => {
     expect(normalizeTabLayout(result, facts)).toEqual(result);
   });
 
+  it('keeps a ranked child manual in its group when normalization materializes its missing parent', () => {
+    const input = layout({
+      groups: [{ id: 'child-group', name: 'Child', refs: [session('child')] }],
+    });
+    const facts = [metadata('parent', { order: 0 }), metadata('child', { order: 1, parentSessionId: 'parent' })];
+
+    const result = applyLegacySessionRank(input, ['child', 'parent'], facts);
+
+    expect(result.groups[0].refs).toEqual([session('child', 'manual')]);
+    expect(result.ungrouped).toEqual([session('parent')]);
+    expect(normalizeTabLayout(result, facts)).toEqual(result);
+  });
+
   it('does not mutate inputs and returns a validated canonical deep clone', () => {
     const input = layout({
       groups: [{ id: 'g', name: '  Work  ', refs: [session('a'), webview('w')] }],
