@@ -4,33 +4,48 @@ import vm from 'node:vm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 type Listener = (event: Record<string, unknown>) => void;
+type ListenerOptions = boolean | { capture?: boolean };
+type RegisteredListener = { listener: Listener; capture: boolean };
 
 class FakeTextarea {
   value = 'unchanged';
-  private listeners = new Map<string, Set<Listener>>();
+  private listeners = new Map<string, RegisteredListener[]>();
 
-  addEventListener(type: string, listener: Listener) {
-    const listeners = this.listeners.get(type) ?? new Set<Listener>();
-    listeners.add(listener);
+  addEventListener(type: string, listener: Listener, options?: ListenerOptions) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push({ listener, capture: options === true || options?.capture === true });
     this.listeners.set(type, listeners);
   }
 
-  removeEventListener(type: string, listener: Listener) {
-    this.listeners.get(type)?.delete(listener);
+  removeEventListener(type: string, listener: Listener, options?: ListenerOptions) {
+    const capture = options === true || options?.capture === true;
+    const listeners = this.listeners.get(type) ?? [];
+    const index = listeners.findIndex(
+      (registered) => registered.listener === listener && registered.capture === capture
+    );
+    if (index >= 0) listeners.splice(index, 1);
   }
 
   dispatch(type: string, event: Record<string, unknown> = {}) {
-    for (const listener of this.listeners.get(type) ?? []) listener({ type, ...event });
+    const listeners = [...(this.listeners.get(type) ?? [])];
+    for (const phase of [true, false]) {
+      for (const registered of listeners) {
+        if (registered.capture === phase) registered.listener({ type, ...event });
+      }
+    }
   }
 
   listenerCount() {
-    return [...this.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
+    return [...this.listeners.values()].reduce((total, listeners) => total + listeners.length, 0);
   }
 }
 
 type Scheduled = { id: number; callback: () => void; delay?: number };
 
-function harness(overrides: Record<string, unknown> = {}) {
+function harness(
+  overrides: Record<string, unknown> = {},
+  beforeCreate?: (textarea: FakeTextarea, getController: () => Record<string, unknown> | undefined) => void
+) {
   const source = readFileSync(new URL('../src/web/public/mobile-ime-preview.js', import.meta.url), 'utf8');
   const context = vm.createContext({ navigator: {} });
   vm.runInContext(source, context, { filename: 'mobile-ime-preview.js' });
@@ -60,7 +75,9 @@ function harness(overrides: Record<string, unknown> = {}) {
     const index = timers.findIndex((timer) => timer.id === id);
     if (index >= 0) timers.splice(index, 1);
   });
-  const controller = api.create({
+  let controller: Record<string, unknown> | undefined;
+  beforeCreate?.(textarea, () => controller);
+  controller = api.create({
     textarea,
     render,
     clear,
@@ -209,6 +226,30 @@ describe('MobileImePreview', () => {
     expect(h.controller.consumeTerminalData('確定')).toBe(true);
     h.textarea.dispatch('compositionend', { data: 'stale' });
     expect(h.controller.consumeTerminalData('stale')).toBe(false);
+  });
+
+  test('capture keydown finalization precedes an earlier xterm bubble onData listener', () => {
+    const consumed: boolean[] = [];
+    const h = harness({}, (textarea, getController) => {
+      textarea.addEventListener('keydown', () => {
+        const controller = getController() as { consumeTerminalData(data: string): boolean };
+        consumed.push(controller.consumeTerminalData('確定'));
+      });
+    });
+    h.textarea.dispatch('compositionstart');
+    h.textarea.dispatch('compositionupdate', { data: '確定' });
+    h.textarea.dispatch('keydown', { key: 'Enter', isComposing: false });
+
+    expect(consumed).toEqual([true]);
+    expect(h.controller.consumeTerminalData('確定')).toBe(false);
+    expect(h.onCommit).toHaveBeenCalledOnce();
+
+    h.controller.destroy();
+    h.textarea.dispatch('compositionstart');
+    h.textarea.dispatch('compositionupdate', { data: 'later' });
+    h.textarea.dispatch('keydown', { key: 'Enter', isComposing: false });
+    expect(consumed).toEqual([true, false]);
+    expect(h.onCommit).toHaveBeenCalledOnce();
   });
 
   test('generation fences stale frames and timers', () => {

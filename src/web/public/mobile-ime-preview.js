@@ -202,15 +202,15 @@
       ['compositionupdate', updateComposition],
       ['input', onComposingInput],
       ['compositionend', onCompositionEnd],
-      ['keydown', onKeydown],
+      ['keydown', onKeydown, true],
       ['blur', reset],
     ];
-    for (const [type, listener] of listeners) textarea.addEventListener(type, listener);
+    for (const [type, listener, capture] of listeners) textarea.addEventListener(type, listener, capture);
 
     function destroy() {
       if (destroyed) return;
       destroyed = true;
-      for (const [type, listener] of listeners) textarea.removeEventListener(type, listener);
+      for (const [type, listener, capture] of listeners) textarea.removeEventListener(type, listener, capture);
       cleanup();
     }
 
