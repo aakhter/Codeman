@@ -246,7 +246,7 @@ Run:
 
 ```bash
 npm test -- test/tab-rail-resize.test.ts test/tab-orientation.test.ts
-npm run test:file -- test/tab-rail-resize.browser.test.ts
+npm run test:browser -- test/tab-rail-resize.browser.test.ts
 ```
 
 Expected: policy/contract tests PASS; Chromium proves pointer/keyboard resize, preferred-width restoration, breakpoint
@@ -381,7 +381,7 @@ After Enter, cancellation, API rejection, session deletion, and replacement by a
 
 - [ ] **Step 2: Run the focused browser test and confirm rename state is absent**
 
-Run: `npm run test:file -- test/inline-rename.test.ts`
+Run: `npm run test:browser -- test/inline-rename.test.ts`
 
 Expected: FAIL because the nested input remains inside the settled two-line clamp and no owned cleanup state exists.
 
@@ -413,7 +413,7 @@ Preserve upstream Enter, Escape, IME composition, API, and rename persistence se
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `npm run test:file -- test/inline-rename.test.ts`
+Run: `npm run test:browser -- test/inline-rename.test.ts`
 
 Expected: all inline-rename cases PASS in Chromium.
 
@@ -477,7 +477,7 @@ Run:
 
 ```bash
 npm test -- test/session-sidebar-ux.test.ts
-npm run test:file -- test/session-sidebar-ux.browser.test.ts
+npm run test:browser -- test/session-sidebar-ux.browser.test.ts
 ```
 
 Expected: schema/contract and real computed-style/click tests PASS.
@@ -509,7 +509,7 @@ Run:
 
 ```bash
 npm test -- test/session-options-structure.test.ts
-npm run test:file -- test/session-options-responsive.browser.test.ts
+npm run test:browser -- test/session-options-responsive.browser.test.ts
 ```
 
 Expected: the new 974px Chromium geometry assertion FAILS under the current 680px viewport breakpoint.
@@ -561,10 +561,10 @@ Expected: every selected file PASS with zero failures.
 - [ ] **Step 3: Run browser files individually**
 
 ```bash
-npm run test:file -- test/tab-rail-resize.browser.test.ts
-npm run test:file -- test/inline-rename.test.ts
-npm run test:file -- test/session-sidebar-ux.browser.test.ts
-npm run test:file -- test/session-options-responsive.browser.test.ts
+npm run test:browser -- test/tab-rail-resize.browser.test.ts
+npm run test:browser -- test/inline-rename.test.ts
+npm run test:browser -- test/session-sidebar-ux.browser.test.ts
+npm run test:browser -- test/session-options-responsive.browser.test.ts
 ```
 
 Expected: each command PASS. Running individually preserves the managed-session safety boundary.
