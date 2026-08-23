@@ -607,6 +607,17 @@ export class WebServer extends EventEmitter {
     }
   }
 
+  /** Add a tentative session only after its owner layout accepts the creation. */
+  private async registerSessionWithLayout(session: Session): Promise<void> {
+    this.sessions.set(session.id, session);
+    try {
+      await this.tabLayouts.sessionCreated(session.owner ?? '@single');
+    } catch (error) {
+      this.sessions.delete(session.id);
+      throw error;
+    }
+  }
+
   /**
    * Build a route context object satisfying all 5 port interfaces.
    * Single object with zero runtime cost — ISP enforced at the type level.
@@ -617,15 +628,7 @@ export class WebServer extends EventEmitter {
     return {
       // SessionPort
       sessions: this.sessions as ReadonlyMap<string, Session>,
-      addSession: async (session: Session) => {
-        this.sessions.set(session.id, session);
-        try {
-          await this.tabLayouts.sessionCreated(session.owner ?? '@single');
-        } catch (error) {
-          this.sessions.delete(session.id);
-          throw error;
-        }
-      },
+      addSession: this.registerSessionWithLayout.bind(this),
       tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),
       setupSessionListeners: this.setupSessionListeners.bind(this),
@@ -1888,7 +1891,7 @@ export class WebServer extends EventEmitter {
           // mode) so the flag-off path stays byte-identical.
           session = new Session({ workingDir: run.workingDir });
         }
-        this.sessions.set(session.id, session);
+        await this.registerSessionWithLayout(session);
         this.store.incrementSessionsCreated();
         this.persistSessionState(session);
         await this.setupSessionListeners(session);

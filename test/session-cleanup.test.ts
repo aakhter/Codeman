@@ -61,17 +61,18 @@ describe('Session Cleanup', () => {
       const internals = server as unknown as {
         tabLayouts: { runSessionDeletion: (...args: unknown[]) => Promise<unknown> };
       };
-      const original = internals.tabLayouts.runSessionDeletion;
-      internals.tabLayouts.runSessionDeletion = vi.fn(async () => {
-        throw new Error('layout prune unavailable');
-      });
+      const deletionSpy = vi
+        .spyOn(internals.tabLayouts, 'runSessionDeletion')
+        .mockRejectedValueOnce(new Error('layout prune unavailable'));
+      try {
+        const deleteRes = await fetch(`${baseUrl}/api/sessions/${id}`, { method: 'DELETE' });
+        const getRes = await fetch(`${baseUrl}/api/sessions/${id}`);
 
-      const deleteRes = await fetch(`${baseUrl}/api/sessions/${id}`, { method: 'DELETE' });
-      const getRes = await fetch(`${baseUrl}/api/sessions/${id}`);
-
-      expect(deleteRes.status).toBe(500);
-      expect(getRes.status).toBe(200);
-      internals.tabLayouts.runSessionDeletion = original;
+        expect(deleteRes.status).toBe(500);
+        expect(getRes.status).toBe(200);
+      } finally {
+        deletionSpy.mockRestore();
+      }
     });
 
     it('should properly stop and cleanup interactive session', async () => {
