@@ -22,6 +22,36 @@ function client() {
   };
 }
 
+function backpressuredClient(options: { throwAfterBackpressure?: boolean } = {}) {
+  const writes: string[] = [];
+  let firstWrite = true;
+  let onDrain: (() => void) | undefined;
+  const raw = {
+    write(chunk: string) {
+      if (!firstWrite && options.throwAfterBackpressure) throw new Error('client disconnected');
+      writes.push(chunk);
+      if (firstWrite) {
+        firstWrite = false;
+        return false;
+      }
+      return true;
+    },
+    once(event: string, callback: () => void) {
+      if (event === 'drain') onDrain = callback;
+      return raw;
+    },
+  };
+  return {
+    writes,
+    reply: { raw } as unknown as FastifyReply,
+    drain: () => {
+      const callback = onDrain;
+      onDrain = undefined;
+      callback?.();
+    },
+  };
+}
+
 describe('legacy session-order SSE routing', () => {
   it('selects an owner slice for the matching regular user and nothing for another user', () => {
     const change = changeWith({ alice: ['a2', 'a1'] }, ['a2', 'b1', 'a1'], true);
@@ -96,6 +126,84 @@ describe('legacy session-order SSE routing', () => {
     expect(constructorUser.writes).toEqual([]);
     expect(alice.writes).toEqual(['event: session:orderChanged\ndata: {"order":["a1"]}\n\n']);
     expect(admin.writes).toEqual(['event: session:orderChanged\ndata: {"order":["a1"]}\n\n']);
+    cleanup.dispose();
+  });
+
+  it('coalesces the latest filtered owner order while backpressured and flushes it on drain', () => {
+    const cleanup = new CleanupManager();
+    const manager = new SseStreamManager({ getSessionStateWithRespawn: () => null }, cleanup);
+    const blockedAlice = backpressuredClient();
+    const liveAlice = client();
+    const bob = client();
+    const admin = client();
+    manager.addClient(blockedAlice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(liveAlice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(bob.reply, null, false, undefined, { username: 'bob', role: 'user' });
+    manager.addClient(admin.reply, null, false, undefined, { username: 'root', role: 'admin' });
+
+    manager.broadcast('test:prime-backpressure', {}, { username: 'alice' });
+    for (const writes of [blockedAlice.writes, liveAlice.writes, bob.writes, admin.writes]) writes.length = 0;
+
+    manager.broadcastSessionOrder(changeWith({ alice: ['a2', 'a1'] }, ['a2', 'b1', 'a1'], true));
+    manager.broadcastSessionOrder(changeWith({ alice: ['a1', 'a2'] }, ['b1', 'a1', 'a2'], true));
+
+    expect(blockedAlice.writes).toEqual([]);
+    expect(liveAlice.writes).toEqual([
+      'event: session:orderChanged\ndata: {"order":["a2","a1"]}\n\n',
+      'event: session:orderChanged\ndata: {"order":["a1","a2"]}\n\n',
+    ]);
+    expect(bob.writes).toEqual([]);
+    expect(admin.writes).toEqual([
+      'event: session:orderChanged\ndata: {"order":["a2","b1","a1"]}\n\n',
+      'event: session:orderChanged\ndata: {"order":["b1","a1","a2"]}\n\n',
+    ]);
+
+    blockedAlice.drain();
+
+    expect(blockedAlice.writes).toEqual([
+      'event: session:needsRefresh\ndata: {}\n\n',
+      'event: session:orderChanged\ndata: {"order":["a1","a2"]}\n\n',
+    ]);
+    cleanup.dispose();
+  });
+
+  it('clears a queued owner order when a backpressured client disconnects', () => {
+    const cleanup = new CleanupManager();
+    const manager = new SseStreamManager({ getSessionStateWithRespawn: () => null }, cleanup);
+    const alice = backpressuredClient();
+    manager.addClient(alice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.broadcast('test:prime-backpressure', {}, { username: 'alice' });
+    alice.writes.length = 0;
+    manager.broadcastSessionOrder(changeWith({ alice: ['a2', 'a1'] }, ['a2', 'a1'], true));
+
+    manager.removeClient(alice.reply);
+    alice.drain();
+
+    expect(alice.writes).toEqual([]);
+    cleanup.dispose();
+  });
+
+  it('isolates a drain write failure from later healthy recipients', () => {
+    const cleanup = new CleanupManager();
+    const manager = new SseStreamManager({ getSessionStateWithRespawn: () => null }, cleanup);
+    const brokenAlice = backpressuredClient({ throwAfterBackpressure: true });
+    const liveAlice = client();
+    const admin = client();
+    manager.addClient(brokenAlice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(liveAlice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(admin.reply, null, false, undefined, { username: 'root', role: 'admin' });
+    manager.broadcast('test:prime-backpressure', {}, { username: 'alice' });
+    brokenAlice.writes.length = 0;
+    liveAlice.writes.length = 0;
+    admin.writes.length = 0;
+    manager.broadcastSessionOrder(changeWith({ alice: ['a2', 'a1'] }, ['a2', 'a1'], true));
+
+    expect(() => brokenAlice.drain()).not.toThrow();
+    expect(manager.clientCount).toBe(2);
+
+    manager.broadcastSessionOrder(changeWith({ alice: ['a1', 'a2'] }, ['a1', 'a2'], true));
+    expect(liveAlice.writes.at(-1)).toBe('event: session:orderChanged\ndata: {"order":["a1","a2"]}\n\n');
+    expect(admin.writes.at(-1)).toBe('event: session:orderChanged\ndata: {"order":["a1","a2"]}\n\n');
     cleanup.dispose();
   });
 });

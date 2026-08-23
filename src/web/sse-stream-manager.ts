@@ -79,6 +79,8 @@ export class SseStreamManager {
   private remoteSseClients: Set<FastifyReply> = new Set();
   /** Clients with backpressure — skip writes until 'drain' fires */
   private backpressuredClients: Set<FastifyReply> = new Set();
+  /** Latest already recipient-filtered legacy order frame awaiting a client's drain. */
+  private pendingSessionOrderFrames: Map<FastifyReply, string> = new Map();
 
   // ─── Tunnel State ───────────────────────────────────────
   /** Cached tunnel active state — updated on TunnelStarted/TunnelStopped to avoid getUrl() on every broadcast */
@@ -146,10 +148,7 @@ export class SseStreamManager {
       // If a previous reply registered the same id (reconnect), drop the old one.
       const prev = this.sseClientsById.get(clientId);
       if (prev && prev !== reply) {
-        this.sseClients.delete(prev);
-        this.remoteSseClients.delete(prev);
-        this.backpressuredClients.delete(prev);
-        this.sseClientIdentity.delete(prev);
+        this.removeClient(prev);
       }
       this.sseClientsById.set(clientId, reply);
     }
@@ -159,6 +158,7 @@ export class SseStreamManager {
     this.sseClients.delete(reply);
     this.remoteSseClients.delete(reply);
     this.backpressuredClients.delete(reply);
+    this.pendingSessionOrderFrames.delete(reply);
     this.sseClientIdentity.delete(reply);
     // Clear any clientId mappings pointing at this reply
     for (const [id, r] of this.sseClientsById) {
@@ -201,8 +201,7 @@ export class SseStreamManager {
     try {
       reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     } catch {
-      this.sseClients.delete(reply);
-      this.remoteSseClients.delete(reply);
+      this.removeClient(reply);
     }
   }
 
@@ -212,7 +211,31 @@ export class SseStreamManager {
     try {
       reply.raw.write(SSE_PADDING);
     } catch {
-      /* client gone */
+      this.removeClient(reply);
+    }
+  }
+
+  private markBackpressured(reply: FastifyReply): void {
+    this.backpressuredClients.add(reply);
+    reply.raw.once('drain', () => this.flushBackpressuredClient(reply));
+  }
+
+  private flushBackpressuredClient(reply: FastifyReply): void {
+    if (!this.sseClients.has(reply)) return;
+    this.backpressuredClients.delete(reply);
+    try {
+      const drainPadding = this._isTunnelActive ? SSE_PADDING : '';
+      const recovered = reply.raw.write(`event: ${SseEvent.SessionNeedsRefresh}\ndata: {}\n\n${drainPadding}`);
+      if (!recovered) {
+        this.markBackpressured(reply);
+        return;
+      }
+      const pendingOrder = this.pendingSessionOrderFrames.get(reply);
+      if (!pendingOrder) return;
+      this.pendingSessionOrderFrames.delete(reply);
+      this.sendSSEPreformatted(reply, pendingOrder);
+    } catch {
+      this.removeClient(reply);
     }
   }
 
@@ -226,24 +249,11 @@ export class SseStreamManager {
     try {
       const ok = reply.raw.write(message);
       if (!ok) {
-        // Buffer is full — mark as backpressured, resume on drain
-        this.backpressuredClients.add(reply);
-        reply.raw.once('drain', () => {
-          this.backpressuredClients.delete(reply);
-          // Client may have missed terminal data during backpressure.
-          // Tell it to reload the active session's buffer to recover.
-          try {
-            const drainPadding = this._isTunnelActive ? SSE_PADDING : '';
-            reply.raw.write(`event: ${SseEvent.SessionNeedsRefresh}\ndata: {}\n\n${drainPadding}`);
-          } catch {
-            /* client gone */
-          }
-        });
+        // Buffer is full — mark as backpressured, resume on drain.
+        this.markBackpressured(reply);
       }
     } catch {
-      this.sseClients.delete(reply);
-      this.remoteSseClients.delete(reply);
-      this.backpressuredClients.delete(reply);
+      this.removeClient(reply);
     }
   }
 
@@ -288,6 +298,10 @@ export class SseStreamManager {
       const payload = sessionOrderPayloadFor(this.sseClientIdentity.get(client), change);
       if (!payload) continue;
       const message = `event: ${SseEvent.SessionOrderChanged}\ndata: ${JSON.stringify(payload)}\n\n`;
+      if (this.backpressuredClients.has(client)) {
+        this.pendingSessionOrderFrames.set(client, message);
+        continue;
+      }
       this.sendSSEPreformatted(client, message);
     }
   }
@@ -516,9 +530,7 @@ export class SseStreamManager {
 
     // Remove dead clients
     for (const client of deadClients) {
-      this.sseClients.delete(client);
-      this.remoteSseClients.delete(client);
-      this.backpressuredClients.delete(client);
+      this.removeClient(client);
     }
 
     if (deadClients.length > 0) {
@@ -565,6 +577,7 @@ export class SseStreamManager {
     this.sseClients.clear();
     this.remoteSseClients.clear();
     this.backpressuredClients.clear();
+    this.pendingSessionOrderFrames.clear();
 
     // Clear per-session batch timers
     for (const timer of this.terminalBatchTimers.values()) {
