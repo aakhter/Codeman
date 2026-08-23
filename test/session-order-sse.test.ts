@@ -29,6 +29,11 @@ describe('legacy session-order SSE routing', () => {
     expect(sessionOrderPayloadFor({ username: 'bob', role: 'user' }, change)).toBeUndefined();
   });
 
+  it('does not treat inherited object properties as changed owner slices', () => {
+    const change = changeWith({ alice: ['a1'] }, ['a1'], true);
+    expect(sessionOrderPayloadFor({ username: 'constructor', role: 'user' }, change)).toBeUndefined();
+  });
+
   it('selects the global projection for admins even when only interleaving changed', () => {
     const change = changeWith({}, ['b1', 'a1'], true);
     expect(sessionOrderPayloadFor({ username: 'admin', role: 'admin' }, change)).toEqual({ order: ['b1', 'a1'] });
@@ -73,6 +78,24 @@ describe('legacy session-order SSE routing', () => {
 
     expect(alice.writes).toEqual([]);
     expect(admin.writes).toEqual(['event: session:orderChanged\ndata: {"order":["b1","a1"]}\n\n']);
+    cleanup.dispose();
+  });
+
+  it('skips an inherited-key username without starving later matching and admin recipients', () => {
+    const cleanup = new CleanupManager();
+    const manager = new SseStreamManager({ getSessionStateWithRespawn: () => null }, cleanup);
+    const constructorUser = client();
+    const alice = client();
+    const admin = client();
+    manager.addClient(constructorUser.reply, null, false, undefined, { username: 'constructor', role: 'user' });
+    manager.addClient(alice.reply, null, false, undefined, { username: 'alice', role: 'user' });
+    manager.addClient(admin.reply, null, false, undefined, { username: 'root', role: 'admin' });
+
+    expect(() => manager.broadcastSessionOrder(changeWith({ alice: ['a1'] }, ['a1'], true))).not.toThrow();
+
+    expect(constructorUser.writes).toEqual([]);
+    expect(alice.writes).toEqual(['event: session:orderChanged\ndata: {"order":["a1"]}\n\n']);
+    expect(admin.writes).toEqual(['event: session:orderChanged\ndata: {"order":["a1"]}\n\n']);
     cleanup.dispose();
   });
 });

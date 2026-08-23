@@ -9,6 +9,7 @@ export function sessionOrderPayloadFor(
   if (!identity || identity.role === 'admin') {
     return change.globalChanged ? { order: [...change.globalOrder] } : undefined;
   }
+  if (!Object.hasOwn(change.changedOwnerOrders, identity.username)) return undefined;
   const order = change.changedOwnerOrders[identity.username];
-  return order ? { order: [...order] } : undefined;
+  return Array.isArray(order) ? { order: [...order] } : undefined;
 }
