@@ -4101,6 +4101,23 @@ class CodemanApp {
     }
   }
 
+  _prepareFreshSocketInputReplay(sessionId, socket) {
+    const list = this._pendingDeliveries?.get?.(sessionId);
+    if (!list || list.length === 0) return true;
+    if (
+      this.activeSessionId !== sessionId ||
+      this._wsSessionId !== sessionId ||
+      this._ws !== socket ||
+      !this._wsReady ||
+      socket?.readyState !== WebSocket.OPEN
+    ) return false;
+    const controller = this._terminalViewerActivity;
+    if (!controller) return false;
+    if (controller.isCurrentTransportActivated?.(sessionId) === true) return true;
+    controller.activate?.('input-replay');
+    return controller.isCurrentTransportActivated?.(sessionId) === true;
+  }
+
   /**
    * Open a WebSocket for terminal I/O on the given session.
    * Replaces HTTP POST input and SSE terminal output with a single
@@ -4150,6 +4167,10 @@ class CodemanApp {
         // A reconnect cannot claim sizing by itself. Retry only explicit viewer
         // activity that occurred while its matching socket was unavailable.
         this._terminalViewerActivity?.flushPending('ws-open');
+        // Durable input is an explicit user action. Even when no old pending va
+        // survived (reload or an old-socket i failure), establish ownership on
+        // this exact fresh socket before replaying geometry or bytes.
+        const inputReplayReady = this._prepareFreshSocketInputReplay(sessionId, ws);
         // Then replay the latest passive geometry on the exact fresh socket.
         // z never activates: the server applies it only if this token owns the
         // session, otherwise it merely remembers the dimensions for later va.
@@ -4157,7 +4178,7 @@ class CodemanApp {
         this._startMobileResizeRetry(sessionId);
         // Flush any durably-queued input over the fresh socket (covers frames a
         // prior half-open socket silently dropped, and input typed while offline).
-        this._onWsReady(sessionId);
+        this._onWsReady(sessionId, { activationReady: inputReplayReady });
       }
     };
 
@@ -4464,8 +4485,12 @@ class CodemanApp {
   }
 
   /** Called from ws.onopen — flush everything pending over the fresh socket. */
-  _onWsReady(sessionId) {
+  _onWsReady(sessionId, options = {}) {
     const list = this._pendingDeliveries.get(sessionId);
+    if (!list || list.length === 0) return;
+    const activationReady =
+      options.activationReady === true || this._prepareFreshSocketInputReplay(sessionId, this._ws);
+    if (!activationReady) return;
     if (list) for (const r of list) r.sentAt = 0; // fresh socket ⇒ re-send all
     this._drainSession(sessionId);
   }

@@ -1348,6 +1348,30 @@ describe('terminal input real browser/server/probe correlation', () => {
     await openSession();
     await page.waitForFunction(() => (window as any).app._pendingDeliveries.size === 0, undefined, { timeout: 20_000 });
     expect(await page.evaluate(() => (window as any).app._clientId)).toBe(identity);
+    const replayWire = await page.evaluate(() => ({
+      ws: (window as any).__cod356Wire.ws.map((entry: any) => entry.frame).filter(Boolean),
+      http: (window as any).__cod356Wire.http.filter((entry: any) => entry.body?.input === 'reload-pending'),
+    }));
+    const replayInputIndex = replayWire.ws.findIndex((frame: any) => frame.t === 'i' && frame.d === 'reload-pending');
+    const replayActivationIndex = replayWire.ws.findIndex(
+      (frame: any, index: number) =>
+        index < replayInputIndex &&
+        frame.t === 'va' &&
+        Number.isInteger(frame.c) &&
+        Number.isInteger(frame.r) &&
+        ['mobile', 'tablet', 'desktop'].includes(frame.v)
+    );
+    const replayResizeIndex = replayWire.ws.findIndex(
+      (frame: any, index: number) => index < replayInputIndex && frame.t === 'z'
+    );
+    expect(replayInputIndex).toBeGreaterThan(-1);
+    expect(replayActivationIndex).toBeGreaterThan(-1);
+    expect(replayActivationIndex).toBeLessThan(replayInputIndex);
+    if (replayResizeIndex !== -1) {
+      expect(replayActivationIndex).toBeLessThan(replayResizeIndex);
+      expect(replayResizeIndex).toBeLessThan(replayInputIndex);
+    }
+    expect(replayWire.http).toEqual([]);
     await new Promise((resolveWait) => setTimeout(resolveWait, 200));
     const bytes = Buffer.concat(
       readProbeEvents()

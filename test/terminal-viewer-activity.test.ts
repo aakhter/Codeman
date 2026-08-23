@@ -63,6 +63,7 @@ function loadApi(globals: Record<string, unknown> = {}) {
       activate: (reason: string) => boolean;
       flushPending: (reason: string) => boolean;
       hasPending: (sessionId?: string | null) => boolean;
+      isCurrentTransportActivated: (sessionId?: string | null) => boolean;
       runWithoutActivation: <T>(callback: () => T) => T;
       destroy: () => void;
     };
@@ -474,8 +475,10 @@ describe('terminal viewer activity controller', () => {
     const h = harness({ send, transportIdentity: () => socket });
     h.setNow(100);
     expect(h.controller.activate('pointerdown')).toBe(true);
+    expect(h.controller.isCurrentTransportActivated()).toBe(true);
 
     socket = null;
+    expect(h.controller.isCurrentTransportActivated()).toBe(false);
     h.setNow(101);
     expect(h.controller.activate('pointerdown')).toBe(false);
     expect(send).toHaveBeenCalledTimes(2);
@@ -484,6 +487,7 @@ describe('terminal viewer activity controller', () => {
     socket = newSocket;
     h.setNow(102);
     expect(h.controller.flushPending('ws-open')).toBe(true);
+    expect(h.controller.isCurrentTransportActivated()).toBe(true);
     expect(send).toHaveBeenCalledTimes(3);
     expect(h.controller.hasPending()).toBe(false);
 

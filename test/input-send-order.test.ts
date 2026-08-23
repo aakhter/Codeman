@@ -85,8 +85,14 @@ function makeApp(): App {
   app.activeSessionId = 'session-1';
   app.isOnline = true;
   app._connectionStatus = 'connected';
+  app._terminalViewerActivity = {
+    activate: vi.fn(() => true),
+    hasPending: vi.fn(() => false),
+    isCurrentTransportActivated: vi.fn(() => true),
+  };
   app._ws = null;
   app._wsSessionId = null;
+  app._wsReady = true;
   return app as unknown as App;
 }
 
@@ -109,34 +115,54 @@ describe('durable input delivery — send ordering', () => {
 
   it('redelivers send-throw input exactly once over the replacement WS', () => {
     const app = makeApp() as App & Record<string, any>;
-    const activate = vi.fn(() => true);
-    app._terminalViewerActivity = { activate, hasPending: vi.fn(() => false) };
+    let transportActivated = false;
+    const activate = vi.fn(() => {
+      try {
+        app._ws.send(JSON.stringify({ t: 'va', c: 80, r: 24, v: 'desktop' }));
+        transportActivated = true;
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    app._terminalViewerActivity = {
+      activate,
+      hasPending: vi.fn(() => false),
+      isCurrentTransportActivated: vi.fn(() => transportActivated),
+    };
     app._wsSessionId = 'session-1';
+    const oldFrames: Frame[] = [];
     app._ws = {
       readyState: 1,
-      send: vi.fn(() => {
-        throw new Error('socket failed');
+      send: vi.fn((data: string) => {
+        const frame = JSON.parse(data) as Frame;
+        if (frame.t === 'i') throw new Error('input socket failed');
+        oldFrames.push(frame);
       }),
     };
 
     app._sendInputAsync('session-1', 'retry-on-fresh-socket');
+    expect(oldFrames).toMatchObject([{ t: 'va', c: 80, r: 24, v: 'desktop' }]);
     expect(app._pendingDeliveries.get('session-1')).toMatchObject([
       { seq: 1, data: 'retry-on-fresh-socket', sentAt: 0 },
     ]);
 
     const frames: Frame[] = [];
+    transportActivated = false;
     app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
     app._onWsReady('session-1');
-    expect(frames).toHaveLength(1);
-    expect(frames[0]).toMatchObject({ t: 'i', d: 'retry-on-fresh-socket', seq: 1, cid: 'c-test' });
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toMatchObject({ t: 'va', c: 80, r: 24, v: 'desktop' });
+    expect(frames[1]).toMatchObject({ t: 'i', d: 'retry-on-fresh-socket', seq: 1, cid: 'c-test' });
     app._onWsInputAck(1);
     app._onWsReady('session-1');
-    expect(frames).toHaveLength(1);
+    expect(frames).toHaveLength(2);
   });
 
   it('does not send input after activation throws and replays it after activation recovery', () => {
     const app = makeApp() as App & Record<string, any>;
     let activationPending = false;
+    let transportActivated = false;
     app._wsSessionId = 'session-1';
     app._ws = {
       readyState: 1,
@@ -148,6 +174,7 @@ describe('durable input delivery — send ordering', () => {
       activate: vi.fn(() => {
         try {
           app._ws.send(JSON.stringify({ t: 'va', c: 80, r: 24, v: 'desktop' }));
+          transportActivated = true;
           return true;
         } catch {
           activationPending = true;
@@ -155,6 +182,7 @@ describe('durable input delivery — send ordering', () => {
         }
       }),
       hasPending: vi.fn(() => activationPending),
+      isCurrentTransportActivated: vi.fn(() => transportActivated),
     };
 
     app._sendInputAsync('session-1', 'after-owned-reconnect');
@@ -167,8 +195,9 @@ describe('durable input delivery — send ordering', () => {
     const frames: Frame[] = [];
     app._ws = { readyState: 1, send: (data: string) => frames.push(JSON.parse(data)) };
     app._onWsReady('session-1');
-    expect(frames).toHaveLength(1);
-    expect(frames[0]).toMatchObject({ t: 'i', d: 'after-owned-reconnect', seq: 1 });
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toMatchObject({ t: 'va' });
+    expect(frames[1]).toMatchObject({ t: 'i', d: 'after-owned-reconnect', seq: 1 });
   });
 
   it('sends ownership activation before input on the same live WS', () => {

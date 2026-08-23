@@ -25,6 +25,7 @@
     let pendingRequiresFocus = false;
     let lastSignature = null;
     let lastTransportIdentity = null;
+    let lastActivatedSessionId = null;
     let lastSentAt = 0;
     let wasVisible = isVisible();
 
@@ -84,6 +85,7 @@
       pendingRequiresFocus = false;
       lastSignature = signature;
       lastTransportIdentity = currentTransportIdentity;
+      lastActivatedSessionId = sessionId;
       lastSentAt = currentTime;
       return true;
     }
@@ -142,6 +144,16 @@
       return !destroyed && pending && sessionId === pendingSessionId;
     }
 
+    function isCurrentTransportActivated(sessionId = deps.activeSessionId()) {
+      const currentTransportIdentity = transportIdentity();
+      return (
+        !destroyed &&
+        currentTransportIdentity !== null &&
+        currentTransportIdentity === lastTransportIdentity &&
+        sessionId === lastActivatedSessionId
+      );
+    }
+
     function destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -149,10 +161,11 @@
       pendingSessionId = null;
       pendingRequiresFocus = false;
       lastTransportIdentity = null;
+      lastActivatedSessionId = null;
       for (const [target, type, listener, options] of listeners) target.removeEventListener(type, listener, options);
     }
 
-    return { activate, flushPending, hasPending, runWithoutActivation, destroy };
+    return { activate, flushPending, hasPending, isCurrentTransportActivated, runWithoutActivation, destroy };
   }
 
   global.CodemanTerminalViewerActivity = { create };

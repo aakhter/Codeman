@@ -246,12 +246,15 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
   it('opens with pending activation, then latest resize, then durable input', () => {
     const { CodemanApp } = loadHarness();
     const order: string[] = [];
+    let transportActivated = false;
     const { app } = makeApp(CodemanApp, {
       _terminalViewerActivity: {
         flushPending: vi.fn(() => {
           order.push('va');
+          transportActivated = true;
           return true;
         }),
+        isCurrentTransportActivated: vi.fn(() => transportActivated),
       },
       _pendingTerminalResize: {
         sessionId: 's1',
@@ -278,6 +281,99 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
       tries: 1,
       sentAt: expect.any(Number),
     });
+  });
+
+  it('activates a fresh exact socket before replaying z and durable input without prior pending va', () => {
+    const { CodemanApp } = loadHarness();
+    const order: string[] = [];
+    let transportActivated = false;
+    const controller = {
+      flushPending: vi.fn(() => false),
+      isCurrentTransportActivated: vi.fn(() => transportActivated),
+      activate: vi.fn(() => {
+        order.push('va');
+        transportActivated = true;
+        return true;
+      }),
+      hasPending: vi.fn(() => false),
+    };
+    const { app } = makeApp(CodemanApp, {
+      _terminalViewerActivity: controller,
+      _pendingTerminalResize: {
+        sessionId: 's1',
+        frame: { t: 'z', c: 90, r: 30, v: 'desktop' },
+      },
+      _pendingDeliveries: new Map([
+        ['s1', [{ seq: 7, data: 'fresh-replay', useMux: false, ts: 1, tries: 0, sentAt: 123 }]],
+      ]),
+    });
+    delete (app as unknown as Record<string, unknown>)._onWsReady;
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    vi.spyOn(ws, 'send').mockImplementation((raw: string) => {
+      const frame = JSON.parse(raw) as { t: string; d?: string; seq?: number };
+      order.push(frame.t === 'i' ? `input:${frame.d}:${frame.seq}` : frame.t);
+    });
+    ws.readyState = FakeWebSocket.OPEN;
+    ws.onopen?.();
+
+    expect(order).toEqual(['va', 'z', 'input:fresh-replay:7']);
+    expect(controller.activate).toHaveBeenCalledWith('input-replay');
+  });
+
+  it('keeps durable replay queued when fresh-socket activation cannot send', () => {
+    const { CodemanApp } = loadHarness();
+    const controller = {
+      flushPending: vi.fn(() => false),
+      isCurrentTransportActivated: vi.fn(() => false),
+      activate: vi.fn(() => false),
+      hasPending: vi.fn(() => false),
+    };
+    const pending = [{ seq: 1, data: 'still-durable', useMux: false, ts: 1, tries: 0, sentAt: 0 }];
+    const { app } = makeApp(CodemanApp, {
+      _terminalViewerActivity: controller,
+      _pendingDeliveries: new Map([['s1', pending]]),
+    });
+    delete (app as unknown as Record<string, unknown>)._onWsReady;
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    const send = vi.spyOn(ws, 'send');
+    ws.readyState = FakeWebSocket.OPEN;
+    ws.onopen?.();
+
+    expect(controller.activate).toHaveBeenCalledWith('input-replay');
+    expect(send).not.toHaveBeenCalled();
+    expect(pending[0]).toMatchObject({ sentAt: 0, tries: 0 });
+  });
+
+  it('does not activate or replay durable input from a stale socket after a session switch', () => {
+    const { CodemanApp } = loadHarness();
+    const activate = vi.fn(() => true);
+    const pending = [{ seq: 1, data: 's1-only', useMux: false, ts: 1, tries: 0, sentAt: 0 }];
+    const { app } = makeApp(CodemanApp, {
+      _terminalViewerActivity: {
+        flushPending: vi.fn(() => false),
+        isCurrentTransportActivated: vi.fn(() => false),
+        activate,
+        hasPending: vi.fn(() => false),
+      },
+      _pendingDeliveries: new Map([['s1', pending]]),
+    });
+    delete (app as unknown as Record<string, unknown>)._onWsReady;
+
+    app._connectWs('s1');
+    const stale = FakeWebSocket.instances[0];
+    const staleSend = vi.spyOn(stale, 'send');
+    app.activeSessionId = 's2';
+    app._connectWs('s2');
+    stale.readyState = FakeWebSocket.OPEN;
+    stale.onopen?.();
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(staleSend).not.toHaveBeenCalled();
+    expect(pending[0]).toMatchObject({ sentAt: 0, tries: 0 });
   });
 
   it('keeps pending passive resize session-bound and ignores a stale socket open', () => {
