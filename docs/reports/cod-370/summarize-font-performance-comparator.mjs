@@ -80,6 +80,10 @@ function fixed(value) {
   return Number(value.toFixed(1));
 }
 
+function durationList(values) {
+  return values.length ? `${values.map(fixed).join(', ')}ms` : 'none';
+}
+
 function aggregate(label, cpuRate) {
   const selected = rows.filter((row) => row.data.config.label === label);
   const rates = selected.map((row) => row.data.rates.find((rate) => rate.cpuRate === cpuRate));
@@ -144,6 +148,12 @@ for (const cpuRate of [1, 4]) {
     `| ${cpuRate}x | ${value.baseline.median} / ${value.baseline.p95} / ${value.baseline.max}ms | ${value.candidate.median} / ${value.candidate.p95} / ${value.candidate.max}ms | ${value.medianDelta.absolute}ms (${value.medianDelta.percent}%) | ${value.p95Delta.absolute}ms (${value.p95Delta.percent}%) | ${value.maxDelta.absolute}ms (${value.maxDelta.percent}%) |`
   );
 }
+if (!regressions.length && aggregates[1].maxDelta.absolute > 20 && aggregates[1].maxDelta.percent > 20) {
+  lines.push(
+    '',
+    `Caution: the candidate retained one isolated 1x maximum of ${aggregates[1].candidate.max}ms versus ${aggregates[1].baseline.max}ms for baseline (${aggregates[1].maxDelta.absolute}ms, ${aggregates[1].maxDelta.percent}% worse). This unfiltered sample had no recorded long task; the defined p95 gate still passes.`
+  );
+}
 lines.push('', '## Per-repetition evidence', '');
 for (const cpuRate of [1, 4]) {
   for (const label of ['baseline', 'candidate']) {
@@ -161,7 +171,7 @@ for (const cpuRate of [1, 4]) {
       ...new Set(value.candidate.dimensions),
     ].join(
       ', '
-    )}; long tasks baseline ${value.baseline.longTasks.length} (${value.baseline.longTasks.map(fixed).join(', ') || 'none'}ms), candidate ${value.candidate.longTasks.length} (${value.candidate.longTasks.map(fixed).join(', ') || 'none'}ms); typing-window resize events baseline [${value.baseline.resizeEvents.join(', ')}], candidate [${value.candidate.resizeEvents.join(', ')}].`
+    )}; long tasks baseline ${value.baseline.longTasks.length} (${durationList(value.baseline.longTasks)}), candidate ${value.candidate.longTasks.length} (${durationList(value.candidate.longTasks)}); typing-window resize events baseline [${value.baseline.resizeEvents.join(', ')}], candidate [${value.candidate.resizeEvents.join(', ')}].`
   );
 }
 lines.push(
