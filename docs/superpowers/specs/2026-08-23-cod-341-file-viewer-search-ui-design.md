@@ -35,14 +35,16 @@ The mixin lazily initializes panel-local state so this extraction does not requi
 
 - a debounce timer;
 - independent monotonically increasing tree-load and search epochs;
+- the File Viewer owner session ID, updated synchronously when session activation changes;
 - a normal-tree cache record containing `{ sessionId, showHidden, data }`;
 - the current flat match list/search-mode flag if needed by rendering.
 
-Every input change advances the search epoch before doing anything else. A valid non-empty input captures the active
-session ID, hidden-files preference, and search epoch, then requests the existing files endpoint with `depth=5`,
+Every input change advances the search epoch before doing anything else. A valid non-empty input captures the File Viewer
+owner session ID, hidden-files preference, and search epoch, then requests the existing files endpoint with `depth=5`,
 `showHidden`, and an encoded `q`. A response may update the visible panel only when its search epoch is current, its captured
-session is still active, its captured hidden preference is current, and the input still contains that query. Session
-changes, refreshes, every panel-hide path, hidden toggles, and input clearing also advance the search epoch.
+owner is still both the File Viewer owner and active session, its captured hidden preference is current, and the input still
+contains that query. Session changes, refreshes, every panel-hide path, hidden toggles, and input clearing also advance the
+search epoch.
 
 Normal-tree loads use a separate tree epoch. A response updates the cache only when its tree epoch, session ID, and hidden
 preference are still current. A compatible tree response may refresh the cache while a search is active, but it must not
@@ -78,10 +80,12 @@ results, and displays `Search queries are limited to 256 characters`; clearing o
 Refresh remains an explicit reset: it clears the search input and state, invalidates pending responses, clears expanded
 directories, and reloads the normal tree.
 
-One shared reset helper clears the search input/state, advances the search epoch, and restores the Expand/Collapse control.
-Both `closeFileBrowserPanel()` and the settings-driven hide branch in `settings-ui.js::applyMonitorVisibility()` call it.
-Responses also require the panel to remain visible, so reopening cannot reveal a stale query or accept a response produced
-while the panel was hidden. This intentionally adds the narrow settings mixin edit to the extraction scope.
+One shared reset helper clears the search input/state, advances both the search and tree epochs, and restores the
+Expand/Collapse control. Both `closeFileBrowserPanel()` and the settings-driven hide branch in
+`settings-ui.js::applyMonitorVisibility()` call it. Advancing the tree epoch means a tree response arriving after either hide
+path cannot update the cache; search responses additionally require the panel to remain visible. Reopening therefore starts
+a fresh normal-tree load and cannot reveal state produced while hidden. This intentionally adds the narrow settings mixin
+edit to the extraction scope.
 
 The hidden-files toggle preserves an active valid query. It advances the search epoch, captures the query/session/new hidden
 preference, and starts a new tree load. Its continuation reruns the captured query only if that tree load won its tree epoch,
@@ -90,9 +94,19 @@ the tree request is pending may run independently; the compatible tree response 
 invalidates both the first toggle's tree response and its continuation. With an empty query the control behaves as it does
 today.
 
-Session changes invalidate requests for the prior session. The search field is cleared when a different session becomes the
-File Viewer owner, and the panel does not restore/render a cache owned by another session or hidden preference. Tree and
-search row actions pass their captured session owner to `openFilePreview()` and construct download URLs from that owner.
+Changing the hidden preference immediately removes prior-preference results from the visible panel and shows the new tree
+load state. If that load fails, the new preference remains selected and persisted, the captured query is not rerun, and the
+panel shows the escaped tree-load failure with no compatible restoration cache. The input may remain for correction or a
+new search; clearing it retains the load failure rather than restoring prior-preference data. Refresh clears the query and
+retries the normal tree, while toggling again retries under the newly selected preference.
+
+`selectSession()` in `app.js` calls a narrow File Viewer owner/reset hook immediately after assigning the new
+`activeSessionId`, before terminal replay and the later idle-callback tree load. The hook synchronously changes the File
+Viewer owner, clears search input/state, invalidates both epochs, blocks prior-owner row interaction, and shows the new
+owner's loading state when the panel is visible. Thus there is no interval in which input can target session B while the
+panel is still owned by A. The later `loadFileBrowser(B)` populates the cache normally. The panel never restores/renders a
+cache owned by another session or hidden preference. Tree and search row actions pass their captured session owner to
+`openFilePreview()` and construct download URLs from that owner.
 
 Expand/Collapse All is disabled while any non-empty query is pending or showing results/errors, and its handler is a no-op
 in those states. Leaving search mode restores the control and its prior tree expansion state. This prevents the existing
@@ -123,13 +137,16 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - 256-character acceptance and 257-character client rejection without a request;
 - strict malformed-envelope rejection and HTML-metacharacter escaping in names, paths, attributes, and links;
 - owner-tagged restoration and row actions, including overlapping A/B tree loads and clear-before-B-load-completes;
+- the real `selectSession()` owner/reset hook, including input attempted after B becomes active but before B's delayed tree
+  load;
 - independent tree/search epochs under query changes, two hidden toggles, search during refresh, and search during a cache
   reload;
-- late response suppression after a newer query, clear, refresh, either close path, or session switch;
+- late search and tree response suppression after a newer query, clear, refresh, either close path, or session switch;
 - search failure followed by clear-to-recover;
 - directory-result navigation back to the cached tree with separator-independent ancestor expansion, including a
   Windows-style path fixture;
 - hidden-toggle reload followed by rerunning the active query;
+- hidden-toggle tree-load failure, clear-without-stale-restoration, refresh recovery, and toggle-back recovery;
 - refresh and session changes clearing search state;
 - Expand/Collapse All remaining inert and disabled during search, then recovering afterward;
 - settings-driven hide/reopen reset behavior.
@@ -142,6 +159,7 @@ Viewer behavior was imported.
 ## Delivery
 
 Create an isolated COD-341 worktree from a freshly fetched `upstream/master`. Keep the implementation to the File Viewer
-mixin, the narrow settings-driven hide/reset hook, focused frontend tests, and the release changeset required by upstream.
-Push the review branch to the configured GitHub fork and open an upstream pull request only under the user's existing
-upstream-submission authorization. Do not merge upstream, merge into local, or deploy production as part of this extraction.
+mixin, the narrow `app.js` session-owner hook, the narrow settings-driven hide/reset hook, focused frontend tests, and the
+release changeset required by upstream. Push the review branch to the configured GitHub fork and open an upstream pull
+request only under the user's existing upstream-submission authorization. Do not merge upstream, merge into local, or deploy
+production as part of this extraction.
