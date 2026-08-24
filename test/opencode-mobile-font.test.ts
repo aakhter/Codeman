@@ -300,10 +300,10 @@ function createApp(deviceType: string, initial: Record<string, string>, mode = '
 }
 
 describe('OpenCode device-local terminal font policy', () => {
-  it('defaults mobile OpenCode to 8px and permits only an explicit 9px fallback', () => {
+  it('defaults mobile OpenCode to the validated 9px performance fallback', () => {
     const { font } = loadTerminalPolicy();
     expect(font.resolveSize({ deviceType: 'mobile', mode: 'OpenCode', stored: null })).toEqual({
-      size: 8,
+      size: 9,
       key: 'codeman-font-size-mobile-opencode',
       min: 8,
     });
@@ -333,7 +333,7 @@ describe('OpenCode device-local terminal font policy', () => {
       expect(font.resolveSize({ deviceType: 'mobile', mode: 'opencode', stored }).size).toBe(Number(stored));
     }
     for (const stored of [null, '', 'nope', '8.5', 7, 25, NaN, Infinity]) {
-      expect(font.resolveSize({ deviceType: 'mobile', mode: 'opencode', stored }).size).toBe(8);
+      expect(font.resolveSize({ deviceType: 'mobile', mode: 'opencode', stored }).size).toBe(9);
     }
     expect(font.resolveSize({ deviceType: 'mobile', mode: 'codex', stored: '9' }).size).toBe(10);
   });
@@ -390,8 +390,8 @@ describe('OpenCode device-local terminal font policy', () => {
       terminal: { options: { fontSize: 14 } },
     });
 
-    expect(app.applyTerminalFontPolicyForActiveSession()).toMatchObject({ size: 8 });
-    expect(app.terminal.options.fontSize).toBe(8);
+    expect(app.applyTerminalFontPolicyForActiveSession()).toMatchObject({ size: 9 });
+    expect(app.terminal.options.fontSize).toBe(9);
   });
 
   it('restores independent values across mobile mode switches without overwriting either key', () => {
@@ -426,7 +426,7 @@ describe('OpenCode device-local terminal font policy', () => {
     harness.app.sendResize = vi.fn();
     harness.app.applyTerminalFontPolicyForActiveSession();
     harness.app.applyTerminalFontPolicyForActiveSession();
-    expect(harness.app.terminal.options.fontSize).toBe(8);
+    expect(harness.app.terminal.options.fontSize).toBe(9);
     expect(harness.fit).not.toHaveBeenCalled();
     expect(harness.app._terminalViewerActivity.activate).not.toHaveBeenCalled();
     expect(harness.app.sendResize).not.toHaveBeenCalled();
@@ -456,7 +456,7 @@ describe('OpenCode device-local terminal font policy', () => {
 
     await harness.app.sendResize('session-1');
 
-    expect(order).toEqual(['policy:8', 'fit:8', 'resize:8']);
+    expect(order).toEqual(['policy:9', 'fit:9', 'resize:9']);
     expect(harness.store.setItem).not.toHaveBeenCalled();
   });
 
@@ -731,8 +731,8 @@ describe('OpenCode device-local terminal font policy', () => {
 
     await app.selectSession('s1');
 
-    expect(app.terminal.options.fontSize).toBe(8);
-    expect(order).toEqual(['policy:8', 'fit:8', 'activate:8']);
+    expect(app.terminal.options.fontSize).toBe(9);
+    expect(order).toEqual(['policy:9', 'fit:9', 'activate:9']);
     expect(fontStorageWrites(integrated.store)).toEqual([]);
     expect(app.sendResize).not.toHaveBeenCalled();
   });
@@ -744,8 +744,8 @@ describe('OpenCode device-local terminal font policy', () => {
 
     await app.selectSession('s1');
 
-    expect(app.terminal.options.fontSize).toBe(8);
-    expect(order).toEqual(['policy:8', 'fit:8', 'activate:8', 'resize:8']);
+    expect(app.terminal.options.fontSize).toBe(9);
+    expect(order).toEqual(['policy:9', 'fit:9', 'activate:9', 'resize:9']);
     expect(fontStorageWrites(integrated.store)).toEqual([]);
   });
 
@@ -816,7 +816,7 @@ describe('OpenCode device-local terminal font policy', () => {
     );
 
     mobile.KeyboardHandler.resetLayout();
-    expect(harness.app.terminal.options.fontSize).toBe(8);
+    expect(harness.app.terminal.options.fontSize).toBe(9);
     mobile.KeyboardHandler.keyboardVisible = true;
     mobile.KeyboardHandler.updateLayoutForKeyboard();
     mobile.KeyboardHandler.onKeyboardShow();
@@ -828,11 +828,11 @@ describe('OpenCode device-local terminal font policy', () => {
     mobile.runLastTimer();
 
     expect(order).toEqual([
-      'policy:8',
-      'policy:8',
-      'policy:8',
-      'fit:8',
-      'resize:8',
+      'policy:9',
+      'policy:9',
+      'policy:9',
+      'fit:9',
+      'resize:9',
       'policy:10',
       'policy:10',
       'fit:10',

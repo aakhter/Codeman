@@ -297,7 +297,9 @@ function resolveTerminalFontSize({ deviceType, mode, stored, performanceFallback
   // mobile policies for compatibility with existing per-browser preferences.
   const key = isOpenCodePhone ? 'codeman-font-size-mobile-opencode' : 'codeman-font-size';
   const min = isOpenCodePhone ? 8 : 10;
-  const fallback = isOpenCodePhone ? (performanceFallback === true ? 9 : 8) : normalizedDevice === 'mobile' ? 10 : 14;
+  // The 9px OpenCode phone fallback retained >=45 usable rows in the real
+  // iPhone viewport while avoiding the 8px renderer/input performance cost.
+  const fallback = isOpenCodePhone ? 9 : normalizedDevice === 'mobile' ? 10 : 14;
   const numericStored =
     typeof stored === 'number'
       ? stored

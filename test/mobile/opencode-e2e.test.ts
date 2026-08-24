@@ -788,7 +788,7 @@ async function runRate(
     await resetTrace(phone);
 
     const phoneDims = await terminalDimensions(phone);
-    expect(await terminalFont(phone)).toBe(8);
+    expect(await terminalFont(phone)).toBe(9);
     expect(validateAcceptedPhoneGeometry(phoneDims)).toBe(true);
     expect(phoneDims.cols).toBe(75);
     expect(phoneDims.rows).toBeGreaterThanOrEqual(45);
@@ -1113,7 +1113,7 @@ describe.skipIf(FONT_COMPARATOR_ENABLED)('COD-370 real OpenCode active-viewer ac
       await selectSession(fixture.phonePage!, fixture.sessionId, true);
       await installBehaviorTrace(fixture.phonePage!);
       await waitUntil('real OpenCode TUI output', () => fixture.paneText().trim().length > 20, 20_000);
-      expect(await terminalFont(fixture.phonePage!)).toBe(8);
+      expect(await terminalFont(fixture.phonePage!)).toBe(9);
       phoneCdp = await fixture.phoneContext!.newCDPSession(fixture.phonePage!);
       desktopCdp = await fixture.desktopContext!.newCDPSession(fixture.desktopPage!);
 
