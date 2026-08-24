@@ -36,9 +36,10 @@ The mixin lazily initializes panel-local state so this extraction does not requi
 - a debounce timer;
 - independent monotonically increasing tree-load and search epochs;
 - the File Viewer owner session ID, updated synchronously when session activation changes;
-- an owner-tagged normal-tree state record containing `{ sessionId, showHidden, phase, data?, error? }`, where `phase` is
-  `loading`, `ready`, or `error`;
-- an in-flight normal-tree load record keyed by owner session and hidden preference for request deduplication;
+- an owner-tagged normal-tree state record containing `{ sessionId, showHidden, treeEpoch, phase, data?, error? }`, where
+  `phase` is `loading`, `ready`, or `error`;
+- an in-flight normal-tree load record keyed by owner session, hidden preference, and current tree epoch for request
+  deduplication;
 - explicit panel view ownership: `normal`, `search-pending`, `search-results`, `search-error`, or `query-error`;
 - the current flat match list and an optional deferred directory target tied to one owner/preference/tree epoch plus its
   originating search epoch and query.
@@ -51,9 +52,9 @@ owner is still both the File Viewer owner and active session, its captured hidde
 contains that query. Session changes, refreshes, every panel-hide path, hidden toggles, and input clearing also advance the
 search epoch.
 
-Normal-tree loads use a separate tree epoch and immediately record an owner-tagged `loading` state. A non-forced request for
-the same owner/hidden identity reuses either its in-flight promise or its compatible settled normal state; refreshes and
-hidden toggles explicitly force a new epoch/load. A response records either
+Normal-tree loads use a separate tree epoch and immediately record an owner-tagged `loading` state. A non-forced request
+reuses an in-flight promise or compatible settled normal state only when owner, hidden preference, and tree epoch all match
+the current values. Refreshes and hidden toggles explicitly force a new epoch/load. A response records either
 `ready` data or a normalized `error` only when its tree epoch, session ID, and hidden preference are still current. A
 compatible tree response may refresh this normal state while a search view owns the panel, but it must not replace
 search-owned UI. Normal state renders only when explicit view ownership is `normal` and the panel is visible; query text may
@@ -103,9 +104,10 @@ directories, and reloads the normal tree.
 One shared reset helper clears the search input/state, advances both the search and tree epochs, and restores the
 Expand/Collapse control. Both `closeFileBrowserPanel()` and the settings-driven hide branch in
 `settings-ui.js::applyMonitorVisibility()` call it. Advancing the tree epoch means a tree response arriving after either hide
-path cannot update the cache; search responses additionally require the panel to remain visible. Reopening therefore starts
-a fresh normal-tree load and cannot reveal state produced while hidden. This intentionally adds the narrow settings mixin
-edit to the extraction scope.
+path cannot update the cache; the helper also clears the in-flight pointer and makes settled normal state incompatible by
+epoch. Search responses additionally require the panel to remain visible. Reopening therefore starts a fresh current-epoch
+normal-tree load and cannot reveal or reuse state produced before/while hidden. This intentionally adds the narrow settings
+mixin edit to the extraction scope.
 
 The hidden-files toggle preserves an active valid query. It advances and captures the search epoch plus the query/session/new
 hidden preference, then starts a new tree load. Its continuation reruns the captured query only if that tree load won its
@@ -128,8 +130,9 @@ toggling again retries under the newly selected preference.
 
 `selectSession()` in `app.js` calls a narrow File Viewer owner/reset hook immediately after assigning the new
 `activeSessionId`, before terminal replay and the later idle callback. The hook synchronously changes the File Viewer owner,
-clears search input/state, invalidates both epochs, blocks prior-owner row interaction, and, when the panel is visible, starts
-the new owner's normal-tree load fire-and-forget. File loading therefore proceeds even if terminal fetch/replay later fails.
+clears search input/state and the in-flight tree pointer, invalidates both epochs (making prior settled state incompatible),
+blocks prior-owner row interaction, and, when the panel is visible, starts the new owner's current-epoch normal-tree load
+fire-and-forget. File loading therefore proceeds even if terminal fetch/replay later fails.
 The existing idle-callback `loadFileBrowser(B)` call is retained for panel initialization but deduplicates against the same
 in-flight owner/preference request; if the immediate request already settled, it may render/reuse the compatible ready/error
 normal state without issuing a duplicate request. Thus there is no interval in which input can target session B while the
@@ -167,7 +170,8 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - strict malformed-envelope rejection and HTML-metacharacter escaping in names, paths, attributes, and links;
 - owner-tagged restoration and row actions, including overlapping A/B tree loads and clear-before-B-load-completes;
 - the real `selectSession()` owner/reset hook, including input attempted after B becomes active but before B's delayed tree
-  load, terminal-selection failure, and deduplication of the immediate owner load with the later idle-callback load;
+  load, terminal-selection failure, deduplication of the immediate owner load with the later idle-callback load, and A→B→A
+  while A's invalidated request remains unresolved;
 - independent tree/search epochs under query changes, two hidden toggles, search during refresh, and search during a cache
   reload. A newer query or clear suppresses prior search responses but still permits a compatible tree response to update
   normal state; a new tree load suppresses the prior tree response; and hide, session switch, or hidden-preference change
@@ -186,6 +190,8 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - refresh and session changes clearing search state;
 - Expand/Collapse All remaining inert and disabled during search, then recovering afterward;
 - settings-driven hide/reopen reset behavior;
+- hide followed by reopen before the invalidated request resolves, proving a new current-epoch request starts and the stale
+  promise is not reused;
 - explicit normal/search view ownership when hidden-toggle loading/error UI coexists with non-empty captured query text.
 
 Run only the new frontend test and directly related existing File Viewer/search route tests from the managed session. Finish
