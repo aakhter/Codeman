@@ -21,6 +21,7 @@ describe('keyboard shortcuts', () => {
     // literal '- 1' here is what let this test go stale when COD-306 moved the
     // decrement into refAtAltNumber, leaving the real invariant unguarded.
     expect(appSource).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
+    expect(appSource).toContain('refAtAltNumber(projection.altRefs || projection.visibleRefs, number)');
     expect(tabLayoutSource).toContain('refs[number - 1]');
     expect(tabLayoutSource).toMatch(/number < 1 \|\| number > 9/);
   });

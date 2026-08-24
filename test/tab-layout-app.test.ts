@@ -487,6 +487,73 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.openWebview).toHaveBeenCalledWith('w1');
   });
 
+  it('numbers Focus shortcuts first while canonical rows keep visual order and collapse-stable Alt slots', () => {
+    const app = makeApp();
+    app.tabLayout = {
+      ...layout,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: group.refs.map((ref) => (ref.id === 'w1' || ref.id === 's1' ? { ...ref, focus: true } : ref)),
+      })),
+    };
+    app.selectSession = vi.fn();
+    app.openWebview = vi.fn();
+
+    app._fullRenderSessionTabs();
+
+    const focusTabs = [...document.querySelectorAll<HTMLElement>('.tab-focus-shortcut')];
+    expect(focusTabs.map((tab) => tab.dataset.focusWebviewId || tab.dataset.focusSessionId)).toEqual(['w1', 's1']);
+    expect(focusTabs.map((tab) => tab.querySelector('.tab-number')?.textContent ?? null)).toEqual(['1', '2']);
+    const canonicalTabs = [...document.querySelectorAll<HTMLElement>('.session-tab:not(.tab-focus-shortcut)')];
+    expect(canonicalTabs.map((tab) => tab.dataset.webviewId || tab.dataset.id)).toEqual(['s2', 'w1', 's1', 's3']);
+    expect(canonicalTabs.map((tab) => tab.querySelector('.tab-number')?.textContent ?? null)).toEqual([
+      '3',
+      null,
+      null,
+      '4',
+    ]);
+
+    expect(app._activateVisibleTabNumber(1)).toBe(true);
+    expect(app.openWebview).toHaveBeenCalledWith('w1');
+    expect(app._activateVisibleTabNumber(2)).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledWith('s1');
+    expect(app._activateVisibleTabNumber(3)).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    expect(app._activateVisibleTabNumber(4)).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledWith('s3');
+
+    app.focusTabGroupCollapsed = true;
+    app.collapsedTabGroupIds = new Set(['group-x']);
+    app._fullRenderSessionTabs();
+
+    expect(document.querySelectorAll('.tab-focus-shortcut')).toHaveLength(0);
+    const collapsedCanonicalTabs = [...document.querySelectorAll<HTMLElement>('.session-tab:not(.tab-focus-shortcut)')];
+    expect(collapsedCanonicalTabs.map((tab) => tab.dataset.webviewId || tab.dataset.id)).toEqual(['w1', 's3']);
+    expect(collapsedCanonicalTabs.map((tab) => tab.querySelector('.tab-number')?.textContent ?? null)).toEqual([
+      null,
+      '4',
+    ]);
+
+    app.selectSession.mockClear();
+    expect(app._activateVisibleTabNumber(2)).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledWith('s1');
+    expect(app._activateVisibleTabNumber(3)).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    expect(app.focusTabGroupCollapsed).toBe(true);
+    expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
+
+    document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
+    app._fullRenderSessionTabs();
+    const horizontalTabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(horizontalTabs.map((tab) => tab.dataset.webviewId || tab.dataset.id)).toEqual(['s2', 'w1', 's1', 's3']);
+    expect(horizontalTabs.map((tab) => tab.querySelector('.tab-number')?.textContent ?? null)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+    ]);
+  });
+
   it('collapses from the header, persists locally, and redraws geometry', () => {
     const app = makeApp();
     app.updateConnectionLines = vi.fn();
@@ -522,10 +589,10 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
     const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
     expect(tabs.map((tab) => tab.dataset.id)).toEqual(['s1', 's3']);
-    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['3', '4']);
   });
 
-  it('selects a hidden previous session without expanding and renumbers visible badges', () => {
+  it('selects a hidden previous session without expanding and preserves skipped badge numbers', () => {
     const app = makeApp();
     app.activeWebviewId = null;
     app.activeSessionId = 's1';
@@ -547,7 +614,7 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.collapsedTabGroupIds).toEqual(new Set(['group-x']));
     const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
     expect(tabs.map((tab) => tab.dataset.id)).toEqual(['s2', 's3']);
-    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '2']);
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent)).toEqual(['1', '4']);
   });
 
   it('expands every group when persisting collapse fails', () => {

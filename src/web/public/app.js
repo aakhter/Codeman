@@ -6096,6 +6096,7 @@ class CodemanApp {
       activeWebviewId: this.activeWebviewId,
       focusRefs: projection.focusRefs,
       focusCollapsed: projection.focusCollapsed,
+      altRefs: projection.altRefs,
       visibleRefs: projection.visibleRefs,
       placementStates,
     });
@@ -6103,7 +6104,7 @@ class CodemanApp {
 
   _activateVisibleTabNumber(number) {
     const projection = this._refreshTabProjection();
-    const ref = window.CodemanTabLayout.refAtAltNumber(projection.visibleRefs, number);
+    const ref = window.CodemanTabLayout.refAtAltNumber(projection.altRefs || projection.visibleRefs, number);
     if (ref?.kind === 'session') this.selectSession(ref.id);
     else if (ref?.kind === 'webview') this.openWebview(ref.id);
     else return false;
@@ -6926,11 +6927,14 @@ class CodemanApp {
 
         // Inject tab-number badge if missing (added after initial render)
         if (!tab.querySelector('.tab-number')) {
-          const idx = projection.visibleRefs.findIndex((ref) => ref.kind === 'session' && ref.id === id);
-          if (idx >= 0 && idx < 9) {
+          const number = window.CodemanTabLayout.altNumberForRef(
+            projection.altRefs || projection.visibleRefs,
+            { kind: 'session', id }
+          );
+          if (number !== null) {
             const numSpan = document.createElement('span');
             numSpan.className = 'tab-number';
-            numSpan.textContent = String(idx + 1);
+            numSpan.textContent = String(number);
             tab.insertBefore(numSpan, tab.firstChild);
           }
         }
@@ -7199,7 +7203,25 @@ class CodemanApp {
     });
   }
 
-  _renderFocusShortcut(ref, sourceHtml) {
+  _renderTabShortcutNumber(sourceHtml, number) {
+    if (!sourceHtml) return '';
+    const template = document.createElement('template');
+    template.innerHTML = sourceHtml.trim();
+    const tab = template.content.firstElementChild;
+    if (!tab) return '';
+    tab.querySelectorAll('.tab-number').forEach((element) => element.remove());
+    if (Number.isInteger(number) && number >= 1 && number <= 9) {
+      const badge = document.createElement('span');
+      badge.className = 'tab-number';
+      badge.textContent = String(number);
+      const anchor = tab.querySelector('[data-tab-ref-drag]') || tab.firstElementChild;
+      if (anchor) anchor.insertAdjacentElement('afterend', badge);
+      else tab.appendChild(badge);
+    }
+    return tab.outerHTML;
+  }
+
+  _renderFocusShortcut(ref, sourceHtml, number) {
     if (!sourceHtml) return '';
     const template = document.createElement('template');
     template.innerHTML = sourceHtml.trim();
@@ -7238,7 +7260,7 @@ class CodemanApp {
     );
     actions.appendChild(more);
     tab.appendChild(actions);
-    return tab.outerHTML;
+    return this._renderTabShortcutNumber(tab.outerHTML, number);
   }
 
   _fullRenderSessionTabs() {
@@ -7287,6 +7309,10 @@ class CodemanApp {
     const parts = [];
     const renderedRefs = [];
     const orientation = this._tabOrientation();
+    const altRefs = projection.altRefs || projection.visibleRefs;
+    const focusedIdentities = new Set(
+      (projection.focusRefs || []).map((ref) => `${ref.kind}:${ref.id}`)
+    );
     const visibleKeys = new Set(projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`));
     const tabOrder = [
       ...projection.visibleRefs,
@@ -7407,9 +7433,20 @@ class CodemanApp {
     container.innerHTML = window.CodemanTabLayout.renderProjection(
       projection,
       orientation,
-      (ref) => renderedByRef.get(`${ref.kind}:${ref.id}`) || '',
+      (ref) => {
+        const identity = `${ref.kind}:${ref.id}`;
+        const number = focusedIdentities.has(identity)
+          ? null
+          : window.CodemanTabLayout.altNumberForRef(altRefs, ref);
+        return this._renderTabShortcutNumber(renderedByRef.get(identity) || '', number);
+      },
       escapeHtml,
-      (ref) => this._renderFocusShortcut(ref, renderedByRef.get(`${ref.kind}:${ref.id}`) || '')
+      (ref) =>
+        this._renderFocusShortcut(
+          ref,
+          renderedByRef.get(`${ref.kind}:${ref.id}`) || '',
+          window.CodemanTabLayout.altNumberForRef(altRefs, ref)
+        )
     );
     container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
     container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
