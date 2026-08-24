@@ -36,7 +36,8 @@ The mixin lazily initializes panel-local state so this extraction does not requi
 - a debounce timer;
 - independent monotonically increasing tree-load and search epochs;
 - the File Viewer owner session ID, updated synchronously when session activation changes;
-- a normal-tree cache record containing `{ sessionId, showHidden, data }`;
+- an owner-tagged normal-tree state record containing `{ sessionId, showHidden, phase, data?, error? }`, where `phase` is
+  `loading`, `ready`, or `error`;
 - the current flat match list/search-mode flag if needed by rendering.
 
 Every input change advances the search epoch before doing anything else. A valid non-empty input captures the File Viewer
@@ -46,10 +47,11 @@ owner is still both the File Viewer owner and active session, its captured hidde
 contains that query. Session changes, refreshes, every panel-hide path, hidden toggles, and input clearing also advance the
 search epoch.
 
-Normal-tree loads use a separate tree epoch. A response updates the cache only when its tree epoch, session ID, and hidden
-preference are still current. A compatible tree response may refresh the cache while a search is active, but it must not
-replace the search results. It renders only when the current query is empty and the panel is visible. This separation lets a
-hidden-toggle or refresh populate the required new cache without allowing its tree UI to overwrite a newer search.
+Normal-tree loads use a separate tree epoch and immediately record an owner-tagged `loading` state. A response records either
+`ready` data or a normalized `error` only when its tree epoch, session ID, and hidden preference are still current. A compatible
+tree response may refresh this normal state while a search is active, but it must not replace search-owned UI. Normal state
+renders only when the current query is empty and the panel is visible. This separation lets a hidden-toggle or refresh
+populate the required new cache/error without allowing its tree UI to overwrite a newer search.
 
 The historical `renderFileBrowserTree()` client-filter branch and `hasMatchingChild()` helper are removed or bypassed.
 `fileBrowserFilter` records the current server query only; cached trees always render unfiltered. This prevents a server
@@ -67,10 +69,10 @@ Successful search responses render `data.matches` as a flat list:
 - the status line uses the server's validated `matchCount` (falling back to the rendered list length) and appends
   `(truncated)` when `data.truncated` is true.
 
-Clearing the query never refetches. It cancels the debounce/in-flight search epoch and exits search mode. It renders and
-restores status only from a cache whose session ID and hidden preference match the current panel owner. If no compatible
-cache exists—for example, while session B is loading after switching from session A—the panel keeps B's loading/empty state
-and never renders A's paths under B's actions.
+Clearing the query never refetches. It cancels the debounce/in-flight search epoch and exits search mode. It renders only the
+compatible owner-tagged normal state: ready cache and status, current loading state, or stored tree-load error. If no
+compatible state exists, the panel shows the current owner's loading/empty state and never renders another owner's paths or
+error under current actions.
 
 Queries of 1–256 trimmed characters are valid, matching the upstream matcher. A longer query sends no request, exits search
 results, and displays `Search queries are limited to 256 characters`; clearing or shortening it recovers normally.
@@ -96,9 +98,10 @@ today.
 
 Changing the hidden preference immediately removes prior-preference results from the visible panel and shows the new tree
 load state. If that load fails, the new preference remains selected and persisted, the captured query is not rerun, and the
-panel shows the escaped tree-load failure with no compatible restoration cache. The input may remain for correction or a
-new search; clearing it retains the load failure rather than restoring prior-preference data. Refresh clears the query and
-retries the normal tree, while toggling again retries under the newly selected preference.
+owner-tagged normal state records the tree-load failure with no compatible restoration cache. The failure renders escaped
+only when no active query owns the UI. Therefore a new query typed during the reload may complete and remain visible even if
+the tree load later fails; clearing that query then reveals the stored failure rather than prior-preference data. Refresh
+clears the query and retries the normal tree, while toggling again retries under the newly selected preference.
 
 `selectSession()` in `app.js` calls a narrow File Viewer owner/reset hook immediately after assigning the new
 `activeSessionId`, before terminal replay and the later idle-callback tree load. The hook synchronously changes the File
@@ -140,13 +143,15 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - the real `selectSession()` owner/reset hook, including input attempted after B becomes active but before B's delayed tree
   load;
 - independent tree/search epochs under query changes, two hidden toggles, search during refresh, and search during a cache
-  reload;
-- late search and tree response suppression after a newer query, clear, refresh, either close path, or session switch;
+  reload. A newer query or clear suppresses prior search responses but still permits a compatible tree response to update
+  normal state; a new tree load suppresses the prior tree response; and hide, session switch, or hidden-preference change
+  suppresses both response classes as applicable;
 - search failure followed by clear-to-recover;
 - directory-result navigation back to the cached tree with separator-independent ancestor expansion, including a
   Windows-style path fixture;
 - hidden-toggle reload followed by rerunning the active query;
-- hidden-toggle tree-load failure, clear-without-stale-restoration, refresh recovery, and toggle-back recovery;
+- hidden-toggle tree-load failure, clear-without-stale-restoration, refresh recovery, and toggle-back recovery, including a
+  new query that wins the UI before the concurrent tree load fails and reveals the stored error only when cleared;
 - refresh and session changes clearing search state;
 - Expand/Collapse All remaining inert and disabled during search, then recovering afterward;
 - settings-driven hide/reopen reset behavior.
