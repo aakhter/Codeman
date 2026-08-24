@@ -16,6 +16,16 @@
     ref && (ref.kind === 'session' || ref.kind === 'webview') && typeof ref.id === 'string' && ref.id.length > 0;
   const asIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []);
   const stableIds = (value) => [...new Set(asIds(value))];
+  const uniqueRefs = (refsInput) => {
+    const seen = new Set();
+    const refs = [];
+    for (const ref of Array.isArray(refsInput) ? refsInput : []) {
+      if (!validRef(ref) || seen.has(refKey(ref))) continue;
+      seen.add(refKey(ref));
+      refs.push({ kind: ref.kind, id: ref.id });
+    }
+    return refs;
+  };
   const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
   const FOCUS_COLLAPSED_STORAGE_KEY = 'codeman:focus-group-collapsed';
 
@@ -401,11 +411,13 @@
         collapsed: false,
       });
     }
+    const altRefs = uniqueRefs(orientation === 'vertical' ? [...focusRefs, ...completeRefs] : visibleRefs);
 
     return {
       sessionOrder: ownerSessions,
       completeRefs,
       visibleRefs,
+      altRefs,
       focusRefs,
       focusCollapsed: orientation === 'vertical' && options.focusCollapsed === true,
       sections,
@@ -434,9 +446,11 @@
     const focusRefs = (Array.isArray(projection?.focusRefs) ? projection.focusRefs : [])
       .filter(keep)
       .map((ref) => ({ kind: ref.kind, id: ref.id }));
+    const altRefs = uniqueRefs([...focusRefs, ...visibleRefs]);
     return {
       ...projection,
       visibleRefs,
+      altRefs,
       focusRefs,
       focusCollapsed: false,
       sections,
@@ -458,6 +472,7 @@
       sessionOrder,
       completeRefs: visibleRefs.map((ref) => ({ ...ref })),
       visibleRefs,
+      altRefs: visibleRefs.map((ref) => ({ ...ref })),
       sections: [],
     };
   }
@@ -476,6 +491,7 @@
       activeWebviewId: input.activeWebviewId || null,
       focusCollapsed: input.focusCollapsed === true,
       focusRefs: (Array.isArray(input.focusRefs) ? input.focusRefs : []).filter(validRef).map(refKey),
+      altRefs: (Array.isArray(input.altRefs) ? input.altRefs : []).filter(validRef).map(refKey),
       placementStates: Array.isArray(input.placementStates) ? input.placementStates : [],
       refs: (Array.isArray(input.visibleRefs) ? input.visibleRefs : []).filter(validRef).map(refKey),
     });
@@ -485,6 +501,15 @@
     if (!Number.isInteger(number) || number < 1 || number > 9) return null;
     const ref = Array.isArray(refs) ? refs[number - 1] : null;
     return validRef(ref) ? { kind: ref.kind, id: ref.id } : null;
+  }
+
+  function altNumberForRef(refs, target) {
+    if (!validRef(target)) return null;
+    const targetKey = refKey(target);
+    const index = (Array.isArray(refs) ? refs.slice(0, 9) : []).findIndex(
+      (ref) => validRef(ref) && refKey(ref) === targetKey
+    );
+    return index < 0 ? null : index + 1;
   }
 
   function adjacentSession(orderInput, activeId, delta) {
@@ -805,6 +830,7 @@
     collapsedHash,
     structureKey,
     refAtAltNumber,
+    altNumberForRef,
     adjacentSession,
     renderProjection,
     applyOperation,

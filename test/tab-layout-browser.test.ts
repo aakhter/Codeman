@@ -134,6 +134,14 @@ describe('COD-306 browser projection', () => {
       { kind: 'webview', id: 'w1' },
       { kind: 'session', id: 's4' },
     ]);
+    expect(result.altRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's4' },
+      { kind: 'session', id: 's1' },
+      { kind: 'session', id: 's3' },
+      { kind: 'webview', id: 'w2' },
+    ]);
     expect(result.focusCollapsed).toBe(true);
     expect(result.visibleRefs).toEqual([
       { kind: 'session', id: 's1' },
@@ -150,7 +158,9 @@ describe('COD-306 browser projection', () => {
       { kind: 'session', id: 's4' },
     ]);
 
-    expect(h.project(focused, { ...options, orientation: 'horizontal' }).focusRefs).toEqual([]);
+    const horizontal = h.project(focused, { ...options, orientation: 'horizontal' });
+    expect(horizontal.focusRefs).toEqual([]);
+    expect(horizontal.altRefs).toEqual(horizontal.visibleRefs);
   });
 
   it('filters an expanded projection to matching sessions while preserving grouped order and canonical metadata', () => {
@@ -175,6 +185,10 @@ describe('COD-306 browser projection', () => {
       { id: null, count: 1, collapsed: false },
     ]);
     expect(filtered.focusRefs).toEqual([{ kind: 'session', id: 's2' }]);
+    expect(filtered.altRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'session', id: 's4' },
+    ]);
     expect(filtered.matchCount).toBe(2);
     expect(filtered.searchActive).toBe(true);
     expect(filtered.sessionOrder).toEqual(projection.sessionOrder);
@@ -196,6 +210,7 @@ describe('COD-306 browser projection', () => {
     const filtered = h.filterSessionProjection(projection, ['s2']);
     expect(filtered.visibleRefs).toEqual([{ kind: 'session', id: 's2' }]);
     expect(filtered.focusRefs).toEqual([{ kind: 'session', id: 's2' }]);
+    expect(filtered.altRefs).toEqual([{ kind: 'session', id: 's2' }]);
     expect(filtered.sections).toHaveLength(1);
     expect(filtered.sections[0].refs).toEqual([{ kind: 'session', id: 's2' }]);
     expect(filtered.sections[0].refIndices).toEqual([0]);
@@ -206,6 +221,7 @@ describe('COD-306 browser projection', () => {
     expect(empty.sections).toEqual([]);
     expect(empty.focusRefs).toEqual([]);
     expect(empty.visibleRefs).toEqual([]);
+    expect(empty.altRefs).toEqual([]);
     expect(empty.matchCount).toBe(0);
   });
 
@@ -275,6 +291,13 @@ describe('COD-306 browser projection', () => {
         { kind: 'webview', id: 'w1' },
       ],
       completeRefs: [
+        { kind: 'session', id: 's2' },
+        { kind: 'session', id: 's1' },
+        { kind: 'session', id: 's3' },
+        { kind: 'webview', id: 'w2' },
+        { kind: 'webview', id: 'w1' },
+      ],
+      altRefs: [
         { kind: 'session', id: 's2' },
         { kind: 'session', id: 's1' },
         { kind: 'session', id: 's3' },
@@ -408,6 +431,10 @@ describe('COD-306 structure and activation policy', () => {
         { kind: 'session', id: 's1' },
         { kind: 'webview', id: 'w1' },
       ],
+      altRefs: [
+        { kind: 'session', id: 's1' },
+        { kind: 'webview', id: 'w1' },
+      ],
     };
     const key = h.structureKey(base);
     for (const changed of [
@@ -418,20 +445,19 @@ describe('COD-306 structure and activation policy', () => {
       { activeSessionId: 's2' },
       { activeWebviewId: 'w1' },
       { visibleRefs: [...base.visibleRefs].reverse() },
+      { altRefs: [...base.altRefs].reverse() },
     ])
       expect(h.structureKey({ ...base, ...changed })).not.toBe(key);
   });
 
-  it('maps Alt numbers directly to the visible interleaved list', () => {
+  it('maps Alt numbers directly to the first nine refs', () => {
     const h = loadHelper();
-    const visibleRefs = [
-      { kind: 'session', id: 's2' },
-      { kind: 'webview', id: 'w1' },
-      { kind: 'session', id: 's1' },
-    ];
-    expect(h.refAtAltNumber(visibleRefs, 1)).toEqual({ kind: 'session', id: 's2' });
-    expect(h.refAtAltNumber(visibleRefs, 2)).toEqual({ kind: 'webview', id: 'w1' });
-    expect(h.refAtAltNumber(visibleRefs, 9)).toBeNull();
+    const refs = Array.from({ length: 10 }, (_, index) => ({ kind: 'session', id: `s${index + 1}` }));
+    expect(h.altNumberForRef(refs, refs[0])).toBe(1);
+    expect(h.altNumberForRef(refs, refs[8])).toBe(9);
+    expect(h.altNumberForRef(refs, refs[9])).toBeNull();
+    expect(h.refAtAltNumber(refs, 9)).toEqual({ kind: 'session', id: 's9' });
+    expect(h.refAtAltNumber(refs, 10)).toBeNull();
   });
 
   it('traverses the complete session projection independently of visible DOM', () => {
