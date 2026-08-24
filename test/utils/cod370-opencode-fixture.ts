@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -12,14 +12,26 @@ import {
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
 const PREFIX = 'cod370-opencode-';
 const POLL_MS = 20;
 const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
+const execFileAsync = promisify(execFile);
 
 export interface Cod370OpenCodeFixtureOptions {
   runtimeRoot?: string;
+  mobileTrace?: {
+    secret: string;
+    capacity?: number;
+  };
+}
+
+export interface MobileTraceSnapshot {
+  enabled: boolean;
+  overflowed: boolean;
+  events: Array<Record<string, unknown>>;
 }
 
 export interface PaneIdentity {
@@ -262,6 +274,7 @@ function liveOpenCodeIdentity(panePid: number): LiveProcessIdentity {
 
 export class Cod370OpenCodeFixture {
   readonly runtimeRoot: string;
+  readonly mobileTrace: Cod370OpenCodeFixtureOptions['mobileTrace'];
   root = '';
   dataDir = '';
   homeDir = '';
@@ -305,6 +318,7 @@ export class Cod370OpenCodeFixture {
 
   constructor(options: Cod370OpenCodeFixtureOptions = {}) {
     this.runtimeRoot = resolve(options.runtimeRoot ?? HARNESS_ROOT);
+    this.mobileTrace = options.mobileTrace;
   }
 
   private tmux(args: string[], ignoreError = false): string {
@@ -375,6 +389,14 @@ export class Cod370OpenCodeFixture {
         process.env.PATH ?? ''
       }`,
     });
+    if (this.mobileTrace) {
+      Object.assign(env, {
+        NODE_ENV: 'test',
+        CODEMAN_TEST_MOBILE_TRACE: '1',
+        CODEMAN_TEST_MOBILE_TRACE_SECRET: this.mobileTrace.secret,
+        CODEMAN_TEST_MOBILE_TRACE_CAPACITY: String(this.mobileTrace.capacity ?? 4096),
+      });
+    }
 
     const child = spawn(
       process.execPath,
@@ -600,6 +622,24 @@ export class Cod370OpenCodeFixture {
   paneText(): string {
     if (!this.pane) throw new Error('OpenCode pane has not been created');
     return this.tmux(['capture-pane', '-p', '-t', this.pane.paneId, '-S', '-200']);
+  }
+
+  async capturePaneText(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<string> {
+    if (!this.pane) throw new Error('OpenCode pane has not been created');
+    const { stdout } = await execFileAsync(
+      'tmux',
+      ['-L', this.socketName, 'capture-pane', '-p', '-t', this.pane.paneId, '-S', '-200'],
+      { encoding: 'utf8', signal: options.signal, timeout: options.timeoutMs }
+    );
+    return stdout.trim();
+  }
+
+  async mobileTraceSnapshot(secret: string, clear = false): Promise<MobileTraceSnapshot> {
+    const response = await fetch(`${this.baseUrl}/__test/perf/mobile-input${clear ? '?clear=1' : ''}`, {
+      headers: { 'x-codeman-test-trace-secret': secret },
+    });
+    if (!response.ok) throw new Error(`Mobile trace snapshot failed: ${response.status} ${await response.text()}`);
+    return (await response.json()) as MobileTraceSnapshot;
   }
 
   async cleanup(): Promise<void> {

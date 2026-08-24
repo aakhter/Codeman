@@ -294,7 +294,7 @@ git commit -m "test(perf): COD-374 trace server input output boundaries"
 - Create: `test/mobile/cod374-input-latency.test.ts`
 - Modify: `test/utils/cod370-opencode-fixture.ts`
 
-- [ ] **Step 1: Write failing pure trace contracts**
+- [x] **Step 1: Write failing pure trace contracts**
 
 Define and test these pure interfaces:
 
@@ -327,7 +327,7 @@ export function tracingOverheadGate(
 
 Tests require both `deltaMs <= 5` and `deltaPercent <= 10`, reject empty/negative/nonfinite values, reject missing stages, reject cross-clock subtraction without calibration, and require every pane probe including errors to remain in the result.
 
-- [ ] **Step 2: Run the pure test and verify RED**
+- [x] **Step 2: Run the pure test and verify RED**
 
 ```bash
 npm test -- test/cod374-latency-trace.test.ts
@@ -335,11 +335,11 @@ npm test -- test/cod374-latency-trace.test.ts
 
 Expected: FAIL because the helper does not exist.
 
-- [ ] **Step 3: Implement pure validation and the bounded pane observer**
+- [x] **Step 3: Implement pure validation and the bounded pane observer**
 
 Add a fixture method that starts before key dispatch, polls the exact pane ID, and resolves only after the exact cumulative token appears. It records each start/completion/error and returns the interval. It must support `AbortSignal`, a fixed deadline, and cleanup that awaits the active probe before fixture teardown.
 
-- [ ] **Step 4: Write a failing real-browser trace test**
+- [x] **Step 4: Write a failing real-browser trace test**
 
 The test installs hooks before the measured key and requires this browser order for each character:
 
@@ -364,7 +364,7 @@ expect(browserStages).toEqual([
 
 The test also requires a nonempty pane interval, exact final pane/xterm token, exact one logical/durable identity, zero trace overflow, no page/serious console errors, and all mandatory fixture cleanup booleans.
 
-- [ ] **Step 5: Run the real test and verify RED**
+- [x] **Step 5: Run the real test and verify RED**
 
 ```bash
 npm run test:mobile -- test/mobile/cod374-input-latency.test.ts -t "records every latency boundary"
@@ -372,7 +372,7 @@ npm run test:mobile -- test/mobile/cod374-input-latency.test.ts -t "records ever
 
 Expected: FAIL with missing browser/pane/server stages while cleanup still reports all true.
 
-- [ ] **Step 6: Implement browser hooks without product-browser edits**
+- [x] **Step 6: Implement browser hooks without product-browser edits**
 
 Install all browser hooks from the test through `addInitScript` or after stable fixture readiness:
 
@@ -388,7 +388,7 @@ Install all browser hooks from the test through `addInitScript` or after stable 
 
 Every wrapper is restored in `finally`, and listener/disposable counts must be zero after teardown.
 
-- [ ] **Step 7: Verify GREEN twice and run focused regressions**
+- [x] **Step 7: Verify GREEN twice and run focused regressions**
 
 ```bash
 npm test -- test/cod374-latency-trace.test.ts
@@ -403,13 +403,27 @@ git diff --check
 
 Expected: both real runs pass independently with complete cleanup; the existing browser performance suite remains green.
 
-- [ ] **Step 8: Commit Task 3**
+- [x] **Step 8: Commit Task 3**
 
 ```bash
 git add test/utils/cod374-latency-trace.ts test/utils/cod370-opencode-fixture.ts \
   test/cod374-latency-trace.test.ts test/mobile/cod374-input-latency.test.ts
 git commit -m "test(perf): COD-374 trace browser pane xterm latency"
 ```
+
+Task 3 evidence (2026-08-24): pure REDs covered global monotonic ordering, lossless post-ACK connection joins, the full
+PTY/session/WebSocket/flush output chain, monotonic server ordinals, mixed/coalesced identities, paint fencing, bounded
+pane capture, and aggregate cleanup. Browser REDs exposed send retry deduplication, partial visibility before incomplete
+classification, mutable context loss under overlap, Playwright's serialized typing, and Codeman's real `q` + coalesced
+`z1` input frames. A final review RED also proved that separate per-token pane loops could overlap and that accepted
+typing windows did not reject known long-task diagnostics. Final pure contracts passed 21/21. The real test pre-arms all cumulative contexts and one shared pane-snapshot scheduler,
+enqueues all CDP key events without per-character waits, requires every keydown before the first output, and preserves
+every input/output/write event while explicitly marking generations that never reached exact-token paint. Two clean
+standalone rapid runs passed (12.85s and 13.36s) with exact client/sequence/coalescing evidence, lossless connection/hash/
+byte/ordinal joins, the complete server output chain, and complete cleanup. The existing terminal input browser suite
+passed 17/17. Typecheck, focused Prettier, and diff checks passed. One pane capture per tick evaluates every pending token
+from the same snapshot, remains integer-deadline/abort-safe, and preserves per-token intervals and errored probes. Known
+long-task diagnostics remain separately classified for failure evidence, but an accepted typing window requires none.
 
 ### Task 4: Calibration, Complete Diagnostic Matrix, and Attribution Report
 
