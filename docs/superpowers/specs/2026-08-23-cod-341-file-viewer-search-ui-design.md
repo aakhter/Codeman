@@ -72,11 +72,14 @@ Successful search responses render `data.matches` as a flat list:
   results and shows `Reload files before opening this folder`. With compatible `loading` state, it records a deferred
   owner/preference/tree-epoch target plus the originating search epoch/query while retaining search results. It transfers to
   the expanded normal tree only if that exact tree load becomes `ready`, contains the target, and the originating search
-  epoch/query/view still owns the panel. Any later input clears the target, so newer search UI always wins. Absence or failure
-  clears the deferred target, keeps the search results visible, and shows the reload prompt; a stored load failure is revealed
-  later if the query is cleared. With compatible `error` state, the click likewise keeps search results visible and shows the
-  reload prompt rather than discarding the only usable view. Ancestors are found by recursively walking the cached tree, not
-  by splitting path strings, so `/` and Windows `\` paths behave identically;
+  epoch/query/view still owns the panel. A successful transfer explicitly advances the search epoch, cancels any debounce,
+  clears the input/filter/matches/deferred target, changes view ownership to `normal`, restores Expand/Collapse, then expands
+  and renders the target; it never relies on assigning the input value to dispatch an `input` event. Any later user input
+  clears the target, so newer search UI always wins. Absence or failure clears the deferred target, keeps the search results
+  visible, and shows the reload prompt; a stored load failure is revealed later if the query is cleared. With compatible
+  `error` state, the click likewise keeps search results visible and shows the reload prompt rather than discarding the only
+  usable view. Ancestors are found by recursively walking the cached tree, not by splitting path strings, so `/` and Windows
+  `\` paths behave identically;
 - an empty list renders `No matches`;
 - the status line uses the server's validated `matchCount` (falling back to the rendered list length) and appends
   `(truncated)` when `data.truncated` is true.
@@ -107,6 +110,10 @@ tree epoch, the captured search epoch is still current, the session and hidden p
 unchanged, and the panel remains visible. Any input event while the tree request is pending invalidates that continuation and
 may run its own search independently; the compatible tree response may update only normal state. A second toggle invalidates
 both the first toggle's tree response and its continuation. With an empty query the control behaves as it does today.
+
+With an overlength query, toggling hidden files advances both request epochs and reloads owner-tagged normal state for the new
+preference, but keeps `query-error` view ownership and never sends/reruns the invalid query. The length error remains visible
+while the normal load settles behind it. Clearing transfers to `normal` and reveals that load's ready tree or stored error.
 
 Changing the hidden preference immediately removes prior-preference results from the visible panel and shows the new tree
 load state under `normal` view ownership even though the captured input remains non-empty. If that load fails, the new
@@ -162,9 +169,12 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - search failure followed by clear-to-recover;
 - directory-result navigation back to the cached tree with separator-independent ancestor expansion, including a
   Windows-style path fixture, immediate ready-state navigation, deferred loading-state navigation while results remain
-  visible, newer query input cancelling deferred navigation, load failure clearing a deferred target, error-state click
+  visible, newer query input cancelling deferred navigation, successful deferred navigation explicitly resetting every
+  search field/control without a synthetic input event, load failure clearing a deferred target, error-state click
   retention/toast behavior, and a stale ready cache that does not contain the fresh search-result directory;
 - hidden-toggle reload followed by rerunning the active query;
+- hidden toggle during a 257-character `query-error`, with no search request and clear revealing the background tree
+  ready/error state;
 - hidden-toggle tree-load failure, clear-without-stale-restoration, refresh recovery, and toggle-back recovery, including a
   new query that wins the UI before the concurrent tree load fails and reveals the stored error only when cleared;
 - refresh and session changes clearing search state;
