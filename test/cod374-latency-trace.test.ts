@@ -482,6 +482,7 @@ describe('COD-374 latency trace helpers', () => {
         ordinal: index + 10,
         bytes: 1,
         valueHash: 'bbbbbbbbbbbbbbbb',
+        ...(stage === 'post-send' ? { delivered: true } : {}),
       })
     );
     expect(validateServerOutputChain([...upstream, ...connection], 'cccccccccccccccc')).toEqual({
@@ -498,6 +499,12 @@ describe('COD-374 latency trace helpers', () => {
         'cccccccccccccccc'
       )
     ).toThrow(/ordinal order/i);
+    expect(() =>
+      validateServerOutputChain(
+        [...upstream, ...connection.slice(0, -1), { ...connection.at(-1), delivered: undefined }],
+        'cccccccccccccccc'
+      )
+    ).toThrow(/delivered/i);
   });
 
   it('fences paint callbacks to the exact generation, selection, ordinal, and write', () => {

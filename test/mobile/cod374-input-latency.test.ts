@@ -21,8 +21,131 @@ import {
   validateServerOutputChain,
 } from '../utils/cod374-latency-trace.js';
 import { Cod370OpenCodeFixture, hasMandatoryCleanupProof } from '../utils/cod370-opencode-fixture.js';
+import { adaptTask3Artifact } from '../../scripts/perf/cod-374-runner.mjs';
+import {
+  CANDIDATE_PRODUCT,
+  HARNESS_FILES,
+  OVERLAY_FILES,
+  validateAttempt,
+} from '../../scripts/perf/cod-374-summarize.mjs';
 
 const POLL_MS = 20;
+
+function realTracePartialAttempt(sample: ReturnType<typeof adaptTask3Artifact>, browserClockId: string) {
+  const hash16 = '1'.repeat(16);
+  const hash40 = '2'.repeat(40);
+  const hash64 = '3'.repeat(64);
+  const cleanup = {
+    browserClosed: true,
+    serverStopped: true,
+    tmuxRemoved: true,
+    tempRootRemoved: true,
+    hooksRestored: true,
+    listenersDisposed: true,
+  };
+  return {
+    schemaVersion: 2,
+    phase: 'calibration',
+    experimentId: hash16,
+    config: {
+      label: 'trace-on',
+      repetition: 1,
+      traceEnabled: true,
+      rates: [1, 4],
+      samplesPerCell: 10,
+      viewport: { width: 390, height: 844 },
+      fontPx: 9,
+      payloadHash: '93557903501f1ae7',
+      payloadLength: 3,
+    },
+    provenance: {
+      product: CANDIDATE_PRODUCT,
+      harness: {
+        commit: hash40,
+        tree: hash40,
+        dirty: false,
+        files: HARNESS_FILES.map((file) => ({ file, blob: hash40, sha256: hash64 })),
+      },
+      overlay: {
+        semanticSha256: hash64,
+        patchSha256: hash64,
+        files: OVERLAY_FILES.map((file) => ({ file, mode: '100644', sha256: hash64 })),
+        manifestSha256: hash64,
+        servedAssets: ['/', '/app.js', '/styles.css'].map((path) => ({ path, sha256: hash64 })),
+      },
+      dependencies: {
+        packageLockSha256: hash64,
+        vendorManifestSha256: hash64,
+        dependencyRootHash: hash64,
+        dependencyContentHash: hash64,
+        dependencyDevice: '1',
+        dependencyInode: '1',
+      },
+      runtimeVendorHash: hash64,
+      host: {
+        hostnameHash: hash16,
+        cpuModelHash: hash16,
+        cpuCount: 1,
+        platform: 'linux',
+        releaseHash: hash16,
+        nodeVersionHash: hash16,
+        opencodeVersionHash: hash16,
+      },
+      process: {
+        runId: hash16,
+        tmuxSessionHash: null,
+        tempRootHash: null,
+        server: null,
+        browser: null,
+        opencode: null,
+      },
+    },
+    timing: {
+      startedAt: '2026-08-24T00:00:00.000Z',
+      endedAt: '2026-08-24T00:01:00.000Z',
+      loadAverageBefore: [0, 0, 0],
+      loadAverageAfter: [0, 0, 0],
+    },
+    clock: { mode: 'component-local', browserClockId, serverClockId: hash16, harnessClockId: hash16 },
+    selection: {
+      attempt: 1,
+      lifecycle: 'partial',
+      accepted: false,
+      failureReasons: [{ code: 'contract-probe', detailHash: hash16 }],
+    },
+    cells: [
+      {
+        rate: 1,
+        realizedCpuThrottle: 1,
+        cpuCalibration: {
+          baselineSamplesMs: [1, 1, 1, 1, 1],
+          throttledSamplesMs: [1, 1, 1, 1, 1],
+          baselineMedianMs: 1,
+          throttledMedianMs: 1,
+          ratio: 1,
+        },
+        samples: [sample],
+      },
+    ],
+    diagnostics: {
+      traceOverflowed: false,
+      observerErrorHashes: [],
+      pageErrorHashes: [],
+      consoleErrorHashes: [],
+      processReplaced: false,
+      resizeEvents: [],
+      longTasks: [],
+      errorHashes: [],
+      serverStdoutHashes: [],
+      serverStderrHashes: [],
+      startupStageHashes: [],
+      startupNameHashes: [],
+      startupMessageHashes: [],
+    },
+    allocation: cleanup,
+    cleanup,
+  };
+}
 
 async function waitUntil(label: string, probe: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -546,6 +669,8 @@ describe('COD-374 real mobile OpenCode latency trace', () => {
           ),
         },
       };
+      const adapted = adaptTask3Artifact(phaseBArtifact, 0);
+      expect(() => validateAttempt(realTracePartialAttempt(adapted, browserEvents[0].clockId))).not.toThrow();
     } catch (error) {
       failures.push(error instanceof Error ? error : new Error(String(error)));
     } finally {

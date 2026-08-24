@@ -293,6 +293,26 @@ and frozen plan used 9px. The corrected probe accepts only the finite positive n
 no longer fall through to the producer-crash sentinel. No retry is permitted; a corrected calibration requires a
 wholly new experiment after commit and review.
 
+The tenth Phase B experiment (`ec09d0f327f75693`) is permanently invalid and must never be retried. Attempt 1 trace-off
+was accepted with 20 samples at hash `38e0b8a3c09affab7a9d39093dcbff6200892bf5be873545b91f2c57f410a981`.
+Attempt 2 trace-on was rejected at hash `b0e719bc83dbc4b3a8ad07424ba7bc109482c1750b4076fc3730c659b28b0701`;
+the final ledger, INVALID report, and finalized hashes are
+`380db1ee3a9b7f4078f145b823170fa23f98f84add63031954295287a66a7d40`,
+`e691ecc952690c5b4e3ea7f7abc80a0aa31cfb1ad35475c34ea75b35bfe0e843`, and
+`40c9720525bdc9154f7c9ee6f910a36787202c8213c1da8d3151c0922aad9b27`. Attempt 3 and diagnostic ABBA did not run.
+The exact proof failure was `COD-374 evidence invalid: selected server output was not delivered`, with message hash
+`d6ebef36d1895073` and Error-prefixed hash `ca0b385822aac2f6`. The route recorded `server.output.post-send` only after
+`socket.send` returned successfully but omitted the corresponding `delivered: true` fact, while synthetic evidence had
+supplied it. The corrected route records delivery only on that successful-return path; a throwing send retains pre-send
+evidence and cannot claim post-send delivery. The corrected candidate/baseline overlay patch hashes are respectively
+`2ac79883807576298fc13460f34ce5c418e0b4fb995470470df9e34497863a3b` and
+`ec6b3e713f59c1e9869e1ec9af90b0642a3a2ea09d0b90e5cb27d2842231bd97`; the corrected five-file manifest hash is
+`d730f0c05ba56d852e451df9b041b5212240ee257706527d0dbea6a96c9672fa`. Independently, attempt 2 retained a 56ms
+browser long task and `runtime-contaminated` detail hash `9337373a4dd1a723`. That contamination remains terminal and
+its relationship to tracing overhead is indeterminate: fixing the instrumentation contract cannot rehabilitate or
+reinterpret this experiment. All cleanup fields were true, but no retry is permitted; any future calibration requires
+a wholly new experiment after commit and review.
+
 ## Fail-closed report command
 
 ```bash

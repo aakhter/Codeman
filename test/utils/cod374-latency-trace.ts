@@ -725,6 +725,9 @@ export function validateServerOutputChain(
     'connection chunk'
   );
   const flushCount = validateServerStageGroups(flushes, SERVER_FLUSH_STAGES, 'flush');
+  if (flushes.some((event) => event.stage === 'server.output.post-send' && event.delivered !== true)) {
+    throw new Error('Server output post-send was not delivered');
+  }
   const emitted = upstream.filter((event) => event.stage === 'server.output.terminal-emitted');
   const received = connectionChunks.filter((event) => event.stage === 'server.output.ws-received');
   if (

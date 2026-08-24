@@ -251,8 +251,31 @@ describe('ws-routes', () => {
           Buffer.byteLength('sensitive terminal output'),
         ]);
         expect(events.every((event) => event.valueHash?.match(/^[0-9a-f]{16}$/))).toBe(true);
+        expect(events.at(-1)).toMatchObject({ stage: 'server.output.post-send', delivered: true });
+        expect(events.slice(0, -1).every((event) => event.delivered === undefined)).toBe(true);
         expect(JSON.stringify(trace.snapshot())).not.toContain('sensitive terminal output');
       } finally {
+        ws.close();
+      }
+    });
+
+    it('COD-374 never records failed WebSocket output as delivered', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const serverSocket = [
+        ...(app as FastifyInstance & { websocketServer: { clients: Set<WebSocket> } }).websocketServer.clients,
+      ][0];
+      const send = vi.spyOn(serverSocket, 'send').mockImplementationOnce(() => {
+        throw new Error('injected output send failure');
+      });
+      try {
+        expect(() => ctx._session.emit('terminal', 'x'.repeat(16_385))).toThrow(/injected output send failure/);
+        const outputEvents = trace.snapshot().events.filter((event) => event.stage.startsWith('server.output.'));
+        expect(outputEvents.at(-1)).toMatchObject({ stage: 'server.output.pre-send' });
+        expect(outputEvents).not.toContainEqual(
+          expect.objectContaining({ stage: 'server.output.post-send', delivered: true })
+        );
+      } finally {
+        send.mockRestore();
         ws.close();
       }
     });

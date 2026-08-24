@@ -632,6 +632,25 @@ against the active terminal option and frozen 9px plan. The corrected probe read
 hashes are retained, and transaction recovery cannot replace it with a producer-crash sentinel. This experiment remains
 immutable and cannot be retried; a corrected calibration requires a new experiment after commit and review.
 
+The tenth fresh experiment `ec09d0f327f75693` is also immutable INVALID and will never be retried. Attempt 1 trace-off
+was accepted with 20 samples at hash `38e0b8a3c09affab7a9d39093dcbff6200892bf5be873545b91f2c57f410a981`.
+Attempt 2 trace-on was rejected at hash `b0e719bc83dbc4b3a8ad07424ba7bc109482c1750b4076fc3730c659b28b0701`;
+ledger, INVALID report, and finalized hashes are
+`380db1ee3a9b7f4078f145b823170fa23f98f84add63031954295287a66a7d40`,
+`e691ecc952690c5b4e3ea7f7abc80a0aa31cfb1ad35475c34ea75b35bfe0e843`, and
+`40c9720525bdc9154f7c9ee6f910a36787202c8213c1da8d3151c0922aad9b27`. Attempt 3 and diagnostic ABBA never ran. The
+exact proof error was `COD-374 evidence invalid: selected server output was not delivered`; its message and
+Error-prefixed hashes are `d6ebef36d1895073` and `ca0b385822aac2f6`. The successful WebSocket output path recorded
+post-send only after `socket.send` returned but failed to attach `delivered: true`; synthetic fixtures had masked the
+contract defect. The correction attaches delivery only after successful return, while a throwing send records no false
+post-send delivery. Corrected candidate/baseline patch hashes are
+`2ac79883807576298fc13460f34ce5c418e0b4fb995470470df9e34497863a3b` and
+`ec6b3e713f59c1e9869e1ec9af90b0642a3a2ea09d0b90e5cb27d2842231bd97`; corrected overlay manifest hash is
+`d730f0c05ba56d852e451df9b041b5212240ee257706527d0dbea6a96c9672fa`. Attempt 2 independently retained a 56ms
+browser long task with `runtime-contaminated` detail `9337373a4dd1a723`. That contamination is terminal and its impact
+on tracing overhead remains indeterminate; the contract fix does not make the immutable experiment reusable or valid.
+All cleanup was verified, but any future calibration requires a wholly new experiment after commit and review.
+
 Use disposable detached worktrees and the exact candidate runtime. Run complete fixed-size cohorts with tracing disabled and enabled. Do not continue to attribution if the overhead gate fails. Preserve every raw repetition and cleanup proof.
 
 For each fixed attempt plan, create the experiment root once with `mktemp -d /tmp/cod374-XXXXXXXX`, then invoke the

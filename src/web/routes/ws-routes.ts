@@ -208,7 +208,8 @@ export function registerWsRoutes(
         batchSize = 0;
         if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.pre-send', ...outputTrace });
         socket.send(`{"t":"o","d":${JSON.stringify(DEC_2026_START + data + DEC_2026_END)}}`);
-        if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.post-send', ...outputTrace });
+        if (recordTrace && outputTrace)
+          recordTrace({ stage: 'server.output.post-send', ...outputTrace, delivered: true });
       };
 
       const sizingToken = Symbol('ws-terminal-viewer');
