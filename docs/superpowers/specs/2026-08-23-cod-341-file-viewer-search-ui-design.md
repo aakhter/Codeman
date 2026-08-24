@@ -64,13 +64,16 @@ Successful search responses render `data.matches` as a flat list:
 
 - file rows retain the existing icon and size behavior; preview and download actions bind to the captured result/cache
   session ID rather than consulting a later `activeSessionId`;
-- directory rows retain directory styling. With compatible `ready` normal state, clicking one clears the search, transfers
-  view ownership to `normal`, restores the tree, and expands the directory plus its ancestors. With compatible `loading`
-  state, it records a deferred owner/preference/epoch-bound target, clears to the normal loading view, and applies expansion
-  only if that exact tree load becomes `ready`; a failure clears the deferred target and renders the normal error. With
-  compatible `error` state, the click keeps the search results visible and shows `Reload files before opening this folder`
-  rather than discarding the only usable view. Ancestors are found by recursively walking the cached tree, not by splitting
-  path strings, so `/` and Windows `\` paths behave identically;
+- directory rows retain directory styling. With compatible `ready` normal state containing the target, clicking one clears
+  the search, transfers view ownership to `normal`, restores the tree, and expands the directory plus its ancestors. A fresh
+  search may find a newly created/renamed directory absent from that older ready cache; in that case the click retains search
+  results and shows `Reload files before opening this folder`. With compatible `loading` state, it records a deferred
+  owner/preference/epoch-bound target while retaining search results, and transfers to the expanded normal tree only if that
+  exact tree load becomes `ready` and contains the target. Absence or failure clears the deferred target, keeps the search
+  results visible, and shows the reload prompt; a stored load failure is revealed later if the query is cleared. With
+  compatible `error` state, the click likewise keeps search results visible and shows the reload prompt rather than
+  discarding the only usable view. Ancestors are found by recursively walking the cached tree, not by splitting path strings,
+  so `/` and Windows `\` paths behave identically;
 - an empty list renders `No matches`;
 - the status line uses the server's validated `matchCount` (falling back to the rendered list length) and appends
   `(truncated)` when `data.truncated` is true.
@@ -155,8 +158,9 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
   suppresses both response classes as applicable;
 - search failure followed by clear-to-recover;
 - directory-result navigation back to the cached tree with separator-independent ancestor expansion, including a
-  Windows-style path fixture, immediate ready-state navigation, deferred loading-state navigation, load failure clearing a
-  deferred target, and error-state click retention/toast behavior;
+  Windows-style path fixture, immediate ready-state navigation, deferred loading-state navigation while results remain
+  visible, load failure clearing a deferred target, error-state click retention/toast behavior, and a stale ready cache that
+  does not contain the fresh search-result directory;
 - hidden-toggle reload followed by rerunning the active query;
 - hidden-toggle tree-load failure, clear-without-stale-restoration, refresh recovery, and toggle-back recovery, including a
   new query that wins the UI before the concurrent tree load fails and reveals the stored error only when cleared;
