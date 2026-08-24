@@ -804,6 +804,12 @@ describe('COD-306 CodemanApp integration', () => {
     app.respawnActionLogs = {};
     app._clearHistoryTruncation = () => {};
     app._persistReliableState = () => {};
+    app._terminalGoneFinalizedSessionIds = new Set(['s1', 's2']);
+    app._wsGoneSessionId = 's1';
+    app._wsState = 'gone';
+    app._pendingTerminalResize = { sessionId: 's1', frame: { t: 'z', c: 80, r: 30 } };
+    app._terminalViewerActivity = { clearSession: vi.fn() };
+    app._updateConnectionIndicator = vi.fn();
     app.clearCountdownTimers = () => {};
     app.closeSessionLogViewerWindows = () => {};
     app.closeSessionImagePopups = () => {};
@@ -814,6 +820,12 @@ describe('COD-306 CodemanApp integration', () => {
     app._cleanupSessionData('s1');
     expect(app.sessionOrder).toEqual(['s2', 's3']);
     expect(app._deferredCreatedSessionIds.has('s1')).toBe(false);
+    expect([...app._terminalGoneFinalizedSessionIds]).toEqual(['s2']);
+    expect(app._wsGoneSessionId).toBeNull();
+    expect(app._wsState).toBe('disconnected');
+    expect(app._pendingTerminalResize).toBeNull();
+    expect(app._terminalViewerActivity.clearSession).toHaveBeenCalledOnce();
+    expect(app._terminalViewerActivity.clearSession).toHaveBeenCalledWith('s1');
   });
 
   it('sequences concurrent app loads', async () => {

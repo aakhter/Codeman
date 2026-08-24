@@ -4114,9 +4114,8 @@ class CodemanApp {
   _isTerminalSessionGone(sessionId) {
     return (
       typeof sessionId === 'string' &&
-      sessionId === this.activeSessionId &&
-      sessionId === this._wsGoneSessionId &&
-      this._wsState === 'gone'
+      (this._terminalGoneFinalizedSessionIds?.has(sessionId) === true ||
+        (sessionId === this.activeSessionId && sessionId === this._wsGoneSessionId && this._wsState === 'gone'))
     );
   }
 
@@ -9162,6 +9161,15 @@ class CodemanApp {
     this._pendingDeliveries?.delete(sessionId);
     this._seqCounters?.delete(sessionId);
     this._persistReliableState();
+    if (this._wsSessionId === sessionId) this._disconnectWs();
+    this._terminalGoneFinalizedSessionIds?.delete(sessionId);
+    if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+    this._terminalViewerActivity?.clearSession?.(sessionId);
+    if (this._wsGoneSessionId === sessionId) {
+      this._wsGoneSessionId = null;
+      if (this._wsState === 'gone') this._wsState = 'disconnected';
+      this._updateConnectionIndicator?.();
+    }
     this.ralphStates.delete(sessionId);
     this.ralphClosedSessions.delete(sessionId);
     this.projectInsights.delete(sessionId);

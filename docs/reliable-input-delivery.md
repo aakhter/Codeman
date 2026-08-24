@@ -44,10 +44,11 @@ undeliverable queue is discarded and the UI says the session ended.
   transient: whether SSE exit or WS close arrives first, only that dead session's
   queue, pending resize, and viewer activity are cleared once, persistence is
   flushed immediately, no reconnect is scheduled, and further input, resize,
-  restore, and manual terminal reconnect actions are rejected for the
-  still-selected dead terminal. A successful `session:interactive` or
-  `session:resumed` event explicitly re-enables a same-ID terminal. The
-  connection-loss retry can still reconnect SSE without reopening a dead WS.
+  restore, and manual terminal reconnect actions are rejected for that dead
+  terminal even after switching tabs and returning. A successful
+  `session:interactive` or `session:resumed` event explicitly re-enables a
+  same-ID terminal; real session deletion releases its stored lifecycle fence.
+  The connection-loss retry can still reconnect SSE without reopening a dead WS.
 - **Half-open recovery** (`_redeliverSweep`, every 2s): if the active WS session's
   oldest record is unacked past `_reliableAckTimeoutMs` (4s), the socket is assumed
   dead — `ws.close()` forces a fast reconnect; `onopen` (`_onWsReady`) resets

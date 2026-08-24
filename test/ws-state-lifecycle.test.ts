@@ -388,6 +388,81 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     expect(connectWs).not.toHaveBeenCalled();
   });
 
+  it('keeps an exact gone session fenced after switching to another tab and back', () => {
+    const { CodemanApp } = loadHarness();
+    const activate = vi.fn();
+    const connectSSE = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      activeSessionId: 's2',
+      _terminalGoneFinalizedSessionIds: new Set(['s1']),
+      _wsGoneSessionId: null,
+      _wsState: 'disconnected',
+      _terminalViewerActivity: { activate },
+      connectSSE,
+      _persistReliableState: vi.fn(),
+      _drainSession: vi.fn(),
+      _seqCounters: new Map(),
+    });
+
+    app._connectWs('s2');
+    app._disconnectWs();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    app.activeSessionId = 's1';
+    app._connectWs('s1');
+    (app as unknown as { _sendInputAsync: (id: string, input: string) => void })._sendInputAsync('s1', 'blocked');
+    (app as unknown as { retryConnection: () => void }).retryConnection();
+
+    const internal = app as unknown as Record<string, any>;
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(activate).not.toHaveBeenCalled();
+    expect(internal._pendingDeliveries.has('s1')).toBe(false);
+    expect(internal._seqCounters.has('s1')).toBe(false);
+    expect(connectSSE).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a round-tripped gone session fenced after failed/local restart bookkeeping', () => {
+    const { CodemanApp } = loadHarness();
+    const { app } = makeApp(CodemanApp, {
+      activeSessionId: 's1',
+      _terminalGoneFinalizedSessionIds: new Set(['s1']),
+      _wsGoneSessionId: null,
+      _wsState: 'disconnected',
+      _applySessionActivityEvent: vi.fn(() => ({})),
+    });
+
+    (app as unknown as { _onSessionRestarted: (data: { id: string }) => void })._onSessionRestarted({ id: 's1' });
+    app._connectWs('s1');
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect((app as unknown as Record<string, any>)._terminalGoneFinalizedSessionIds.has('s1')).toBe(true);
+  });
+
+  it.each(['_onSessionInteractive', '_onSessionResumed'])(
+    '%s clears a round-tripped exact fence and reconnects only once',
+    (method) => {
+      const { CodemanApp } = loadHarness();
+      const connectWs = vi.fn();
+      const { app } = makeApp(CodemanApp, {
+        activeSessionId: 's1',
+        _terminalGoneFinalizedSessionIds: new Set(['s1']),
+        _wsGoneSessionId: null,
+        _wsState: 'disconnected',
+        _connectWs: connectWs,
+        _applySessionActivityEvent: vi.fn(() => ({})),
+        _onSessionListMaybeChanged: vi.fn(),
+      });
+
+      const handler = (app as unknown as Record<string, (data: { id: string }) => void>)[method];
+      handler.call(app, { id: 's1' });
+      handler.call(app, { id: 's1' });
+
+      expect(connectWs).toHaveBeenCalledOnce();
+      expect(connectWs).toHaveBeenCalledWith('s1');
+      expect((app as unknown as Record<string, any>)._terminalGoneFinalizedSessionIds.has('s1')).toBe(false);
+    }
+  );
+
   it('registers the authoritative session:interactive SSE success event', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     expect(source).toContain("[SSE_EVENTS.SESSION_INTERACTIVE, '_onSessionInteractive']");
