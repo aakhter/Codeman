@@ -81,7 +81,7 @@ Add schema tests that accept only enumerated stages, safe scalar fields, bounded
 Run:
 
 ```bash
-npm test -- test/perf-cod-374-trace.test.ts
+npm run test:perf -- test/perf-cod-374-trace.test.ts
 ```
 
 Expected: FAIL because `src/perf/mobile-input-trace.ts` does not exist.
@@ -171,7 +171,8 @@ Register `registerPerfTraceRoutes` from `src/web/server.ts` only when the global
 Run:
 
 ```bash
-npm test -- test/perf-cod-374-trace.test.ts test/routes/perf-trace-routes.test.ts
+npm run test:perf -- test/perf-cod-374-trace.test.ts
+npm test -- test/routes/perf-trace-routes.test.ts
 npm run typecheck
 npx prettier --check src/perf/mobile-input-trace.ts src/web/routes/perf-trace-routes.ts src/web/server.ts test/perf-cod-374-trace.test.ts test/routes/perf-trace-routes.test.ts
 git diff --check
@@ -266,7 +267,8 @@ Record PTY callback receipt at each interactive PTY `onData` entry, handler entr
 - [ ] **Step 7: Verify GREEN and regression gates**
 
 ```bash
-npm test -- test/perf-cod-374-trace.test.ts test/session-terminal-trace.test.ts test/routes/ws-routes.test.ts test/reliable-input-dedup.test.ts
+npm run test:perf -- test/perf-cod-374-trace.test.ts
+npm test -- test/session-terminal-trace.test.ts test/routes/ws-routes.test.ts test/reliable-input-dedup.test.ts
 npm run typecheck
 npm run lint
 npx prettier --check src/perf/mobile-input-trace.ts src/session.ts src/web/routes/ws-routes.ts \
@@ -434,7 +436,7 @@ It must accept a complete synthetic matrix and label each duration as component-
 - [ ] **Step 2: Run the report test and verify RED**
 
 ```bash
-npm test -- test/perf-cod-374-report.test.ts
+npm run test:perf -- test/perf-cod-374-report.test.ts
 ```
 
 Expected: FAIL because the summarizer is absent.
@@ -446,7 +448,7 @@ The script takes explicit input paths and an unused output path, validates every
 - [ ] **Step 4: Verify summarizer GREEN**
 
 ```bash
-npm test -- test/perf-cod-374-report.test.ts
+npm run test:perf -- test/perf-cod-374-report.test.ts
 node --check scripts/perf/cod-374-summarize.mjs
 ```
 
@@ -476,9 +478,9 @@ Run the summarizer to a new report path. Confirm the first delayed component or 
 - [ ] **Step 8: Run final scoped verification**
 
 ```bash
-npm test -- test/perf-cod-374-trace.test.ts test/routes/perf-trace-routes.test.ts \
-  test/session-terminal-trace.test.ts test/routes/ws-routes.test.ts \
-  test/cod374-latency-trace.test.ts test/perf-cod-374-report.test.ts
+npm run test:perf -- test/perf-cod-374-trace.test.ts test/perf-cod-374-report.test.ts
+npm test -- test/routes/perf-trace-routes.test.ts test/session-terminal-trace.test.ts \
+  test/routes/ws-routes.test.ts test/cod374-latency-trace.test.ts
 npm run test:mobile -- test/mobile/cod374-input-latency.test.ts
 npm run test:browser -- test/terminal-input-performance.browser.test.ts
 npm run typecheck
