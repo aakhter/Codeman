@@ -38,6 +38,7 @@ The mixin lazily initializes panel-local state so this extraction does not requi
 - the File Viewer owner session ID, updated synchronously when session activation changes;
 - an owner-tagged normal-tree state record containing `{ sessionId, showHidden, phase, data?, error? }`, where `phase` is
   `loading`, `ready`, or `error`;
+- an in-flight normal-tree load record keyed by owner session and hidden preference for request deduplication;
 - explicit panel view ownership: `normal`, `search-pending`, `search-results`, `search-error`, or `query-error`;
 - the current flat match list and an optional deferred directory target tied to one owner/preference/tree epoch plus its
   originating search epoch and query.
@@ -50,7 +51,9 @@ owner is still both the File Viewer owner and active session, its captured hidde
 contains that query. Session changes, refreshes, every panel-hide path, hidden toggles, and input clearing also advance the
 search epoch.
 
-Normal-tree loads use a separate tree epoch and immediately record an owner-tagged `loading` state. A response records either
+Normal-tree loads use a separate tree epoch and immediately record an owner-tagged `loading` state. A non-forced request for
+the same owner/hidden identity reuses either its in-flight promise or its compatible settled normal state; refreshes and
+hidden toggles explicitly force a new epoch/load. A response records either
 `ready` data or a normalized `error` only when its tree epoch, session ID, and hidden preference are still current. A
 compatible tree response may refresh this normal state while a search view owns the panel, but it must not replace
 search-owned UI. Normal state renders only when explicit view ownership is `normal` and the panel is visible; query text may
@@ -124,12 +127,15 @@ reveals the stored failure rather than prior-preference data. Refresh clears the
 toggling again retries under the newly selected preference.
 
 `selectSession()` in `app.js` calls a narrow File Viewer owner/reset hook immediately after assigning the new
-`activeSessionId`, before terminal replay and the later idle-callback tree load. The hook synchronously changes the File
-Viewer owner, clears search input/state, invalidates both epochs, blocks prior-owner row interaction, and shows the new
-owner's loading state when the panel is visible. Thus there is no interval in which input can target session B while the
-panel is still owned by A. The later `loadFileBrowser(B)` populates the cache normally. The panel never restores/renders a
-cache owned by another session or hidden preference. Tree and search row actions pass their captured session owner to
-`openFilePreview()` and construct download URLs from that owner.
+`activeSessionId`, before terminal replay and the later idle callback. The hook synchronously changes the File Viewer owner,
+clears search input/state, invalidates both epochs, blocks prior-owner row interaction, and, when the panel is visible, starts
+the new owner's normal-tree load fire-and-forget. File loading therefore proceeds even if terminal fetch/replay later fails.
+The existing idle-callback `loadFileBrowser(B)` call is retained for panel initialization but deduplicates against the same
+in-flight owner/preference request; if the immediate request already settled, it may render/reuse the compatible ready/error
+normal state without issuing a duplicate request. Thus there is no interval in which input can target session B while the
+panel is still owned by A, and no terminal failure can strand B permanently in a synthetic loading state. The panel never
+restores/renders a cache owned by another session or hidden preference. Tree and search row actions pass their captured
+session owner to `openFilePreview()` and construct download URLs from that owner.
 
 Expand/Collapse All is disabled while any non-empty query is pending or showing results/errors, and its handler is a no-op
 in those states. Leaving search mode restores the control and its prior tree expansion state. This prevents the existing
@@ -161,7 +167,7 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - strict malformed-envelope rejection and HTML-metacharacter escaping in names, paths, attributes, and links;
 - owner-tagged restoration and row actions, including overlapping A/B tree loads and clear-before-B-load-completes;
 - the real `selectSession()` owner/reset hook, including input attempted after B becomes active but before B's delayed tree
-  load;
+  load, terminal-selection failure, and deduplication of the immediate owner load with the later idle-callback load;
 - independent tree/search epochs under query changes, two hidden toggles, search during refresh, and search during a cache
   reload. A newer query or clear suppresses prior search responses but still permits a compatible tree response to update
   normal state; a new tree load suppresses the prior tree response; and hide, session switch, or hidden-preference change
