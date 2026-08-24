@@ -240,9 +240,8 @@ export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): 
   if (mode === 'opencode') {
     // Opencode Bubble Tea TUI — see OPENCODE_WORKING_LINE_PATTERN for
     // rationale. Any single hit proves working; absence proves nothing.
-    // Import is cycle-free (same file) — inline to avoid cross-module import.
-    if (/\besc to interrupt\b/i.test(data)) return true;
-    if (/\bWorking\b/.test(data)) return true;
+    // COD-375: w6-tcc idle frame shows `esc interrupt` and `⬝` while idle — only Working/`…` timer or braille spinner prove working.
+    if (/\bWorking\b/i.test(data)) return true;
     if (/…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/.test(data)) return true;
     if (SPINNER_PATTERN.test(data)) return true;
     return false;

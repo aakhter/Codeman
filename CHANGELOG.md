@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.22.5
+
+### Patch Changes
+
+- Fix w6-tcc opencode busy while idle: broaden detectExternalCliWorkingFrame to only Working/…/spinner (remove esc alone and ⬝ false positives) and fix SessionAgentActivityCoordinator onTerminalOutput to set not_observable for all non-claude modes (was only codex), so opencode idle no longer shows checking_agents
+
 ## 1.22.4
 
 ### Patch Changes
