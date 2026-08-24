@@ -54,7 +54,9 @@ search epoch.
 
 Normal-tree loads use a separate tree epoch and immediately record an owner-tagged `loading` state. A non-forced request
 reuses an in-flight promise or compatible settled normal state only when owner, hidden preference, and tree epoch all match
-the current values. Refreshes and hidden toggles explicitly force a new epoch/load. A response records either
+the current values. Each completion clears the in-flight pointer only when it is still identical to that request's captured
+record; an invalidated request settling later cannot erase its replacement's dedupe record. Refreshes and hidden toggles
+explicitly force a new epoch/load. A response records either
 `ready` data or a normalized `error` only when its tree epoch, session ID, and hidden preference are still current. A
 compatible tree response may refresh this normal state while a search view owns the panel, but it must not replace
 search-owned UI. Normal state renders only when explicit view ownership is `normal` and the panel is visible; query text may
@@ -192,6 +194,8 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - settings-driven hide/reopen reset behavior;
 - hide followed by reopen before the invalidated request resolves, proving a new current-epoch request starts and the stale
   promise is not reused;
+- stale request completion while its replacement remains pending, followed by another non-forced load that must reuse the
+  replacement because cleanup compares the captured in-flight record before clearing;
 - explicit normal/search view ownership when hidden-toggle loading/error UI coexists with non-empty captured query text.
 
 Run only the new frontend test and directly related existing File Viewer/search route tests from the managed session. Finish
