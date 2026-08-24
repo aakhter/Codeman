@@ -31,6 +31,7 @@ export interface MobileInputTraceEvent {
   monoNs: string;
   epochMs?: number;
   sessionHash?: string;
+  connectionHash?: string;
   clientId?: string;
   seq?: number;
   ordinal?: number;
@@ -85,6 +86,7 @@ const EVENT_FIELDS: ReadonlySet<string> = new Set<keyof MobileInputTraceEvent>([
   'monoNs',
   'epochMs',
   'sessionHash',
+  'connectionHash',
   'clientId',
   'seq',
   'ordinal',
@@ -112,6 +114,8 @@ function validateEvent(value: MobileInputTraceEvent): void {
     (value.epochMs === undefined ||
       (typeof value.epochMs === 'number' && Number.isFinite(value.epochMs) && value.epochMs >= 0)) &&
     (value.sessionHash === undefined || (typeof value.sessionHash === 'string' && HASH.test(value.sessionHash))) &&
+    (value.connectionHash === undefined ||
+      (typeof value.connectionHash === 'string' && HASH.test(value.connectionHash))) &&
     (value.clientId === undefined ||
       (typeof value.clientId === 'string' &&
         value.clientId.length > 0 &&

@@ -142,11 +142,52 @@ import {
   type TerminalViewerDimensions,
   type TerminalViewportType,
 } from './terminal-sizing-ownership.js';
+import {
+  hashMobileInputTraceValue,
+  mobileInputTraceCollector,
+  mobileInputTraceTimestamp,
+  type MobileInputTraceCollector,
+  type MobileInputTraceStage,
+} from './perf/mobile-input-trace.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
 
 export type ResizeViewportType = TerminalViewportType;
+
+interface SessionMobileInputTraceRegistration {
+  token?: symbol;
+  trace: MobileInputTraceCollector;
+  active: boolean;
+}
+
+const sessionMobileInputTraceRegistrations: SessionMobileInputTraceRegistration[] = [];
+const globalSessionMobileInputTraceRegistration: SessionMobileInputTraceRegistration | undefined =
+  mobileInputTraceCollector.enabled ? { trace: mobileInputTraceCollector, active: true } : undefined;
+
+function currentSessionMobileInputTraceRegistration(): SessionMobileInputTraceRegistration | undefined {
+  return sessionMobileInputTraceRegistrations.at(-1) ?? globalSessionMobileInputTraceRegistration;
+}
+
+type SessionMobileInputTraceRecorder = (stage: MobileInputTraceStage, data: string) => void;
+
+/** Install an enabled trace collector only inside Vitest and return an exact restoration callback. */
+export function setMobileInputTraceCollectorForTests(trace: MobileInputTraceCollector): () => void {
+  if (!process.env.VITEST || !trace.enabled) {
+    throw new Error('Session tracing tests require an enabled test trace collector');
+  }
+  const token = Symbol('session-mobile-input-trace');
+  const registration: SessionMobileInputTraceRegistration = { token, trace, active: true };
+  sessionMobileInputTraceRegistrations.push(registration);
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    registration.active = false;
+    const index = sessionMobileInputTraceRegistrations.findIndex((registration) => registration.token === token);
+    if (index !== -1) sessionMobileInputTraceRegistrations.splice(index, 1);
+  };
+}
 
 export type SessionIdleReason = 'turn-end' | 'initial-ready' | 'shell-ready';
 
@@ -563,6 +604,7 @@ export class Session extends EventEmitter {
     activityStatusSince: null,
   };
   private _terminalActivityEpoch = 0;
+  private _mobileInputTraceOrdinal = 0;
   private _currentTaskId: string | null = null;
 
   // COD-118: bound repeated non-zero interactive-PTY exits. Recorded in the
@@ -2377,7 +2419,8 @@ export class Session extends EventEmitter {
     this.emit('mouseTrackingChanged', active);
   }
 
-  private _handleTerminalOutput(data: string): void {
+  private _handleTerminalOutput(data: string, recordTrace?: SessionMobileInputTraceRecorder): void {
+    recordTrace?.('server.output.handler-enter', data);
     // Invalidate idle decisions for every raw PTY chunk, including bytes held
     // back by the sanitizer while it waits for the rest of an incomplete CSI.
     this._terminalActivityEpoch++;
@@ -2491,11 +2534,32 @@ export class Session extends EventEmitter {
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
     this._markActivity();
+    recordTrace?.('server.output.terminal-emitted', data);
     this.emit('terminal', data);
     this.emit('output', data);
   }
 
+  private _recordMobileInputOutputTrace(
+    trace: MobileInputTraceCollector,
+    stage: MobileInputTraceStage,
+    data: string
+  ): void {
+    try {
+      trace.record({
+        stage,
+        ...mobileInputTraceTimestamp(),
+        sessionHash: hashMobileInputTraceValue(this.id),
+        ordinal: ++this._mobileInputTraceOrdinal,
+        bytes: Buffer.byteLength(data),
+        valueHash: hashMobileInputTraceValue(data),
+      });
+    } catch {
+      // Trace observation is test-only and must never affect terminal output.
+    }
+  }
+
   async startInteractive(): Promise<void> {
+    const traceRegistration = currentSessionMobileInputTraceRegistration();
     if (this.ptyProcess) {
       throw new Error('Session already has a running process');
     }
@@ -2755,12 +2819,17 @@ export class Session extends EventEmitter {
     this._pid = this.ptyProcess.pid;
     console.log('[Session] Interactive PTY spawned with PID:', this._pid);
 
+    const boundRecordTrace: SessionMobileInputTraceRecorder | undefined = traceRegistration
+      ? (stage, data) => this._recordMobileInputOutputTrace(traceRegistration.trace, stage, data)
+      : undefined;
     this.ptyProcess.onData((rawData: string) => {
+      const recordTrace = traceRegistration?.active ? boundRecordTrace : undefined;
+      recordTrace?.('server.output.pty-received', rawData);
       // Filter out focus escape sequences and Ctrl+L (form feed)
       const data = rawData.replace(FOCUS_ESCAPE_FILTER, '').replace(CTRL_L_PATTERN, ''); // Remove Ctrl+L
       if (!data) return; // Skip if only filtered sequences
 
-      this._handleTerminalOutput(data);
+      this._handleTerminalOutput(data, recordTrace);
 
       // === Auto-accept workspace trust dialog ===
       this._maybeAcceptTrustDialog();

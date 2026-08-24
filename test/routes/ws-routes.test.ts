@@ -11,12 +11,55 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const terminalClassifierState = vi.hoisted(() => ({ throwFor: null as string | null }));
+const traceTimingState = vi.hoisted(() => ({
+  active: false,
+  clock: 0n,
+  metadataTimes: [] as bigint[],
+  marker: 'COD-374 timing boundary',
+  throwHelpers: false,
+}));
+
+vi.mock('../../src/terminal-input-classifier.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/terminal-input-classifier.js')>();
+  return {
+    ...actual,
+    isKeyboardTerminalInput(input: string) {
+      if (input === terminalClassifierState.throwFor) throw new Error('classifier failed');
+      return actual.isKeyboardTerminalInput(input);
+    },
+  };
+});
+
+vi.mock('../../src/perf/mobile-input-trace.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/perf/mobile-input-trace.js')>();
+  return {
+    ...actual,
+    mobileInputTraceTimestamp() {
+      if (traceTimingState.throwHelpers) throw new Error('disabled trace evaluated timestamp helper');
+      if (!traceTimingState.active) return actual.mobileInputTraceTimestamp();
+      traceTimingState.clock += 1n;
+      return { monoNs: String(traceTimingState.clock), epochMs: Number(traceTimingState.clock) };
+    },
+    hashMobileInputTraceValue(value: string | Uint8Array) {
+      if (traceTimingState.throwHelpers) throw new Error('disabled trace evaluated hash helper');
+      if (traceTimingState.active && value === traceTimingState.marker) {
+        traceTimingState.clock += 1n;
+        traceTimingState.metadataTimes.push(traceTimingState.clock);
+      }
+      return actual.hashMobileInputTraceValue(value);
+    },
+  };
+});
+
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import WebSocket from 'ws';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { registerWsRoutes } from '../../src/web/routes/ws-routes.js';
 import { MAX_INPUT_LENGTH } from '../../src/config/terminal-limits.js';
+import { createMobileInputTraceCollector, type MobileInputTraceCollector } from '../../src/perf/mobile-input-trace.js';
 
 const PORT = 3170;
 
@@ -78,6 +121,7 @@ function collectMessages(ws: WebSocket, count: number, timeoutMs = 3000): Promis
 describe('ws-routes', () => {
   let app: FastifyInstance;
   let ctx: MockRouteContext;
+  let trace: MobileInputTraceCollector;
   let sizingSession: MockRouteContext['_session'] & {
     activateTerminalViewer: ReturnType<typeof vi.fn>;
     resizeFromTerminalViewer: ReturnType<typeof vi.fn>;
@@ -90,18 +134,29 @@ describe('ws-routes', () => {
     await app.register(fastifyWebsocket);
 
     ctx = createMockRouteContext({ sessionId: 'ws-test-session' });
+    trace = createMobileInputTraceCollector({
+      nodeEnv: 'test',
+      traceFlag: '1',
+      secret: 'route-test-secret',
+      capacity: 512,
+    });
     sizingSession = Object.assign(ctx._session, {
       activateTerminalViewer: vi.fn(),
       resizeFromTerminalViewer: vi.fn(() => false),
       bootstrapTerminalViewer: vi.fn(() => true),
       releaseTerminalViewer: vi.fn(),
     });
-    registerWsRoutes(app, ctx as never, () => ({ bindHost: '127.0.0.1', allowedHosts: [], tunnelHost: null }));
+    registerWsRoutes(app, ctx as never, () => ({ bindHost: '127.0.0.1', allowedHosts: [], tunnelHost: null }), trace);
 
     await app.listen({ port: PORT, host: '127.0.0.1' });
   });
 
   afterEach(async () => {
+    terminalClassifierState.throwFor = null;
+    traceTimingState.active = false;
+    traceTimingState.clock = 0n;
+    traceTimingState.metadataTimes = [];
+    traceTimingState.throwHelpers = false;
     await app.close();
   });
 
@@ -119,6 +174,89 @@ describe('ws-routes', () => {
   // ========== Terminal output ==========
 
   describe('terminal output', () => {
+    it('COD-374 distinguishes identical output stages for two viewer connections', async () => {
+      const first = await connectWs('/ws/sessions/ws-test-session/terminal?cid=viewer-one');
+      const second = await connectWs('/ws/sessions/ws-test-session/terminal?cid=viewer-two');
+      try {
+        const messages = [nextMessage(first), nextMessage(second)];
+        ctx._session.emit('terminal', 'shared output');
+        await Promise.all(messages);
+
+        const outputEvents = trace.snapshot().events.filter((event) => event.stage.startsWith('server.output.'));
+        const connectionHashes = [...new Set(outputEvents.map((event) => event.connectionHash))];
+        expect(connectionHashes).toHaveLength(2);
+        expect(connectionHashes.every((hash) => hash?.match(/^[0-9a-f]{16}$/))).toBe(true);
+        for (const connectionHash of connectionHashes) {
+          const connectionEvents = outputEvents.filter((event) => event.connectionHash === connectionHash);
+          expect(connectionEvents.map((event) => event.ordinal)).toEqual([1, 2, 3, 4, 5]);
+          expect(connectionEvents.map((event) => event.stage)).toEqual([
+            'server.output.ws-received',
+            'server.output.batch-enqueued',
+            'server.output.flush-start',
+            'server.output.pre-send',
+            'server.output.post-send',
+          ]);
+        }
+      } finally {
+        first.close();
+        second.close();
+      }
+    });
+
+    it('COD-374 timestamps WebSocket receipt and flush entry before output metadata work', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        traceTimingState.active = true;
+        const message = nextMessage(ws);
+        ctx._session.emit('terminal', traceTimingState.marker);
+        await message;
+
+        const events = trace.snapshot().events;
+        const wsReceived = events.find((event) => event.stage === 'server.output.ws-received');
+        const flushStart = events.find((event) => event.stage === 'server.output.flush-start');
+        expect(traceTimingState.metadataTimes).toHaveLength(2);
+        expect(BigInt(wsReceived?.monoNs ?? 0)).toBeLessThan(traceTimingState.metadataTimes[0]);
+        expect(BigInt(flushStart?.monoNs ?? 0)).toBeLessThan(traceTimingState.metadataTimes[1]);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('COD-374 traces WebSocket output batching and send boundaries without raw terminal text', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        ctx._session.emit('terminal', 'sensitive ');
+        ctx._session.emit('terminal', 'terminal output');
+
+        expect(await nextMessage(ws)).toMatchObject({ t: 'o' });
+        const events = trace.snapshot().events.filter((event) => event.stage.startsWith('server.output.'));
+
+        expect(events.map((event) => event.stage)).toEqual([
+          'server.output.ws-received',
+          'server.output.batch-enqueued',
+          'server.output.ws-received',
+          'server.output.batch-enqueued',
+          'server.output.flush-start',
+          'server.output.pre-send',
+          'server.output.post-send',
+        ]);
+        expect(events.map((event) => event.ordinal)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+        expect(events.map((event) => event.bytes)).toEqual([
+          Buffer.byteLength('sensitive '),
+          Buffer.byteLength('sensitive '),
+          Buffer.byteLength('terminal output'),
+          Buffer.byteLength('terminal output'),
+          Buffer.byteLength('sensitive terminal output'),
+          Buffer.byteLength('sensitive terminal output'),
+          Buffer.byteLength('sensitive terminal output'),
+        ]);
+        expect(events.every((event) => event.valueHash?.match(/^[0-9a-f]{16}$/))).toBe(true);
+        expect(JSON.stringify(trace.snapshot())).not.toContain('sensitive terminal output');
+      } finally {
+        ws.close();
+      }
+    });
+
     it('receives terminal output via WS with DEC 2026 sync markers', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
       try {
@@ -204,6 +342,192 @@ describe('ws-routes', () => {
   // ========== Client input ==========
 
   describe('client input', () => {
+    it('COD-374 records pre-write only after checkpoint handling and immediately at write entry', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const session = ctx._session;
+      const originalWrite = session.write.bind(session);
+      let stagesAtCheckpoint: string[] = [];
+      let stagesAtWrite: string[] = [];
+      session.isCheckpointActive = true;
+      session.cancelCheckpoint.mockImplementationOnce(() => {
+        stagesAtCheckpoint = trace.snapshot().events.map((event) => event.stage);
+      });
+      const write = vi.spyOn(session, 'write').mockImplementation((data) => {
+        stagesAtWrite = trace.snapshot().events.map((event) => event.stage);
+        return originalWrite(data);
+      });
+      try {
+        ws.send(JSON.stringify({ t: 'i', d: 'boundary\r', cid: 'boundary-client', seq: 8 }));
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 8 });
+
+        expect(stagesAtCheckpoint).not.toContain('server.input.pre-write');
+        expect(stagesAtWrite.at(-1)).toBe('server.input.pre-write');
+      } finally {
+        write.mockRestore();
+        ws.close();
+      }
+    });
+
+    it('COD-374 does not claim a write boundary when input classification throws', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        terminalClassifierState.throwFor = 'classification-failure';
+        ws.send(JSON.stringify({ t: 'i', d: terminalClassifierState.throwFor, cid: 'classifier-client', seq: 9 }));
+
+        await expect(nextMessage(ws, 200)).rejects.toThrow(/timeout/);
+        const stages = trace
+          .snapshot()
+          .events.filter((event) => event.clientId === 'classifier-client')
+          .map((event) => event.stage);
+        expect(stages).not.toContain('server.input.pre-write');
+        expect(stages).not.toContain('server.input.post-write');
+        expect(ctx._session.shouldApplyInput('classifier-client', 9)).toBe(true);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('COD-374 traces exact tagged input stages in write and ACK order', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        ws.send(JSON.stringify({ t: 'i', d: 'trace-me\r', cid: 'client-1', seq: 7 }));
+
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 7 });
+        const events = trace.snapshot().events.filter((event) => event.clientId === 'client-1' && event.seq === 7);
+        expect(events.map((event) => event.stage)).toEqual([
+          'server.input.received',
+          'server.input.parsed',
+          'server.input.deduped',
+          'server.input.activated',
+          'server.input.pre-write',
+          'server.input.post-write',
+          'server.input.pre-ack',
+          'server.input.post-ack',
+        ]);
+        expect(events.map((event) => event.ordinal)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(events.every((event) => event.sessionHash?.match(/^[0-9a-f]{16}$/))).toBe(true);
+        expect(JSON.stringify(events)).not.toContain('trace-me');
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('COD-374 records duplicates as unapplied, skips a second write, and still ACKs', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const write = vi.spyOn(ctx._session, 'write');
+      try {
+        const frame = JSON.stringify({ t: 'i', d: 'once\r', cid: 'duplicate-client', seq: 2 });
+        ws.send(frame);
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 2 });
+        ws.send(frame);
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 2 });
+
+        const deduped = trace
+          .snapshot()
+          .events.filter((event) => event.stage === 'server.input.deduped' && event.clientId === 'duplicate-client');
+        expect(deduped.map((event) => event.applied)).toEqual([true, false]);
+        expect(write).toHaveBeenCalledTimes(1);
+        expect(
+          trace
+            .snapshot()
+            .events.filter(
+              (event) => event.stage === 'server.input.post-write' && event.clientId === 'duplicate-client'
+            )
+        ).toHaveLength(1);
+      } finally {
+        write.mockRestore();
+        ws.close();
+      }
+    });
+
+    it('COD-374 records a failed write without ACK and leaves the tagged frame retryable', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        ctx._session.failWrites = true;
+        ws.send(JSON.stringify({ t: 'i', d: 'retry\r', cid: 'failed-client', seq: 3 }));
+
+        await expect(nextMessage(ws, 200)).rejects.toThrow(/timeout/);
+        const events = trace.snapshot().events.filter((event) => event.clientId === 'failed-client');
+        expect(events.find((event) => event.stage === 'server.input.post-write')?.delivered).toBe(false);
+        expect(events.some((event) => event.stage === 'server.input.pre-ack')).toBe(false);
+        expect(ctx._session.shouldApplyInput('failed-client', 3)).toBe(true);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('COD-374 never traces a successful write for malformed or oversized frames', async () => {
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        ws.send('not-json{{{');
+        ws.send(JSON.stringify({ t: 'i', d: 'x'.repeat(MAX_INPUT_LENGTH + 1), cid: 'oversized-client', seq: 4 }));
+        ws.send(JSON.stringify({ t: 'i', d: 'ok', cid: 'valid-client', seq: 5 }));
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 5 });
+
+        const successfulWrites = trace
+          .snapshot()
+          .events.filter((event) => event.stage === 'server.input.post-write' && event.delivered === true);
+        expect(successfulWrites.map((event) => event.clientId)).toEqual(['valid-client']);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it('COD-374 preserves tagged input behavior when tracing is disabled', async () => {
+      const disabledApp = Fastify({ logger: false });
+      await disabledApp.register(fastifyWebsocket);
+      const disabledCtx = createMockRouteContext({ sessionId: 'disabled-trace-session' });
+      Object.assign(disabledCtx._session, {
+        activateTerminalViewer: vi.fn(),
+        resizeFromTerminalViewer: vi.fn(() => false),
+        releaseTerminalViewer: vi.fn(),
+      });
+      let enabledReads = 0;
+      const disabledTrace: MobileInputTraceCollector = {
+        get enabled() {
+          enabledReads += 1;
+          if (enabledReads > 1) throw new Error('disabled trace recorder was entered');
+          return false;
+        },
+        record() {
+          throw new Error('disabled trace record was called');
+        },
+        snapshot: () => ({ enabled: false, overflowed: false, events: [] }),
+        clear: vi.fn(),
+        isAuthorized: () => false,
+      };
+      registerWsRoutes(
+        disabledApp,
+        disabledCtx as never,
+        () => ({ bindHost: '127.0.0.1', allowedHosts: [], tunnelHost: null }),
+        disabledTrace
+      );
+      await disabledApp.listen({ port: 0, host: '127.0.0.1' });
+      const address = disabledApp.server.address();
+      if (!address || typeof address === 'string') throw new Error('Expected TCP listener');
+      const ws = new WebSocket(`ws://127.0.0.1:${address.port}/ws/sessions/disabled-trace-session/terminal`);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.once('open', resolve);
+          ws.once('error', reject);
+        });
+        traceTimingState.throwHelpers = true;
+        const outputMessage = nextMessage(ws);
+        disabledCtx._session.emit('terminal', 'disabled output');
+        expect(await outputMessage).toMatchObject({ t: 'o' });
+        const message = nextMessage(ws);
+        ws.send(JSON.stringify({ t: 'i', d: 'unchanged\r', cid: 'disabled-client', seq: 1 }));
+
+        expect(await message).toEqual({ t: 'ia', seq: 1 });
+        expect(disabledCtx._session.writeBuffer).toEqual(['unchanged\r']);
+        expect(disabledTrace.snapshot().events).toEqual([]);
+        expect(enabledReads).toBe(1);
+      } finally {
+        ws.close();
+        await disabledApp.close();
+      }
+    });
+
     it('forwards input messages to session.write()', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
       const info = vi.spyOn(console, 'info').mockImplementation(() => {});

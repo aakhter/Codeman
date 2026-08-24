@@ -41,6 +41,13 @@ import { isKeyboardTerminalInput } from '../../terminal-input-classifier.js';
 import { isAllowedRequestHost, isAllowedRequestOrigin, type HostPolicy } from '../network-auth-policy.js';
 import { WsConnectionRegistry } from '../ws-connection-registry.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
+import {
+  hashMobileInputTraceValue,
+  mobileInputTraceCollector,
+  mobileInputTraceTimestamp,
+  type MobileInputTraceCollector,
+  type MobileInputTraceEvent,
+} from '../../perf/mobile-input-trace.js';
 
 /** Micro-batch interval for terminal output (ms). Short enough for low latency,
  *  long enough to group Ink's rapid cursor-up redraw sequences into single frames. */
@@ -74,8 +81,14 @@ const MAX_WS_PER_SESSION = 5;
  * admitted anonymously up to the cap. See ws-connection-registry.ts.
  */
 const sessionWsRegistry = new WsConnectionRegistry<WebSocket>(MAX_WS_PER_SESSION);
+let mobileInputTraceConnectionOrdinal = 0;
 
-export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHostPolicy: () => HostPolicy): void {
+export function registerWsRoutes(
+  app: FastifyInstance,
+  ctx: SessionPort,
+  getHostPolicy: () => HostPolicy,
+  trace: MobileInputTraceCollector = mobileInputTraceCollector
+): void {
   app.get<{ Params: { id: string }; Querystring: { cid?: string } }>(
     '/ws/sessions/:id/terminal',
     { websocket: true },
@@ -128,6 +141,31 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         socket.close(4008, 'Too many connections');
         return;
       }
+      const traceEnabled = trace.enabled;
+      const traceSessionHash = traceEnabled ? hashMobileInputTraceValue(id) : undefined;
+      const traceConnectionHash = traceEnabled
+        ? hashMobileInputTraceValue(`${id}:${cid ?? 'anonymous'}:${++mobileInputTraceConnectionOrdinal}`)
+        : undefined;
+      let traceOrdinal = 0;
+      const recordTrace =
+        traceEnabled && traceSessionHash && traceConnectionHash
+          ? (
+              event: Omit<MobileInputTraceEvent, 'monoNs' | 'epochMs' | 'sessionHash' | 'connectionHash' | 'ordinal'>,
+              timestamp?: ReturnType<typeof mobileInputTraceTimestamp>
+            ): void => {
+              try {
+                trace.record({
+                  ...event,
+                  ...(timestamp ?? mobileInputTraceTimestamp()),
+                  sessionHash: traceSessionHash,
+                  connectionHash: traceConnectionHash,
+                  ordinal: ++traceOrdinal,
+                });
+              } catch {
+                // Trace observation is test-only and must never affect terminal I/O.
+              }
+            }
+          : undefined;
       if (evictedSocket) {
         // Same client reconnected; retire the stale socket so it doesn't linger.
         console.info('[ws] terminal superseded by reconnect', { sessionId: id });
@@ -152,6 +190,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
       let batchTimer: ReturnType<typeof setTimeout> | null = null;
 
       const flushBatch = () => {
+        const flushStartedAt = recordTrace ? mobileInputTraceTimestamp() : undefined;
         batchTimer = null;
         if (batchChunks.length === 0 || socket.readyState !== 1) {
           batchChunks = [];
@@ -159,9 +198,17 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
           return;
         }
         const data = batchChunks.join('');
+        const outputTrace = recordTrace
+          ? { bytes: Buffer.byteLength(data), valueHash: hashMobileInputTraceValue(data) }
+          : undefined;
+        if (recordTrace && outputTrace) {
+          recordTrace({ stage: 'server.output.flush-start', ...outputTrace }, flushStartedAt);
+        }
         batchChunks = [];
         batchSize = 0;
+        if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.pre-send', ...outputTrace });
         socket.send(`{"t":"o","d":${JSON.stringify(DEC_2026_START + data + DEC_2026_END)}}`);
+        if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.post-send', ...outputTrace });
       };
 
       const sizingToken = Symbol('ws-terminal-viewer');
@@ -169,6 +216,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
       // Attach message handler synchronously BEFORE any async work
       // (@fastify/websocket requirement to avoid dropped messages).
       socket.on('message', (raw) => {
+        const receivedAt = recordTrace ? mobileInputTraceTimestamp() : undefined;
         try {
           const msg = JSON.parse(String(raw));
           if (msg.t === 'i' && typeof msg.d === 'string') {
@@ -179,7 +227,14 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             // (legacy/other tools) are applied as-is — no behavior change.
             const cid = typeof msg.cid === 'string' ? msg.cid : null;
             const seq = Number.isInteger(msg.seq) ? (msg.seq as number) : null;
+            if (cid && seq !== null) {
+              recordTrace?.({ stage: 'server.input.received', clientId: cid, seq }, receivedAt);
+              recordTrace?.({ stage: 'server.input.parsed', clientId: cid, seq });
+            }
             const apply = cid && seq !== null ? session.shouldApplyInput(cid, seq) : true;
+            if (cid && seq !== null) {
+              recordTrace?.({ stage: 'server.input.deduped', clientId: cid, seq, applied: apply });
+            }
             let delivered = !apply;
             if (apply) {
               try {
@@ -188,6 +243,10 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
                 // Sizing is best-effort. A viewer handoff failure must not drop
                 // input that can still be delivered to the PTY.
               }
+              if (cid && seq !== null) {
+                recordTrace?.({ stage: 'server.input.activated', clientId: cid, seq });
+              }
+              let writeAttempted = false;
               try {
                 if (isKeyboardTerminalInput(msg.d)) {
                   if (session.isCheckpointActive) {
@@ -199,9 +258,16 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
                   }
                   session.cancelCheckpoint('manual-takeover');
                 }
+                writeAttempted = true;
+                if (cid && seq !== null) {
+                  recordTrace?.({ stage: 'server.input.pre-write', clientId: cid, seq });
+                }
                 delivered = session.write(msg.d);
               } catch {
                 delivered = false;
+              }
+              if (writeAttempted && cid && seq !== null) {
+                recordTrace?.({ stage: 'server.input.post-write', clientId: cid, seq, delivered });
               }
               // A session whose PTY is gone swallows the write. ACKing anyway told
               // the client to drop the frame from its durable queue and left the seq
@@ -210,7 +276,9 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
               if (!delivered && cid && seq !== null) session.forgetInputSeq(cid, seq);
             }
             if (delivered && seq !== null && socket.readyState === 1) {
+              if (cid) recordTrace?.({ stage: 'server.input.pre-ack', clientId: cid, seq });
               socket.send(`{"t":"ia","seq":${seq}}`);
+              if (cid) recordTrace?.({ stage: 'server.input.post-ack', clientId: cid, seq });
             }
           } else if (
             msg.t === 'va' &&
@@ -247,9 +315,17 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
 
       // Terminal output -> micro-batched WS send
       const onTerminal = (data: string) => {
+        const wsReceivedAt = recordTrace ? mobileInputTraceTimestamp() : undefined;
+        const outputTrace = recordTrace
+          ? { bytes: Buffer.byteLength(data), valueHash: hashMobileInputTraceValue(data) }
+          : undefined;
+        if (recordTrace && outputTrace) {
+          recordTrace({ stage: 'server.output.ws-received', ...outputTrace }, wsReceivedAt);
+        }
         if (socket.readyState !== 1) return;
         batchChunks.push(data);
         batchSize += data.length;
+        if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.batch-enqueued', ...outputTrace });
 
         // Flush immediately for large batches (responsiveness during bulk output)
         if (batchSize > WS_BATCH_FLUSH_THRESHOLD) {
