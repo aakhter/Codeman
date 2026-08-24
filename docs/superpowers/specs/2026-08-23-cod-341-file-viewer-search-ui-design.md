@@ -39,10 +39,12 @@ The mixin lazily initializes panel-local state so this extraction does not requi
 - an owner-tagged normal-tree state record containing `{ sessionId, showHidden, phase, data?, error? }`, where `phase` is
   `loading`, `ready`, or `error`;
 - explicit panel view ownership: `normal`, `search-pending`, `search-results`, `search-error`, or `query-error`;
-- the current flat match list and an optional deferred directory target tied to one owner/preference/tree epoch.
+- the current flat match list and an optional deferred directory target tied to one owner/preference/tree epoch plus its
+  originating search epoch and query.
 
-Every input change advances the search epoch before doing anything else. A valid non-empty input captures the File Viewer
-owner session ID, hidden-files preference, and search epoch, then requests the existing files endpoint with `depth=5`,
+Every input change advances the search epoch and clears any deferred directory target before doing anything else. A valid
+non-empty input captures the File Viewer owner session ID, hidden-files preference, and search epoch, then requests the
+existing files endpoint with `depth=5`,
 `showHidden`, and an encoded `q`. A response may update the visible panel only when its search epoch is current, its captured
 owner is still both the File Viewer owner and active session, its captured hidden preference is current, and the input still
 contains that query. Session changes, refreshes, every panel-hide path, hidden toggles, and input clearing also advance the
@@ -68,12 +70,13 @@ Successful search responses render `data.matches` as a flat list:
   the search, transfers view ownership to `normal`, restores the tree, and expands the directory plus its ancestors. A fresh
   search may find a newly created/renamed directory absent from that older ready cache; in that case the click retains search
   results and shows `Reload files before opening this folder`. With compatible `loading` state, it records a deferred
-  owner/preference/epoch-bound target while retaining search results, and transfers to the expanded normal tree only if that
-  exact tree load becomes `ready` and contains the target. Absence or failure clears the deferred target, keeps the search
-  results visible, and shows the reload prompt; a stored load failure is revealed later if the query is cleared. With
-  compatible `error` state, the click likewise keeps search results visible and shows the reload prompt rather than
-  discarding the only usable view. Ancestors are found by recursively walking the cached tree, not by splitting path strings,
-  so `/` and Windows `\` paths behave identically;
+  owner/preference/tree-epoch target plus the originating search epoch/query while retaining search results. It transfers to
+  the expanded normal tree only if that exact tree load becomes `ready`, contains the target, and the originating search
+  epoch/query/view still owns the panel. Any later input clears the target, so newer search UI always wins. Absence or failure
+  clears the deferred target, keeps the search results visible, and shows the reload prompt; a stored load failure is revealed
+  later if the query is cleared. With compatible `error` state, the click likewise keeps search results visible and shows the
+  reload prompt rather than discarding the only usable view. Ancestors are found by recursively walking the cached tree, not
+  by splitting path strings, so `/` and Windows `\` paths behave identically;
 - an empty list renders `No matches`;
 - the status line uses the server's validated `matchCount` (falling back to the rendered list length) and appends
   `(truncated)` when `data.truncated` is true.
@@ -159,8 +162,8 @@ Add `test/file-browser-search.test.ts` using the established VM-loaded mixin pat
 - search failure followed by clear-to-recover;
 - directory-result navigation back to the cached tree with separator-independent ancestor expansion, including a
   Windows-style path fixture, immediate ready-state navigation, deferred loading-state navigation while results remain
-  visible, load failure clearing a deferred target, error-state click retention/toast behavior, and a stale ready cache that
-  does not contain the fresh search-result directory;
+  visible, newer query input cancelling deferred navigation, load failure clearing a deferred target, error-state click
+  retention/toast behavior, and a stale ready cache that does not contain the fresh search-result directory;
 - hidden-toggle reload followed by rerunning the active query;
 - hidden-toggle tree-load failure, clear-without-stale-restoration, refresh recovery, and toggle-back recovery, including a
   new query that wins the UI before the concurrent tree load fails and reveals the stored error only when cleared;
