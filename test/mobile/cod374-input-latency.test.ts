@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import type { Page } from 'playwright';
 import {
@@ -152,12 +153,16 @@ async function selectAndFocusPhone(fixture: Cod370OpenCodeFixture): Promise<void
 describe('COD-374 real mobile OpenCode latency trace', () => {
   it('records every latency boundary', async () => {
     const traceSecret = randomBytes(24).toString('hex');
-    const fixture = new Cod370OpenCodeFixture({ mobileTrace: { secret: traceSecret, capacity: 20_000 } });
+    const fixture = new Cod370OpenCodeFixture({
+      runtimeRoot: process.env.CODEMAN_COD374_RUNTIME_ROOT,
+      mobileTrace: { secret: traceSecret, capacity: 20_000 },
+    });
     const failures: Error[] = [];
     const pageErrors: string[] = [];
     const seriousConsoleErrors: string[] = [];
     const diagnosticWarnings: string[] = [];
     let acceptedWindowDiagnosticWarnings: string[] = [];
+    let phaseBArtifact: Record<string, unknown> | null = null;
     let hooksCleanup: { wrappersRestored: boolean; listenersDisposed: boolean } | null = null;
     let paneController: AbortController | null = null;
     let panePromise: Promise<PaneVisibilityResult[]> | null = null;
@@ -497,6 +502,50 @@ describe('COD-374 real mobile OpenCode latency trace', () => {
       expect(pageErrors).toEqual([]);
       expect(seriousConsoleErrors).toEqual([]);
       requireNoBrowserLongTasks(acceptedWindowDiagnosticWarnings);
+      const keydownAt = Math.min(
+        ...browserEvents.filter((event) => event.stage === 'browser.keydown').map((event) => event.atMs)
+      );
+      const paintAt = Math.max(
+        ...browserEvents.filter((event) => event.stage === 'browser.paint-proxy').map((event) => event.atMs)
+      );
+      phaseBArtifact = {
+        schemaVersion: 1,
+        browserEvents,
+        serverEvents: server.events,
+        paneResults: paneResults.map((result, inputIndex) => {
+          const probes = result.status === 'visible' ? result.interval.probes : result.error.probes;
+          return {
+            inputIndex,
+            tokenHash: createHash('sha256').update(expectedTokens[inputIndex]).digest('hex').slice(0, 16),
+            tokenLength: expectedTokens[inputIndex].length,
+            status: result.status,
+            errorHash:
+              result.status === 'visible'
+                ? null
+                : createHash('sha256').update(result.error.message).digest('hex').slice(0, 16),
+            probes: probes.map((probe) => ({
+              startedNs: probe.startedNs.toString(),
+              completedNs: probe.completedNs.toString(),
+              present: probe.present,
+              durationMs: probe.durationMs,
+              errorHash: probe.error
+                ? createHash('sha256').update(probe.error.message).digest('hex').slice(0, 16)
+                : null,
+            })),
+          };
+        }),
+        longTaskWindow: { startedMs: keydownAt, endedMs: paintAt, entries: [] },
+        resizeEvents: [],
+        diagnostics: {
+          warningHashes: acceptedWindowDiagnosticWarnings.map((warning) =>
+            createHash('sha256').update(warning).digest('hex').slice(0, 16)
+          ),
+          pageErrorHashes: pageErrors.map((error) => createHash('sha256').update(error).digest('hex').slice(0, 16)),
+          consoleErrorHashes: seriousConsoleErrors.map((error) =>
+            createHash('sha256').update(error).digest('hex').slice(0, 16)
+          ),
+        },
+      };
     } catch (error) {
       failures.push(error instanceof Error ? error : new Error(String(error)));
     } finally {
@@ -522,5 +571,13 @@ describe('COD-374 real mobile OpenCode latency trace', () => {
     if (failures.length) throw new AggregateError(failures, 'COD-374 real browser trace failed');
     expect(hooksCleanup).toEqual({ wrappersRestored: true, listenersDisposed: true });
     expect(paneObserverSettled).toBe(true);
+    if (process.env.CODEMAN_COD374_ARTIFACT_PATH) {
+      if (!phaseBArtifact) throw new Error('COD-374 Phase B artifact was not captured');
+      await writeFile(
+        process.env.CODEMAN_COD374_ARTIFACT_PATH,
+        `${JSON.stringify({ ...phaseBArtifact, cleanup: fixture.cleanupProof }, null, 2)}\n`,
+        { flag: 'wx', mode: 0o600 }
+      );
+    }
   }, 180_000);
 });

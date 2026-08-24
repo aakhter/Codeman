@@ -430,24 +430,28 @@ long-task diagnostics remain separately classified for failure evidence, but an 
 **Files:**
 
 - Create: `scripts/perf/cod-374-summarize.mjs`
+- Create: `scripts/perf/cod-374-runner.mjs`
+- Create: `scripts/perf/cod-374-playwright-runtime.ts`
 - Create: `docs/reports/cod-374/README.md`
-- Generate: `docs/reports/cod-374/raw/*.json`
-- Generate: `docs/reports/cod-374/input-latency-attribution.md`
+- Phase B external temp output: deterministic `attempts/attempt-NNNN.json` files and regenerated `ledger.json`
+- Later evidence commit only: `docs/reports/cod-374/input-latency-attribution.md` and selected raw evidence
 - Test: `test/perf-cod-374-report.test.ts`
+- Test: `test/perf-cod-374-runner.test.ts`
 
-- [ ] **Step 1: Write failing report/publication contracts**
+- [x] **Step 1: Write failing report/publication contracts**
 
 Create fixtures for complete and incomplete raw traces. The report test must reject:
 
 - wrong runtime/tree/harness/lock/vendor provenance;
 - tracing-on p95 overhead above 5ms or 10%;
 - missing stages, duplicate sequence writes, missing ACKs, or absent pane/xterm token evidence;
-- trace overflow, observer errors, excessive clock uncertainty, page/console errors, process replacement, resize during typing, or incomplete cleanup;
+- trace overflow, observer errors, page/console errors, process replacement, resize during typing, or incomplete cleanup;
 - partial ABBA order, selective samples, or mixed harness hashes.
 
-It must accept a complete synthetic matrix and label each duration as component-local or calibrated with uncertainty.
+It must model the real Task 3 browser/server schemas and multiplicity, accept honest trace-off samples without collector
+events, and label every duration component-local. Cross-domain attribution always remains inconclusive.
 
-- [ ] **Step 2: Run the report test and verify RED**
+- [x] **Step 2: Run the report test and verify RED**
 
 ```bash
 npm run test:perf -- test/perf-cod-374-report.test.ts
@@ -455,22 +459,195 @@ npm run test:perf -- test/perf-cod-374-report.test.ts
 
 Expected: FAIL because the summarizer is absent.
 
-- [ ] **Step 3: Implement the fail-closed summarizer**
+- [x] **Step 3: Implement the fail-closed summarizer**
 
-The script takes explicit input paths and an unused output path, validates everything before publication, writes atomically through an adjacent temporary file, and refuses to overwrite an existing report. It reports medians, p95, max, complete per-sample stage durations, pane interval widths, poll cost, trace overhead, long tasks, load, correctness, errors, and cleanup.
+The script reconciles a deterministic external experiment root, validates every immutable attempt file and the complete
+schedule before publication, writes atomically, and refuses to overwrite an existing report. It reports medians, p95,
+max, every consecutive per-sample component-local duration, pane probes/intervals, trace overhead, long tasks, load,
+derived correctness, errors, and cleanup.
 
-- [ ] **Step 4: Verify summarizer GREEN**
+- [x] **Step 4: Verify summarizer GREEN**
 
 ```bash
-npm run test:perf -- test/perf-cod-374-report.test.ts
+npm run test:perf -- test/perf-cod-374-report.test.ts test/perf-cod-374-runner.test.ts
 node --check scripts/perf/cod-374-summarize.mjs
+node --check scripts/perf/cod-374-runner.mjs
 ```
 
 Expected: all contracts pass.
 
+Phase A evidence: the initial scoped run failed because the summarizer module was absent. First-review REDs covered the
+collector vocabulary, lossless evidence, provenance, overlay, ledger, median, privacy, and durable publication. The
+second-review real-shape RED produced 31 expected failures in 43 tests against the incompatible schema and append ledger;
+later REDs covered completed contamination, missing output identities, multi-batch output, crash-after-ledger recovery,
+manifest symlinks, and clean-repository preflight proof. Final corrective REDs covered full rapid-input generation
+windows and async output/write joins, honest launched-partial evidence, independently measured runtime proofs,
+reconcile-before-validation, actual killed-process lock recovery, realpath containment, recursive canonical JSON, and
+complete calibration/diagnostic/cleanup reporting. Independent final review then corrected real Task 3 input-received
+identity, mutually exclusive generation completion, one-write paint fences, retained-sample detail in invalid reports,
+and identity-bound stale-lock reclamation. The final harness accepts Task 3 browser/server multiplicity, keeps
+trace-off free of server collector events, removes calibrated cross-domain causality, verifies actual runtime and clean
+Git/dependency provenance, applies overlay bytes through stdin, and treats immutable attempt files as truth for an
+atomically regenerated ledger. A concrete Phase B runner now launches the exact verified overlay worktree, binds served
+assets and live server/browser/OpenCode process identities, adapts the actual Task 3 trace shape, measures fixed-loop CPU
+ratios, retains partial/cleanup failures, and publishes through the locked transaction API. Final adversarial REDs bound
+UUID client privacy, captured clocks/load/process identities, overlay launch provenance, strict post-ACK attribution,
+and output-root/finalization safety. The final pre-cohort corrections reserve each exact schedule position before
+capture, recover a killed reservation as a terminal rejected attempt, use the Task 3 first-ACK boundary, observe resize
+contamination, bracket process start time with `/proc/uptime` uncertainty, re-read exact final process identities, and
+recover after-link crashes for locks, reclaim, reports, and finalization markers. Invalid dirty/dependency/overlay
+preflights publish from retained evidence without rerunning the failed prerequisite. Phase A generated no raw cohort or
+attribution report. The expanded focused suites passed 98/98 before final static verification.
+
 - [ ] **Step 5: Run tracing-off/on calibration**
 
+The first calibration experiment `32e33dfa699bd0f7` is immutable INVALID and will never be retried. Attempt 1 hash
+`d43195872fe9109a1a67aeda378c8cb19366d376f7be78858f1f213fef39c940` failed before capture because the verified
+detached runtime lacked a dependency root; invalid report hash
+`036a54d2813d4754186628c57475e12fd2836a6370785223cb28cfdc01338860`. The corrected harness provisions and re-verifies
+the exact clean harness dependency root after overlay verification. The corrected runner binds the source device/inode
+and a bounded content manifest of every installed package record, including dev Playwright and launcher packages, and
+recomputes that identity before launch, after launch, and before publication. A future calibration must use a fresh
+experiment.
+
+The next fresh experiment `194d04296ddc0953` is also immutable INVALID and will never be retried. Attempt 1 hash
+`231627b26f8a69c4ec8c9f443eb478806b180c7f6358a46425f1f76236e20c32` stopped before samples; ledger, report, and
+finalized hashes are `18ae4b5a17091609bd731faabab333431832e1a8494537fb2110bacd11e71109`,
+`43b7b593a97fb5ec0cf2e98b0891c839c5b0edcab558c49c9df04797519791b8`, and
+`11124dc2170898787cabc39e17a2f67baef6c4f679ff410d115011ca0fc70e02`. Its bounded outer startup-message hash is
+`4f5bcd7681299314`. The app shell's loaded marker preceded deferred animation-frame terminal initialization, and the old
+runtime selected the session while terminal options were null. The correction waits for terminal plus SSE readiness
+before creation, requires exact session hydration before selection, and proves active session, ready WebSocket, buffer,
+pane+xterm composer, real row click/focus, and stability. The required full detached-runtime integration then exposed a
+second prerequisite: generated vendor assets are ignored and absent from a Git worktree. The runner now provisions only
+the exact hash-bound ignored vendor files beside the preserved tracked files and recomputes their identity at all three
+runtime boundaries. It retains that proof in `provenance.runtimeVendorHash`; the plan and preflight/crash evidence use
+null until a runtime is actually proven. The composer click uses independently derived, unique, equal visible tmux and
+xterm viewport rows rather than a tmux scrollback index. Browser/server/tmux/root cleanup was verified; hooks/listeners
+were not allocated. A future calibration requires another wholly fresh experiment after this correction is committed
+and reviewed.
+
+The third fresh experiment `381941ff3eeec967` is likewise immutable INVALID and will never be retried. Attempt 1 hash
+`23dd88651bcf17641c225fcae0763a45c055f3e08b1eef689cad19242a07f545` stopped with zero cells; ledger, report, and
+finalized hashes are `635f807e15fd65ef9ccd275e8e5db1f6e0fe30f6616c81bf64f57efdd2d1c903`,
+`b750d8f4555c976c03ffa7a88da520b3ec83a70a7f362da6fbb35b4ce877c556`, and
+`85f29237b3da049ffd074e8cbfc5ad32ca2f53e0328ea65e2c910ae428162743`. Its runtime-vendor proof is
+`c1a48afcc27a693a329a4bcce1d52bbc43118c491c4ce28d2506b91733391c0a`, bounded outer failure hash is
+`4f5bcd7681299314`, and startup-message hashes are `0bdcf894ac84c582` and `81c304ef6ed1beb5`. Exact production-loader
+reproduction proved that `node --import tsx` transformed the function callback supplied to `page.addInitScript`, leaked
+a free `__name`, and caused a browser page error before `window.__cod374LatencyTrace` existed. The correction uses a
+static self-contained plain-JavaScript `content` payload, verified under the production dynamic-import path to contain
+no transform helpers and to create the trace state before navigation. Aggregate cleanup was complete and no retry is
+permitted; another calibration requires a new experiment only after this correction is committed and reviewed.
+
+The fourth fresh experiment `fe48f15eeb83d566` is also immutable INVALID and will never be retried. Attempt 1 hash
+`12204036be0d3a25a211bf3aae20a45ca87f6246dfb3804449053cecfc0410cd` stopped with zero cells; ledger, report, and
+finalized hashes are `6b8b87f3bd0a06617e585e23712d778d6106d7e45bdca8daee6a1d58ddc92129`,
+`32ae41cc71fd03c6319ae8ddd11be794efe2d7e1e6bf14dd22a363831e95e9bb`, and
+`53a0a450c198855f10a0a4549e50994e66e5fb914c251ad7f79b37e404eb66f6`. Its runtime-vendor proof is
+`c1a48afcc27a693a329a4bcce1d52bbc43118c491c4ce28d2506b91733391c0a`, bounded outer failure hash is
+`4f5bcd7681299314`, and nested startup-message hash is `e9a3d8fa25ed9e27`. The static init payload and exact
+session/focus readiness succeeded, then production `node --import tsx` transformed the function callback passed to
+`page.evaluate` by `installBrowserLatencyHooks` and leaked a free `__name`. The corrected installer evaluates an exact
+static plain-JavaScript hook expression, JSON-encoding only a validated fail-stage enum. Exact-loader tests exercise the
+real init/install/arm/complete/read/resize/remove path and audit all remaining setup/capture/cleanup callbacks, allowing
+transform helpers only for exact Node-local handlers. Aggregate cleanup was complete; no retry is permitted and any
+future calibration requires a wholly new experiment after commit and review.
+
+The fifth fresh experiment `6706cafd8c32f6c0` is also immutable INVALID and will never be retried. Attempt 1 hash
+`193fd39b6f41d7928538c2cd2392b339941b45fbe51d043e2d2f4ded8e16b65b` stopped with zero cells; ledger, report, and
+finalized hashes are `3b6100b36c06b01e113b7d01e34b20aff1b50e48b88cb36eb797f14fc8be7e99`,
+`217123849a4e280f371afd796840d8b5146e663047f0ce56f32ca480429c6e3c`, and
+`259e55818e3937787301463a14b3c8ca538c4236eedc73f80d4004f35798caf6`. Its runtime-vendor proof is
+`c1a48afcc27a693a329a4bcce1d52bbc43118c491c4ce28d2506b91733391c0a`, bounded failure hash is
+`b12becd4e90bf372`, and nested startup-message hash is `dec3d9ab7735b19b`. The old verifier raw-hashed dynamic `/`
+against the immutable source index hash, even though frozen `renderIndexHtml` changes the title, numeric cache-busters,
+exact CLI bootstrap, and two allowlisted visibility markers. The correction preserves the source hash independently,
+canonicalizes only those exact transformations before requiring full source equality, and continues to require raw
+byte equality for referenced `app.js` and `styles.css`. Cleanup was complete; no retry is permitted and any future
+calibration requires a wholly new experiment after commit and review.
+
+The sixth fresh experiment `9c4d0087fa344ef1` is also immutable INVALID and will never be retried. Attempt 1 hash
+`00465b54fe716a9da4792a1ba552ecd32dea42bbfdb03cfa1a85bffd55958d8a` stopped with zero cells; ledger, report, and
+finalized hashes are `17ac23e5765cbf42bd5ed91920b6b241e2ee58141becec55b726cd7b84e40c85`,
+`56600a0b026886afd387978bb04a86aec6fc88749ea3902a0d364b1323c46a56`, and
+`b64ed63213b92931f143c40415c23c4c9684d6c730db31df20934975fa6cc703`. Its runtime-vendor proof is
+`c1a48afcc27a693a329a4bcce1d52bbc43118c491c4ce28d2506b91733391c0a`, bounded failure hash is
+`9eea4651f2e1886f`, and nested startup-message hash is `063c9eb222973875`. Raw dynamic error text was not retained and
+cannot be reconstructed uniquely, so the trigger remains indeterminate. The cleanup-accounting root cause is proven:
+after cleanup nulled the runtime and overlay handles, a later proof-construction error reached the generic catch, which
+incorrectly inferred all cleanup fields from null handles and discarded the completed proof and evidence prefix.
+Read-only live inspection found every recorded PID dead and no attempt-owned process, tmux socket, scenario root, or
+overlay root. The correction hoists explicit resource state and durable monotonic cleanup proof, preserves completed
+cells/diagnostics, invokes cleanup once, and separates later `runtime-proof-failed` evidence from any
+`runtime-cleanup-failed` evidence. No retry is permitted; any future calibration requires a wholly new experiment after
+commit and review. A recurring real-runtime gate additionally proved a composer-row TOCTOU between the successful
+readiness poll and its immediate action-time reread. The corrected barrier accepts only two consecutive identical,
+exactly equal visible pane/xterm snapshots and clicks the row from that accepted snapshot, with no fixed sleep.
+
+The seventh fresh experiment `9e070ba5a75eca90` is also immutable INVALID and will never be retried. Attempt 1 hash
+`3bcea24a95da48dce284c6d45bb45bfb4766eb1e5913e24dbcaf594f18caf133` stopped with zero published samples; ledger,
+report, and finalized hashes are `b7d751a3df2810e31a20a02afe9fd7fbd5cbe852080d32d3e96e5fabebb4566b`,
+`dca02c5b6c15430c713f319fc775d0af295ea36ae67da4becb28609ef4eba581`, and
+`3b720bf2738b06b6e39db62274fc7c4efdb6c450bf1bc0e9ebd119866e1098b2`; the bounded failure hash is
+`793268f4b26a4359`. No later calibration attempt or diagnostic ABBA ran. The captured write had all four events, ruling
+out missing-event and quiescence hypotheses. The validator incorrectly required write, return, callback, parsed even
+though `@xterm/xterm` 6.0.0 legally calls the callback and `onWriteParsed` synchronously inside `Reflect.apply`, before
+the wrapper records return. The corrected invariant is causal: write first, callback before parsed, exactly one return
+either before callback or after parsed, with unchanged identity and monotonic checks. Report derivation uses the same
+stable nonnegative write-to-return, write-to-callback, and callback-to-parsed intervals for both schedules. Because the old strict failure
+surfaced only after cleanup, its invalid partial then failed transaction validation and was replaced by a producer-crash
+sentinel. The corrected producer retains the longest schema-valid cell/sample prefix, durable cleanup proof, and safe
+failure hashes before publication, so a later validation failure cannot discard them. No retry is permitted; any future
+calibration requires a wholly new experiment after commit and review.
+
+The eighth fresh experiment `c5a5074cc3710e0f` is also immutable INVALID and will never be retried. Attempt 1 hash
+`72dc5e1f5d2739cb9a5b20464a6635696840a6a9dec5aabd3193bb6dba4d28f3` stopped trace-off with one retained 1x cell and
+zero samples; ledger, report, and finalized hashes are
+`53ed53b9dea564629dcf8ffd11140f64485f85dde3ea525271a8c52d137645d8`,
+`c63d82bbe24e32e88408fb4f5fb977dba6e5ac9a43fa1a83f2a69a5179767d2d`, and
+`0be60a490bbedd93016698ada387295937928666abd6be292d0c40b7cf682f3e`. The retained runtime-vendor proof is
+`c1a48afcc27a693a329a4bcce1d52bbc43118c491c4ce28d2506b91733391c0a`, bounded failure hash is
+`386f7e7852f75046`, and startup-message hash is `f9cc966fa89ba331`; cleanup was completely verified and no later attempt
+or diagnostic ABBA ran. The exact error was `COD-374 evidence invalid: browser visibility is not joined to a parsed
+write`. The real hook's selected visibility events retained generation/input identity but lacked the explicit
+`attributedGeneration`/`attributedInputIndex` join because `selectAttribution` annotated only global output events;
+synthetic fixtures had manually enriched these fields. The correction applies the selected context to the matching
+parse-visible, render, visible, and paint chain while preserving ordinal/write identity and generation/RAF fencing. A
+real-hook contract executes parse, render, and RAF and feeds its unmodified trace through the Task 3 adapter and strict
+evidence derivation. This experiment remains immutable and cannot be retried; a corrected calibration requires a new
+experiment after commit and review.
+
+The ninth fresh experiment `92b2296a98c9bcf5` is also immutable INVALID and will never be retried. Attempt 1 hash
+`3aae425b0b178bca40001aad5327cd2e55449e24c2846dcdec6b816d2f9a1860` stopped trace-off with zero retained cells; ledger,
+report, and finalized hashes are `4281c8e515e80c202aa08280a05e727e91fb3f9c59a8a6708b54256c649f5cd5`,
+`dca02c5b6c15430c713f319fc775d0af295ea36ae67da4becb28609ef4eba581`, and
+`bac703d0fa329d6d8707357e8b2583f90066bfefb46c7851039ab1ed90cb43ca`; bounded failure hash is
+`793268f4b26a4359`. No later calibration attempt or diagnostic ABBA ran. The immutable producer-crash fallback retained
+false/unknown cleanup, which remains authoritative despite a later read-only inventory finding no matching live process,
+runtime worktree, or scenario root. The exact observation mismatch was a 16px inherited computed `.xterm` font size
+against the active terminal option and frozen 9px plan. The corrected probe reads only the finite positive numeric
+`window.app.terminal.options.fontSize`. A publication-time observation mismatch now produces a schema-valid
+`runtime-proof-failed` partial with the measured cell prefix, diagnostics, and durable cleanup proof intact; only bounded
+hashes are retained, and transaction recovery cannot replace it with a producer-crash sentinel. This experiment remains
+immutable and cannot be retried; a corrected calibration requires a new experiment after commit and review.
+
 Use disposable detached worktrees and the exact candidate runtime. Run complete fixed-size cohorts with tracing disabled and enabled. Do not continue to attribution if the overhead gate fails. Preserve every raw repetition and cleanup proof.
+
+For each fixed attempt plan, create the experiment root once with `mktemp -d /tmp/cod374-XXXXXXXX`, then invoke the
+concrete producer with explicit paths (no globs):
+
+```bash
+npx tsx scripts/perf/cod-374-runner.mjs \
+  --experiment-root /tmp/cod374-EXPERIMENT \
+  --repository-root /opt/projects/Codeman/.worktrees/COD-370-active-viewer-terminal-sizing \
+  --vendor-manifest /tmp/cod374-inputs/vendor-manifest.json \
+  --repetition-plan /tmp/cod374-inputs/attempt-0001-plan.json \
+  --overlay-artifact /tmp/cod374-inputs/candidate-overlay.json
+```
+
+Repeat only for schedule attempts 2 and 3 after each prior immutable attempt reconciles successfully. A rejected or
+contaminated attempt stops the experiment; do not rerun it.
 
 Expected accepted result: enabled p95 is no more than 5ms and no more than 10% worse than disabled. Otherwise publish a measurement-invalid report and stop.
 
@@ -487,12 +664,16 @@ Every repetition contains complete 1x and 4x cells and the same unfiltered chara
 
 - [ ] **Step 7: Generate and inspect the attribution report**
 
-Run the summarizer to a new report path. Confirm the first delayed component or mark the result inconclusive when intervals/uncertainty overlap. Do not include a product fix recommendation unless the boundary is causally demonstrated.
+Run the summarizer to a new `0700` `/tmp/cod374-output-*` directory and unused report path. Inspect all component-local
+durations, correctness, pane probes, diagnostics, and cleanup. The cross-domain conclusion must always remain
+`INCONCLUSIVE ACROSS CLOCK DOMAINS`; COD-374 does not identify a first delayed cross-clock boundary or make a causal
+product-fix recommendation.
 
 - [ ] **Step 8: Run final scoped verification**
 
 ```bash
-npm run test:perf -- test/perf-cod-374-trace.test.ts test/perf-cod-374-report.test.ts
+npm run test:perf -- test/perf-cod-374-trace.test.ts test/perf-cod-374-report.test.ts \
+  test/perf-cod-374-runner.test.ts
 npm test -- test/routes/perf-trace-routes.test.ts test/session-terminal-trace.test.ts \
   test/routes/ws-routes.test.ts test/cod374-latency-trace.test.ts
 npm run test:mobile -- test/mobile/cod374-input-latency.test.ts

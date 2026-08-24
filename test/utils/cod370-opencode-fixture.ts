@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -84,6 +85,13 @@ export interface CleanupProof {
   rootAbsent: boolean;
 }
 
+export interface FixtureResourceAllocation {
+  browserClosed: boolean;
+  serverStopped: boolean;
+  tmuxRemoved: boolean;
+  tempRootRemoved: boolean;
+}
+
 export interface ProcessIdentity {
   pid: number;
   commandLine: string;
@@ -133,7 +141,13 @@ function procIdentity(pid: number): {
   return { pid, ppid, startTimeTicks, executable, command };
 }
 
-async function waitUntil<T>(label: string, probe: () => T | false | Promise<T | false>, timeoutMs: number): Promise<T> {
+export class FatalFixtureProbeError extends Error {}
+
+export async function waitForFixture<T>(
+  label: string,
+  probe: () => T | false | Promise<T | false>,
+  timeoutMs: number
+): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -141,6 +155,7 @@ async function waitUntil<T>(label: string, probe: () => T | false | Promise<T | 
       const value = await probe();
       if (value !== false) return value;
     } catch (error) {
+      if (error instanceof FatalFixtureProbeError) throw error;
       lastError = error;
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, POLL_MS));
@@ -148,6 +163,8 @@ async function waitUntil<T>(label: string, probe: () => T | false | Promise<T | 
   const detail = lastError instanceof Error ? `: ${lastError.message}` : '';
   throw new Error(`Timed out waiting for ${label}${detail}`);
 }
+
+const waitUntil = waitForFixture;
 
 async function allocatePort(): Promise<number> {
   return new Promise((resolvePort, rejectPort) => {
@@ -221,6 +238,18 @@ function descendantsOf(ancestorPid: number): number[] {
     .map((entry) => entry.pid);
 }
 
+export function chooseOpenCodeCandidate<T extends { pid: number; executable: string; command: string }>(
+  panePid: number,
+  candidates: T[]
+): T {
+  const paneOwned = candidates.find((entry) => entry.pid === panePid);
+  if (paneOwned) return paneOwned;
+  if (candidates.length !== 1) {
+    throw new Error(`expected one live OpenCode descendant of pane ${panePid}, found ${candidates.length}`);
+  }
+  return candidates[0]!;
+}
+
 function liveOpenCodeIdentity(panePid: number): LiveProcessIdentity {
   const descendants = [panePid, ...descendantsOf(panePid)]
     .map((pid) => {
@@ -236,7 +265,10 @@ function liveOpenCodeIdentity(panePid: number): LiveProcessIdentity {
     const arguments_ = entry.command.split(' ').map((argument) => argument.toLowerCase());
     return executableName === 'opencode' || arguments_.some((argument) => /(?:^|\/)opencode$/.test(argument));
   });
-  if (candidates.length !== 1) {
+  let processIdentity;
+  try {
+    processIdentity = chooseOpenCodeCandidate(panePid, candidates);
+  } catch {
     throw new Error(
       `expected one live OpenCode descendant of pane ${panePid}, found ${candidates.length}: ${
         candidates.map((entry) => `${entry.pid}:${entry.executable}:${entry.command}`).join('; ') || 'none'
@@ -245,7 +277,6 @@ function liveOpenCodeIdentity(panePid: number): LiveProcessIdentity {
       }`
     );
   }
-  const processIdentity = candidates[0];
   const parentChain: LiveProcessIdentity['parentChain'] =
     processIdentity.pid === panePid
       ? [{ pid: processIdentity.pid, startTimeTicks: processIdentity.startTimeTicks }]
@@ -288,6 +319,8 @@ export class Cod370OpenCodeFixture {
   listenerIdentity: ProcessIdentity | null = null;
   listenerPid = 0;
   serverLog = '';
+  serverStdout = '';
+  serverStderr = '';
   browser: Browser | null = null;
   desktopContext: BrowserContext | null = null;
   phoneContext: BrowserContext | null = null;
@@ -297,6 +330,12 @@ export class Cod370OpenCodeFixture {
   sessionId = '';
   pane: PaneIdentity | null = null;
   initialOpenCodeIdentity: LiveProcessIdentity | null = null;
+  private resourceWasAllocated: FixtureResourceAllocation = {
+    browserClosed: false,
+    serverStopped: false,
+    tmuxRemoved: false,
+    tempRootRemoved: false,
+  };
   cleanupProof: CleanupProof = {
     desktopContextClosed: false,
     phoneContextClosed: false,
@@ -362,6 +401,7 @@ export class Cod370OpenCodeFixture {
   async start(): Promise<void> {
     this.assertNoPriorArtifacts();
     this.root = realpathSync(mkdtempSync(join(tmpdir(), PREFIX)));
+    this.resourceWasAllocated.tempRootRemoved = true;
     if (dirname(this.root) !== realpathSync(tmpdir()) || !basename(this.root).startsWith(PREFIX)) {
       throw new Error(`Unsafe COD-370 scenario root: ${this.root}`);
     }
@@ -412,23 +452,31 @@ export class Cod370OpenCodeFixture {
       { cwd: this.runtimeRoot, env, stdio: ['ignore', 'pipe', 'pipe'], detached: false }
     );
     this.server = child;
+    this.resourceWasAllocated.serverStopped = true;
     if (!child.pid) throw new Error('Codeman child has no PID');
+    const childClosed = new Promise<void>((resolveClosed) => child.once('close', () => resolveClosed()));
     this.serverIdentity = { pid: child.pid, commandLine: commandLine(child.pid) };
     const listenMarker = `Codeman web interface running at http://127.0.0.1:${this.port}`;
     let markerSeen = false;
-    const append = (chunk: Buffer) => {
-      this.serverLog = `${this.serverLog}${chunk.toString()}`.slice(-30_000);
+    const append = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
+      const text = chunk.toString();
+      if (stream === 'stdout') this.serverStdout = `${this.serverStdout}${text}`.slice(-30_000);
+      else this.serverStderr = `${this.serverStderr}${text}`.slice(-30_000);
+      this.serverLog = `${this.serverLog}${text}`.slice(-30_000);
       markerSeen ||= this.serverLog.includes(listenMarker);
     };
-    child.stdout?.on('data', append);
-    child.stderr?.on('data', append);
+    child.stdout?.on('data', (chunk) => append('stdout', chunk));
+    child.stderr?.on('data', (chunk) => append('stderr', chunk));
 
     try {
       await waitUntil(
         `owned Codeman server on ${this.port}`,
         async () => {
           if (child.exitCode !== null || child.signalCode !== null) {
-            throw new Error(`server exited early\n${this.serverLog}`);
+            await childClosed;
+            const fatal = new FatalFixtureProbeError('owned server exited before readiness');
+            Object.assign(fatal, { serverDiagnostics: this.serverDiagnosticHashes() });
+            throw fatal;
           }
           if (!markerSeen) return false;
           const response = await fetch(`${this.baseUrl}/api/status`).catch(() => null);
@@ -446,14 +494,16 @@ export class Cod370OpenCodeFixture {
         60_000
       );
     } catch (error) {
-      const ss = execFileSync('ss', ['-ltnp', 'sport', '=', `:${this.port}`], { encoding: 'utf8' });
-      throw new Error(`${error instanceof Error ? error.message : String(error)}\nlistener=${ss}\n${this.serverLog}`);
+      const readinessError = new Error('owned server readiness failed', { cause: error });
+      Object.assign(readinessError, { serverDiagnostics: this.serverDiagnosticHashes() });
+      throw readinessError;
     }
     this.serverIdentity = { pid: child.pid, commandLine: commandLine(child.pid) };
     if (!this.serverIdentity.commandLine.includes(String(this.port)))
       throw new Error('Server identity lacks owned port');
 
     this.browser = await chromium.launch({ headless: true });
+    this.resourceWasAllocated.browserClosed = true;
     this.desktopContext = await this.browser.newContext({
       viewport: { width: 1440, height: 900 },
     });
@@ -469,6 +519,18 @@ export class Cod370OpenCodeFixture {
     this.desktopPage = await this.desktopContext.newPage();
     this.phonePage = await this.phoneContext.newPage();
     this.chromiumPids = chromiumDescendants(process.pid);
+  }
+
+  serverDiagnosticHashes(): { stdoutHashes: string[]; stderrHashes: string[] } {
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 16);
+    return {
+      stdoutHashes: this.serverStdout ? [hash(this.serverStdout)] : [],
+      stderrHashes: this.serverStderr ? [hash(this.serverStderr)] : [],
+    };
+  }
+
+  resourceAllocation(): FixtureResourceAllocation {
+    return { ...this.resourceWasAllocated };
   }
 
   async navigatePages(): Promise<void> {
@@ -506,6 +568,9 @@ export class Cod370OpenCodeFixture {
     });
     this.sessionId = created?.session?.id ?? created?.id ?? created?.sessionId;
     if (!this.sessionId) throw new Error(`Session response lacks id: ${JSON.stringify(created)}`);
+    // The request is side-effecting and can fail after the server creates tmux
+    // but before the client observes the response. Fail closed from dispatch.
+    this.resourceWasAllocated.tmuxRemoved = true;
     await this.api('POST', `/api/sessions/${this.sessionId}/interactive`);
     const muxName = `codeman-${this.sessionId.slice(0, 8)}`;
     this.pane = await waitUntil(
@@ -622,6 +687,14 @@ export class Cod370OpenCodeFixture {
   paneText(): string {
     if (!this.pane) throw new Error('OpenCode pane has not been created');
     return this.tmux(['capture-pane', '-p', '-t', this.pane.paneId, '-S', '-200']);
+  }
+
+  paneViewportText(): string {
+    if (!this.pane) throw new Error('OpenCode pane has not been created');
+    return execFileSync('tmux', ['-L', this.socketName, 'capture-pane', '-p', '-t', this.pane.paneId], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).replace(/\n$/, '');
   }
 
   async capturePaneText(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<string> {
@@ -817,7 +890,10 @@ export class Cod370OpenCodeFixture {
           rmSync(socketPath, { force: true });
           if (existsSync(socketPath)) throw new Error(`${socketPath} remains`);
         },
-        () => (this.cleanupProof.socketAbsent = true)
+        () => {
+          this.cleanupProof.socketAbsent = true;
+          if (this.resourceWasAllocated.tmuxRemoved) this.cleanupProof.tmuxTargetAbsent = true;
+        }
       );
     }
 
@@ -879,6 +955,6 @@ export class Cod370OpenCodeFixture {
       );
     }
 
-    if (errors.length) throw new AggregateError(errors, `COD-370 fixture cleanup failed\n${this.serverLog}`);
+    if (errors.length) throw new AggregateError(errors, 'COD-370 fixture cleanup failed');
   }
 }

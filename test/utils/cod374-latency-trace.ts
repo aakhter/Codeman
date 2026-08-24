@@ -837,590 +837,569 @@ export interface BrowserHookInstallOptions {
   failAfter?: string;
 }
 
+const BROWSER_LATENCY_INIT_SCRIPT = [
+  '(() => {',
+  '    const browserWindow = window;',
+  '    const globalOutputStages = new Set([',
+  "        'browser.ws-output-receive',",
+  "        'browser.output-handler',",
+  "        'browser.write-queued',",
+  "        'browser.xterm-write',",
+  "        'browser.xterm-write-return',",
+  "        'browser.xterm-write-callback',",
+  "        'browser.xterm-parsed',",
+  '    ]);',
+  '    const visibilityStages = new Set([',
+  "        'browser.xterm-visible-after-parse',",
+  "        'browser.xterm-render',",
+  "        'browser.xterm-visible',",
+  "        'browser.paint-proxy',",
+  '    ]);',
+  '    const state = {',
+  '        events: [],',
+  '        window: null,',
+  '        contexts: [],',
+  '        armedContexts: [],',
+  '        dispatchContext: null,',
+  '        pendingOnDataContexts: [],',
+  '        pendingLogicalContexts: [],',
+  '        pendingReliableContexts: [],',
+  '        reliableContexts: [],',
+  '        generation: 0,',
+  '        clockId: `page-${crypto.randomUUID()}`,',
+  '        originals: {},',
+  '        initCleanup: [],',
+  '        hookCleanup: [],',
+  '        listenerCount: 0,',
+  '        wrappersInstalled: false,',
+  '        outputOrdinal: 0,',
+  '        pendingOutputOrdinal: 0,',
+  '        currentOutput: null,',
+  '        flushingOutput: null,',
+  '        epochOutputs: {},',
+  '        inputContextsBySeq: {},',
+  '        ackedGenerations: {},',
+  '        firstAcked: false,',
+  '        sendAttempts: {},',
+  '        nextWriteId: 1,',
+  '        pendingParse: [],',
+  '        lastParsed: null,',
+  '        pendingVisibility: {},',
+  '        currentSelections: {},',
+  '        completedGenerations: {},',
+  '        nextSelectionId: 1,',
+  '    };',
+  '    const contextSnapshot = (context) => (context ? { ...context } : null);',
+  '    const windowContext = () => state.window',
+  '        ? {',
+  '            trialId: state.window.trialId,',
+  '            generation: 0,',
+  '            inputIndex: 0,',
+  '            tokenHash: state.window.tokenHash,',
+  '            tokenLength: state.window.tokenLength,',
+  '        }',
+  '        : null;',
+  '    const record = (stage, extra = {}, suppliedContext) => {',
+  '        const active = contextSnapshot(suppliedContext ?? (globalOutputStages.has(stage) ? windowContext() : null));',
+  '        if (!active ||',
+  '            state.events.some((event) => event.stage === stage &&',
+  '                event.trialId === active.trialId &&',
+  '                event.generation === active.generation &&',
+  '                event.inputIndex === active.inputIndex &&',
+  '                (extra.attempt === undefined || event.attempt === extra.attempt) &&',
+  '                (!globalOutputStages.has(stage) && !visibilityStages.has(stage)',
+  '                    ? true',
+  '                    : event.ordinal === extra.ordinal && (extra.writeId === undefined || event.writeId === extra.writeId))))',
+  '            return null;',
+  '        const event = {',
+  '            stage,',
+  '            atMs: window.performance.now(),',
+  "            clock: 'browser',",
+  '            clockId: state.clockId,',
+  '            trialId: active.trialId,',
+  '            generation: active.generation,',
+  '            inputIndex: active.inputIndex,',
+  '            tokenHash: active.tokenHash,',
+  '            tokenLength: active.tokenLength,',
+  '            selectedForAttribution: !globalOutputStages.has(stage) && !visibilityStages.has(stage),',
+  '            ...extra,',
+  '        };',
+  '        state.events.push(event);',
+  '        return event;',
+  '    };',
+  '    const exactTokenVisible = (terminal, context) => {',
+  '        if (!context?.token)',
+  '            return false;',
+  "        const marker = context.token[0].replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');",
+  '        const pattern = new RegExp(`^\\\\s*[│┃]\\\\s+(${marker}[A-Za-z0-9]*)\\\\s*(?:[│┃])?\\\\s*$`);',
+  '        const matches = [];',
+  '        const buffer = terminal.buffer.active;',
+  '        for (let row = 0; row < buffer.length; row++) {',
+  '            const match = buffer.getLine(row)?.translateToString(true).match(pattern)?.[1];',
+  '            if (match)',
+  '                matches.push(match);',
+  '        }',
+  '        return matches.length === 1 && matches[0] === context.token;',
+  '    };',
+  '    const selectAttribution = (context, ordinal, writeId) => {',
+  '        for (const event of state.events) {',
+  '            if (event.trialId !== context.trialId)',
+  '                continue;',
+  '            const globalOutput = globalOutputStages.has(String(event.stage));',
+  '            const selectedVisibility = visibilityStages.has(String(event.stage)) &&',
+  '                event.selectedForAttribution !== false &&',
+  '                event.generation === context.generation &&',
+  '                event.inputIndex === context.inputIndex;',
+  '            if (!globalOutput && !selectedVisibility)',
+  '                continue;',
+  "            const writeStage = String(event.stage).startsWith('browser.xterm');",
+  '            const exactWrite = selectedVisibility || writeStage;',
+  '            if (event.ordinal === ordinal && (!exactWrite || event.writeId === undefined || event.writeId === writeId)) {',
+  '                event.selectedForAttribution = true;',
+  '                event.attributedGeneration = context.generation;',
+  '                event.attributedInputIndex = context.inputIndex;',
+  '            }',
+  '        }',
+  '    };',
+  '    state.originals.record = record;',
+  '    state.originals.exactTokenVisible = exactTokenVisible;',
+  '    state.originals.selectAttribution = selectAttribution;',
+  '    browserWindow.__cod374LatencyTrace = state;',
+  '    const keydown = () => {',
+  '        const context = state.armedContexts.shift() ?? null;',
+  '        state.dispatchContext = context;',
+  '        if (context)',
+  '            state.pendingOnDataContexts.push(context);',
+  "        record('browser.keydown', {}, context);",
+  '    };',
+  "    window.addEventListener('keydown', keydown, true);",
+  '    state.originals.keydown = keydown;',
+  '    state.listenerCount++;',
+  '    state.initCleanup.push(() => {',
+  "        window.removeEventListener('keydown', keydown, true);",
+  '        state.listenerCount--;',
+  '    });',
+  '    const OriginalWebSocket = window.WebSocket;',
+  '    state.originals.WebSocket = OriginalWebSocket;',
+  '    class TracedWebSocket extends OriginalWebSocket {',
+  '        constructor(url, protocols) {',
+  '            super(url, protocols);',
+  '            const receive = (event) => {',
+  "                if (typeof event.data !== 'string')",
+  '                    return;',
+  '                try {',
+  '                    const frame = JSON.parse(event.data);',
+  "                    if (frame?.t === 'o' && typeof frame.d === 'string' && state.window?.collecting && state.firstAcked) {",
+  '                        const ordinal = ++state.outputOrdinal;',
+  '                        state.pendingOutputOrdinal = ordinal;',
+  "                        const start = '\\x1b[?2026h';",
+  "                        const end = '\\x1b[?2026l';",
+  '                        const rawValue = frame.d.startsWith(start) && frame.d.endsWith(end) ? frame.d.slice(start.length, -end.length) : frame.d;',
+  "                        record('browser.ws-output-receive', {",
+  '                            bytes: new TextEncoder().encode(rawValue).byteLength,',
+  '                            ordinal,',
+  '                            rawValue,',
+  '                        });',
+  '                    }',
+  '                }',
+  '                catch {',
+  '                    // Product handling remains authoritative for malformed frames.',
+  '                }',
+  '            };',
+  "            this.addEventListener('message', receive);",
+  '            state.listenerCount++;',
+  '            state.initCleanup.push(() => {',
+  "                this.removeEventListener('message', receive);",
+  '                state.listenerCount--;',
+  '            });',
+  '        }',
+  '        send(data) {',
+  '            let frame = null;',
+  "            if (typeof data === 'string') {",
+  '                try {',
+  '                    frame = JSON.parse(data);',
+  '                }',
+  '                catch {',
+  '                    // Non-JSON frames remain outside the trace.',
+  '                }',
+  '            }',
+  "            if (frame?.t === 'i' &&",
+  "                typeof frame.cid === 'string' &&",
+  '                Number.isInteger(frame.seq) &&',
+  "                typeof frame.d === 'string') {",
+  '                const entries = state.inputContextsBySeq[frame.seq] ?? [',
+  '                    { context: state.dispatchContext, coalescedIndex: 0, coalescedCount: 1 },',
+  '                ];',
+  '                const attempts = entries.map((entry) => {',
+  '                    const context = contextSnapshot(entry.context);',
+  '                    const attemptKey = `${context?.generation ?? 0}:${frame.cid}:${frame.seq}`;',
+  '                    const attempt = (state.sendAttempts[attemptKey] ?? 0) + 1;',
+  '                    state.sendAttempts[attemptKey] = attempt;',
+  '                    const details = {',
+  '                        clientId: frame.cid,',
+  '                        seq: frame.seq,',
+  '                        bytes: new TextEncoder().encode(frame.d).byteLength,',
+  '                        attempt,',
+  '                        coalescedIndex: entry.coalescedIndex,',
+  '                        coalescedCount: entry.coalescedCount,',
+  '                        selectedForAttribution: false,',
+  '                    };',
+  "                    return { context, details, event: record('browser.ws-input-send', details, context) };",
+  '                });',
+  '                try {',
+  '                    const result = super.send(data);',
+  '                    for (const attempt of attempts) {',
+  '                        if (attempt.event)',
+  '                            attempt.event.selectedForAttribution = true;',
+  "                        record('browser.ws-input-send-return', { ...attempt.details, selectedForAttribution: true }, attempt.context);",
+  '                    }',
+  '                    return result;',
+  '                }',
+  '                catch (error) {',
+  '                    for (const attempt of attempts) {',
+  "                        record('browser.ws-input-send-failure', { ...attempt.details, failureHash: 'ffffffffffffffff', selectedForAttribution: false }, attempt.context);",
+  '                    }',
+  '                    throw error;',
+  '                }',
+  '            }',
+  '            return super.send(data);',
+  '        }',
+  '    }',
+  '    window.WebSocket = TracedWebSocket;',
+  '    let tracedTerminal;',
+  "    Object.defineProperty(window, 'Terminal', {",
+  '        configurable: true,',
+  '        get: () => tracedTerminal,',
+  '        set: (OriginalTerminal) => {',
+  '            state.originals.Terminal = OriginalTerminal;',
+  '            tracedTerminal = new Proxy(OriginalTerminal, {',
+  '                construct(target, argumentsList, newTarget) {',
+  '                    const terminal = Reflect.construct(target, argumentsList, newTarget);',
+  '                    const disposable = terminal.onData(() => {',
+  '                        const context = state.pendingOnDataContexts.shift() ?? state.dispatchContext;',
+  '                        if (context)',
+  '                            state.pendingLogicalContexts.push(context);',
+  "                        record('browser.xterm-on-data', {}, context);",
+  '                    });',
+  '                    state.initCleanup.push(() => {',
+  '                        disposable.dispose();',
+  '                        state.listenerCount--;',
+  '                    });',
+  '                    state.listenerCount++;',
+  '                    return terminal;',
+  '                },',
+  '            });',
+  '        },',
+  '    });',
+  '    state.initCleanup.push(() => {',
+  '        window.WebSocket = OriginalWebSocket;',
+  '    });',
+  '    state.initCleanup.push(() => {',
+  '        const originalTerminal = state.originals.Terminal;',
+  '        delete browserWindow.Terminal;',
+  '        browserWindow.Terminal = originalTerminal;',
+  '    });',
+  '})();',
+].join('\n');
+
 export async function installBrowserLatencyInitScript(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const browserWindow = window as any;
-    const globalOutputStages = new Set([
-      'browser.ws-output-receive',
-      'browser.output-handler',
-      'browser.write-queued',
-      'browser.xterm-write',
-      'browser.xterm-write-return',
-      'browser.xterm-write-callback',
-      'browser.xterm-parsed',
-    ]);
-    const visibilityStages = new Set([
-      'browser.xterm-visible-after-parse',
-      'browser.xterm-render',
-      'browser.xterm-visible',
-      'browser.paint-proxy',
-    ]);
-    const state = {
-      events: [] as Array<Record<string, unknown>>,
-      window: null as null | {
-        trialId: string;
-        tokenHash: string;
-        tokenLength: number;
-        collecting: boolean;
-      },
-      contexts: [] as Array<{
-        trialId: string;
-        generation: number;
-        inputIndex: number;
-        tokenHash: string;
-        tokenLength: number;
-        token: string;
-      }>,
-      armedContexts: [] as any[],
-      dispatchContext: null as any,
-      pendingOnDataContexts: [] as any[],
-      pendingLogicalContexts: [] as any[],
-      pendingReliableContexts: [] as any[][],
-      reliableContexts: [] as any[],
-      generation: 0,
-      clockId: `page-${crypto.randomUUID()}`,
-      originals: {} as Record<string, any>,
-      initCleanup: [] as Array<() => void | Promise<void>>,
-      hookCleanup: [] as Array<() => void | Promise<void>>,
-      listenerCount: 0,
-      wrappersInstalled: false,
-      outputOrdinal: 0,
-      pendingOutputOrdinal: 0,
-      currentOutput: null as null | { ordinal: number },
-      flushingOutput: null as null | { ordinal: number },
-      epochOutputs: {} as Record<number, { ordinal: number }>,
-      inputContextsBySeq: {} as Record<number, any[]>,
-      ackedGenerations: {} as Record<number, boolean>,
-      firstAcked: false,
-      sendAttempts: {} as Record<string, number>,
-      nextWriteId: 1,
-      pendingParse: [] as Array<{ writeId: number; ordinal: number }>,
-      lastParsed: null as null | { writeId: number; ordinal: number },
-      pendingVisibility: {} as Record<number, any>,
-      currentSelections: {} as Record<number, any>,
-      completedGenerations: {} as Record<number, boolean>,
-      nextSelectionId: 1,
-    };
-    const contextSnapshot = (context: any) => (context ? { ...context } : null);
-    const windowContext = () =>
-      state.window
-        ? {
-            trialId: state.window.trialId,
-            generation: 0,
-            inputIndex: 0,
-            tokenHash: state.window.tokenHash,
-            tokenLength: state.window.tokenLength,
-          }
-        : null;
-    const record = (stage: string, extra: Record<string, unknown> = {}, suppliedContext?: any) => {
-      const active = contextSnapshot(suppliedContext ?? (globalOutputStages.has(stage) ? windowContext() : null));
-      if (
-        !active ||
-        state.events.some(
-          (event) =>
-            event.stage === stage &&
-            event.trialId === active.trialId &&
-            event.generation === active.generation &&
-            event.inputIndex === active.inputIndex &&
-            (extra.attempt === undefined || event.attempt === extra.attempt) &&
-            (!globalOutputStages.has(stage) && !visibilityStages.has(stage)
-              ? true
-              : event.ordinal === extra.ordinal && (extra.writeId === undefined || event.writeId === extra.writeId))
-        )
-      )
-        return null;
-      const event = {
-        stage,
-        atMs: window.performance.now(),
-        clock: 'browser',
-        clockId: state.clockId,
-        trialId: active.trialId,
-        generation: active.generation,
-        inputIndex: active.inputIndex,
-        tokenHash: active.tokenHash,
-        tokenLength: active.tokenLength,
-        selectedForAttribution: !globalOutputStages.has(stage) && !visibilityStages.has(stage),
-        ...extra,
-      };
-      state.events.push(event);
-      return event;
-    };
-    const exactTokenVisible = (terminal: any, context: any) => {
-      if (!context?.token) return false;
-      const marker = context.token[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`^\\s*[│┃]\\s+(${marker}[A-Za-z0-9]*)\\s*(?:[│┃])?\\s*$`);
-      const matches: string[] = [];
-      const buffer = terminal.buffer.active;
-      for (let row = 0; row < buffer.length; row++) {
-        const match = buffer.getLine(row)?.translateToString(true).match(pattern)?.[1];
-        if (match) matches.push(match);
-      }
-      return matches.length === 1 && matches[0] === context.token;
-    };
-    const selectAttribution = (context: any, ordinal: number, writeId: number) => {
-      for (const event of state.events) {
-        if (event.trialId !== context.trialId || !globalOutputStages.has(String(event.stage))) continue;
-        const writeStage = String(event.stage).startsWith('browser.xterm');
-        if (event.ordinal === ordinal && (!writeStage || event.writeId === undefined || event.writeId === writeId)) {
-          event.selectedForAttribution = true;
-          event.attributedGeneration = context.generation;
-          event.attributedInputIndex = context.inputIndex;
-        }
-      }
-    };
-    state.originals.record = record;
-    state.originals.exactTokenVisible = exactTokenVisible;
-    state.originals.selectAttribution = selectAttribution;
-    browserWindow.__cod374LatencyTrace = state;
-
-    const keydown = () => {
-      const context = state.armedContexts.shift() ?? null;
-      state.dispatchContext = context;
-      if (context) state.pendingOnDataContexts.push(context);
-      record('browser.keydown', {}, context);
-    };
-    window.addEventListener('keydown', keydown, true);
-    state.originals.keydown = keydown;
-    state.listenerCount++;
-    state.initCleanup.push(() => {
-      window.removeEventListener('keydown', keydown, true);
-      state.listenerCount--;
-    });
-
-    const OriginalWebSocket = window.WebSocket;
-    state.originals.WebSocket = OriginalWebSocket;
-    class TracedWebSocket extends OriginalWebSocket {
-      constructor(url: string | URL, protocols?: string | string[]) {
-        super(url, protocols);
-        const receive = (event: MessageEvent) => {
-          if (typeof event.data !== 'string') return;
-          try {
-            const frame = JSON.parse(event.data);
-            if (frame?.t === 'o' && typeof frame.d === 'string' && state.window?.collecting && state.firstAcked) {
-              const ordinal = ++state.outputOrdinal;
-              state.pendingOutputOrdinal = ordinal;
-              const start = '\x1b[?2026h';
-              const end = '\x1b[?2026l';
-              const rawValue =
-                frame.d.startsWith(start) && frame.d.endsWith(end) ? frame.d.slice(start.length, -end.length) : frame.d;
-              record('browser.ws-output-receive', {
-                bytes: new TextEncoder().encode(rawValue).byteLength,
-                ordinal,
-                rawValue,
-              });
-            }
-          } catch {
-            // Product handling remains authoritative for malformed frames.
-          }
-        };
-        this.addEventListener('message', receive);
-        state.listenerCount++;
-        state.initCleanup.push(() => {
-          this.removeEventListener('message', receive);
-          state.listenerCount--;
-        });
-      }
-
-      override send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-        let frame: any = null;
-        if (typeof data === 'string') {
-          try {
-            frame = JSON.parse(data);
-          } catch {
-            // Non-JSON frames remain outside the trace.
-          }
-        }
-        if (
-          frame?.t === 'i' &&
-          typeof frame.cid === 'string' &&
-          Number.isInteger(frame.seq) &&
-          typeof frame.d === 'string'
-        ) {
-          const entries = state.inputContextsBySeq[frame.seq] ?? [
-            { context: state.dispatchContext, coalescedIndex: 0, coalescedCount: 1 },
-          ];
-          const attempts = entries.map((entry: any) => {
-            const context = contextSnapshot(entry.context);
-            const attemptKey = `${context?.generation ?? 0}:${frame.cid}:${frame.seq}`;
-            const attempt = (state.sendAttempts[attemptKey] ?? 0) + 1;
-            state.sendAttempts[attemptKey] = attempt;
-            const details = {
-              clientId: frame.cid,
-              seq: frame.seq,
-              bytes: new TextEncoder().encode(frame.d).byteLength,
-              attempt,
-              coalescedIndex: entry.coalescedIndex,
-              coalescedCount: entry.coalescedCount,
-              selectedForAttribution: false,
-            };
-            return { context, details, event: record('browser.ws-input-send', details, context) };
-          });
-          try {
-            const result = super.send(data);
-            for (const attempt of attempts) {
-              if (attempt.event) attempt.event.selectedForAttribution = true;
-              record(
-                'browser.ws-input-send-return',
-                { ...attempt.details, selectedForAttribution: true },
-                attempt.context
-              );
-            }
-            return result;
-          } catch (error) {
-            for (const attempt of attempts) {
-              record(
-                'browser.ws-input-send-failure',
-                { ...attempt.details, failureHash: 'ffffffffffffffff', selectedForAttribution: false },
-                attempt.context
-              );
-            }
-            throw error;
-          }
-        }
-        return super.send(data);
-      }
-    }
-    window.WebSocket = TracedWebSocket;
-
-    let tracedTerminal: any;
-    Object.defineProperty(window, 'Terminal', {
-      configurable: true,
-      get: () => tracedTerminal,
-      set: (OriginalTerminal) => {
-        state.originals.Terminal = OriginalTerminal;
-        tracedTerminal = new Proxy(OriginalTerminal, {
-          construct(target, argumentsList, newTarget) {
-            const terminal = Reflect.construct(target, argumentsList, newTarget);
-            const disposable = terminal.onData(() => {
-              const context = state.pendingOnDataContexts.shift() ?? state.dispatchContext;
-              if (context) state.pendingLogicalContexts.push(context);
-              record('browser.xterm-on-data', {}, context);
-            });
-            state.initCleanup.push(() => {
-              disposable.dispose();
-              state.listenerCount--;
-            });
-            state.listenerCount++;
-            return terminal;
-          },
-        });
-      },
-    });
-    state.initCleanup.push(() => {
-      window.WebSocket = OriginalWebSocket;
-    });
-    state.initCleanup.push(() => {
-      const originalTerminal = state.originals.Terminal;
-      delete browserWindow.Terminal;
-      browserWindow.Terminal = originalTerminal;
-    });
-  });
+  await page.addInitScript({ content: BROWSER_LATENCY_INIT_SCRIPT });
 }
+const BROWSER_HOOK_FAILURE_STAGES = new Set([
+  '_sendInputAsync',
+  '_reliableSend',
+  '_drainSession',
+  '_onWsInputAck',
+  '_onSessionTerminal',
+  'batchTerminalWrite',
+  'flushPendingWrites',
+  'terminal.write',
+  'parsed-listener',
+  'xterm-listeners',
+]);
+
+const BROWSER_LATENCY_HOOK_INSTALL_SCRIPT = [
+  '((installOptions) => {',
+  '    const browserWindow = window;',
+  '    const state = browserWindow.__cod374LatencyTrace;',
+  '    const app = browserWindow.app;',
+  '    if (!state || !app || state.wrappersInstalled)',
+  "        throw new Error('COD-374 init hook is unavailable or duplicated');",
+  '    const record = state.originals.record;',
+  '    const exactTokenVisible = state.originals.exactTokenVisible;',
+  '    const selectAttribution = state.originals.selectAttribution;',
+  '    const restorers = [];',
+  '    const maybeFail = (name) => {',
+  '        if (installOptions.failAfter === name)',
+  '            throw new Error(`Injected hook install failure after ${name}`);',
+  '    };',
+  '    const wrap = (owner, name, observer) => {',
+  '        const original = owner[name];',
+  '        state.originals[name] = original;',
+  '        owner[name] = function (...args) {',
+  '            observer(...args);',
+  '            return Reflect.apply(original, this, args);',
+  '        };',
+  '        restorers.push(() => {',
+  '            owner[name] = original;',
+  '        });',
+  '        maybeFail(name);',
+  '    };',
+  '    const install = () => {',
+  "        wrap(app, '_sendInputAsync', (data) => {",
+  "            const requestedCount = typeof data === 'string' ? Math.max(1, Array.from(data).length) : 1;",
+  '            const contexts = state.pendingLogicalContexts.splice(0, requestedCount);',
+  '            if (contexts.length === 0 && state.dispatchContext)',
+  '                contexts.push(state.dispatchContext);',
+  '            const entries = contexts.map((context, coalescedIndex) => ({',
+  '                context,',
+  '                coalescedIndex,',
+  '                coalescedCount: contexts.length,',
+  '            }));',
+  '            if (entries.length)',
+  '                state.pendingReliableContexts.push(entries);',
+  '            for (const entry of entries) {',
+  "                record('browser.logical', { coalescedIndex: entry.coalescedIndex, coalescedCount: entry.coalescedCount }, entry.context);",
+  '            }',
+  '        });',
+  "        wrap(app, '_reliableSend', () => {",
+  '            state.reliableContexts = state.pendingReliableContexts.shift() ?? [',
+  '                { context: state.dispatchContext, coalescedIndex: 0, coalescedCount: 1 },',
+  '            ];',
+  '        });',
+  "        wrap(app, '_drainSession', (sessionId) => {",
+  '            const pending = app._pendingDeliveries.get(sessionId);',
+  '            const latest = pending?.at(-1);',
+  '            if (latest) {',
+  '                const entries = state.reliableContexts.map((entry) => ({',
+  '                    ...entry,',
+  '                    context: { ...entry.context },',
+  '                }));',
+  '                state.inputContextsBySeq[latest.seq] = entries;',
+  '                for (const entry of entries) {',
+  "                    record('browser.durable-queued', {",
+  '                        clientId: app._clientId,',
+  '                        seq: latest.seq,',
+  '                        coalescedIndex: entry.coalescedIndex,',
+  '                        coalescedCount: entry.coalescedCount,',
+  '                    }, entry.context);',
+  '                }',
+  '            }',
+  '        });',
+  '        const originalAck = app._onWsInputAck;',
+  '        state.originals._onWsInputAck = originalAck;',
+  '        app._onWsInputAck = function (seq) {',
+  '            const result = Reflect.apply(originalAck, this, [seq]);',
+  '            const pendingCount = app._pendingDeliveries.get(app._wsSessionId)?.length ?? 0;',
+  '            const entries = state.inputContextsBySeq[seq] ?? [];',
+  '            for (const entry of entries) {',
+  "                record('browser.ws-input-ack', {",
+  '                    clientId: app._clientId,',
+  '                    seq,',
+  '                    pendingCount,',
+  '                    coalescedIndex: entry.coalescedIndex,',
+  '                    coalescedCount: entry.coalescedCount,',
+  '                }, entry.context);',
+  '                state.ackedGenerations[entry.context.generation] = true;',
+  '                state.firstAcked = true;',
+  '            }',
+  '            return result;',
+  '        };',
+  '        restorers.push(() => {',
+  '            app._onWsInputAck = originalAck;',
+  '        });',
+  "        maybeFail('_onWsInputAck');",
+  '        const originalTerminalHandler = app._onSessionTerminal;',
+  '        state.originals._onSessionTerminal = originalTerminalHandler;',
+  '        app._onSessionTerminal = function (...args) {',
+  '            const ordinal = state.pendingOutputOrdinal;',
+  '            if (!ordinal)',
+  '                return Reflect.apply(originalTerminalHandler, this, args);',
+  '            state.pendingOutputOrdinal = 0;',
+  '            state.currentOutput = { ordinal };',
+  "            record('browser.output-handler', { ordinal });",
+  '            try {',
+  '                return Reflect.apply(originalTerminalHandler, this, args);',
+  '            }',
+  '            finally {',
+  '                state.currentOutput = null;',
+  '            }',
+  '        };',
+  '        restorers.push(() => {',
+  '            app._onSessionTerminal = originalTerminalHandler;',
+  '        });',
+  "        maybeFail('_onSessionTerminal');",
+  '        const originalBatch = app.batchTerminalWrite;',
+  '        state.originals.batchTerminalWrite = originalBatch;',
+  '        app.batchTerminalWrite = function (...args) {',
+  '            const output = state.currentOutput;',
+  '            const result = Reflect.apply(originalBatch, this, args);',
+  '            if (!output)',
+  '                return result;',
+  '            const epoch = app._terminalOutputAcceptanceEpoch;',
+  '            if (Number.isInteger(epoch))',
+  '                state.epochOutputs[epoch] = output;',
+  "            record('browser.write-queued', { ordinal: output.ordinal });",
+  '            return result;',
+  '        };',
+  '        restorers.push(() => {',
+  '            app.batchTerminalWrite = originalBatch;',
+  '        });',
+  "        maybeFail('batchTerminalWrite');",
+  '        const originalFlush = app.flushPendingWrites;',
+  '        state.originals.flushPendingWrites = originalFlush;',
+  '        app.flushPendingWrites = function (...args) {',
+  '            const epoch = app._pendingWritesMaxAcceptanceEpoch;',
+  '            state.flushingOutput = state.epochOutputs[epoch] || null;',
+  '            try {',
+  '                return Reflect.apply(originalFlush, this, args);',
+  '            }',
+  '            finally {',
+  '                state.flushingOutput = null;',
+  '            }',
+  '        };',
+  '        restorers.push(() => {',
+  '            app.flushPendingWrites = originalFlush;',
+  '        });',
+  "        maybeFail('flushPendingWrites');",
+  '        const terminal = app.terminal;',
+  '        const originalWrite = terminal.write;',
+  '        state.originals.terminalWrite = originalWrite;',
+  '        terminal.write = function (data, callback) {',
+  "            const bytes = typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength;",
+  '            const output = state.flushingOutput;',
+  '            if (!output)',
+  '                return Reflect.apply(originalWrite, this, [data, callback]);',
+  '            const writeId = state.nextWriteId++;',
+  '            const write = { writeId, ordinal: output.ordinal };',
+  '            state.pendingParse.push(write);',
+  "            record('browser.xterm-write', { bytes, ordinal: write.ordinal, writeId });",
+  '            const wrappedCallback = () => {',
+  "                record('browser.xterm-write-callback', { bytes, ordinal: write.ordinal, writeId });",
+  '                callback?.();',
+  '            };',
+  '            const result = Reflect.apply(originalWrite, this, [data, wrappedCallback]);',
+  "            record('browser.xterm-write-return', { bytes, ordinal: write.ordinal, writeId });",
+  '            return result;',
+  '        };',
+  '        restorers.push(() => {',
+  '            terminal.write = originalWrite;',
+  '        });',
+  "        maybeFail('terminal.write');",
+  '        const parsed = terminal.onWriteParsed(() => {',
+  '            const parsedWrites = state.pendingParse.splice(0);',
+  '            for (const write of parsedWrites) {',
+  "                record('browser.xterm-parsed', { ordinal: write.ordinal, writeId: write.writeId });",
+  '                for (const context of state.contexts) {',
+  '                    if (state.ackedGenerations[context.generation] &&',
+  '                        !state.completedGenerations[context.generation] &&',
+  '                        exactTokenVisible(terminal, context)) {',
+  '                        const selection = {',
+  '                            ...write,',
+  '                            context: { ...context },',
+  '                            selectionId: state.nextSelectionId++,',
+  '                        };',
+  '                        state.pendingVisibility[context.generation] = selection;',
+  "                        record('browser.xterm-visible-after-parse', { ordinal: write.ordinal, writeId: write.writeId, selectedForAttribution: false }, context);",
+  '                    }',
+  '                }',
+  '                state.lastParsed = write;',
+  '            }',
+  '        });',
+  '        restorers.push(() => {',
+  '            parsed.dispose();',
+  '            state.listenerCount--;',
+  '        });',
+  '        state.listenerCount++;',
+  "        maybeFail('parsed-listener');",
+  '        const render = terminal.onRender(() => {',
+  '            const write = state.lastParsed;',
+  '            if (!write)',
+  '                return;',
+  '            for (const context of state.contexts) {',
+  '                const pending = state.pendingVisibility[context.generation];',
+  '                if (!pending ||',
+  '                    pending.writeId !== write.writeId ||',
+  '                    state.completedGenerations[context.generation] ||',
+  '                    !exactTokenVisible(terminal, context))',
+  '                    continue;',
+  '                for (const event of state.events) {',
+  '                    if (event.trialId === context.trialId &&',
+  '                        event.generation === context.generation &&',
+  "                        ['browser.xterm-visible-after-parse', 'browser.xterm-render', 'browser.xterm-visible'].includes(String(event.stage))) {",
+  '                        event.selectedForAttribution = false;',
+  '                    }',
+  '                }',
+  '                const selection = { ...pending, selectionId: state.nextSelectionId++ };',
+  '                state.currentSelections[context.generation] = selection;',
+  '                const parseVisible = state.events.find((event) => event.trialId === context.trialId &&',
+  '                    event.generation === context.generation &&',
+  "                    event.stage === 'browser.xterm-visible-after-parse' &&",
+  '                    event.ordinal === write.ordinal &&',
+  '                    event.writeId === write.writeId);',
+  '                if (parseVisible)',
+  '                    parseVisible.selectedForAttribution = true;',
+  "                record('browser.xterm-render', { ordinal: write.ordinal, writeId: write.writeId, selectedForAttribution: true }, context);",
+  "                record('browser.xterm-visible', { ordinal: write.ordinal, writeId: write.writeId, selectedForAttribution: true }, context);",
+  '                const captured = { ...selection, context: { ...context } };',
+  '                requestAnimationFrame(() => {',
+  '                    const current = state.currentSelections[captured.context.generation];',
+  '                    if (current?.selectionId !== captured.selectionId ||',
+  '                        current?.ordinal !== captured.ordinal ||',
+  '                        current?.writeId !== captured.writeId ||',
+  '                        !state.window?.collecting ||',
+  '                        !exactTokenVisible(terminal, captured.context))',
+  '                        return;',
+  "                    record('browser.paint-proxy', { ordinal: captured.ordinal, writeId: captured.writeId, selectedForAttribution: true }, captured.context);",
+  '                    state.completedGenerations[captured.context.generation] = true;',
+  '                    selectAttribution(captured.context, captured.ordinal, captured.writeId);',
+  '                });',
+  '            }',
+  '        });',
+  '        restorers.push(() => {',
+  '            render.dispose();',
+  '            state.listenerCount--;',
+  '        });',
+  '        state.listenerCount++;',
+  "        maybeFail('xterm-listeners');",
+  '    };',
+  '    try {',
+  '        install();',
+  '    }',
+  '    catch (cause) {',
+  '        const rollbackErrors = [];',
+  '        for (const restore of restorers.reverse()) {',
+  '            try {',
+  '                restore();',
+  '            }',
+  '            catch (error) {',
+  '                rollbackErrors.push(error instanceof Error ? error : new Error(String(error)));',
+  '            }',
+  '        }',
+  '        state.hookCleanup = [];',
+  '        state.wrappersInstalled = false;',
+  '        if (rollbackErrors.length)',
+  "            throw new AggregateError([cause, ...rollbackErrors], 'Hook install rollback failed');",
+  '        throw cause;',
+  '    }',
+  '    state.hookCleanup = restorers.reverse();',
+  '    state.wrappersInstalled = true;',
+  '})',
+].join('\n');
 
 export async function installBrowserLatencyHooks(page: Page, options: BrowserHookInstallOptions = {}): Promise<void> {
-  await page.evaluate((installOptions) => {
-    const browserWindow = window as any;
-    const state = browserWindow.__cod374LatencyTrace;
-    const app = browserWindow.app;
-    if (!state || !app || state.wrappersInstalled) throw new Error('COD-374 init hook is unavailable or duplicated');
-    const record = state.originals.record as (stage: string, extra?: Record<string, unknown>, context?: any) => void;
-    const exactTokenVisible = state.originals.exactTokenVisible as (terminal: any, context: any) => boolean;
-    const selectAttribution = state.originals.selectAttribution as (
-      context: any,
-      ordinal: number,
-      writeId: number
-    ) => void;
-    const restorers: Array<() => void | Promise<void>> = [];
-    const maybeFail = (name: string) => {
-      if (installOptions.failAfter === name) throw new Error(`Injected hook install failure after ${name}`);
-    };
-    const wrap = (owner: Record<string, any>, name: string, observer: (...args: any[]) => void) => {
-      const original = owner[name];
-      state.originals[name] = original;
-      owner[name] = function (...args: any[]) {
-        observer(...args);
-        return Reflect.apply(original, this, args);
-      };
-      restorers.push(() => {
-        owner[name] = original;
-      });
-      maybeFail(name);
-    };
-    const install = () => {
-      wrap(app, '_sendInputAsync', (data: string) => {
-        const requestedCount = typeof data === 'string' ? Math.max(1, Array.from(data).length) : 1;
-        const contexts = state.pendingLogicalContexts.splice(0, requestedCount);
-        if (contexts.length === 0 && state.dispatchContext) contexts.push(state.dispatchContext);
-        const entries = contexts.map((context: any, coalescedIndex: number) => ({
-          context,
-          coalescedIndex,
-          coalescedCount: contexts.length,
-        }));
-        if (entries.length) state.pendingReliableContexts.push(entries);
-        for (const entry of entries) {
-          record(
-            'browser.logical',
-            { coalescedIndex: entry.coalescedIndex, coalescedCount: entry.coalescedCount },
-            entry.context
-          );
-        }
-      });
-      wrap(app, '_reliableSend', () => {
-        state.reliableContexts = state.pendingReliableContexts.shift() ?? [
-          { context: state.dispatchContext, coalescedIndex: 0, coalescedCount: 1 },
-        ];
-      });
-      wrap(app, '_drainSession', (sessionId: string) => {
-        const pending = app._pendingDeliveries.get(sessionId);
-        const latest = pending?.at(-1);
-        if (latest) {
-          const entries = state.reliableContexts.map((entry: any) => ({
-            ...entry,
-            context: { ...entry.context },
-          }));
-          state.inputContextsBySeq[latest.seq] = entries;
-          for (const entry of entries) {
-            record(
-              'browser.durable-queued',
-              {
-                clientId: app._clientId,
-                seq: latest.seq,
-                coalescedIndex: entry.coalescedIndex,
-                coalescedCount: entry.coalescedCount,
-              },
-              entry.context
-            );
-          }
-        }
-      });
-      const originalAck = app._onWsInputAck;
-      state.originals._onWsInputAck = originalAck;
-      app._onWsInputAck = function (seq: number) {
-        const result = Reflect.apply(originalAck, this, [seq]);
-        const pendingCount = app._pendingDeliveries.get(app._wsSessionId)?.length ?? 0;
-        const entries = state.inputContextsBySeq[seq] ?? [];
-        for (const entry of entries) {
-          record(
-            'browser.ws-input-ack',
-            {
-              clientId: app._clientId,
-              seq,
-              pendingCount,
-              coalescedIndex: entry.coalescedIndex,
-              coalescedCount: entry.coalescedCount,
-            },
-            entry.context
-          );
-          state.ackedGenerations[entry.context.generation] = true;
-          state.firstAcked = true;
-        }
-        return result;
-      };
-      restorers.push(() => {
-        app._onWsInputAck = originalAck;
-      });
-      maybeFail('_onWsInputAck');
-      const originalTerminalHandler = app._onSessionTerminal;
-      state.originals._onSessionTerminal = originalTerminalHandler;
-      app._onSessionTerminal = function (...args: any[]) {
-        const ordinal = state.pendingOutputOrdinal;
-        if (!ordinal) return Reflect.apply(originalTerminalHandler, this, args);
-        state.pendingOutputOrdinal = 0;
-        state.currentOutput = { ordinal };
-        record('browser.output-handler', { ordinal });
-        try {
-          return Reflect.apply(originalTerminalHandler, this, args);
-        } finally {
-          state.currentOutput = null;
-        }
-      };
-      restorers.push(() => {
-        app._onSessionTerminal = originalTerminalHandler;
-      });
-      maybeFail('_onSessionTerminal');
-
-      const originalBatch = app.batchTerminalWrite;
-      state.originals.batchTerminalWrite = originalBatch;
-      app.batchTerminalWrite = function (...args: any[]) {
-        const output = state.currentOutput;
-        const result = Reflect.apply(originalBatch, this, args);
-        if (!output) return result;
-        const epoch = app._terminalOutputAcceptanceEpoch;
-        if (Number.isInteger(epoch)) state.epochOutputs[epoch] = output;
-        record('browser.write-queued', { ordinal: output.ordinal });
-        return result;
-      };
-      restorers.push(() => {
-        app.batchTerminalWrite = originalBatch;
-      });
-      maybeFail('batchTerminalWrite');
-
-      const originalFlush = app.flushPendingWrites;
-      state.originals.flushPendingWrites = originalFlush;
-      app.flushPendingWrites = function (...args: any[]) {
-        const epoch = app._pendingWritesMaxAcceptanceEpoch;
-        state.flushingOutput = state.epochOutputs[epoch] || null;
-        try {
-          return Reflect.apply(originalFlush, this, args);
-        } finally {
-          state.flushingOutput = null;
-        }
-      };
-      restorers.push(() => {
-        app.flushPendingWrites = originalFlush;
-      });
-      maybeFail('flushPendingWrites');
-
-      const terminal = app.terminal;
-      const originalWrite = terminal.write;
-      state.originals.terminalWrite = originalWrite;
-      terminal.write = function (data: string | Uint8Array, callback?: () => void) {
-        const bytes = typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength;
-        const output = state.flushingOutput;
-        if (!output) return Reflect.apply(originalWrite, this, [data, callback]);
-        const writeId = state.nextWriteId++;
-        const write = { writeId, ordinal: output.ordinal };
-        state.pendingParse.push(write);
-        record('browser.xterm-write', { bytes, ordinal: write.ordinal, writeId });
-        const wrappedCallback = () => {
-          record('browser.xterm-write-callback', { bytes, ordinal: write.ordinal, writeId });
-          callback?.();
-        };
-        const result = Reflect.apply(originalWrite, this, [data, wrappedCallback]);
-        record('browser.xterm-write-return', { bytes, ordinal: write.ordinal, writeId });
-        return result;
-      };
-      restorers.push(() => {
-        terminal.write = originalWrite;
-      });
-      maybeFail('terminal.write');
-
-      const parsed = terminal.onWriteParsed(() => {
-        const parsedWrites = state.pendingParse.splice(0);
-        for (const write of parsedWrites) {
-          record('browser.xterm-parsed', { ordinal: write.ordinal, writeId: write.writeId });
-          for (const context of state.contexts) {
-            if (
-              state.ackedGenerations[context.generation] &&
-              !state.completedGenerations[context.generation] &&
-              exactTokenVisible(terminal, context)
-            ) {
-              const selection = {
-                ...write,
-                context: { ...context },
-                selectionId: state.nextSelectionId++,
-              };
-              state.pendingVisibility[context.generation] = selection;
-              record(
-                'browser.xterm-visible-after-parse',
-                { ordinal: write.ordinal, writeId: write.writeId, selectedForAttribution: false },
-                context
-              );
-            }
-          }
-          state.lastParsed = write;
-        }
-      });
-      restorers.push(() => {
-        parsed.dispose();
-        state.listenerCount--;
-      });
-      state.listenerCount++;
-      maybeFail('parsed-listener');
-      const render = terminal.onRender(() => {
-        const write = state.lastParsed;
-        if (!write) return;
-        for (const context of state.contexts) {
-          const pending = state.pendingVisibility[context.generation];
-          if (
-            !pending ||
-            pending.writeId !== write.writeId ||
-            state.completedGenerations[context.generation] ||
-            !exactTokenVisible(terminal, context)
-          )
-            continue;
-          for (const event of state.events) {
-            if (
-              event.trialId === context.trialId &&
-              event.generation === context.generation &&
-              ['browser.xterm-visible-after-parse', 'browser.xterm-render', 'browser.xterm-visible'].includes(
-                String(event.stage)
-              )
-            ) {
-              event.selectedForAttribution = false;
-            }
-          }
-          const selection = { ...pending, selectionId: state.nextSelectionId++ };
-          state.currentSelections[context.generation] = selection;
-          const parseVisible = state.events.find(
-            (event: any) =>
-              event.trialId === context.trialId &&
-              event.generation === context.generation &&
-              event.stage === 'browser.xterm-visible-after-parse' &&
-              event.ordinal === write.ordinal &&
-              event.writeId === write.writeId
-          );
-          if (parseVisible) parseVisible.selectedForAttribution = true;
-          record(
-            'browser.xterm-render',
-            { ordinal: write.ordinal, writeId: write.writeId, selectedForAttribution: true },
-            context
-          );
-          record(
-            'browser.xterm-visible',
-            { ordinal: write.ordinal, writeId: write.writeId, selectedForAttribution: true },
-            context
-          );
-          const captured = { ...selection, context: { ...context } };
-          requestAnimationFrame(() => {
-            const current = state.currentSelections[captured.context.generation];
-            if (
-              current?.selectionId !== captured.selectionId ||
-              current?.ordinal !== captured.ordinal ||
-              current?.writeId !== captured.writeId ||
-              !state.window?.collecting ||
-              !exactTokenVisible(terminal, captured.context)
-            )
-              return;
-            record(
-              'browser.paint-proxy',
-              { ordinal: captured.ordinal, writeId: captured.writeId, selectedForAttribution: true },
-              captured.context
-            );
-            state.completedGenerations[captured.context.generation] = true;
-            selectAttribution(captured.context, captured.ordinal, captured.writeId);
-          });
-        }
-      });
-      restorers.push(() => {
-        render.dispose();
-        state.listenerCount--;
-      });
-      state.listenerCount++;
-      maybeFail('xterm-listeners');
-    };
-
-    try {
-      install();
-    } catch (cause) {
-      const rollbackErrors: Error[] = [];
-      for (const restore of restorers.reverse()) {
-        try {
-          restore();
-        } catch (error) {
-          rollbackErrors.push(error instanceof Error ? error : new Error(String(error)));
-        }
-      }
-      state.hookCleanup = [];
-      state.wrappersInstalled = false;
-      if (rollbackErrors.length) throw new AggregateError([cause, ...rollbackErrors], 'Hook install rollback failed');
-      throw cause;
-    }
-    state.hookCleanup = restorers.reverse();
-    state.wrappersInstalled = true;
-  }, options);
+  if (
+    !options ||
+    typeof options !== 'object' ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => key !== 'failAfter') ||
+    (options.failAfter !== undefined && !BROWSER_HOOK_FAILURE_STAGES.has(options.failAfter))
+  ) {
+    throw new Error('COD-374 hook failure stage is invalid');
+  }
+  const installOptions = options.failAfter === undefined ? {} : { failAfter: options.failAfter };
+  await page.evaluate(`(${BROWSER_LATENCY_HOOK_INSTALL_SCRIPT})(${JSON.stringify(installOptions)})`);
 }
-
 export async function armBrowserLatencyTrial(page: Page, trial: BrowserLatencyTrial): Promise<void> {
   if (
     !trial.trialId ||
