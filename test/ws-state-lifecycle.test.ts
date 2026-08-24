@@ -261,6 +261,138 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     fetchSpy.mockRestore();
   });
 
+  it('finalizes terminal exit once when SSE arrives before a queued WS 4009 close', () => {
+    const { CodemanApp } = loadHarness();
+    const clearSession = vi.fn();
+    const persistReliableNow = vi.fn();
+    const showToast = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _pendingDeliveries: new Map([
+        ['s1', [{ seq: 1, data: 'dead-input', useMux: false, ts: 1, tries: 0, sentAt: 0 }]],
+      ]),
+      _pendingTerminalResize: { sessionId: 's1', frame: { t: 'z', c: 80, r: 30, v: 'desktop' } },
+      _terminalViewerActivity: { clearSession },
+      _persistReliableNow: persistReliableNow,
+      _applySessionActivityEvent: vi.fn(() => ({})),
+      _updateLocalEchoState: vi.fn(),
+      _notifySession: vi.fn(),
+      showToast,
+    });
+
+    app._connectWs('s1');
+    const ws = FakeWebSocket.instances[0];
+    const queuedClose = ws.onclose;
+    (app as unknown as { _onSessionExit: (data: { id: string; code: number }) => void })._onSessionExit({
+      id: 's1',
+      code: 1,
+    });
+    queuedClose?.({ code: 4009, reason: 'Session terminated' });
+
+    const internal = app as unknown as Record<string, any>;
+    expect(internal._pendingDeliveries.has('s1')).toBe(false);
+    expect(internal._pendingTerminalResize).toBeNull();
+    expect(clearSession).toHaveBeenCalledOnce();
+    expect(persistReliableNow).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledOnce();
+    expect(app._wsState).toBe('gone');
+    expect(internal._wsGoneSessionId).toBe('s1');
+  });
+
+  it('keeps WS-first terminal finalization idempotent when SSE exit follows', () => {
+    const { CodemanApp } = loadHarness();
+    const clearSession = vi.fn();
+    const persistReliableNow = vi.fn();
+    const showToast = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _pendingDeliveries: new Map([
+        ['s1', [{ seq: 1, data: 'dead-input', useMux: false, ts: 1, tries: 0, sentAt: 0 }]],
+      ]),
+      _terminalViewerActivity: { clearSession },
+      _persistReliableNow: persistReliableNow,
+      _applySessionActivityEvent: vi.fn(() => ({})),
+      _updateLocalEchoState: vi.fn(),
+      _notifySession: vi.fn(),
+      showToast,
+    });
+
+    app._connectWs('s1');
+    FakeWebSocket.instances[0].onclose?.({ code: 4009, reason: 'Session terminated' });
+    (app as unknown as { _onSessionExit: (data: { id: string; code: number }) => void })._onSessionExit({
+      id: 's1',
+      code: 1,
+    });
+
+    expect(clearSession).toHaveBeenCalledOnce();
+    expect(persistReliableNow).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledOnce();
+    expect(app._wsState).toBe('gone');
+  });
+
+  it.each(['_onSessionInteractive', '_onSessionResumed'])(
+    '%s clears exact gone state only on an authoritative successful lifecycle event',
+    (method) => {
+      const { CodemanApp } = loadHarness();
+      const connectWs = vi.fn();
+      const applySessionActivityEvent = vi.fn(() => ({}));
+      const { app } = makeApp(CodemanApp, {
+        _wsState: 'gone',
+        _wsGoneSessionId: 's1',
+        _terminalGoneFinalizedSessionIds: new Set(['s1']),
+        _connectWs: connectWs,
+        _applySessionActivityEvent: applySessionActivityEvent,
+        _onSessionListMaybeChanged: vi.fn(),
+      });
+
+      (app as unknown as Record<string, (data: { id: string }) => void>)[method]({ id: 's1' });
+
+      const internal = app as unknown as Record<string, any>;
+      expect(internal._wsGoneSessionId).toBeNull();
+      expect(internal._terminalGoneFinalizedSessionIds.has('s1')).toBe(false);
+      expect(connectWs).toHaveBeenCalledOnce();
+      expect(connectWs).toHaveBeenCalledWith('s1');
+    }
+  );
+
+  it('does not clear gone state for failed/local restart bookkeeping without a success event', () => {
+    const { CodemanApp } = loadHarness();
+    const connectWs = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _wsState: 'gone',
+      _wsGoneSessionId: 's1',
+      _terminalGoneFinalizedSessionIds: new Set(['s1']),
+      _connectWs: connectWs,
+      _applySessionActivityEvent: vi.fn(() => ({})),
+    });
+
+    (app as unknown as { _onSessionRestarted: (data: { id: string }) => void })._onSessionRestarted({ id: 's1' });
+
+    expect((app as unknown as Record<string, any>)._wsGoneSessionId).toBe('s1');
+    expect(connectWs).not.toHaveBeenCalled();
+  });
+
+  it('does not let another session lifecycle event clear the active gone terminal', () => {
+    const { CodemanApp } = loadHarness();
+    const connectWs = vi.fn();
+    const { app } = makeApp(CodemanApp, {
+      _wsState: 'gone',
+      _wsGoneSessionId: 's1',
+      _terminalGoneFinalizedSessionIds: new Set(['s1']),
+      _connectWs: connectWs,
+      _applySessionActivityEvent: vi.fn(() => ({})),
+    });
+
+    (app as unknown as Record<string, (data: { id: string }) => void>)._onSessionInteractive({ id: 's2' });
+
+    expect((app as unknown as Record<string, any>)._wsGoneSessionId).toBe('s1');
+    expect(app._wsState).toBe('gone');
+    expect(connectWs).not.toHaveBeenCalled();
+  });
+
+  it('registers the authoritative session:interactive SSE success event', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    expect(source).toContain("[SSE_EVENTS.SESSION_INTERACTIVE, '_onSessionInteractive']");
+  });
+
   it('a terminal give-up close preserves another session pending resize and durable input', () => {
     const { CodemanApp } = loadHarness();
     const otherResize = {

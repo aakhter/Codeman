@@ -219,6 +219,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_COMPLETION, '_onSessionCompletion'],
   [SSE_EVENTS.SESSION_ERROR, '_onSessionError'],
   [SSE_EVENTS.SESSION_EXIT, '_onSessionExit'],
+  [SSE_EVENTS.SESSION_INTERACTIVE, '_onSessionInteractive'],
   [SSE_EVENTS.SESSION_IDLE, '_onSessionIdle'],
   [SSE_EVENTS.SESSION_WORKING, '_onSessionWorking'],
   [SSE_EVENTS.SESSION_AUTO_CLEAR, '_onSessionAutoClear'],
@@ -767,6 +768,7 @@ class CodemanApp {
     this._wsReady = false;      // True when WS is open and ready for I/O
     this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | gone | disconnected
     this._wsGoneSessionId = null; // exact session named by authoritative 4004/4009 close
+    this._terminalGoneFinalizedSessionIds = new Set();
     this._wsLastClose = null; // { code, reason, at } for transport diagnostics
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
     this._wsCloseRefreshTimer = null;
@@ -2276,7 +2278,14 @@ class CodemanApp {
 
   _onSessionResumed(data) {
     const session = data?.id ? this._applySessionActivityEvent(data, 'resumed') : null;
+    if (data?.id) this._clearTerminalSessionGoneForRestart(data.id);
     this._onSessionListMaybeChanged?.();
+    return session;
+  }
+
+  _onSessionInteractive(data) {
+    const session = data?.id ? this._applySessionActivityEvent(data, 'restart') : null;
+    if (data?.id) this._clearTerminalSessionGoneForRestart(data.id);
     return session;
   }
 
@@ -3876,7 +3885,7 @@ class CodemanApp {
   }
 
   _onSessionExit(data) {
-    if (this._wsSessionId === data.id) this._disconnectWs();
+    this._finalizeTerminalSessionGone(data.id);
     const session = this._applySessionActivityEvent(data, 'exit');
     if (session) {
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
@@ -4111,6 +4120,55 @@ class CodemanApp {
     );
   }
 
+  _finalizeTerminalSessionGone(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+    const finalized = (this._terminalGoneFinalizedSessionIds ??= new Set());
+    const firstFinalization = !finalized.has(sessionId);
+    let hadQueuedInput = false;
+    if (firstFinalization) {
+      finalized.add(sessionId);
+      hadQueuedInput = this._pendingDeliveries?.delete?.(sessionId) === true;
+      if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+      this._terminalViewerActivity?.clearSession?.(sessionId);
+      if (hadQueuedInput) this._persistReliableNow();
+    }
+
+    const stillActive = this.activeSessionId === sessionId;
+    if (stillActive) {
+      this._wsGoneSessionId = sessionId;
+      this._wsState = 'gone';
+    }
+    if (this._wsSessionId === sessionId) this._disconnectWs();
+    if (stillActive) {
+      this._wsState = 'gone';
+      this._updateConnectionIndicator();
+      if (firstFinalization) {
+        this.showToast?.(
+          hadQueuedInput
+            ? 'Session ended — queued terminal input could not be delivered'
+            : 'Terminal session is no longer available',
+          hadQueuedInput ? 'error' : 'warning'
+        );
+      }
+    }
+    return firstFinalization;
+  }
+
+  _clearTerminalSessionGoneForRestart(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+    const finalized = this._terminalGoneFinalizedSessionIds;
+    const wasGone = finalized?.has(sessionId) || this._wsGoneSessionId === sessionId;
+    if (!wasGone) return false;
+    finalized?.delete(sessionId);
+    if (this._wsGoneSessionId === sessionId) this._wsGoneSessionId = null;
+    if (this.activeSessionId === sessionId) {
+      this._wsState = 'disconnected';
+      this._updateConnectionIndicator();
+      this._connectWs(sessionId);
+    }
+    return true;
+  }
+
   _prepareFreshSocketInputReplay(sessionId, socket) {
     const list = this._pendingDeliveries?.get?.(sessionId);
     if (!list || list.length === 0) return true;
@@ -4256,21 +4314,7 @@ class CodemanApp {
       }
       if (plan.action === 'give-up') {
         this._clearTimer('_wsReconnectTimer');
-        const hadQueuedInput = this._pendingDeliveries.delete(sessionId);
-        if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
-        this._terminalViewerActivity?.clearSession?.(sessionId);
-        if (hadQueuedInput) this._persistReliableNow();
-        this._wsGoneSessionId = sessionId;
-        this._wsState = stillActive ? 'gone' : 'disconnected';
-        this._updateConnectionIndicator();
-        if (stillActive) {
-          this.showToast?.(
-            hadQueuedInput
-              ? 'Session ended — queued terminal input could not be delivered'
-              : 'Terminal session is no longer available',
-            hadQueuedInput ? 'error' : 'warning'
-          );
-        }
+        this._finalizeTerminalSessionGone(sessionId);
       } else if (plan.action === 'reconnect') {
         if (stillActive) {
           this._wsState = 'reconnecting';
@@ -4326,7 +4370,8 @@ class CodemanApp {
     // this first, so a reset would restart the exponential backoff ladder at
     // attempt 0 on every retry (≈0ms tight reconnect loop during an outage).
     // ws.onopen zeroes the counter once a connection actually succeeds.
-    this._wsState = 'disconnected';
+    const preserveGone = this._isTerminalSessionGone(this._wsSessionId || this.activeSessionId);
+    if (!preserveGone) this._wsState = 'disconnected';
     this._stopMobileResizeRetry();
     try {
       this._mobileImePreview?.reset?.();
@@ -4340,7 +4385,7 @@ class CodemanApp {
       this._ws = null;
       this._wsSessionId = null;
       this._wsReady = false;
-      this._wsState = 'disconnected';
+      if (!preserveGone) this._wsState = 'disconnected';
       this._updateConnectionIndicator();
     }
   }

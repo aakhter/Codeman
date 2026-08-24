@@ -33,18 +33,21 @@ undeliverable queue is discarded and the UI says the session ended.
   persist too, so seqs stay monotonic across reloads (never reset — a reset would
   let the server treat fresh input as an already-applied duplicate).
 - **Delivery** (`_drainSession`) uses only the session's ownership-capable WS.
-  When that socket is `OPEN`, the browser first sends viewer activation (`va`)
-  and the latest ownership-fenced geometry (`z`), then sends each not-yet-sent
-  input record (`sentAt === 0`) in seq order. Records stay pending until the
-  server's `{t:'ia',seq}` ACK removes them. Browser code does **not** fall back to
-  `POST /input`, because that would bypass active-viewer ownership.
+  When that socket is `OPEN`, the browser first sends viewer activation (`va`),
+  then any current/pending ownership-fenced geometry (`z`) needed for replay,
+  followed by each not-yet-sent input record (`sentAt === 0`) in seq order.
+  Records stay pending until the server's `{t:'ia',seq}` ACK removes them.
+  Browser code does **not** fall back to `POST /input`, because that would bypass
+  active-viewer ownership.
 - **Transient outage** — records remain persisted and queued until the exact
   session gets a fresh activated WS. A 4004/4009 close is terminal rather than
-  transient: only that dead session's queue, pending resize, and viewer activity
-  are cleared, persistence is flushed immediately, no reconnect is scheduled,
-  and further input, resize, restore, and manual terminal reconnect actions are
-  rejected for the still-selected dead terminal. The connection-loss retry can
-  still reconnect SSE without reopening that terminal WS.
+  transient: whether SSE exit or WS close arrives first, only that dead session's
+  queue, pending resize, and viewer activity are cleared once, persistence is
+  flushed immediately, no reconnect is scheduled, and further input, resize,
+  restore, and manual terminal reconnect actions are rejected for the
+  still-selected dead terminal. A successful `session:interactive` or
+  `session:resumed` event explicitly re-enables a same-ID terminal. The
+  connection-loss retry can still reconnect SSE without reopening a dead WS.
 - **Half-open recovery** (`_redeliverSweep`, every 2s): if the active WS session's
   oldest record is unacked past `_reliableAckTimeoutMs` (4s), the socket is assumed
   dead — `ws.close()` forces a fast reconnect; `onopen` (`_onWsReady`) resets
