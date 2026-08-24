@@ -333,6 +333,8 @@ import {
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { registerCodexCommandProfileRoutes } from './routes/codex-command-profile-routes.js';
+import { registerPerfTraceRoutes } from './routes/perf-trace-routes.js';
+import { mobileInputTraceCollector } from '../perf/mobile-input-trace.js';
 import { CronService } from '../cron/cron-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1749,6 +1751,7 @@ export class WebServer extends EventEmitter {
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx);
     registerTabLayoutRoutes(this.app, ctx);
+    if (mobileInputTraceCollector.enabled) registerPerfTraceRoutes(this.app, mobileInputTraceCollector);
 
     // Cron: build the service from the same context, recompute
     // due times for any persisted jobs, then expose it to its routes.
