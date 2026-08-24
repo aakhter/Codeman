@@ -487,6 +487,53 @@ describe('COD-306 CodemanApp integration', () => {
     expect(app.openWebview).toHaveBeenCalledWith('w1');
   });
 
+  it('falls back to visible refs for Alt activation when projected Alt refs are malformed', () => {
+    const app = makeApp();
+    const projection = app._refreshTabProjection();
+    projection.altRefs = { malformed: true };
+    app._refreshTabProjection = vi.fn(() => projection);
+    app.selectSession = vi.fn();
+    app.openWebview = vi.fn();
+
+    expect(app._activateVisibleTabNumber(1)).toBe(true);
+    expect(app.selectSession).toHaveBeenCalledWith('s2');
+    expect(app._activateVisibleTabNumber(2)).toBe(true);
+    expect(app.openWebview).toHaveBeenCalledWith('w1');
+  });
+
+  it('falls back to visible refs for badges when projected Alt refs are malformed', () => {
+    const app = makeApp();
+    const projection = app._refreshTabProjection();
+    projection.altRefs = { malformed: true };
+    app._refreshTabProjection = vi.fn(() => projection);
+
+    app._fullRenderSessionTabs();
+
+    const tabs = [...document.querySelectorAll<HTMLElement>('.session-tab')];
+    expect(tabs.map((tab) => tab.querySelector('.tab-number')?.textContent ?? null)).toEqual(['1', '2', '3', '4']);
+  });
+
+  it('places a focused loading session badge before its spinner', () => {
+    const app = makeApp();
+    app.tabLayout = {
+      ...layout,
+      groups: layout.groups.map((group) => ({
+        ...group,
+        refs: group.refs.map((ref) => (ref.id === 's1' ? { ...ref, focus: true } : ref)),
+      })),
+    };
+    app.terminalLoadStates.set('s1', { phase: 'connecting' });
+
+    app._fullRenderSessionTabs();
+
+    const focusTab = document.querySelector<HTMLElement>('[data-focus-session-id="s1"]')!;
+    expect(
+      [...focusTab.children]
+        .filter((child) => child.matches('.tab-number, .tab-load-spinner'))
+        .map((child) => child.className)
+    ).toEqual(['tab-number', 'tab-load-spinner']);
+  });
+
   it('numbers Focus shortcuts first while canonical rows keep visual order and collapse-stable Alt slots', () => {
     const app = makeApp();
     app.tabLayout = {

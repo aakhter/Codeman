@@ -6102,9 +6102,13 @@ class CodemanApp {
     });
   }
 
+  _tabAltRefs(projection) {
+    return Array.isArray(projection?.altRefs) ? projection.altRefs : projection?.visibleRefs;
+  }
+
   _activateVisibleTabNumber(number) {
     const projection = this._refreshTabProjection();
-    const ref = window.CodemanTabLayout.refAtAltNumber(projection.altRefs || projection.visibleRefs, number);
+    const ref = window.CodemanTabLayout.refAtAltNumber(this._tabAltRefs(projection), number);
     if (ref?.kind === 'session') this.selectSession(ref.id);
     else if (ref?.kind === 'webview') this.openWebview(ref.id);
     else return false;
@@ -6928,7 +6932,7 @@ class CodemanApp {
         // Inject tab-number badge if missing (added after initial render)
         if (!tab.querySelector('.tab-number')) {
           const number = window.CodemanTabLayout.altNumberForRef(
-            projection.altRefs || projection.visibleRefs,
+            this._tabAltRefs(projection),
             { kind: 'session', id }
           );
           if (number !== null) {
@@ -7214,9 +7218,9 @@ class CodemanApp {
       const badge = document.createElement('span');
       badge.className = 'tab-number';
       badge.textContent = String(number);
-      const anchor = tab.querySelector('[data-tab-ref-drag]') || tab.firstElementChild;
-      if (anchor) anchor.insertAdjacentElement('afterend', badge);
-      else tab.appendChild(badge);
+      const dragHandle = tab.querySelector('[data-tab-ref-drag]');
+      if (dragHandle) dragHandle.insertAdjacentElement('afterend', badge);
+      else tab.insertBefore(badge, tab.querySelector('.tab-load-spinner') || tab.firstChild);
     }
     return tab.outerHTML;
   }
@@ -7309,7 +7313,7 @@ class CodemanApp {
     const parts = [];
     const renderedRefs = [];
     const orientation = this._tabOrientation();
-    const altRefs = projection.altRefs || projection.visibleRefs;
+    const altRefs = this._tabAltRefs(projection);
     const focusedIdentities = new Set(
       (projection.focusRefs || []).map((ref) => `${ref.kind}:${ref.id}`)
     );
