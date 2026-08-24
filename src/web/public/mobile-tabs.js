@@ -61,9 +61,9 @@ const MobileTabSheet = {
       pill.setAttribute('aria-controls', 'mobileTabSheet');
       pill.innerHTML =
         '<span class="pill-mini"></span><span class="pill-count">0</span><span class="pill-chev">▼</span>';
-      pill.onclick = () => this.toggle(true);
       brand.insertAdjacentElement('afterend', pill);
     }
+    this._bindPill();
     // Scrim + sheet at body level so fixed positioning is viewport-relative
     if (!document.getElementById('mobileTabSheet')) {
       const scrim = document.createElement('div');
@@ -92,6 +92,12 @@ const MobileTabSheet = {
       `;
       document.body.appendChild(sheet);
     }
+  },
+  _bindPill() {
+    const pill = document.getElementById('mobileTabPill');
+    if (!pill || pill.dataset.mobileTabSheetBound === 'true') return;
+    pill.dataset.mobileTabSheetBound = 'true';
+    pill.addEventListener('click', () => this.toggle());
   },
   _bindEvents() {
     const input = document.getElementById('mobileTabSearch');
@@ -200,7 +206,7 @@ const MobileTabSheet = {
     if (mini && window.app?.activeSessionId) {
       const active = window.app.sessions?.get(window.app.activeSessionId);
       const name = active?.name || window.app.activeSessionId?.slice(0, 4) || '—';
-      mini.textContent = name.slice(0, 8);
+      mini.textContent = name;
     }
     pill.setAttribute('aria-expanded', this.isOpen() ? 'true' : 'false');
   },
