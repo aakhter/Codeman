@@ -286,6 +286,210 @@ function phaseBPlan() {
   };
 }
 
+function hostQuiescenceEvidence(passed = true) {
+  return {
+    cpuCount: 8,
+    sampleCount: 11,
+    sampleIntervalMs: 500,
+    startedAtMs: 0,
+    endedAtMs: 5_000,
+    sampleTimesMs: Array.from({ length: 11 }, (_, index) => index * 500),
+    idlePercent: passed ? 90 : 79,
+    firstLoad1: 1,
+    finalLoad1: 1,
+    processes: [],
+    measurementErrorHash: null,
+    passed,
+  };
+}
+
+function browserQuiescenceEvidence(passed = true) {
+  const driftsMs = Array.from({ length: 50 }, () => (passed ? 1 : 11));
+  return {
+    tickCount: 50,
+    timerIntervalMs: 20,
+    driftsMs,
+    p95DriftMs: passed ? 1 : 11,
+    maxDriftMs: passed ? 1 : 11,
+    longTaskDurationsMs: [],
+    pageErrorHashes: [],
+    consoleErrorHashes: [],
+    resizeCount: 0,
+    overflowed: false,
+    measurementErrorHash: null,
+    passed,
+  };
+}
+
+async function gateProducerFixture({
+  experimentRoot,
+  runtimeRoot,
+  calls,
+  hostEvidence = hostQuiescenceEvidence(),
+  browserEvidence = browserQuiescenceEvidence(),
+  hostError,
+  browserError,
+  runtimeCleanupError,
+  repositoryError,
+  processReplacementAfterGate = false,
+  processReadErrorAfterGate,
+  runtimeCleanupResult = 'complete',
+}: {
+  experimentRoot: string;
+  runtimeRoot: string;
+  calls: string[];
+  hostEvidence?: ReturnType<typeof hostQuiescenceEvidence>;
+  browserEvidence?: ReturnType<typeof browserQuiescenceEvidence>;
+  hostError?: Error;
+  browserError?: Error;
+  runtimeCleanupError?: Error;
+  repositoryError?: Error;
+  processReplacementAfterGate?: boolean;
+  processReadErrorAfterGate?: Error;
+  runtimeCleanupResult?: 'complete' | 'undefined' | 'missing' | 'false' | 'malformed';
+}) {
+  const plan = phaseBPlan();
+  const launchedAt = new Date(Date.now() - 1_000).toISOString();
+  let runtimeCleanupCalls = 0;
+  let overlayCleanupCalls = 0;
+  let captureCalls = 0;
+  let processReads = 0;
+  const options = {
+    experimentRoot,
+    repositoryRoot: '/repo',
+    vendorManifestPath: '/repo/vendor.json',
+    repetition: plan,
+    overlayArtifact: { ...plan.provenance.overlay, product: plan.provenance.product },
+    testAdapters: {
+      gitVerifier: async () => {
+        calls.push('repository-preflight');
+        if (repositoryError) throw repositoryError;
+      },
+      measureHostQuiescence: async () => {
+        calls.push('host-quiescence');
+        if (hostError) throw hostError;
+        return hostEvidence;
+      },
+      materialize: async () => {
+        calls.push('overlay-materialize');
+        return {
+          root: runtimeRoot,
+          files: plan.provenance.overlay.files,
+          manifestSha256: plan.provenance.overlay.manifestSha256,
+          cleanup: async () => {
+            calls.push('overlay-cleanup');
+            overlayCleanupCalls += 1;
+          },
+        };
+      },
+      provisionDependencies: async () => {
+        calls.push('dependency-provision');
+        return {
+          dependencyRootHash: plan.provenance.dependencies.dependencyRootHash,
+          dependencyContentHash: plan.provenance.dependencies.dependencyContentHash,
+          dependencyDevice: plan.provenance.dependencies.dependencyDevice,
+          dependencyInode: plan.provenance.dependencies.dependencyInode,
+        };
+      },
+      verifyProvisionedDependencies: async () => ({
+        dependencyRootHash: plan.provenance.dependencies.dependencyRootHash,
+        dependencyContentHash: plan.provenance.dependencies.dependencyContentHash,
+        dependencyDevice: plan.provenance.dependencies.dependencyDevice,
+        dependencyInode: plan.provenance.dependencies.dependencyInode,
+      }),
+      provisionVendorAssets: async () => {
+        calls.push('vendor-provision');
+        return { vendorRuntimeHash: '7'.repeat(64) };
+      },
+      verifyProvisionedVendorAssets: async () => ({ vendorRuntimeHash: '7'.repeat(64) }),
+      verifyServedAssets: async () => {
+        calls.push('asset-readiness');
+      },
+      procIdentity: async (pid: number) => {
+        processReads += 1;
+        if (processReads > 3 && processReadErrorAfterGate) throw processReadErrorAfterGate;
+        return {
+          pid,
+          startIdentity: processReplacementAfterGate && processReads > 3 && pid === 1001 ? '9999' : String(pid),
+          startedAt: launchedAt,
+          startUncertaintyMs: 10,
+          cwd: runtimeRoot,
+          cmdlineHash: token(String(pid)),
+          cmdline:
+            pid === 1001
+              ? 'node src/index.ts web --host 127.0.0.1'
+              : pid === 1003
+                ? 'opencode --serve'
+                : 'chromium --headless',
+        };
+      },
+      launch: async () => {
+        calls.push('runtime-launch');
+        return {
+          runtimeRoot,
+          serverPid: 1001,
+          browserPid: 1002,
+          opencodePid: 1003,
+          baseUrl: 'http://127.0.0.1:3000',
+          launchedAt,
+          fetch: async () => new Response('asset'),
+          page: {
+            evaluate: async (callback: () => unknown) => {
+              calls.push(String(callback).includes('innerWidth') ? 'viewport-readiness' : 'font-readiness');
+              return String(callback).includes('innerWidth') ? { width: 390, height: 844 } : 9;
+            },
+          },
+          opencodeVersion: async () => {
+            calls.push('opencode-readiness');
+            return 'fixture';
+          },
+          identities: async () => {
+            calls.push('identity-readiness');
+            return { tmuxSession: 'tmux-fixture', tempRoot: runtimeRoot };
+          },
+          measureBrowserQuiescence: async () => {
+            calls.push('browser-quiescence');
+            if (browserError) throw browserError;
+            return browserEvidence;
+          },
+          captureRepetition: async () => {
+            calls.push('capture-repetition');
+            captureCalls += 1;
+            return [];
+          },
+          diagnostics: async () => ({ pageErrorHashes: [], consoleErrorHashes: [], processReplaced: false }),
+          cleanup: async () => {
+            calls.push('runtime-cleanup');
+            runtimeCleanupCalls += 1;
+            const cleanupProof = {
+              browserClosed: true,
+              serverStopped: true,
+              tmuxRemoved: true,
+              tempRootRemoved: true,
+              hooksRestored: true,
+              listenersDisposed: true,
+            };
+            if (runtimeCleanupError) throw Object.assign(runtimeCleanupError, { cleanupProof });
+            if (runtimeCleanupResult === 'undefined') return undefined;
+            if (runtimeCleanupResult === 'missing') {
+              const { listenersDisposed: _omitted, ...missing } = cleanupProof;
+              return missing;
+            }
+            if (runtimeCleanupResult === 'false') return { ...cleanupProof, browserClosed: false };
+            if (runtimeCleanupResult === 'malformed') return { ...cleanupProof, browserClosed: 'yes' };
+            return cleanupProof;
+          },
+        };
+      },
+    },
+  };
+  return {
+    options,
+    plan,
+    counts: () => ({ runtimeCleanupCalls, overlayCleanupCalls, captureCalls }),
+  };
+}
+
 describe('COD-374 Phase B producer contracts', () => {
   it('measures the exact terminal option instead of inherited xterm root CSS', async () => {
     const originalWindow = (globalThis as any).window;
@@ -1896,6 +2100,342 @@ describe('COD-374 Phase B producer contracts', () => {
     expect(() => adaptTask3Artifact(artifact, 0)).toThrow(/rapid input identity/i);
   });
 
+  it('publishes a canonical prerequisite preflight when repository verification fails before host measurement', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-repository-preflight-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-repository-preflight-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const repositoryError = new Error('repository proof failed');
+    const fixture = await gateProducerFixture({ experimentRoot, runtimeRoot, calls, repositoryError });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(calls).toEqual(['repository-preflight']);
+    expect(published.selection).toEqual({
+      attempt: 1,
+      lifecycle: 'preflight',
+      accepted: false,
+      failureReasons: [{ code: 'prerequisite-verification-failed', detailHash: token(String(repositoryError)) }],
+    });
+    expect(published.quiescence).toEqual({ host: null, browser: null, passed: false });
+    expect(published.cells).toEqual([]);
+    expect(Object.values(published.allocation)).toEqual([false, false, false, false, false, false]);
+    expect(Object.values(published.cleanup)).toEqual([true, true, true, true, true, true]);
+    expect(published.provenance.process).toMatchObject({
+      tmuxSessionHash: null,
+      tempRootHash: null,
+      server: null,
+      browser: null,
+      opencode: null,
+    });
+    expect(JSON.stringify(published)).not.toContain(repositoryError.message);
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 0, overlayCleanupCalls: 0, captureCalls: 0 });
+  });
+
+  it('publishes one immutable host-not-quiescent preflight before allocating resources', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-host-gate-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-host-gate-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      hostEvidence: hostQuiescenceEvidence(false),
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(calls).toEqual(['repository-preflight', 'host-quiescence']);
+    expect(published.selection).toMatchObject({
+      lifecycle: 'preflight',
+      accepted: false,
+      failureReasons: [expect.objectContaining({ code: 'host-not-quiescent' })],
+    });
+    expect(published.quiescence).toEqual({
+      host: hostQuiescenceEvidence(false),
+      browser: null,
+      passed: false,
+    });
+    expect(published.cells).toEqual([]);
+    expect(published.allocation).toEqual({
+      browserClosed: false,
+      serverStopped: false,
+      tmuxRemoved: false,
+      tempRootRemoved: false,
+      hooksRestored: false,
+      listenersDisposed: false,
+    });
+    expect(published.cleanup).toEqual({
+      browserClosed: true,
+      serverStopped: true,
+      tmuxRemoved: true,
+      tempRootRemoved: true,
+      hooksRestored: true,
+      listenersDisposed: true,
+    });
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 0, overlayCleanupCalls: 0, captureCalls: 0 });
+
+    await expect(runPhaseBProducer(fixture.options)).rejects.toThrow(/stopped after rejected attempt/i);
+    expect(calls).toEqual(['repository-preflight', 'host-quiescence']);
+  });
+
+  it('turns a host quiescence measurement exception into terminal safe host-not-quiescent evidence', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-host-gate-error-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-host-gate-error-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      hostError: new Error('host probe secret'),
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(calls).toEqual(['repository-preflight', 'host-quiescence']);
+    expect(published.selection.failureReasons).toEqual([expect.objectContaining({ code: 'host-not-quiescent' })]);
+    expect(published.quiescence.host).toMatchObject({
+      sampleCount: 0,
+      sampleTimesMs: [],
+      measurementErrorHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+      passed: false,
+    });
+    expect(published.quiescence.browser).toBeNull();
+    expect(JSON.stringify(published)).not.toContain('host probe secret');
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 0, overlayCleanupCalls: 0, captureCalls: 0 });
+  });
+
+  it('publishes browser-not-quiescent partial evidence before capture and cleans allocated resources once', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      browserEvidence: browserQuiescenceEvidence(false),
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(calls.indexOf('repository-preflight')).toBeLessThan(calls.indexOf('host-quiescence'));
+    expect(calls.indexOf('host-quiescence')).toBeLessThan(calls.indexOf('overlay-materialize'));
+    expect(calls.indexOf('identity-readiness')).toBeLessThan(calls.indexOf('browser-quiescence'));
+    expect(calls).not.toContain('capture-repetition');
+    expect(published.selection).toMatchObject({
+      lifecycle: 'partial',
+      accepted: false,
+      failureReasons: [expect.objectContaining({ code: 'browser-not-quiescent' })],
+    });
+    expect(published.quiescence).toEqual({
+      host: hostQuiescenceEvidence(),
+      browser: browserQuiescenceEvidence(false),
+      passed: false,
+    });
+    expect(published.provenance.runtimeVendorHash).toBe('7'.repeat(64));
+    expect(published.provenance.process.server).toMatchObject({ pid: 1001 });
+    expect(published.cells).toEqual([]);
+    expect(published.cleanup).toEqual({
+      browserClosed: true,
+      serverStopped: true,
+      tmuxRemoved: true,
+      tempRootRemoved: true,
+      hooksRestored: true,
+      listenersDisposed: true,
+    });
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 1, overlayCleanupCalls: 1, captureCalls: 0 });
+
+    await expect(runPhaseBProducer(fixture.options)).rejects.toThrow(/stopped after rejected attempt/i);
+    expect(calls.filter((call) => call === 'browser-quiescence')).toHaveLength(1);
+  });
+
+  it('turns a browser quiescence exception into safe browser-not-quiescent evidence and still cleans once', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-error-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-error-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      browserError: new Error('browser probe secret'),
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(calls).not.toContain('capture-repetition');
+    expect(published.selection.failureReasons).toEqual([expect.objectContaining({ code: 'browser-not-quiescent' })]);
+    expect(published.quiescence.browser).toMatchObject({
+      tickCount: 0,
+      driftsMs: [],
+      measurementErrorHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+      passed: false,
+    });
+    expect(JSON.stringify(published)).not.toContain('browser probe secret');
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 1, overlayCleanupCalls: 1, captureCalls: 0 });
+  });
+
+  it('retains browser-not-quiescent independently from cleanup failure evidence', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-cleanup-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-cleanup-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const cleanupError = new Error('browser gate cleanup failed');
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      browserEvidence: browserQuiescenceEvidence(false),
+      runtimeCleanupError: cleanupError,
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(published.selection.failureReasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'browser-not-quiescent' }),
+        { code: 'runtime-cleanup-failed', detailHash: token(String(cleanupError)) },
+      ])
+    );
+    expect(published.diagnostics.errorHashes).toContain(token(String(cleanupError)));
+    expect(published.diagnostics.startupStageHashes).toContain(token('runtime-cleanup'));
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 1, overlayCleanupCalls: 1, captureCalls: 0 });
+  });
+
+  it('retains browser-not-quiescent plus process contamination when a process is replaced during the gate', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-replacement-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-replacement-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      browserEvidence: browserQuiescenceEvidence(false),
+      processReplacementAfterGate: true,
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(published.selection.failureReasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'browser-not-quiescent' }),
+        expect.objectContaining({ code: 'runtime-contaminated' }),
+      ])
+    );
+    expect(published.diagnostics.processReplaced).toBe(true);
+    expect(published.provenance.process.server).toMatchObject({ pid: 1001, startIdentity: '1001' });
+    expect(published.cells).toEqual([]);
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 1, overlayCleanupCalls: 1, captureCalls: 0 });
+  });
+
+  it('retains browser-not-quiescent plus process contamination when a post-gate identity read fails', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-process-read-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'cod374-browser-gate-process-read-runtime-'));
+    temporaryRoots.push(experimentRoot, runtimeRoot);
+    const calls: string[] = [];
+    const processReadError = new Error('post-gate process read failed secret');
+    const fixture = await gateProducerFixture({
+      experimentRoot,
+      runtimeRoot,
+      calls,
+      browserEvidence: browserQuiescenceEvidence(false),
+      processReadErrorAfterGate: processReadError,
+    });
+
+    await runPhaseBProducer(fixture.options);
+
+    const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(published.selection.failureReasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'browser-not-quiescent' }),
+        expect.objectContaining({ code: 'runtime-contaminated' }),
+      ])
+    );
+    expect(published.diagnostics).toMatchObject({
+      processReplaced: true,
+      errorHashes: expect.arrayContaining([token(String(processReadError))]),
+      startupStageHashes: expect.arrayContaining([token('runtime-process-verification')]),
+    });
+    expect(JSON.stringify(published)).not.toContain('post-gate process read failed secret');
+    expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 1, overlayCleanupCalls: 1, captureCalls: 0 });
+  });
+
+  it.each([
+    [
+      'undefined',
+      {
+        browserClosed: false,
+        serverStopped: false,
+        tmuxRemoved: false,
+        hooksRestored: false,
+        listenersDisposed: false,
+      },
+    ],
+    [
+      'missing',
+      { browserClosed: true, serverStopped: true, tmuxRemoved: true, hooksRestored: true, listenersDisposed: false },
+    ],
+    [
+      'false',
+      { browserClosed: false, serverStopped: true, tmuxRemoved: true, hooksRestored: true, listenersDisposed: true },
+    ],
+    [
+      'malformed',
+      { browserClosed: false, serverStopped: true, tmuxRemoved: true, hooksRestored: true, listenersDisposed: true },
+    ],
+  ] as const)(
+    'treats a resolved %s runtime cleanup result as failure while retaining true proof fields',
+    async (runtimeCleanupResult, expectedRuntimeProof) => {
+      vi.stubEnv('NODE_ENV', 'test');
+      const experimentRoot = await mkdtemp(join(tmpdir(), `cod374-browser-gate-cleanup-${runtimeCleanupResult}-`));
+      const runtimeRoot = await mkdtemp(join(tmpdir(), `cod374-browser-gate-cleanup-${runtimeCleanupResult}-runtime-`));
+      temporaryRoots.push(experimentRoot, runtimeRoot);
+      const calls: string[] = [];
+      const fixture = await gateProducerFixture({
+        experimentRoot,
+        runtimeRoot,
+        calls,
+        browserEvidence: browserQuiescenceEvidence(false),
+        runtimeCleanupResult,
+      });
+
+      await runPhaseBProducer(fixture.options);
+
+      const published = JSON.parse(await readFile(join(experimentRoot, 'attempts/attempt-0001.json'), 'utf8'));
+      expect(published.selection.failureReasons).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ code: 'browser-not-quiescent' }),
+          expect.objectContaining({ code: 'runtime-cleanup-failed' }),
+        ])
+      );
+      expect(published.cleanup).toEqual({ ...expectedRuntimeProof, tempRootRemoved: expectedRuntimeProof.tmuxRemoved });
+      expect(published.diagnostics).toMatchObject({
+        errorHashes: [expect.stringMatching(/^[0-9a-f]{16}$/)],
+        startupStageHashes: expect.arrayContaining([token('runtime-cleanup')]),
+      });
+      expect(fixture.counts()).toEqual({ runtimeCleanupCalls: 1, overlayCleanupCalls: 1, captureCalls: 0 });
+    }
+  );
+
   it('runs the concrete producer transaction through test-only async adapters and publishes measured evidence', async () => {
     vi.stubEnv('NODE_ENV', 'test');
     const experimentRoot = await mkdtemp(join(tmpdir(), 'cod374-runner-'));
@@ -1908,6 +2448,7 @@ describe('COD-374 Phase B producer contracts', () => {
     let overlayCleaned = false;
     let vendorVerifications = 0;
     let assetVerifications = 0;
+    const gateCalls: string[] = [];
     const makeTraceOffArtifact = (sequenceBase: number) => {
       const artifact = structuredClone(actualTask3Artifact());
       artifact.serverEvents = [];
@@ -1925,6 +2466,10 @@ describe('COD-374 Phase B producer contracts', () => {
       overlayArtifact: { ...plan.provenance.overlay, product: plan.provenance.product },
       testAdapters: {
         gitVerifier: async () => undefined,
+        measureHostQuiescence: async () => {
+          gateCalls.push('host-quiescence');
+          return hostQuiescenceEvidence();
+        },
         provisionDependencies: async () => ({
           dependencyRootHash: plan.provenance.dependencies.dependencyRootHash,
           dependencyContentHash: plan.provenance.dependencies.dependencyContentHash,
@@ -1985,7 +2530,12 @@ describe('COD-374 Phase B producer contracts', () => {
           },
           opencodeVersion: async () => 'fixture',
           identities: async () => ({ tmuxSession: 'tmux-fixture', tempRoot: runtimeRoot }),
+          measureBrowserQuiescence: async () => {
+            gateCalls.push('browser-quiescence');
+            return browserQuiescenceEvidence();
+          },
           captureRepetition: async () => {
+            gateCalls.push('capture-repetition');
             captured += 1;
             return [1, 4].map((rate) => ({
               rate,
@@ -2024,6 +2574,7 @@ describe('COD-374 Phase B producer contracts', () => {
     expect(captured).toBe(1);
     expect(vendorVerifications).toBe(3);
     expect(assetVerifications).toBe(1);
+    expect(gateCalls).toEqual(['host-quiescence', 'browser-quiescence', 'capture-repetition']);
     expect(runtimeCleaned).toBe(true);
     expect(overlayCleaned).toBe(true);
     const manifest = JSON.parse(
@@ -2040,6 +2591,11 @@ describe('COD-374 Phase B producer contracts', () => {
     expect(published.provenance.process.runId).not.toBe(plan.provenance.process.runId);
     expect(published.provenance.runtimeVendorHash).toBe('7'.repeat(64));
     expect(published.timing.loadAverageBefore).not.toEqual(plan.timing.loadAverageBefore);
+    expect(published.quiescence).toEqual({
+      host: hostQuiescenceEvidence(),
+      browser: browserQuiescenceEvidence(),
+      passed: true,
+    });
 
     const contaminatedRoot = await mkdtemp(join(tmpdir(), 'cod374-runner-contaminated-'));
     temporaryRoots.push(contaminatedRoot);

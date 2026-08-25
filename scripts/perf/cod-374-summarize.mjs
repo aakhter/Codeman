@@ -9,6 +9,11 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import {
+  validateBrowserQuiescence as validateBrowserQuiescenceEvidence,
+  validatePersistedHostQuiescence as validateHostQuiescenceEvidence,
+} from './cod-374-quiescence.mjs';
+
 const execFileAsync = promisify(execFile);
 
 export const BASELINE_PRODUCT = Object.freeze({
@@ -1058,6 +1063,7 @@ function validateCommon(row, accepted, completed = accepted) {
       'timing',
       'clock',
       'selection',
+      'quiescence',
       'cells',
       'diagnostics',
       'allocation',
@@ -1065,6 +1071,7 @@ function validateCommon(row, accepted, completed = accepted) {
     ],
     'attempt'
   );
+  validateAttemptQuiescence(row, accepted, completed);
   if (row.schemaVersion !== 2) fail('unsupported repetition schema');
   hash(row.experimentId, 'experiment');
   if (!['calibration', 'diagnostic'].includes(row.phase)) fail('phase is invalid');
@@ -1192,6 +1199,77 @@ function validateCommon(row, accepted, completed = accepted) {
   if (Object.values(row.cleanup).some((value) => typeof value !== 'boolean')) fail('cleanup schema is invalid');
   for (const field of Object.keys(row.cleanup)) {
     if (!row.allocation[field] && row.cleanup[field] !== true) fail('not-allocated cleanup must not be a failure');
+  }
+}
+
+function validateFailedBrowserQuiescence(evidence) {
+  try {
+    validateBrowserQuiescenceEvidence(evidence);
+  } catch (error) {
+    if (
+      evidence?.passed === false &&
+      typeof error?.message === 'string' &&
+      error.message === 'COD-374 browser is not quiescent'
+    ) {
+      return evidence;
+    }
+    throw error;
+  }
+  return evidence;
+}
+
+function validateAttemptQuiescence(row, accepted, completed) {
+  exactKeys(row.quiescence, ['host', 'browser', 'passed'], 'quiescence');
+  if (typeof row.quiescence.passed !== 'boolean') fail('quiescence pass flag is invalid');
+  const host = row.quiescence.host;
+  const browser = row.quiescence.browser;
+  if (host !== null) validateHostQuiescenceEvidence(host);
+  if (browser !== null) validateFailedBrowserQuiescence(browser);
+  const reasons = new Set(row.selection?.failureReasons?.map((entry) => entry.code));
+  const hostRejected = reasons.has('host-not-quiescent');
+  const browserRejected = reasons.has('browser-not-quiescent');
+  if (hostRejected) {
+    if (
+      row.selection.lifecycle !== 'preflight' ||
+      host === null ||
+      host.passed ||
+      browser !== null ||
+      row.quiescence.passed ||
+      row.cells.length !== 0 ||
+      Object.values(row.allocation).some(Boolean)
+    ) {
+      fail('host-not-quiescent attempt must be an unallocated preflight rejection');
+    }
+    return;
+  }
+  if (browserRejected) {
+    if (
+      row.selection.lifecycle !== 'partial' ||
+      host?.passed !== true ||
+      browser === null ||
+      browser.passed ||
+      row.quiescence.passed ||
+      row.cells.length !== 0 ||
+      Object.values(row.allocation).some((value) => value !== true) ||
+      row.provenance?.runtimeVendorHash === null ||
+      row.provenance?.process?.tmuxSessionHash === null ||
+      row.provenance?.process?.tempRootHash === null ||
+      ['server', 'browser', 'opencode'].some((name) => row.provenance?.process?.[name] === null)
+    ) {
+      fail('browser-not-quiescent attempt must retain a passing host and zero captured cells');
+    }
+    return;
+  }
+  if (accepted || completed) {
+    if (host?.passed !== true || browser?.passed !== true || !row.quiescence.passed) {
+      fail('completed attempt requires passing host and browser quiescence');
+    }
+    return;
+  }
+  if (row.quiescence.passed) {
+    if (host?.passed !== true || browser?.passed !== true) fail('quiescence pass assertion is invalid');
+  } else if (browser !== null || (host !== null && !host.passed)) {
+    fail('failed quiescence evidence requires its terminal rejection reason');
   }
 }
 
@@ -1473,10 +1551,22 @@ function fixed(value) {
   return Number(value.toFixed(3));
 }
 
+function quiescenceAudit(quiescence) {
+  const host = quiescence.host;
+  const hostText = host
+    ? `host idle ${fixed(host.idlePercent)}%, load ${fixed(host.firstLoad1)}/${fixed(host.finalLoad1)} <= ${fixed(host.cpuCount * 0.5)}, conflicts ${host.processes.filter((process) => !process.allowedAncestor).length}`
+    : 'host not measured';
+  const browser = quiescence.browser;
+  const browserText = browser
+    ? `browser drift p95 ${fixed(browser.p95DriftMs)}ms/max ${fixed(browser.maxDriftMs)}ms, long-tasks ${browser.longTaskDurationsMs.length}`
+    : 'browser not allocated';
+  return `quiescence ${hostText}; ${browserText}; passed ${quiescence.passed}`;
+}
+
 function attemptAuditLines(attempts) {
   return attempts.map(
     (row) =>
-      `- attempt ${row.selection.attempt} ${row.phase}/${row.config.label} ${row.selection.lifecycle}: accepted ${row.selection.accepted}; failures ${row.selection.failureReasons.map((entry) => `${entry.code}:${entry.detailHash}`).join(',') || 'none'}; cells ${row.cells.length}; samples ${row.cells.reduce((count, cell) => count + cell.samples.length, 0)}; runtime vendor ${row.provenance.runtimeVendorHash ?? 'unavailable'}; load ${row.timing.loadAverageBefore.join(',')} to ${row.timing.loadAverageAfter.join(',')}; diagnostics overflow ${row.diagnostics.traceOverflowed}, observer [${row.diagnostics.observerErrorHashes.join(',')}], page [${row.diagnostics.pageErrorHashes.join(',')}], console [${row.diagnostics.consoleErrorHashes.join(',')}], server-stdout [${row.diagnostics.serverStdoutHashes.join(',')}], server-stderr [${row.diagnostics.serverStderrHashes.join(',')}], startup-stage [${row.diagnostics.startupStageHashes.join(',')}], startup-name [${row.diagnostics.startupNameHashes.join(',')}], startup-message [${row.diagnostics.startupMessageHashes.join(',')}], resize [${row.diagnostics.resizeEvents.map((entry) => entry.atMs).join(',')}], long-tasks [${row.diagnostics.longTasks.map((entry) => `${entry.startedMs}/${entry.durationMs}`).join(',')}], errors [${row.diagnostics.errorHashes.join(',')}], process-replaced ${row.diagnostics.processReplaced}; cleanup ${Object.entries(
+      `- attempt ${row.selection.attempt} ${row.phase}/${row.config.label} ${row.selection.lifecycle}: accepted ${row.selection.accepted}; failures ${row.selection.failureReasons.map((entry) => `${entry.code}:${entry.detailHash}`).join(',') || 'none'}; cells ${row.cells.length}; samples ${row.cells.reduce((count, cell) => count + cell.samples.length, 0)}; runtime vendor ${row.provenance.runtimeVendorHash ?? 'unavailable'}; load ${row.timing.loadAverageBefore.join(',')} to ${row.timing.loadAverageAfter.join(',')}; ${quiescenceAudit(row.quiescence)}; diagnostics overflow ${row.diagnostics.traceOverflowed}, observer [${row.diagnostics.observerErrorHashes.join(',')}], page [${row.diagnostics.pageErrorHashes.join(',')}], console [${row.diagnostics.consoleErrorHashes.join(',')}], server-stdout [${row.diagnostics.serverStdoutHashes.join(',')}], server-stderr [${row.diagnostics.serverStderrHashes.join(',')}], startup-stage [${row.diagnostics.startupStageHashes.join(',')}], startup-name [${row.diagnostics.startupNameHashes.join(',')}], startup-message [${row.diagnostics.startupMessageHashes.join(',')}], resize [${row.diagnostics.resizeEvents.map((entry) => entry.atMs).join(',')}], long-tasks [${row.diagnostics.longTasks.map((entry) => `${entry.startedMs}/${entry.durationMs}`).join(',')}], errors [${row.diagnostics.errorHashes.join(',')}], process-replaced ${row.diagnostics.processReplaced}; cleanup ${Object.entries(
         row.cleanup
       )
         .map(([key, value]) => `${key}=${row.allocation[key] ? (value ? 'verified' : 'failed') : 'not-allocated'}`)
@@ -1709,6 +1799,7 @@ function runtimeProofFailureAttempt(repetition, cause) {
 function runtimeSignature(row) {
   return stable({
     preflight: preflightSignature(row),
+    quiescence: row.quiescence,
     timing: row.timing,
     process: row.provenance.process,
     cells: row.cells.map((cell) => ({
@@ -1720,6 +1811,20 @@ function runtimeSignature(row) {
 }
 
 function preflightSignature(row) {
+  return stable({
+    experimentId: row.experimentId,
+    phase: row.phase,
+    config: row.config,
+    product: row.provenance.product,
+    harness: row.provenance.harness,
+    overlay: row.provenance.overlay,
+    dependencies: row.provenance.dependencies,
+    host: row.provenance.host,
+    quiescence: row.quiescence,
+  });
+}
+
+function preflightBaseSignature(row) {
   return stable({
     experimentId: row.experimentId,
     phase: row.phase,
@@ -1748,7 +1853,38 @@ export async function verifyExperimentPreflight({
   }
   await gitVerifier([repetition], { repositoryRoot, vendorManifestPath, validateEvidence: false });
   const proof = Object.freeze({});
-  VERIFIED_PREFLIGHTS.set(proof, preflightSignature(repetition));
+  VERIFIED_PREFLIGHTS.set(proof, {
+    baseSignature: preflightBaseSignature(repetition),
+    signature: preflightSignature(repetition),
+    quiescence: structuredClone(repetition.quiescence),
+  });
+  return proof;
+}
+
+export function bindExperimentPreflightQuiescence(proof, repetition) {
+  const measured = VERIFIED_PREFLIGHTS.get(proof);
+  if (!measured || measured.baseSignature !== preflightBaseSignature(repetition)) {
+    fail('preflight proof provenance mismatch');
+  }
+  exactKeys(repetition.quiescence, ['host', 'browser', 'passed'], 'quiescence');
+  const previous = measured.quiescence;
+  const next = repetition.quiescence;
+  const hostChanged = stable(previous.host) !== stable(next.host);
+  const browserChanged = stable(previous.browser) !== stable(next.browser);
+  if (
+    (hostChanged && previous.host !== null) ||
+    (browserChanged && previous.browser !== null) ||
+    (!hostChanged && !browserChanged && previous.passed !== next.passed)
+  ) {
+    fail('preflight quiescence evidence is immutable');
+  }
+  if (next.host !== null) validateHostQuiescenceEvidence(next.host);
+  if (next.browser !== null) validateFailedBrowserQuiescence(next.browser);
+  if (next.passed !== (next.host?.passed === true && next.browser?.passed === true)) {
+    fail('quiescence pass assertion is invalid');
+  }
+  measured.signature = preflightSignature(repetition);
+  measured.quiescence = structuredClone(next);
   return proof;
 }
 
@@ -2324,6 +2460,17 @@ function reservationSignature(row) {
   return createHash('sha256')
     .update(
       canonicalJson({
+        schedule: reservationScheduleSignature(row),
+        hostQuiescence: row.quiescence?.host ?? null,
+      })
+    )
+    .digest('hex');
+}
+
+function reservationScheduleSignature(row) {
+  return createHash('sha256')
+    .update(
+      canonicalJson({
         experimentId: row.experimentId,
         phase: row.phase,
         selection: { attempt: row.selection.attempt },
@@ -2340,9 +2487,57 @@ function reservationSignature(row) {
     .digest('hex');
 }
 
+function validateBeforeHostRejectionBundle(bundle, intent, rejection) {
+  if (bundle.beforeHostRejection !== rejection.token) fail('pre-host rejection token is invalid');
+  if (bundle.runtimeObservation !== undefined || bundle.preflightProof !== undefined) {
+    fail('pre-host rejection cannot claim measured proofs');
+  }
+  const row = bundle.repetition;
+  validateAttempt(row);
+  const expectedFailure = {
+    code: 'prerequisite-verification-failed',
+    detailHash: rejection.detailHash,
+  };
+  if (
+    canonicalJson(row.selection) !==
+      canonicalJson({
+        attempt: intent.selection.attempt,
+        lifecycle: 'preflight',
+        accepted: false,
+        failureReasons: [expectedFailure],
+      }) ||
+    canonicalJson(row.quiescence) !== canonicalJson({ host: null, browser: null, passed: false }) ||
+    row.cells.length !== 0 ||
+    Object.values(row.allocation).some(Boolean) ||
+    Object.values(row.cleanup).some((value) => value !== true) ||
+    row.provenance.runtimeVendorHash !== null ||
+    row.provenance.process.tmuxSessionHash !== null ||
+    row.provenance.process.tempRootHash !== null ||
+    ['server', 'browser', 'opencode'].some((name) => row.provenance.process[name] !== null) ||
+    row.diagnostics.traceOverflowed ||
+    row.diagnostics.processReplaced ||
+    [
+      'observerErrorHashes',
+      'pageErrorHashes',
+      'consoleErrorHashes',
+      'resizeEvents',
+      'longTasks',
+      'errorHashes',
+      'serverStdoutHashes',
+      'serverStderrHashes',
+      'startupStageHashes',
+      'startupNameHashes',
+      'startupMessageHashes',
+    ].some((field) => row.diagnostics[field].length !== 0)
+  ) {
+    fail('pre-host rejection result is not canonical');
+  }
+}
+
 function producerCrashAttempt(intent, endedAt = new Date().toISOString()) {
   const row = structuredClone(intent);
   row.provenance.runtimeVendorHash = null;
+  row.quiescence = { host: null, browser: null, passed: false };
   const startedAt = new Date().toISOString();
   row.timing = {
     startedAt,
@@ -2411,7 +2606,8 @@ async function recoverInflight(root) {
   const current = await scanAttempts(root);
   const published = current.rows[record.crashAttempt.selection.attempt - 1];
   if (published) {
-    if (reservationSignature(published) !== record.signature) fail('inflight reservation conflicts with evidence');
+    if (reservationScheduleSignature(published) !== record.signature)
+      fail('inflight reservation conflicts with evidence');
     await unlink(path);
     await fsyncDirectory(root);
     return;
@@ -2514,6 +2710,10 @@ export async function runExperimentProducerTransaction({
 }) {
   if (typeof produce !== 'function') fail('experiment producer callback is required');
   if (!object(intent) || !object(intent.selection)) fail('experiment producer intent is required');
+  exactKeys(intent.quiescence, ['host', 'browser', 'passed'], 'producer intent quiescence');
+  if (intent.quiescence.host !== null || intent.quiescence.browser !== null || intent.quiescence.passed !== false) {
+    fail('producer intent host quiescence must be unmeasured');
+  }
   await requireExternalRoot(experimentRoot, repositoryRoot);
   return withExperimentLock(experimentRoot, async (root) => {
     const current = await reconcileLocked(root);
@@ -2533,21 +2733,75 @@ export async function runExperimentProducerTransaction({
     if (proposed.length > 3 && !validateCalibration(proposed.slice(0, 3)).gate.passed)
       fail('diagnostic cannot run after failed tracing overhead gate');
     const inflightPath = join(root, 'inflight.json');
-    const signature = reservationSignature(intent);
+    const scheduleSignature = reservationScheduleSignature(intent);
+    let evidenceSignature = reservationSignature(intent);
+    let hostQuiescenceBindings = 0;
+    let producerFinished = false;
+    let beforeHostRejection = null;
     await createExclusiveRecord(
       inflightPath,
-      canonicalJson({ schemaVersion: 1, signature, crashAttempt }),
+      canonicalJson({ schemaVersion: 1, signature: scheduleSignature, crashAttempt }),
       join(root, '.staging'),
       'inflight'
     );
     await afterReservation?.();
     let bundle;
     try {
-      bundle = await produce(Object.freeze({ root, stagingDirectory: join(root, '.staging') }));
-      exactKeys(bundle, ['repetition', 'runtimeObservation', 'preflightProof'], 'producer result');
-      if (reservationSignature(bundle.repetition) !== signature)
+      bundle = await produce(
+        Object.freeze({
+          root,
+          stagingDirectory: join(root, '.staging'),
+          rejectBeforeHostMeasurement(error) {
+            if (producerFinished) fail('pre-host rejection is too late');
+            if (hostQuiescenceBindings !== 0 || beforeHostRejection !== null) {
+              fail('pre-host rejection is duplicated or follows host measurement');
+            }
+            const token = Object.freeze({});
+            beforeHostRejection = {
+              token,
+              detailHash: createHash('sha256').update(String(error)).digest('hex').slice(0, 16),
+            };
+            return token;
+          },
+          bindHostQuiescence(host) {
+            if (producerFinished) fail('host quiescence binding is too late');
+            if (hostQuiescenceBindings !== 0 || beforeHostRejection !== null) {
+              fail('host quiescence binding is duplicated or follows pre-host rejection');
+            }
+            validateHostQuiescenceEvidence(host);
+            const bound = {
+              ...intent,
+              quiescence: { host, browser: intent.quiescence?.browser ?? null, passed: false },
+            };
+            evidenceSignature = reservationSignature(bound);
+            hostQuiescenceBindings += 1;
+          },
+        })
+      );
+      producerFinished = true;
+      if (beforeHostRejection !== null) {
+        exactKeys(
+          bundle,
+          ['repetition', 'runtimeObservation', 'preflightProof', 'beforeHostRejection'],
+          'producer result'
+        );
+        validateBeforeHostRejectionBundle(bundle, intent, beforeHostRejection);
+      } else {
+        if (hostQuiescenceBindings !== 1) fail('producer result requires one measured host quiescence binding');
+        exactKeys(bundle, ['repetition', 'runtimeObservation', 'preflightProof'], 'producer result');
+      }
+      if (
+        reservationScheduleSignature(bundle.repetition) !== scheduleSignature ||
+        reservationSignature(bundle.repetition) !== evidenceSignature
+      )
         fail('producer result does not match reserved attempt');
-      const manifest = await publishAttemptLocked({ root, current, ...bundle });
+      const manifest = await publishAttemptLocked({
+        root,
+        current,
+        repetition: bundle.repetition,
+        runtimeObservation: bundle.runtimeObservation,
+        preflightProof: bundle.preflightProof,
+      });
       await unlink(inflightPath);
       await fsyncDirectory(root);
       return manifest;
@@ -2608,7 +2862,7 @@ async function publishAttemptLocked({
   if (repetition.selection.lifecycle !== 'preflight') {
     if (!preflightProof || !VERIFIED_PREFLIGHTS.has(preflightProof))
       fail('launched attempt requires clean repository preflight proof');
-    if (VERIFIED_PREFLIGHTS.get(preflightProof) !== preflightSignature(repetition))
+    if (VERIFIED_PREFLIGHTS.get(preflightProof)?.signature !== preflightSignature(repetition))
       fail('preflight proof provenance mismatch');
     if (!runtimeObservation) {
       if (repetition.selection.lifecycle !== 'partial' || repetition.selection.accepted)
@@ -2623,7 +2877,17 @@ async function publishAttemptLocked({
       }
       VERIFIED_RUNTIME_OBSERVATIONS.delete(runtimeObservation);
     }
-  } else if (runtimeObservation !== undefined) fail('rejected preflight cannot claim complete runtime observation');
+  } else {
+    if (runtimeObservation !== undefined) fail('rejected preflight cannot claim complete runtime observation');
+    if (repetition.quiescence.host !== null) {
+      if (!preflightProof || !VERIFIED_PREFLIGHTS.has(preflightProof)) {
+        fail('measured host preflight requires clean repository proof');
+      }
+      if (VERIFIED_PREFLIGHTS.get(preflightProof)?.signature !== preflightSignature(repetition)) {
+        fail('preflight proof provenance mismatch');
+      }
+    }
+  }
   if (preflightProof) VERIFIED_PREFLIGHTS.delete(preflightProof);
   if (current.rows.some((row) => !row.selection.accepted)) fail('experiment stopped after rejected attempt');
   const proposed = [...current.rows, repetition];

@@ -10,12 +10,20 @@ import { promisify } from 'node:util';
 
 import {
   OVERLAY_FILES,
+  bindExperimentPreflightQuiescence,
   canonicalJson,
   measureRuntimeObservation,
   runExperimentProducerTransaction,
   validateAttempt,
   verifyExperimentPreflight,
 } from './cod-374-summarize.mjs';
+import {
+  BROWSER_TIMER_INTERVAL_MS,
+  HOST_SAMPLE_INTERVAL_MS,
+  measureHostQuiescence,
+  validateBrowserQuiescence,
+  validatePersistedHostQuiescence,
+} from './cod-374-quiescence.mjs';
 
 const execFileAsync = promisify(execFile);
 const WORKLOAD = [
@@ -588,6 +596,51 @@ function rejectedPreflight(plan, error) {
   };
 }
 
+function quiescencePlaceholder() {
+  return { host: null, browser: null, passed: false };
+}
+
+function failedHostQuiescence(error, cpuCount = 1) {
+  return {
+    cpuCount: Number.isInteger(cpuCount) && cpuCount > 0 ? cpuCount : 1,
+    sampleCount: 0,
+    sampleIntervalMs: HOST_SAMPLE_INTERVAL_MS,
+    startedAtMs: 0,
+    endedAtMs: 0,
+    sampleTimesMs: [],
+    idlePercent: 0,
+    firstLoad1: 0,
+    finalLoad1: 0,
+    processes: [],
+    measurementErrorHash: hash16(error instanceof Error ? `${error.name}:${error.message}` : String(error)),
+    passed: false,
+  };
+}
+
+function failedBrowserQuiescence(error) {
+  return {
+    tickCount: 0,
+    timerIntervalMs: BROWSER_TIMER_INTERVAL_MS,
+    driftsMs: [],
+    p95DriftMs: 0,
+    maxDriftMs: 0,
+    longTaskDurationsMs: [],
+    pageErrorHashes: [],
+    consoleErrorHashes: [],
+    resizeCount: 0,
+    overflowed: false,
+    measurementErrorHash: hash16(error instanceof Error ? `${error.name}:${error.message}` : String(error)),
+    passed: false,
+  };
+}
+
+function hostRejectedPreflight(plan, host) {
+  const repetition = rejectedPreflight(plan, new Error('host-not-quiescent'));
+  repetition.selection.failureReasons = [{ code: 'host-not-quiescent', detailHash: hash16(canonicalJson(host)) }];
+  repetition.quiescence = { host, browser: null, passed: false };
+  return repetition;
+}
+
 function command(args, cwd, input) {
   if (input !== undefined) {
     return new Promise((resolvePromise, rejectPromise) => {
@@ -822,6 +875,7 @@ async function procIdentity(pid) {
 export async function runPhaseBProducer(options) {
   const adapters = options.testAdapters;
   if (adapters && process.env.NODE_ENV !== 'test') fail('injected adapters are test-only');
+  const repetitionPlan = { ...options.repetition, quiescence: quiescencePlaceholder() };
   const materialize = adapters?.materialize ?? materializeVerifiedRuntimeOverlay;
   const launch =
     adapters?.launch ??
@@ -832,8 +886,8 @@ export async function runPhaseBProducer(options) {
   return runExperimentProducerTransaction({
     experimentRoot: options.experimentRoot,
     repositoryRoot: options.repositoryRoot,
-    intent: options.repetition,
-    produce: async ({ stagingDirectory }) => {
+    intent: repetitionPlan,
+    produce: async ({ stagingDirectory, rejectBeforeHostMeasurement, bindHostQuiescence }) => {
       let overlay;
       let runtime;
       const cleanupFields = [
@@ -857,6 +911,21 @@ export async function runPhaseBProducer(options) {
           if (proof[field] === true) runtimeCleanupProof[field] = true;
         }
       };
+      const validateCleanupProof = (proof) => {
+        mergeCleanupProof(proof);
+        const keys = proof && typeof proof === 'object' && !Array.isArray(proof) ? Object.keys(proof).sort() : [];
+        if (
+          !proof ||
+          typeof proof !== 'object' ||
+          Array.isArray(proof) ||
+          canonicalJson(keys) !== canonicalJson([...cleanupFields].sort()) ||
+          cleanupFields.some((field) => typeof proof[field] !== 'boolean' || proof[field] !== true)
+        ) {
+          throw Object.assign(new Error('COD-374 runtime cleanup proof is invalid or incomplete'), {
+            cleanupProof: proof,
+          });
+        }
+      };
       const cleanupEvidence = () => ({
         ...runtimeCleanupProof,
         tempRootRemoved: runtimeCleanupProof.tempRootRemoved && overlayCleanupProof,
@@ -865,7 +934,7 @@ export async function runPhaseBProducer(options) {
         if (resourceState.runtime !== 'live' || runtimeCleanupAttempted) return;
         runtimeCleanupAttempted = true;
         try {
-          mergeCleanupProof(await runtime.cleanup());
+          validateCleanupProof(await runtime.cleanup());
         } catch (error) {
           mergeCleanupProof(error?.cleanupProof);
           cleanupErrors.push(error);
@@ -898,22 +967,47 @@ export async function runPhaseBProducer(options) {
       try {
         try {
           preflightProof = await verifyExperimentPreflight({
-            repetition: options.repetition,
+            repetition: repetitionPlan,
             repositoryRoot: options.repositoryRoot,
             vendorManifestPath: options.vendorManifestPath,
             gitVerifier: adapters?.gitVerifier,
           });
         } catch (error) {
           return {
-            repetition: rejectedPreflight(options.repetition, error),
+            repetition: rejectedPreflight(repetitionPlan, error),
             runtimeObservation: undefined,
             preflightProof: undefined,
+            beforeHostRejection: rejectBeforeHostMeasurement(error),
           };
         }
+        let hostQuiescence;
         try {
-          const claimedOverlay = options.repetition.provenance.overlay;
+          hostQuiescence = await (adapters?.measureHostQuiescence ?? measureHostQuiescence)();
+          validatePersistedHostQuiescence(hostQuiescence);
+        } catch (error) {
+          if (error?.evidence) {
+            try {
+              validatePersistedHostQuiescence(error.evidence);
+              hostQuiescence = error.evidence;
+            } catch {
+              hostQuiescence = failedHostQuiescence(error, repetitionPlan.provenance.host.cpuCount);
+            }
+          } else {
+            hostQuiescence = failedHostQuiescence(error, repetitionPlan.provenance.host.cpuCount);
+          }
+        }
+        bindHostQuiescence(hostQuiescence);
+        repetitionPlan.quiescence = { host: hostQuiescence, browser: null, passed: false };
+        bindExperimentPreflightQuiescence(preflightProof, repetitionPlan);
+        if (!hostQuiescence.passed) {
+          const repetition = hostRejectedPreflight(repetitionPlan, hostQuiescence);
+          bindExperimentPreflightQuiescence(preflightProof, repetition);
+          return { repetition, runtimeObservation: undefined, preflightProof };
+        }
+        try {
+          const claimedOverlay = repetitionPlan.provenance.overlay;
           if (
-            canonicalJson(options.overlayArtifact.product) !== canonicalJson(options.repetition.provenance.product) ||
+            canonicalJson(options.overlayArtifact.product) !== canonicalJson(repetitionPlan.provenance.product) ||
             options.overlayArtifact.patchSha256 !== claimedOverlay.patchSha256 ||
             options.overlayArtifact.manifestSha256 !== claimedOverlay.manifestSha256 ||
             canonicalJson(options.overlayArtifact.files) !== canonicalJson(claimedOverlay.files)
@@ -931,13 +1025,13 @@ export async function runPhaseBProducer(options) {
           const dependencyOptions = {
             runtimeRoot: overlay.root,
             repositoryRoot: options.repositoryRoot,
-            expectedLockSha256: options.repetition.provenance.dependencies.packageLockSha256,
+            expectedLockSha256: repetitionPlan.provenance.dependencies.packageLockSha256,
           };
           const expectedDependencyProof = {
-            dependencyRootHash: options.repetition.provenance.dependencies.dependencyRootHash,
-            dependencyContentHash: options.repetition.provenance.dependencies.dependencyContentHash,
-            dependencyDevice: options.repetition.provenance.dependencies.dependencyDevice,
-            dependencyInode: options.repetition.provenance.dependencies.dependencyInode,
+            dependencyRootHash: repetitionPlan.provenance.dependencies.dependencyRootHash,
+            dependencyContentHash: repetitionPlan.provenance.dependencies.dependencyContentHash,
+            dependencyDevice: repetitionPlan.provenance.dependencies.dependencyDevice,
+            dependencyInode: repetitionPlan.provenance.dependencies.dependencyInode,
           };
           const dependencyProof = await (adapters?.provisionDependencies ?? provisionRuntimeDependencies)(
             dependencyOptions
@@ -953,7 +1047,7 @@ export async function runPhaseBProducer(options) {
             runtimeRoot: overlay.root,
             repositoryRoot: options.repositoryRoot,
             vendorManifestPath: options.vendorManifestPath,
-            expectedManifestSha256: options.repetition.provenance.dependencies.vendorManifestSha256,
+            expectedManifestSha256: repetitionPlan.provenance.dependencies.vendorManifestSha256,
           };
           vendorRuntimeProof = await (adapters?.provisionVendorAssets ?? provisionRuntimeVendorAssets)(vendorOptions);
           const verifiedVendorProof = await (
@@ -977,7 +1071,7 @@ export async function runPhaseBProducer(options) {
             }
             overlay = null;
           }
-          const repetition = rejectedPreflight(options.repetition, failure);
+          const repetition = rejectedPreflight(repetitionPlan, failure);
           repetition.allocation.tempRootRemoved = tempRootAllocated;
           repetition.cleanup.tempRootRemoved = tempRootRemoved;
           repetition.diagnostics.errorHashes = [hash16(String(failure))];
@@ -985,10 +1079,10 @@ export async function runPhaseBProducer(options) {
           return {
             repetition,
             runtimeObservation: undefined,
-            preflightProof: undefined,
+            preflightProof,
           };
         }
-        runtime = await launch({ runtimeRoot: overlay.root, stagingDirectory, plan: options.repetition });
+        runtime = await launch({ runtimeRoot: overlay.root, stagingDirectory, plan: repetitionPlan });
         resourceState.runtime = 'live';
         for (const field of cleanupFields) runtimeCleanupProof[field] = false;
         runtimeLaunchedAt = runtime.launchedAt;
@@ -1000,18 +1094,15 @@ export async function runPhaseBProducer(options) {
         )({
           runtimeRoot: overlay.root,
           repositoryRoot: options.repositoryRoot,
-          expectedLockSha256: options.repetition.provenance.dependencies.packageLockSha256,
+          expectedLockSha256: repetitionPlan.provenance.dependencies.packageLockSha256,
           expectedProof: {
-            dependencyRootHash: options.repetition.provenance.dependencies.dependencyRootHash,
-            dependencyContentHash: options.repetition.provenance.dependencies.dependencyContentHash,
-            dependencyDevice: options.repetition.provenance.dependencies.dependencyDevice,
-            dependencyInode: options.repetition.provenance.dependencies.dependencyInode,
+            dependencyRootHash: repetitionPlan.provenance.dependencies.dependencyRootHash,
+            dependencyContentHash: repetitionPlan.provenance.dependencies.dependencyContentHash,
+            dependencyDevice: repetitionPlan.provenance.dependencies.dependencyDevice,
+            dependencyInode: repetitionPlan.provenance.dependencies.dependencyInode,
           },
         });
-        if (
-          finalDependencyProof.dependencyContentHash !==
-          options.repetition.provenance.dependencies.dependencyContentHash
-        )
+        if (finalDependencyProof.dependencyContentHash !== repetitionPlan.provenance.dependencies.dependencyContentHash)
           fail('runtime dependency proof changed after launch');
         const finalVendorProof = await (
           adapters?.verifyProvisionedVendorAssets ?? verifyProvisionedRuntimeVendorAssets
@@ -1019,7 +1110,7 @@ export async function runPhaseBProducer(options) {
           runtimeRoot: overlay.root,
           repositoryRoot: options.repositoryRoot,
           vendorManifestPath: options.vendorManifestPath,
-          expectedManifestSha256: options.repetition.provenance.dependencies.vendorManifestSha256,
+          expectedManifestSha256: repetitionPlan.provenance.dependencies.vendorManifestSha256,
           expectedProof: vendorRuntimeProof,
         });
         if (canonicalJson(finalVendorProof) !== canonicalJson(vendorRuntimeProof))
@@ -1038,13 +1129,150 @@ export async function runPhaseBProducer(options) {
           runtimeRoot: overlay.root,
           baseUrl: runtime.baseUrl,
           fetch: runtime.fetch,
-          expectedAssets: options.repetition.provenance.overlay.servedAssets,
+          expectedAssets: repetitionPlan.provenance.overlay.servedAssets,
         });
         const viewport = await runtime.page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
         const fontPx = await readTerminalFontPx(runtime.page);
         const opencodeVersion = await runtime.opencodeVersion();
         runtimeIdentities = await runtime.identities();
         const loadAverageBefore = loadavg();
+        let browserQuiescence;
+        try {
+          browserQuiescence = await runtime.measureBrowserQuiescence();
+          validateBrowserQuiescence(browserQuiescence);
+        } catch (error) {
+          if (
+            browserQuiescence?.passed === false &&
+            typeof error?.message === 'string' &&
+            error.message === 'COD-374 browser is not quiescent'
+          ) {
+            // The validator has already established the exact failed evidence shape.
+          } else {
+            browserQuiescence = failedBrowserQuiescence(error);
+          }
+        }
+        repetitionPlan.quiescence = {
+          host: repetitionPlan.quiescence.host,
+          browser: browserQuiescence,
+          passed: repetitionPlan.quiescence.host.passed && browserQuiescence.passed,
+        };
+        bindExperimentPreflightQuiescence(preflightProof, repetitionPlan);
+        if (!browserQuiescence.passed) {
+          let processReplaced = false;
+          let processVerificationError;
+          try {
+            const [finalServer, finalBrowser, finalOpenCode] = await Promise.all([
+              (adapters?.procIdentity ?? procIdentity)(runtime.serverPid),
+              (adapters?.procIdentity ?? procIdentity)(runtime.browserPid),
+              (adapters?.procIdentity ?? procIdentity)(runtime.opencodePid),
+            ]);
+            processReplaced = [
+              [serverProc, finalServer],
+              [browserProc, finalBrowser],
+              [opencodeProc, finalOpenCode],
+            ].some(([initial, final]) => initial.pid !== final.pid || initial.startIdentity !== final.startIdentity);
+          } catch (error) {
+            processReplaced = true;
+            processVerificationError = error;
+          }
+          await cleanupRuntimeResource();
+          await cleanupOverlayResource();
+          const cleanup = cleanupEvidence();
+          const diagnostics = {
+            traceOverflowed: false,
+            observerErrorHashes: [],
+            pageErrorHashes: [],
+            consoleErrorHashes: [],
+            processReplaced,
+            resizeEvents: [],
+            longTasks: [],
+            errorHashes: [
+              ...new Set(
+                [processVerificationError, ...cleanupErrors].filter(Boolean).map((error) => hash16(String(error)))
+              ),
+            ],
+            serverStdoutHashes: [],
+            serverStderrHashes: [],
+            startupStageHashes: [],
+            startupNameHashes: [],
+            startupMessageHashes: [],
+          };
+          if (processVerificationError) {
+            const proof = errorDiagnosticHashes(processVerificationError, 'runtime-process-verification');
+            for (const field of ['startupStageHashes', 'startupNameHashes', 'startupMessageHashes']) {
+              diagnostics[field].push(...proof[field].filter((value) => !diagnostics[field].includes(value)));
+            }
+          }
+          for (const cleanupError of cleanupErrors) {
+            const proof = errorDiagnosticHashes(cleanupError, 'runtime-cleanup');
+            for (const field of ['startupStageHashes', 'startupNameHashes', 'startupMessageHashes']) {
+              diagnostics[field].push(...proof[field].filter((value) => !diagnostics[field].includes(value)));
+            }
+          }
+          const repetition = {
+            ...repetitionPlan,
+            timing: {
+              startedAt: runtimeLaunchedAt,
+              endedAt: new Date().toISOString(),
+              loadAverageBefore,
+              loadAverageAfter: loadavg(),
+            },
+            clock: {
+              mode: 'component-local',
+              browserClockId: hash16(`browser:${browserProc.pid}:${browserProc.startIdentity}`),
+              serverClockId: hash16(`server:${serverProc.pid}:${serverProc.startIdentity}`),
+              harnessClockId: randomBytes(8).toString('hex'),
+            },
+            provenance: {
+              ...repetitionPlan.provenance,
+              runtimeVendorHash: vendorRuntimeProof.vendorRuntimeHash,
+              process: {
+                runId: randomBytes(8).toString('hex'),
+                tmuxSessionHash: hash16(runtimeIdentities.tmuxSession),
+                tempRootHash: hash16(runtimeIdentities.tempRoot),
+                server: {
+                  pid: serverProc.pid,
+                  startedAt: serverProc.startedAt,
+                  startIdentity: serverProc.startIdentity,
+                  startUncertaintyMs: serverProc.startUncertaintyMs,
+                },
+                browser: {
+                  pid: browserProc.pid,
+                  startedAt: browserProc.startedAt,
+                  startIdentity: browserProc.startIdentity,
+                  startUncertaintyMs: browserProc.startUncertaintyMs,
+                },
+                opencode: {
+                  pid: opencodeProc.pid,
+                  startedAt: opencodeProc.startedAt,
+                  startIdentity: opencodeProc.startIdentity,
+                  startUncertaintyMs: opencodeProc.startUncertaintyMs,
+                },
+              },
+            },
+            selection: {
+              ...repetitionPlan.selection,
+              lifecycle: 'partial',
+              accepted: false,
+              failureReasons: [
+                { code: 'browser-not-quiescent', detailHash: hash16(canonicalJson(browserQuiescence)) },
+                ...(processReplaced
+                  ? [{ code: 'runtime-contaminated', detailHash: hash16(canonicalJson(diagnostics)) }]
+                  : []),
+                ...cleanupErrors.map((error) => ({
+                  code: 'runtime-cleanup-failed',
+                  detailHash: hash16(String(error)),
+                })),
+              ],
+            },
+            quiescence: repetitionPlan.quiescence,
+            cells: [],
+            diagnostics,
+            cleanup,
+          };
+          attemptSnapshot = repetition;
+          return { repetition, runtimeObservation: undefined, preflightProof };
+        }
         let lifecycleError;
         let artifacts;
         try {
@@ -1118,17 +1346,16 @@ export async function runPhaseBProducer(options) {
         )({
           runtimeRoot: overlay.root,
           repositoryRoot: options.repositoryRoot,
-          expectedLockSha256: options.repetition.provenance.dependencies.packageLockSha256,
+          expectedLockSha256: repetitionPlan.provenance.dependencies.packageLockSha256,
           expectedProof: {
-            dependencyRootHash: options.repetition.provenance.dependencies.dependencyRootHash,
-            dependencyContentHash: options.repetition.provenance.dependencies.dependencyContentHash,
-            dependencyDevice: options.repetition.provenance.dependencies.dependencyDevice,
-            dependencyInode: options.repetition.provenance.dependencies.dependencyInode,
+            dependencyRootHash: repetitionPlan.provenance.dependencies.dependencyRootHash,
+            dependencyContentHash: repetitionPlan.provenance.dependencies.dependencyContentHash,
+            dependencyDevice: repetitionPlan.provenance.dependencies.dependencyDevice,
+            dependencyInode: repetitionPlan.provenance.dependencies.dependencyInode,
           },
         });
         if (
-          publishDependencyProof.dependencyContentHash !==
-          options.repetition.provenance.dependencies.dependencyContentHash
+          publishDependencyProof.dependencyContentHash !== repetitionPlan.provenance.dependencies.dependencyContentHash
         )
           fail('runtime dependency proof changed before publication');
         const publishVendorProof = await (
@@ -1137,7 +1364,7 @@ export async function runPhaseBProducer(options) {
           runtimeRoot: overlay.root,
           repositoryRoot: options.repositoryRoot,
           vendorManifestPath: options.vendorManifestPath,
-          expectedManifestSha256: options.repetition.provenance.dependencies.vendorManifestSha256,
+          expectedManifestSha256: repetitionPlan.provenance.dependencies.vendorManifestSha256,
           expectedProof: vendorRuntimeProof,
         });
         if (canonicalJson(publishVendorProof) !== canonicalJson(vendorRuntimeProof))
@@ -1166,7 +1393,7 @@ export async function runPhaseBProducer(options) {
           }
         }
         const repetition = {
-          ...options.repetition,
+          ...repetitionPlan,
           timing: { startedAt: launchedAt, endedAt, loadAverageBefore, loadAverageAfter },
           clock: {
             mode: 'component-local',
@@ -1175,10 +1402,10 @@ export async function runPhaseBProducer(options) {
             harnessClockId: randomBytes(8).toString('hex'),
           },
           provenance: {
-            ...options.repetition.provenance,
+            ...repetitionPlan.provenance,
             runtimeVendorHash: vendorRuntimeProof.vendorRuntimeHash,
             process: {
-              ...options.repetition.provenance.process,
+              ...repetitionPlan.provenance.process,
               runId: randomBytes(8).toString('hex'),
               tmuxSessionHash: hash16(runtimeIdentities.tmuxSession),
               tempRootHash: hash16(runtimeIdentities.tempRoot),
@@ -1204,16 +1431,16 @@ export async function runPhaseBProducer(options) {
           },
           selection: contaminated
             ? {
-                ...options.repetition.selection,
+                ...repetitionPlan.selection,
                 lifecycle:
-                  artifacts.length === options.repetition.config.rates.length &&
-                  artifacts.every((cell) => cell.samples.length === options.repetition.config.samplesPerCell)
+                  artifacts.length === repetitionPlan.config.rates.length &&
+                  artifacts.every((cell) => cell.samples.length === repetitionPlan.config.samplesPerCell)
                     ? 'completed'
                     : 'partial',
                 accepted: false,
                 failureReasons: [{ code: 'runtime-contaminated', detailHash: hash16(canonicalJson(diagnostics)) }],
               }
-            : options.repetition.selection,
+            : repetitionPlan.selection,
           cells,
           diagnostics,
           cleanup,
@@ -1277,7 +1504,7 @@ export async function runPhaseBProducer(options) {
         await cleanupRuntimeResource();
         await cleanupOverlayResource();
         const cleanup = cleanupEvidence();
-        const repetition = rejectedPreflight(options.repetition, primaryError);
+        const repetition = rejectedPreflight(repetitionPlan, primaryError);
         repetition.cleanup = cleanup;
         repetition.diagnostics.errorHashes = [
           ...new Set([primaryError, ...cleanupErrors].map((retainedError) => hash16(String(retainedError)))),
@@ -1355,7 +1582,7 @@ export async function runPhaseBProducer(options) {
         return {
           repetition,
           runtimeObservation: undefined,
-          preflightProof: postAllocation ? preflightProof : undefined,
+          preflightProof: repetition.quiescence.host === null ? undefined : preflightProof,
         };
       } finally {
         await cleanupRuntimeResource();

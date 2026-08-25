@@ -51,6 +51,41 @@ const EXPERIMENT_ID = '9999999999999999';
 const OPENCODE_VERSION = 'opencode-fixture-1.0.0';
 const OPENCODE_VERSION_HASH = createHash('sha256').update(OPENCODE_VERSION).digest('hex').slice(0, 16);
 
+function hostQuiescence(passed = true) {
+  return {
+    cpuCount: 8,
+    sampleCount: 11,
+    sampleIntervalMs: 500,
+    startedAtMs: 0,
+    endedAtMs: 5_000,
+    sampleTimesMs: Array.from({ length: 11 }, (_, index) => index * 500),
+    idlePercent: passed ? 84.125 : 79,
+    firstLoad1: 2.1,
+    finalLoad1: 2.4,
+    processes: [],
+    measurementErrorHash: null,
+    passed,
+  };
+}
+
+function browserQuiescence(passed = true) {
+  const driftsMs = Array.from({ length: 50 }, (_, index) => (passed && index === 49 ? 6.4 : passed ? 2.1 : 11));
+  return {
+    tickCount: 50,
+    timerIntervalMs: 20,
+    driftsMs,
+    p95DriftMs: passed ? 2.1 : 11,
+    maxDriftMs: passed ? 6.4 : 11,
+    longTaskDurationsMs: [],
+    pageErrorHashes: [],
+    consoleErrorHashes: [],
+    resizeCount: 0,
+    overflowed: false,
+    measurementErrorHash: null,
+    passed,
+  };
+}
+
 function browserEvent(stage: string, atMs: number, context: Record<string, unknown>, optional = {}) {
   return { stage, atMs, clock: 'browser', ...context, ...optional };
 }
@@ -365,6 +400,7 @@ function repetition(
     timing: { startedAt, endedAt, loadAverageBefore: [0.1, 0.2, 0.3], loadAverageAfter: [0.2, 0.3, 0.4] },
     clock: { mode: 'component-local', browserClockId, serverClockId, harnessClockId },
     selection: { attempt, lifecycle: 'completed', accepted: true, failureReasons: [] },
+    quiescence: { host: hostQuiescence(), browser: browserQuiescence(), passed: true },
     cells: [1, 4].map((rate) => ({
       rate,
       realizedCpuThrottle: rate,
@@ -430,6 +466,7 @@ function rejectedPreflight(attempt = 1) {
     opencode: null,
   };
   row.provenance.runtimeVendorHash = null;
+  row.quiescence = { host: null, browser: null, passed: false };
   row.cells = [];
   row.allocation = {
     browserClosed: false,
@@ -478,6 +515,12 @@ const allAttempts = () => [...completeCalibration(), ...completeDiagnostic()];
 
 function runtimeObservation(row: any) {
   return measureRuntimeObservation(row, runtimeProbes(row));
+}
+
+function producerIntent(row: any) {
+  const intent = structuredClone(row);
+  intent.quiescence = { host: null, browser: null, passed: false };
+  return intent;
 }
 
 function runtimeProbes(row: any) {
@@ -926,6 +969,152 @@ describe('COD-374 real-shape evidence validation', () => {
   });
 });
 
+describe('COD-374 quiescence schema, signatures, and report evidence', () => {
+  it('requires exact passing quiescence evidence for accepted attempts', () => {
+    const accepted: any = repetition('calibration', 'trace-off', 1, 1);
+    expect(validateAttempt(accepted)).toBe(accepted);
+
+    const missing = structuredClone(accepted);
+    delete missing.quiescence;
+    expect(() => validateAttempt(missing)).toThrow(/quiescence|attempt.*field/i);
+
+    const failed = structuredClone(accepted);
+    failed.quiescence.browser = browserQuiescence(false);
+    failed.quiescence.passed = false;
+    expect(() => validateAttempt(failed)).toThrow(/quiescence|browser/i);
+  });
+
+  it.each([
+    ['host sample count', (row: any) => (row.quiescence.host.sampleCount = 10)],
+    ['host sample times', (row: any) => (row.quiescence.host.sampleTimesMs[5] = 2_000)],
+    ['host measurement hash', (row: any) => (row.quiescence.host.measurementErrorHash = 'raw error')],
+    ['browser tick count', (row: any) => (row.quiescence.browser.tickCount = 49)],
+    ['browser drift summary', (row: any) => (row.quiescence.browser.p95DriftMs = 3)],
+    ['browser diagnostic hash', (row: any) => row.quiescence.browser.pageErrorHashes.push('raw error')],
+  ])('rejects malformed quiescence %s evidence', (_name, mutate) => {
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    mutate(row);
+    expect(() => validateAttempt(row)).toThrow(/quiescence|sample|timing|hash|tick|drift|browser|host/i);
+  });
+
+  it('accepts only canonical host-not-quiescent preflight evidence with no browser allocation', () => {
+    const row: any = rejectedPreflight();
+    row.selection.failureReasons = [{ code: 'host-not-quiescent', detailHash: '7777777777777777' }];
+    row.quiescence = { host: hostQuiescence(false), browser: null, passed: false };
+    expect(validateAttempt(row)).toBe(row);
+
+    const browserAllocated = structuredClone(row);
+    browserAllocated.quiescence.browser = browserQuiescence(false);
+    expect(() => validateAttempt(browserAllocated)).toThrow(/host-not-quiescent|browser.*null|not allocated/i);
+
+    const rawCommand = structuredClone(row);
+    rawCommand.quiescence.host.processes = [
+      {
+        classification: 'vitest',
+        commandHash: '1212121212121212',
+        startIdentity: '123',
+        allowedAncestor: false,
+        command: 'secret raw command',
+      },
+    ];
+    expect(() => validateAttempt(rawCommand)).toThrow(/process|field|quiescence/i);
+  });
+
+  it('accepts only canonical browser-not-quiescent partial evidence with no captured cells', () => {
+    const row: any = rejectedPartial(1);
+    row.config.label = 'trace-off';
+    row.config.traceEnabled = false;
+    row.selection.failureReasons = [{ code: 'browser-not-quiescent', detailHash: '8989898989898989' }];
+    row.cells = [];
+    row.diagnostics.longTasks = [];
+    row.cleanup = Object.fromEntries(Object.keys(row.cleanup).map((key) => [key, true]));
+    row.quiescence = { host: hostQuiescence(), browser: browserQuiescence(false), passed: false };
+    expect(validateAttempt(row)).toBe(row);
+
+    const failedHost = structuredClone(row);
+    failedHost.quiescence.host = hostQuiescence(false);
+    expect(() => validateAttempt(failedHost)).toThrow(/browser-not-quiescent|host.*pass|quiescence/i);
+
+    const missingProcess = structuredClone(row);
+    missingProcess.provenance.process.browser = null;
+    expect(() => validateAttempt(missingProcess)).toThrow(/browser-not-quiescent|process|provenance/i);
+
+    const incompleteTicks = structuredClone(row);
+    incompleteTicks.quiescence.browser.tickCount = 49;
+    incompleteTicks.quiescence.browser.driftsMs.pop();
+    incompleteTicks.quiescence.browser.p95DriftMs = 11;
+    incompleteTicks.quiescence.browser.maxDriftMs = 11;
+    expect(() => validateAttempt(incompleteTicks)).toThrow(/tick cardinality|browser/i);
+
+    const captured = structuredClone(row);
+    captured.cells = [repetition('calibration', 'trace-off', 1, 1).cells[0]];
+    expect(() => validateAttempt(captured)).toThrow(/browser-not-quiescent|zero cells|capture/i);
+  });
+
+  it('binds host quiescence measurements into preflight proof signatures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-quiescence-signature-'));
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    const preflightProof = await verifyExperimentPreflight({
+      repetition: row,
+      repositoryRoot: '/repo',
+      vendorManifestPath: '/vendor.json',
+      gitVerifier: async () => {},
+    });
+    row.quiescence.host.idlePercent = 85;
+    await expect(
+      publishExperimentAttempt({
+        experimentRoot: root,
+        repositoryRoot: '/repo',
+        repetition: row,
+        runtimeObservation: runtimeObservation(row),
+        preflightProof,
+      })
+    ).rejects.toThrow(/preflight.*provenance|quiescence|proof/i);
+  });
+
+  it('binds browser quiescence measurements into preflight proof signatures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-browser-signature-'));
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    const preflightProof = await verifyExperimentPreflight({
+      repetition: row,
+      repositoryRoot: '/repo',
+      vendorManifestPath: '/vendor.json',
+      gitVerifier: async () => {},
+    });
+    row.quiescence.browser.driftsMs[49] = 7;
+    row.quiescence.browser.maxDriftMs = 7;
+    await expect(
+      publishExperimentAttempt({
+        experimentRoot: root,
+        repositoryRoot: '/repo',
+        repetition: row,
+        runtimeObservation: runtimeObservation(row),
+        preflightProof,
+      })
+    ).rejects.toThrow(/preflight.*provenance|quiescence|proof/i);
+  });
+
+  it('binds quiescence measurements into runtime observation signatures', () => {
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    const proof = runtimeObservation(row);
+    row.quiescence.browser.driftsMs[49] = 7;
+    row.quiescence.browser.maxDriftMs = 7;
+    expect(() => verifyRuntimeObservation(row, proof)).toThrow(/runtime observation proof|quiescence/i);
+  });
+
+  it('reports bounded host and browser quiescence evidence or browser not allocated', () => {
+    const report = buildAttributionReport({ attempts: allAttempts() });
+    expect(report).toMatch(
+      /quiescence host idle 84\.125%, load 2\.1\/2\.4 <= 4, conflicts 0; browser drift p95 2\.1ms\/max 6\.4ms, long-tasks 0; passed true/i
+    );
+
+    const preflight: any = rejectedPreflight();
+    preflight.selection.failureReasons = [{ code: 'host-not-quiescent', detailHash: '7777777777777777' }];
+    preflight.quiescence = { host: hostQuiescence(false), browser: null, passed: false };
+    expect(buildAttributionReport({ attempts: [preflight] })).toMatch(/browser not allocated; passed false/i);
+  });
+});
+
 describe('COD-374 lifecycle and report policy', () => {
   it('accepts exact calibration and diagnostic schedules', () => {
     expect(validateCalibration(completeCalibration()).gate.passed).toBe(true);
@@ -1206,6 +1395,164 @@ describe('COD-374 overlay and runtime provenance', () => {
 });
 
 describe('COD-374 evidence-source transaction and publication', () => {
+  it('rejects preloaded host evidence when the producer skips the measured host binding', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-preloaded-host-'));
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    const preflightProof = await verifyExperimentPreflight({
+      repetition: row,
+      repositoryRoot: '/repo',
+      vendorManifestPath: '/vendor.json',
+      gitVerifier: async () => {},
+    });
+    let producerCalls = 0;
+
+    await expect(
+      runExperimentProducerTransaction({
+        experimentRoot: root,
+        repositoryRoot: '/repo',
+        intent: row,
+        produce: async () => {
+          producerCalls += 1;
+          return { repetition: row, runtimeObservation: runtimeObservation(row), preflightProof };
+        },
+      })
+    ).rejects.toThrow(/intent.*host.*unmeasured|host.*binding|quiescence/i);
+
+    expect(producerCalls).toBe(0);
+    await expect(readFile(join(root, 'attempts/attempt-0001.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects mutated host quiescence after the measured preflight identity is reserved', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-host-reservation-'));
+    const intent: any = repetition('calibration', 'trace-off', 1, 1);
+    intent.quiescence = { host: null, browser: null, passed: false };
+    const measuredHost = hostQuiescence(false);
+    const mutated: any = rejectedPreflight();
+    mutated.selection.failureReasons = [{ code: 'host-not-quiescent', detailHash: '7777777777777777' }];
+    mutated.quiescence = { host: hostQuiescence(false), browser: null, passed: false };
+    mutated.quiescence.host.idlePercent = 78;
+
+    await expect(
+      runExperimentProducerTransaction({
+        experimentRoot: root,
+        repositoryRoot: '/repo',
+        intent,
+        produce: async ({ bindHostQuiescence }: any) => {
+          bindHostQuiescence(measuredHost);
+          return { repetition: mutated, runtimeObservation: undefined, preflightProof: undefined };
+        },
+      })
+    ).rejects.toThrow(/reserved attempt|quiescence|signature/i);
+
+    const published = JSON.parse(await readFile(join(root, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(published.selection.failureReasons).toEqual([expect.objectContaining({ code: 'producer-crash' })]);
+    expect(published.quiescence).toEqual({ host: null, browser: null, passed: false });
+    expect(JSON.stringify(published)).not.toContain('"idlePercent":78');
+  });
+
+  it('rejects caller-attested measured host preflight evidence without its repository proof', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-host-proof-'));
+    const row: any = rejectedPreflight();
+    row.selection.failureReasons = [{ code: 'host-not-quiescent', detailHash: '7777777777777777' }];
+    row.quiescence = { host: hostQuiescence(false), browser: null, passed: false };
+
+    await expect(
+      publishExperimentAttempt({
+        experimentRoot: root,
+        repositoryRoot: '/repo',
+        repetition: row,
+        runtimeObservation: undefined,
+        preflightProof: undefined,
+      })
+    ).rejects.toThrow(/measured host preflight.*proof|preflight.*proof/i);
+  });
+
+  it('accepts the opaque pre-host rejection capability only for its canonical original failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-pre-host-capability-'));
+    const intent = producerIntent(repetition('calibration', 'trace-off', 1, 1));
+    const arbitrary = rejectedPreflight();
+    const originalError = new Error('original repository failure');
+
+    await expect(
+      runExperimentProducerTransaction({
+        experimentRoot: root,
+        repositoryRoot: '/repo',
+        intent,
+        produce: async ({ rejectBeforeHostMeasurement }) => ({
+          repetition: arbitrary,
+          runtimeObservation: undefined,
+          preflightProof: undefined,
+          beforeHostRejection: rejectBeforeHostMeasurement(originalError),
+        }),
+      })
+    ).rejects.toThrow(/pre-host rejection result is not canonical/i);
+
+    const published = JSON.parse(await readFile(join(root, 'attempts/attempt-0001.json'), 'utf8'));
+    expect(published.selection.failureReasons).toEqual([expect.objectContaining({ code: 'producer-crash' })]);
+    expect(published.quiescence).toEqual({ host: null, browser: null, passed: false });
+  });
+
+  it('requires exactly one measured host binding before a producer result', async () => {
+    const omittedRoot = await mkdtemp(join(tmpdir(), 'cod374-host-binding-omitted-'));
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    const preflightProof = await verifyExperimentPreflight({
+      repetition: row,
+      repositoryRoot: '/repo',
+      vendorManifestPath: '/vendor.json',
+      gitVerifier: async () => {},
+    });
+    await expect(
+      runExperimentProducerTransaction({
+        experimentRoot: omittedRoot,
+        repositoryRoot: '/repo',
+        intent: producerIntent(row),
+        produce: async () => ({ repetition: row, runtimeObservation: runtimeObservation(row), preflightProof }),
+      })
+    ).rejects.toThrow(/requires one measured host quiescence binding/i);
+
+    const duplicateRoot = await mkdtemp(join(tmpdir(), 'cod374-host-binding-duplicate-'));
+    await expect(
+      runExperimentProducerTransaction({
+        experimentRoot: duplicateRoot,
+        repositoryRoot: '/repo',
+        intent: producerIntent(row),
+        produce: async ({ bindHostQuiescence }) => {
+          bindHostQuiescence(row.quiescence.host);
+          bindHostQuiescence(row.quiescence.host);
+          return { repetition: row, runtimeObservation: runtimeObservation(row), preflightProof };
+        },
+      })
+    ).rejects.toThrow(/binding is duplicated/i);
+    for (const root of [omittedRoot, duplicateRoot]) {
+      const published = JSON.parse(await readFile(join(root, 'attempts/attempt-0001.json'), 'utf8'));
+      expect(published.selection.failureReasons).toEqual([expect.objectContaining({ code: 'producer-crash' })]);
+      expect(published.quiescence).toEqual({ host: null, browser: null, passed: false });
+    }
+  });
+
+  it('revokes the measured host binding callback after the producer result', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cod374-host-binding-late-'));
+    const row: any = repetition('calibration', 'trace-off', 1, 1);
+    const preflightProof = await verifyExperimentPreflight({
+      repetition: row,
+      repositoryRoot: '/repo',
+      vendorManifestPath: '/vendor.json',
+      gitVerifier: async () => {},
+    });
+    let lateBinding: ((host: any) => void) | undefined;
+    await runExperimentProducerTransaction({
+      experimentRoot: root,
+      repositoryRoot: '/repo',
+      intent: producerIntent(row),
+      produce: async ({ bindHostQuiescence }) => {
+        lateBinding = bindHostQuiescence;
+        bindHostQuiescence(row.quiescence.host);
+        return { repetition: row, runtimeObservation: runtimeObservation(row), preflightProof };
+      },
+    });
+    expect(() => lateBinding!(row.quiescence.host)).toThrow(/binding is too late/i);
+  });
+
   it('requires a real clean-repository preflight proof for completed attempts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cod374-experiment-'));
     const row: any = completeCalibration()[0];
@@ -1492,7 +1839,7 @@ describe('COD-374 evidence-source transaction and publication', () => {
       runExperimentProducerTransaction({
         experimentRoot: root,
         repositoryRoot: '/repo',
-        intent: completeCalibration()[1],
+        intent: producerIntent(completeCalibration()[1]),
         produce: async () => {
           calls += 1;
           throw new Error('must not run');
@@ -1506,7 +1853,7 @@ describe('COD-374 evidence-source transaction and publication', () => {
       runExperimentProducerTransaction({
         experimentRoot: root,
         repositoryRoot: '/repo',
-        intent: completeCalibration()[1],
+        intent: producerIntent(completeCalibration()[1]),
         produce: async () => {
           calls += 1;
           throw new Error('must not run');
@@ -1521,7 +1868,7 @@ describe('COD-374 evidence-source transaction and publication', () => {
       runExperimentProducerTransaction({
         experimentRoot: finalizedRoot,
         repositoryRoot: '/repo',
-        intent: completeCalibration()[0],
+        intent: producerIntent(completeCalibration()[0]),
         produce: async () => {
           calls += 1;
           throw new Error('must not run');
@@ -1545,7 +1892,7 @@ describe('COD-374 evidence-source transaction and publication', () => {
       runExperimentProducerTransaction({
         experimentRoot: failedCalibrationRoot,
         repositoryRoot: '/repo',
-        intent: completeDiagnostic()[0],
+        intent: producerIntent(completeDiagnostic()[0]),
         produce: async () => {
           calls += 1;
           throw new Error('must not run');
@@ -1559,7 +1906,7 @@ describe('COD-374 evidence-source transaction and publication', () => {
     const root = await mkdtemp(join(tmpdir(), 'cod374-experiment-'));
     const modulePath = resolve('scripts/perf/cod-374-summarize.mjs');
     const intentPath = join(root, 'test-intent.json');
-    await writeFile(intentPath, JSON.stringify(completeCalibration()[0]));
+    await writeFile(intentPath, JSON.stringify(producerIntent(completeCalibration()[0])));
     const child = spawn(
       process.execPath,
       [
@@ -1587,7 +1934,7 @@ describe('COD-374 evidence-source transaction and publication', () => {
       runExperimentProducerTransaction({
         experimentRoot: root,
         repositoryRoot: '/repo',
-        intent: completeCalibration()[0],
+        intent: producerIntent(completeCalibration()[0]),
         produce: async () => {
           throw new Error('must not retry');
         },
@@ -1613,8 +1960,11 @@ describe('COD-374 evidence-source transaction and publication', () => {
       runExperimentProducerTransaction({
         experimentRoot: root,
         repositoryRoot: '/repo',
-        intent: row,
-        produce: async () => ({ repetition: row, runtimeObservation: mismatchedObservation, preflightProof }),
+        intent: producerIntent(row),
+        produce: async ({ bindHostQuiescence }) => {
+          bindHostQuiescence(row.quiescence.host);
+          return { repetition: row, runtimeObservation: mismatchedObservation, preflightProof };
+        },
       })
     ).resolves.toEqual(expect.objectContaining({ attempts: [expect.objectContaining({ accepted: false })] }));
 
