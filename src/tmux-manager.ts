@@ -1973,6 +1973,13 @@ export function buildHeadroomExports(mode: SessionMode, headroomClaudeUrl?: stri
   return [];
 }
 
+interface WindowResizeRequest {
+  cols: number;
+  rows: number;
+  onComplete?: (success: boolean) => void;
+  completed: boolean;
+}
+
 /**
  * Manages tmux sessions that wrap Claude CLI or shell processes.
  *
@@ -2000,6 +2007,18 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private mouseSyncInterval: NodeJS.Timeout | null = null;
   /** Track last-known pane count per session to avoid unnecessary tmux set-option calls */
   private lastPaneCount: Map<string, number> = new Map();
+  /** Serialize resize completion per tmux window while retaining only the latest pending dimensions. */
+  private readonly pendingWindowResizes = new Map<
+    string,
+    {
+      generation: number;
+      running: boolean;
+      active: WindowResizeRequest | null;
+      pending: WindowResizeRequest | null;
+      cancelled: boolean;
+    }
+  >();
+  private windowResizeGeneration = 0;
 
   // ── COD-108 remote-reconnect watcher state ────────────────────────────────
   /** Periodic watcher that re-establishes dropped remote sessions. */
@@ -2933,6 +2952,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     // TEST MODE: Remove from memory only — NEVER touch real tmux sessions
     if (IS_TEST_MODE) {
+      this.invalidateWindowResize(session.muxName);
       this.sessions.delete(sessionId);
       this.clearRemoteReconnectState(sessionId);
       this.emit('sessionKilled', { sessionId });
@@ -2945,6 +2965,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       console.error(`[TmuxManager] BLOCKED: Refusing to kill own tmux session: ${session.muxName}`);
       return false;
     }
+
+    this.invalidateWindowResize(session.muxName);
 
     // COD-105 — DETACH-NOT-KILL for NON-owned remote sessions.
     //
@@ -3586,6 +3608,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   }
 
   destroy(): void {
+    this.invalidateAllWindowResizes();
     this.stopStatsCollection();
     this.stopMouseModeSync();
     this.stopRemoteReconnectWatcher();
@@ -4279,7 +4302,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
-  resizeWindow(muxName: string, cols: number, rows: number): boolean {
+  resizeWindow(muxName: string, cols: number, rows: number, onComplete?: (success: boolean) => void): boolean {
     if (!isValidMuxName(muxName)) {
       console.error('[TmuxManager] Invalid session name in resizeWindow:', muxName);
       return false;
@@ -4289,19 +4312,126 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return false;
     }
 
+    const state = this.pendingWindowResizes.get(muxName) ?? {
+      generation: ++this.windowResizeGeneration,
+      running: false,
+      active: null,
+      pending: null,
+      cancelled: false,
+    };
+    const superseded = state.pending;
+    state.pending = { cols, rows, onComplete, completed: false };
+    this.pendingWindowResizes.set(muxName, state);
+    if (superseded) this.completeWindowResizeRequest(superseded, false);
+    if (!state.running) this.drainWindowResize(muxName, state);
+    return true;
+  }
+
+  private drainWindowResize(
+    muxName: string,
+    state: {
+      generation: number;
+      running: boolean;
+      active: WindowResizeRequest | null;
+      pending: WindowResizeRequest | null;
+      cancelled: boolean;
+    }
+  ): void {
+    if (state.running || state.cancelled || !this.isCurrentWindowResize(muxName, state)) return;
+
+    const next = state.pending;
+    if (!next) {
+      this.pendingWindowResizes.delete(muxName);
+      return;
+    }
+
+    state.pending = null;
+    state.active = next;
+    state.running = true;
+    let completed = false;
+    const complete = (error: unknown): void => {
+      if (completed) return;
+      completed = true;
+      try {
+        if (error) {
+          try {
+            console.error('[TmuxManager] Failed to resize tmux window:', error);
+          } catch {
+            // Error reporting is best-effort and must not strand the resize queue.
+          }
+        }
+      } finally {
+        const succeeded = !error && !state.cancelled && this.isCurrentWindowResize(muxName, state);
+        this.completeWindowResizeRequest(next, succeeded);
+        state.active = null;
+        state.running = false;
+        if (!state.cancelled && this.isCurrentWindowResize(muxName, state)) {
+          this.drainWindowResize(muxName, state);
+        }
+      }
+    };
+
     // Fire-and-forget: this runs on the interactive resize path (WS {t:'z'} and
     // HTTP /resize), so use a non-blocking exec — a slow/hung tmux must not stall
     // the Fastify event loop while other sessions' input/SSE are served. The sole
     // caller (Session.resize) ignores the result, and under `window-size manual`
     // the subsequent ptyProcess.resize is subordinate to this authoritative size.
-    exec(
-      `${this.tmux()} resize-window -t ${shellescape(muxName)} -x ${cols} -y ${rows}`,
-      { timeout: EXEC_TIMEOUT_MS },
-      (err) => {
-        if (err) console.error('[TmuxManager] Failed to resize tmux window:', err);
+    try {
+      exec(
+        `${this.tmux()} resize-window -t ${shellescape(muxName)} -x ${next.cols} -y ${next.rows}`,
+        { timeout: EXEC_TIMEOUT_MS },
+        complete
+      );
+    } catch (error) {
+      complete(error);
+    }
+  }
+
+  private completeWindowResizeRequest(request: WindowResizeRequest, success: boolean): void {
+    if (request.completed) return;
+    request.completed = true;
+    try {
+      request.onComplete?.(success);
+    } catch (error) {
+      try {
+        console.error('[TmuxManager] Resize completion callback failed:', error);
+      } catch {
+        // Completion reporting is best-effort and must not strand the queue.
       }
-    );
-    return true;
+    }
+  }
+
+  private isCurrentWindowResize(muxName: string, state: { generation: number }): boolean {
+    const current = this.pendingWindowResizes.get(muxName);
+    return current === state && current.generation === state.generation;
+  }
+
+  private invalidateWindowResize(muxName: string): void {
+    const state = this.pendingWindowResizes.get(muxName);
+    if (!state) return;
+    state.cancelled = true;
+    const active = state.active;
+    const pending = state.pending;
+    state.active = null;
+    state.pending = null;
+    if (this.isCurrentWindowResize(muxName, state)) {
+      this.pendingWindowResizes.delete(muxName);
+    }
+    if (active) this.completeWindowResizeRequest(active, false);
+    if (pending) this.completeWindowResizeRequest(pending, false);
+  }
+
+  private invalidateAllWindowResizes(): void {
+    for (const state of this.pendingWindowResizes.values()) {
+      state.cancelled = true;
+      const active = state.active;
+      const pending = state.pending;
+      state.active = null;
+      state.pending = null;
+      if (active) this.completeWindowResizeRequest(active, false);
+      if (pending) this.completeWindowResizeRequest(pending, false);
+    }
+    this.pendingWindowResizes.clear();
   }
 
   isAvailable(): boolean {

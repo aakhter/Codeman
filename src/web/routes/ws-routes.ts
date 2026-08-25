@@ -26,7 +26,11 @@
  *     {"t":"i","d":"...","seq":N,"cid":"..."} — input (keystroke or paste). seq+cid are
  *                          optional reliable-delivery tags: the server applies each
  *                          (cid,seq) at-most-once and ACKs with {"t":"ia","seq":N}.
- *     {"t":"z","c":N,"r":N,"f":bool} — resize terminal (f=true forces SIGWINCH even if dims unchanged)
+ *     {"t":"va","c":N,"r":N,"v":"mobile"|"tablet"|"desktop"} — explicitly activate this
+ *                          viewer as sizing owner with its fitted dimensions.
+ *     {"t":"z","c":N,"r":N,"v":viewport,"f":bool} — passively remember this viewer's size;
+ *                          only the current owner may apply it (legacy missing/invalid v defaults to desktop,
+ *                          and f=true forces owner SIGWINCH even if dimensions are unchanged).
  */
 
 import { FastifyInstance } from 'fastify';
@@ -37,6 +41,13 @@ import { isKeyboardTerminalInput } from '../../terminal-input-classifier.js';
 import { isAllowedRequestHost, isAllowedRequestOrigin, type HostPolicy } from '../network-auth-policy.js';
 import { WsConnectionRegistry } from '../ws-connection-registry.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
+import {
+  hashMobileInputTraceValue,
+  mobileInputTraceCollector,
+  mobileInputTraceTimestamp,
+  type MobileInputTraceCollector,
+  type MobileInputTraceEvent,
+} from '../../perf/mobile-input-trace.js';
 
 /** Micro-batch interval for terminal output (ms). Short enough for low latency,
  *  long enough to group Ink's rapid cursor-up redraw sequences into single frames. */
@@ -70,8 +81,14 @@ const MAX_WS_PER_SESSION = 5;
  * admitted anonymously up to the cap. See ws-connection-registry.ts.
  */
 const sessionWsRegistry = new WsConnectionRegistry<WebSocket>(MAX_WS_PER_SESSION);
+let mobileInputTraceConnectionOrdinal = 0;
 
-export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHostPolicy: () => HostPolicy): void {
+export function registerWsRoutes(
+  app: FastifyInstance,
+  ctx: SessionPort,
+  getHostPolicy: () => HostPolicy,
+  trace: MobileInputTraceCollector = mobileInputTraceCollector
+): void {
   app.get<{ Params: { id: string }; Querystring: { cid?: string } }>(
     '/ws/sessions/:id/terminal',
     { websocket: true },
@@ -124,6 +141,31 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         socket.close(4008, 'Too many connections');
         return;
       }
+      const traceEnabled = trace.enabled;
+      const traceSessionHash = traceEnabled ? hashMobileInputTraceValue(id) : undefined;
+      const traceConnectionHash = traceEnabled
+        ? hashMobileInputTraceValue(`${id}:${cid ?? 'anonymous'}:${++mobileInputTraceConnectionOrdinal}`)
+        : undefined;
+      let traceOrdinal = 0;
+      const recordTrace =
+        traceEnabled && traceSessionHash && traceConnectionHash
+          ? (
+              event: Omit<MobileInputTraceEvent, 'monoNs' | 'epochMs' | 'sessionHash' | 'connectionHash' | 'ordinal'>,
+              timestamp?: ReturnType<typeof mobileInputTraceTimestamp>
+            ): void => {
+              try {
+                trace.record({
+                  ...event,
+                  ...(timestamp ?? mobileInputTraceTimestamp()),
+                  sessionHash: traceSessionHash,
+                  connectionHash: traceConnectionHash,
+                  ordinal: ++traceOrdinal,
+                });
+              } catch {
+                // Trace observation is test-only and must never affect terminal I/O.
+              }
+            }
+          : undefined;
       if (evictedSocket) {
         // Same client reconnected; retire the stale socket so it doesn't linger.
         console.info('[ws] terminal superseded by reconnect', { sessionId: id });
@@ -148,6 +190,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
       let batchTimer: ReturnType<typeof setTimeout> | null = null;
 
       const flushBatch = () => {
+        const flushStartedAt = recordTrace ? mobileInputTraceTimestamp() : undefined;
         batchTimer = null;
         if (batchChunks.length === 0 || socket.readyState !== 1) {
           batchChunks = [];
@@ -155,21 +198,26 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
           return;
         }
         const data = batchChunks.join('');
+        const outputTrace = recordTrace
+          ? { bytes: Buffer.byteLength(data), valueHash: hashMobileInputTraceValue(data) }
+          : undefined;
+        if (recordTrace && outputTrace) {
+          recordTrace({ stage: 'server.output.flush-start', ...outputTrace }, flushStartedAt);
+        }
         batchChunks = [];
         batchSize = 0;
+        if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.pre-send', ...outputTrace });
         socket.send(`{"t":"o","d":${JSON.stringify(DEC_2026_START + data + DEC_2026_END)}}`);
+        if (recordTrace && outputTrace)
+          recordTrace({ stage: 'server.output.post-send', ...outputTrace, delivered: true });
       };
 
-      // Per-connection desktop sizing claim — registered on the first
-      // desktop-typed resize and released on socket close, so Session.resize()
-      // can ignore small-viewport resizes only while a desktop is actually
-      // connected (see Session._desktopSizeClaims).
-      const sizingToken = Symbol('ws-desktop-sizing');
-      let holdsDesktopClaim = false;
+      const sizingToken = Symbol('ws-terminal-viewer');
 
       // Attach message handler synchronously BEFORE any async work
       // (@fastify/websocket requirement to avoid dropped messages).
       socket.on('message', (raw) => {
+        const receivedAt = recordTrace ? mobileInputTraceTimestamp() : undefined;
         try {
           const msg = JSON.parse(String(raw));
           if (msg.t === 'i' && typeof msg.d === 'string') {
@@ -180,23 +228,48 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             // (legacy/other tools) are applied as-is — no behavior change.
             const cid = typeof msg.cid === 'string' ? msg.cid : null;
             const seq = Number.isInteger(msg.seq) ? (msg.seq as number) : null;
+            if (cid && seq !== null) {
+              recordTrace?.({ stage: 'server.input.received', clientId: cid, seq }, receivedAt);
+              recordTrace?.({ stage: 'server.input.parsed', clientId: cid, seq });
+            }
             const apply = cid && seq !== null ? session.shouldApplyInput(cid, seq) : true;
-            let delivered = true;
+            if (cid && seq !== null) {
+              recordTrace?.({ stage: 'server.input.deduped', clientId: cid, seq, applied: apply });
+            }
+            let delivered = !apply;
             if (apply) {
-              if (isKeyboardTerminalInput(msg.d)) {
-                if (session.isCheckpointActive) {
-                  console.info('[Checkpoint] manual takeover', {
-                    sessionId: id,
-                    route: 'ws',
-                    inputClass: 'keyboard',
-                  });
-                }
-                session.cancelCheckpoint('manual-takeover');
+              try {
+                session.activateTerminalViewer(sizingToken);
+              } catch {
+                // Sizing is best-effort. A viewer handoff failure must not drop
+                // input that can still be delivered to the PTY.
               }
-              // Typed input from a claim-holding desktop keeps the claim "hot"
-              // and re-asserts the desktop layout after a mobile override.
-              if (holdsDesktopClaim) session.noteDesktopActivity();
-              delivered = session.write(msg.d);
+              if (cid && seq !== null) {
+                recordTrace?.({ stage: 'server.input.activated', clientId: cid, seq });
+              }
+              let writeAttempted = false;
+              try {
+                if (isKeyboardTerminalInput(msg.d)) {
+                  if (session.isCheckpointActive) {
+                    console.info('[Checkpoint] manual takeover', {
+                      sessionId: id,
+                      route: 'ws',
+                      inputClass: 'keyboard',
+                    });
+                  }
+                  session.cancelCheckpoint('manual-takeover');
+                }
+                writeAttempted = true;
+                if (cid && seq !== null) {
+                  recordTrace?.({ stage: 'server.input.pre-write', clientId: cid, seq });
+                }
+                delivered = session.write(msg.d);
+              } catch {
+                delivered = false;
+              }
+              if (writeAttempted && cid && seq !== null) {
+                recordTrace?.({ stage: 'server.input.post-write', clientId: cid, seq, delivered });
+              }
               // A session whose PTY is gone swallows the write. ACKing anyway told
               // the client to drop the frame from its durable queue and left the seq
               // burnt, so the retry that reliable delivery exists for was rejected as
@@ -204,8 +277,25 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
               if (!delivered && cid && seq !== null) session.forgetInputSeq(cid, seq);
             }
             if (delivered && seq !== null && socket.readyState === 1) {
+              if (cid) recordTrace?.({ stage: 'server.input.pre-ack', clientId: cid, seq });
               socket.send(`{"t":"ia","seq":${seq}}`);
+              if (cid) recordTrace?.({ stage: 'server.input.post-ack', clientId: cid, seq });
             }
+          } else if (
+            msg.t === 'va' &&
+            Number.isInteger(msg.c) &&
+            Number.isInteger(msg.r) &&
+            msg.c >= 1 &&
+            msg.c <= 500 &&
+            msg.r >= 1 &&
+            msg.r <= 200 &&
+            (msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop')
+          ) {
+            session.activateTerminalViewer(sizingToken, {
+              cols: msg.c,
+              rows: msg.r,
+              viewportType: msg.v,
+            });
           } else if (
             msg.t === 'z' &&
             Number.isInteger(msg.c) &&
@@ -215,18 +305,9 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
             msg.r >= 1 &&
             msg.r <= 200
           ) {
-            const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : undefined;
-            if (viewportType === 'desktop') {
-              session.claimDesktopSizing(sizingToken);
-              holdsDesktopClaim = true;
-            } else if (viewportType) {
-              // The connection's viewport can change (e.g. browser window
-              // narrowed past the tablet breakpoint) — drop a stale claim.
-              session.releaseDesktopSizing(sizingToken);
-              holdsDesktopClaim = false;
-            }
+            const viewportType = msg.v === 'mobile' || msg.v === 'tablet' || msg.v === 'desktop' ? msg.v : 'desktop';
             const force = msg.f === true;
-            session.resize(msg.c, msg.r, { viewportType, force });
+            session.resizeFromTerminalViewer(sizingToken, msg.c, msg.r, viewportType, force);
           }
         } catch {
           // Ignore malformed messages
@@ -235,9 +316,17 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
 
       // Terminal output -> micro-batched WS send
       const onTerminal = (data: string) => {
+        const wsReceivedAt = recordTrace ? mobileInputTraceTimestamp() : undefined;
+        const outputTrace = recordTrace
+          ? { bytes: Buffer.byteLength(data), valueHash: hashMobileInputTraceValue(data) }
+          : undefined;
+        if (recordTrace && outputTrace) {
+          recordTrace({ stage: 'server.output.ws-received', ...outputTrace }, wsReceivedAt);
+        }
         if (socket.readyState !== 1) return;
         batchChunks.push(data);
         batchSize += data.length;
+        if (recordTrace && outputTrace) recordTrace({ stage: 'server.output.batch-enqueued', ...outputTrace });
 
         // Flush immediately for large batches (responsiveness during bulk output)
         if (batchSize > WS_BATCH_FLUSH_THRESHOLD) {
@@ -309,7 +398,7 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         session.off('clearTerminal', onClearTerminal);
         session.off('needsRefresh', onNeedsRefresh);
         session.off('exit', onSessionExit);
-        session.releaseDesktopSizing(sizingToken);
+        session.releaseTerminalViewer(sizingToken);
 
         // Release this socket's slot. Idempotent and identity-matched: if this
         // socket was already superseded (a same-cid reconnect took its slot) or

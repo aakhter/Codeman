@@ -11,7 +11,7 @@
  *      → input only flushed on the 2s sweep (large typing lag) and the indicator
  *      never rendered (missing "WS" status).
  *   2. The restored body only read the SSE `_connectionStatus`, so it never
- *      surfaced the terminal WebSocket transport ("WS" / "HTTP"), and it flashed
+ *      surfaced the terminal WebSocket transport state, and it flashed
  *      "sending 1B" on every single keystroke.
  *
  * COD-136 (perf, no behavior change) extracts the pure render into
@@ -107,11 +107,12 @@ describe('connection indicator — transport display', () => {
     expect(els.connectionDot.className).toContain('connected');
   });
 
-  it('shows "HTTP" with a fallback dot when the socket dropped to HTTP POST', () => {
+  it('shows reconnecting WS while browser input is queued instead of claiming HTTP delivery', () => {
     const { app, els } = makeApp({ activeSessionId: 's1', _wsState: 'fallback' });
     app._updateConnectionIndicator();
-    expect(els.connectionText.textContent).toBe('HTTP');
-    expect(els.connectionDot.className).toContain('fallback');
+    expect(els.connectionText.textContent).toBe('WS…');
+    expect(els.connectionDot.className).toContain('reconnecting');
+    expect(els.connectionIndicator.title).toContain('input queued until reconnect');
   });
 
   it('shows "WS…" while connecting or reconnecting the socket', () => {
@@ -247,13 +248,13 @@ describe('_computeConnectionDescriptor — pure render per state (COD-136)', () 
     });
   });
 
-  it('active terminal — fallback → HTTP', () => {
+  it('active terminal — fallback → queued WS reconnect', () => {
     const app = computeApp({ activeSessionId: 's1', _wsState: 'fallback' });
     expect(app._computeConnectionDescriptor()).toEqual({
       display: 'flex',
-      dotClass: 'connection-dot fallback',
-      text: 'HTTP',
-      title: 'WebSocket unavailable — input sent over HTTP',
+      dotClass: 'connection-dot reconnecting',
+      text: 'WS…',
+      title: 'WebSocket unavailable — input queued until reconnect',
     });
   });
 
@@ -413,18 +414,18 @@ describe('_updateConnectionIndicator — COD-136 unchanged-skip', () => {
     expect(els.connectionIndicator.writes.title).toBe(before.title);
   });
 
-  it('re-renders when state changes between calls (WS → HTTP)', () => {
+  it('re-renders when state changes between calls (WS → queued reconnect)', () => {
     const { app, els } = makeCountingApp({ activeSessionId: 's1', _wsState: 'connected' });
 
     app._updateConnectionIndicator(); // WS
     const writesAfterFirst = els.connectionText.writes.textContent;
 
     app._wsState = 'fallback';
-    app._updateConnectionIndicator(); // HTTP — must write again
+    app._updateConnectionIndicator(); // queued reconnect — must write again
 
     expect(els.connectionText.writes.textContent).toBe(writesAfterFirst + 1);
-    expect(els.connectionText.textContent).toBe('HTTP');
-    expect(els.connectionDot.className).toBe('connection-dot fallback');
+    expect(els.connectionText.textContent).toBe('WS…');
+    expect(els.connectionDot.className).toBe('connection-dot reconnecting');
   });
 
   it('re-renders display when the hidden→shown transition occurs (none → flex)', () => {

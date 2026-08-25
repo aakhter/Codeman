@@ -137,11 +137,57 @@ import {
 import type { CodexProviderEnvironment } from './readmymind-predictor.js';
 import type { CodexProviderIdentity } from './codex-provider-identity.js';
 import { workingFramePollCoordinator } from './working-frame-poll-coordinator.js';
+import {
+  TerminalSizingOwnership,
+  type TerminalViewerDimensions,
+  type TerminalViewportType,
+} from './terminal-sizing-ownership.js';
+import {
+  hashMobileInputTraceValue,
+  mobileInputTraceCollector,
+  mobileInputTraceTimestamp,
+  type MobileInputTraceCollector,
+  type MobileInputTraceStage,
+} from './perf/mobile-input-trace.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
 
-export type ResizeViewportType = 'mobile' | 'tablet' | 'desktop';
+export type ResizeViewportType = TerminalViewportType;
+
+interface SessionMobileInputTraceRegistration {
+  token?: symbol;
+  trace: MobileInputTraceCollector;
+  active: boolean;
+}
+
+const sessionMobileInputTraceRegistrations: SessionMobileInputTraceRegistration[] = [];
+const globalSessionMobileInputTraceRegistration: SessionMobileInputTraceRegistration | undefined =
+  mobileInputTraceCollector.enabled ? { trace: mobileInputTraceCollector, active: true } : undefined;
+
+function currentSessionMobileInputTraceRegistration(): SessionMobileInputTraceRegistration | undefined {
+  return sessionMobileInputTraceRegistrations.at(-1) ?? globalSessionMobileInputTraceRegistration;
+}
+
+type SessionMobileInputTraceRecorder = (stage: MobileInputTraceStage, data: string) => void;
+
+/** Install an enabled trace collector only inside Vitest and return an exact restoration callback. */
+export function setMobileInputTraceCollectorForTests(trace: MobileInputTraceCollector): () => void {
+  if (!process.env.VITEST || !trace.enabled) {
+    throw new Error('Session tracing tests require an enabled test trace collector');
+  }
+  const token = Symbol('session-mobile-input-trace');
+  const registration: SessionMobileInputTraceRegistration = { token, trace, active: true };
+  sessionMobileInputTraceRegistrations.push(registration);
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    registration.active = false;
+    const index = sessionMobileInputTraceRegistrations.findIndex((registration) => registration.token === token);
+    if (index !== -1) sessionMobileInputTraceRegistrations.splice(index, 1);
+  };
+}
 
 export type SessionIdleReason = 'turn-end' | 'initial-ready' | 'shell-ready';
 
@@ -557,6 +603,7 @@ export class Session extends EventEmitter {
     activityStatusSince: null,
   };
   private _terminalActivityEpoch = 0;
+  private _mobileInputTraceOrdinal = 0;
   private _currentTaskId: string | null = null;
 
   // COD-118: bound repeated non-zero interactive-PTY exits. Recorded in the
@@ -2372,7 +2419,8 @@ export class Session extends EventEmitter {
     this.emit('mouseTrackingChanged', active);
   }
 
-  private _handleTerminalOutput(data: string): void {
+  private _handleTerminalOutput(data: string, recordTrace?: SessionMobileInputTraceRecorder): void {
+    recordTrace?.('server.output.handler-enter', data);
     // Invalidate idle decisions for every raw PTY chunk, including bytes held
     // back by the sanitizer while it waits for the rest of an incomplete CSI.
     this._terminalActivityEpoch++;
@@ -2486,14 +2534,40 @@ export class Session extends EventEmitter {
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
     this._markActivity();
+    recordTrace?.('server.output.terminal-emitted', data);
     this.emit('terminal', data);
     this.emit('output', data);
   }
 
+  private _recordMobileInputOutputTrace(
+    trace: MobileInputTraceCollector,
+    stage: MobileInputTraceStage,
+    data: string
+  ): void {
+    try {
+      trace.record({
+        stage,
+        ...mobileInputTraceTimestamp(),
+        sessionHash: hashMobileInputTraceValue(this.id),
+        ordinal: ++this._mobileInputTraceOrdinal,
+        bytes: Buffer.byteLength(data),
+        valueHash: hashMobileInputTraceValue(data),
+      });
+    } catch {
+      // Trace observation is test-only and must never affect terminal output.
+    }
+  }
+
   async startInteractive(): Promise<void> {
+    const traceRegistration = currentSessionMobileInputTraceRegistration();
     if (this.ptyProcess) {
       throw new Error('Session already has a running process');
     }
+
+    // Viewer ownership is valid only for a fully initialized interactive PTY.
+    // Keep it suspended across every attach/spawn/fallback failure path and
+    // resume only after the new PTY has all synchronous listeners installed.
+    this._suspendTerminalViewerSizing();
 
     // Bounds the workspace-trust scan (see _maybeAcceptTrustDialog). Stamped here
     // rather than at PTY spawn so a slow mux attach still counts as startup.
@@ -2745,12 +2819,17 @@ export class Session extends EventEmitter {
     this._pid = this.ptyProcess.pid;
     console.log('[Session] Interactive PTY spawned with PID:', this._pid);
 
+    const boundRecordTrace: SessionMobileInputTraceRecorder | undefined = traceRegistration
+      ? (stage, data) => this._recordMobileInputOutputTrace(traceRegistration.trace, stage, data)
+      : undefined;
     this.ptyProcess.onData((rawData: string) => {
+      const recordTrace = traceRegistration?.active ? boundRecordTrace : undefined;
+      recordTrace?.('server.output.pty-received', rawData);
       // Filter out focus escape sequences and Ctrl+L (form feed)
       const data = rawData.replace(FOCUS_ESCAPE_FILTER, '').replace(CTRL_L_PATTERN, ''); // Remove Ctrl+L
       if (!data) return; // Skip if only filtered sequences
 
-      this._handleTerminalOutput(data);
+      this._handleTerminalOutput(data, recordTrace);
 
       // === Auto-accept workspace trust dialog ===
       this._maybeAcceptTrustDialog();
@@ -2811,6 +2890,7 @@ export class Session extends EventEmitter {
 
     this.ptyProcess.onExit(({ exitCode }) => {
       console.log('[Session] Interactive PTY exited with code:', exitCode);
+      this._suspendTerminalViewerSizing();
       // COD-118: record the exit in the circuit breaker BEFORE status bookkeeping.
       // A clean (0) exit resets the counter; rapid non-zero repeats trip it.
       const breakerResult = this._ptyExitBreaker.recordExit(exitCode, Date.now());
@@ -2861,6 +2941,10 @@ export class Session extends EventEmitter {
       }
       this.emit('exit', exitCode);
     });
+
+    if (this.ptyProcess) {
+      this._resumeTerminalViewerSizing();
+    }
   }
 
   /**
@@ -4217,64 +4301,89 @@ export class Session extends EventEmitter {
   private _ptyCols = 120;
   private _ptyRows = 40;
 
-  /**
-   * Live WebSocket connections that have announced a desktop viewport for this
-   * session. While at least one is registered, small-viewport (mobile/tablet)
-   * resizes are ignored so a phone glancing at the session can't reflow the
-   * PTY under an active desktop view. Claims are connection-scoped: ws-routes
-   * registers them on a desktop-typed resize and releases them on socket
-   * close, so a mobile-only session (no desktop connected) keeps full control
-   * of its own size — including narrowing below the spawn default.
-   *
-   * Deliberate tradeoff: claims are WS-only because only a socket has a
-   * liveness signal. A desktop degraded to the stateless HTTP resize fallback
-   * still applies its typed resizes but holds no claim, so a concurrent phone
-   * can reflow it. This is cooperative UX arbitration, not a security
-   * boundary — untyped (legacy/API) resizes bypass claims by design.
-   */
-  private _desktopSizeClaims = new Set<symbol>();
+  private _terminalResizeRequestSequence = 0;
+  private _terminalResizeConfirmedSequence = 0;
+  private _terminalGeometryDirty = false;
+  private _pendingTerminalResize: {
+    sequence: number;
+    cols: number;
+    rows: number;
+    authority?: { token: symbol; generation: number };
+  } | null = null;
 
-  /**
-   * A desktop sizing claim only blocks small-viewport resizes while the
-   * desktop is RECENTLY ACTIVE (claim registration or typed input within this
-   * window). An abandoned-but-connected desktop tab (left open at home, screen
-   * locked) must not hold a phone's view hostage: without this, the phone
-   * renders a desktop-width stream in a narrow xterm — mid-word wraps, tmux
-   * dot-fill, and Ink overdraw soup (the 0.9.8–0.9.12 mobile regression).
-   */
-  private static readonly DESKTOP_CLAIM_IDLE_MS = 90_000;
+  private readonly _terminalSizing = new TerminalSizingOwnership();
+  private _acceptsTerminalViewerSizing = true;
 
-  /** Last evidence of a live desktop user (claim registered / typed input). */
-  private _lastDesktopActivityAt = 0;
-
-  /** Last desktop-typed dimensions, for re-asserting after a mobile override. */
-  private _lastDesktopDims: { cols: number; rows: number } | null = null;
-
-  /** True while a small viewport reflowed the pane past an idle desktop claim. */
-  private _mobileSizeOverride = false;
-
-  /** Register a live desktop sizing claim (see _desktopSizeClaims). */
-  claimDesktopSizing(token: symbol): void {
-    this._desktopSizeClaims.add(token);
-    this._lastDesktopActivityAt = Date.now();
+  private _suspendTerminalViewerSizing(): void {
+    this._acceptsTerminalViewerSizing = false;
+    this._terminalSizing.clear();
+    this._terminalResizeRequestSequence += 1;
+    this._pendingTerminalResize = null;
   }
 
-  /** Release a desktop sizing claim when its connection goes away. */
-  releaseDesktopSizing(token: symbol): void {
-    this._desktopSizeClaims.delete(token);
-  }
-
-  /**
-   * Record desktop user activity (typed input over a claim-holding socket).
-   * If a phone reflowed the pane while the desktop was idle, the desktop
-   * layout is restored — "whoever is actively using the session wins".
-   */
-  noteDesktopActivity(): void {
-    this._lastDesktopActivityAt = Date.now();
-    if (this._mobileSizeOverride && this._lastDesktopDims) {
-      this._mobileSizeOverride = false;
-      this.resize(this._lastDesktopDims.cols, this._lastDesktopDims.rows, { viewportType: 'desktop' });
+  private _resumeTerminalViewerSizing(): void {
+    if (!this._isStopped) {
+      this._acceptsTerminalViewerSizing = true;
     }
+  }
+
+  rememberTerminalViewerSize(token: symbol, cols: number, rows: number, viewportType: TerminalViewportType): void {
+    if (!this._acceptsTerminalViewerSizing) {
+      return;
+    }
+    this._terminalSizing.remember(token, { cols, rows, viewportType });
+  }
+
+  activateTerminalViewer(token: symbol, dimensions?: TerminalViewerDimensions): number {
+    if (!this._acceptsTerminalViewerSizing) {
+      return this._terminalSizing.currentGeneration;
+    }
+    const activation = this._terminalSizing.activate(token, dimensions);
+    if (activation.dimensions) {
+      const { cols, rows, viewportType } = activation.dimensions;
+      this._resizeTerminal(cols, rows, { viewportType }, { token, generation: activation.generation });
+    }
+    return activation.generation;
+  }
+
+  resizeFromTerminalViewer(
+    token: symbol,
+    cols: number,
+    rows: number,
+    viewportType: TerminalViewportType,
+    force = false
+  ): boolean {
+    if (!this._acceptsTerminalViewerSizing) {
+      return false;
+    }
+    this.rememberTerminalViewerSize(token, cols, rows, viewportType);
+    if (!this._terminalSizing.isOwner(token)) {
+      return false;
+    }
+    this._resizeTerminal(
+      cols,
+      rows,
+      { viewportType, force },
+      { token, generation: this._terminalSizing.currentGeneration }
+    );
+    return true;
+  }
+
+  bootstrapTerminalViewer(token: symbol, force = false): boolean {
+    if (!this._acceptsTerminalViewerSizing) {
+      return false;
+    }
+    const activation = this._terminalSizing.bootstrap(token);
+    if (!activation?.dimensions) {
+      return false;
+    }
+    const { cols, rows, viewportType } = activation.dimensions;
+    this._resizeTerminal(cols, rows, { viewportType, force }, { token, generation: activation.generation });
+    return true;
+  }
+
+  releaseTerminalViewer(token: symbol): void {
+    this._terminalSizing.release(token);
   }
 
   /**
@@ -4282,50 +4391,109 @@ export class Session extends EventEmitter {
    * Skips the resize if dimensions haven't changed to avoid triggering
    * unnecessary Ink full-screen redraws (visible flicker on tab switch).
    *
-   * Arbitration: while a desktop connection holds a sizing claim AND has been
-   * active within DESKTOP_CLAIM_IDLE_MS, resizes from small viewports
-   * (mobile/tablet) are ignored — shrink AND grow would both reflow the
-   * desktop view. Once the desktop goes idle, a phone may take the pane (the
-   * desktop re-asserts its size on its next typed input via
-   * noteDesktopActivity). Without a desktop connected, small viewports
-   * control the PTY size freely.
-   *
    * @param cols - Number of columns (width in characters)
    * @param rows - Number of rows (height in lines)
    */
   resize(cols: number, rows: number, options: { viewportType?: ResizeViewportType; force?: boolean } = {}): void {
-    const isSmallViewport = options.viewportType === 'mobile' || options.viewportType === 'tablet';
-    if (options.viewportType === 'desktop') {
-      this._lastDesktopDims = { cols, rows };
-      this._lastDesktopActivityAt = Date.now();
-      this._mobileSizeOverride = false;
+    this._resizeTerminal(cols, rows, options);
+  }
+
+  resizeIfNoActiveTerminalViewer(cols: number, rows: number): boolean {
+    if (this._terminalSizing.ownerToken !== null) return false;
+    this.resize(cols, rows);
+    return true;
+  }
+
+  private _resizeTerminal(
+    cols: number,
+    rows: number,
+    options: { viewportType?: ResizeViewportType; force?: boolean },
+    authority?: { token: symbol; generation: number }
+  ): void {
+    const pty = this.ptyProcess;
+    if (!pty) return;
+
+    const authoritativeResize = this._mux && this._muxSession ? this._mux.resizeWindow : undefined;
+    const dimsChanged = cols !== this._ptyCols || rows !== this._ptyRows;
+    const pending = this._pendingTerminalResize;
+    const correctsStaleAuthority = !!pending && !!authority && pending.authority?.generation !== authority.generation;
+    const needsAuthoritativeReconcile = !!authoritativeResize && this._terminalGeometryDirty;
+    const duplicatesPending =
+      !!pending && pending.cols === cols && pending.rows === rows && !correctsStaleAuthority && !options.force;
+    if (
+      (!dimsChanged && !options.force && !correctsStaleAuthority && !needsAuthoritativeReconcile) ||
+      duplicatesPending
+    ) {
+      return;
     }
-    if (isSmallViewport && this._desktopSizeClaims.size > 0) {
-      if (Date.now() - this._lastDesktopActivityAt < Session.DESKTOP_CLAIM_IDLE_MS) {
+
+    const sequence = ++this._terminalResizeRequestSequence;
+    const request = { sequence, cols, rows, authority };
+    this._pendingTerminalResize = request;
+
+    const confirm = (success: boolean, authoritativeGeometryMayHaveChanged = false): void => {
+      const isLatestRequest = this._pendingTerminalResize?.sequence === sequence;
+      if (isLatestRequest) this._pendingTerminalResize = null;
+      const hasCurrentAuthority =
+        !authority ||
+        (this._acceptsTerminalViewerSizing &&
+          this._terminalSizing.currentGeneration === authority.generation &&
+          this._terminalSizing.isOwner(authority.token));
+      if (!isLatestRequest || !success || !hasCurrentAuthority) {
+        if (authoritativeGeometryMayHaveChanged && sequence > this._terminalResizeConfirmedSequence) {
+          this._terminalGeometryDirty = true;
+        }
         return;
       }
-      this._mobileSizeOverride = true;
-    }
-    const dimsChanged = cols !== this._ptyCols || rows !== this._ptyRows;
-    if (this.ptyProcess && (dimsChanged || options.force)) {
+      const confirmedChange = cols !== this._ptyCols || rows !== this._ptyRows;
       this._ptyCols = cols;
       this._ptyRows = rows;
-      if (!IS_TEST_MODE && this._mux && this._muxSession) {
-        this._mux.resizeWindow?.(this._muxSession.muxName, cols, rows);
-      }
-      try {
-        this.ptyProcess.resize(cols, rows);
-      } catch {
-        this.ptyProcess = null;
-      }
+      this._terminalResizeConfirmedSequence = sequence;
+      if (authoritativeResize) this._terminalGeometryDirty = false;
       // COD-179: tell every connected client the shared geometry changed. A
       // viewer whose xterm has different dims renders the subsequent TUI
       // repaint frames misaligned (orphan "Working" rows in scrollback) and
       // needs to reconcile by rewriting from the tmux capture. Only a real
       // geometry change matters — a forced same-size SIGWINCH can't misalign.
-      if (dimsChanged) {
+      if (confirmedChange) {
         this.emit('resized', { cols, rows });
       }
+    };
+
+    if (authoritativeResize && this._muxSession) {
+      let admissionKnown = false;
+      let synchronousCompletion: boolean | undefined;
+      let accepted = false;
+      try {
+        accepted = authoritativeResize.call(this._mux, this._muxSession.muxName, cols, rows, (success) => {
+          if (!admissionKnown) synchronousCompletion = success;
+          else confirm(success, true);
+        });
+      } catch {
+        admissionKnown = true;
+        confirm(false);
+        return;
+      }
+      admissionKnown = true;
+      if (!accepted) {
+        confirm(false);
+        return;
+      }
+      try {
+        pty.resize(cols, rows);
+      } catch {
+        if (this.ptyProcess === pty) this.ptyProcess = null;
+      }
+      if (synchronousCompletion !== undefined) confirm(synchronousCompletion, true);
+      return;
+    }
+
+    try {
+      pty.resize(cols, rows);
+      confirm(true);
+    } catch {
+      if (this.ptyProcess === pty) this.ptyProcess = null;
+      confirm(false);
     }
   }
 
@@ -4414,14 +4582,9 @@ export class Session extends EventEmitter {
     // Set stopped flag first to prevent new timers from being created
     this._isStopped = true;
     Session.codexSubmitTimes.delete(this.id);
+    this._suspendTerminalViewerSizing();
 
     this._clearAllTimers();
-
-    // Drop desktop sizing claims defensively. Sockets normally release their
-    // own claim on close, but a hung client's close event can lag the session
-    // teardown by up to a ping cycle — don't let a stale claim suppress
-    // mobile resizes if this Session object sees any further use.
-    this._desktopSizeClaims.clear();
 
     // Immediately cleanup Promise callbacks to prevent orphaned references
     // during the rest of stop() processing (e.g., if mux kill times out)
@@ -4536,14 +4699,14 @@ export class Session extends EventEmitter {
       return;
     }
 
+    this._suspendTerminalViewerSizing();
+
     // Preserve the conversation-resume id for claude-mode sessions only.
     if (this.mode === 'claude') {
       this._resumeSessionId = this._claudeSessionId || this._resumeSessionId || this.id;
     }
 
     this._clearAllTimers();
-    this._desktopSizeClaims.clear();
-
     if (this.rejectPromise && !this._promptResolved) {
       this._promptResolved = true;
       this.rejectPromise(new Error('Session parked'));

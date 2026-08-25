@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const SOURCE = readFileSync(new URL('../src/web/public/notification-manager.js', import.meta.url), 'utf8');
 
@@ -23,13 +23,15 @@ type Manager = {
   getStorageKey: () => string;
   normalizePreferences: (preferences: Record<string, unknown>) => NotificationPreferences;
   notify: (notification: Record<string, unknown>) => void;
+  onTabVisible: () => void;
 };
 
 const openWindows: JSDOM[] = [];
 
 function loadManager(
   saved?: Record<string, unknown>,
-  device: { deviceType?: string; handheld?: boolean } = {}
+  device: { deviceType?: string; handheld?: boolean } = {},
+  app: Record<string, unknown> = { sessions: new Map() }
 ): { dom: JSDOM; manager: Manager } {
   const dom = new JSDOM(
     '<!doctype html><body><span id="notifBadge"></span><div id="notifList"></div><div id="notifEmpty"></div></body>',
@@ -74,7 +76,7 @@ function loadManager(
       __testNotificationManager: new (app: { sessions: Map<unknown, unknown> }) => Manager;
     }
   ).__testNotificationManager;
-  const manager = new NotificationManager({ sessions: new Map() }) as Manager;
+  const manager = new NotificationManager(app as { sessions: Map<unknown, unknown> }) as Manager;
   return { dom, manager };
 }
 
@@ -146,5 +148,26 @@ describe('notification noise defaults', () => {
 
     expect(manager.preferences.enabled).toBe(false);
     expect(manager.getStorageKey()).toBe('codeman-notification-prefs-mobile');
+  });
+
+  it('delegates visible-tab sizing to one policy-aware canonical resize', () => {
+    const order: string[] = [];
+    const app = {
+      sessions: new Map(),
+      activeSessionId: 'session-1',
+      fitAddon: { fit: vi.fn(() => order.push('stale-fit')) },
+      sendResize: vi.fn(() => {
+        order.push('policy');
+        order.push('fit');
+      }),
+    };
+    const { manager } = loadManager(undefined, {}, app);
+
+    manager.onTabVisible();
+
+    expect(order).toEqual(['policy', 'fit']);
+    expect(app.sendResize).toHaveBeenCalledOnce();
+    expect(app.sendResize).toHaveBeenCalledWith('session-1');
+    expect(app.fitAddon.fit).not.toHaveBeenCalled();
   });
 });

@@ -283,6 +283,41 @@
   global.codemanCurrentSkinIsLight = currentSkinIsLight;
 })(window);
 
+const TERMINAL_FONT_SIZE_MAX = 24;
+
+/**
+ * Resolve the device- and mode-local terminal font preference. This is pure so
+ * selecting a policy cannot resize a shared PTY or mutate browser storage.
+ */
+function resolveTerminalFontSize({ deviceType, mode, stored, performanceFallback = false } = {}) {
+  const normalizedDevice = typeof deviceType === 'string' ? deviceType.trim().toLowerCase() : '';
+  const normalizedMode = typeof mode === 'string' ? mode.trim().toLowerCase() : '';
+  const isOpenCodePhone = normalizedDevice === 'mobile' && normalizedMode === 'opencode';
+  // Keep the legacy general key shared by desktop, tablet, and non-OpenCode
+  // mobile policies for compatibility with existing per-browser preferences.
+  const key = isOpenCodePhone ? 'codeman-font-size-mobile-opencode' : 'codeman-font-size';
+  const min = isOpenCodePhone ? 8 : 10;
+  // The 9px OpenCode phone fallback retained >=45 usable rows in the real
+  // iPhone viewport while avoiding the 8px renderer/input performance cost.
+  const fallback = isOpenCodePhone ? 9 : normalizedDevice === 'mobile' ? 10 : 14;
+  const numericStored =
+    typeof stored === 'number'
+      ? stored
+      : typeof stored === 'string' && /^\d+$/.test(stored.trim())
+        ? Number(stored.trim())
+        : NaN;
+  const size =
+    Number.isInteger(numericStored) && numericStored >= min && numericStored <= TERMINAL_FONT_SIZE_MAX
+      ? numericStored
+      : fallback;
+  return { size, key, min };
+}
+
+window.CodemanTerminalFont = {
+  ...(window.CodemanTerminalFont || {}),
+  resolveSize: resolveTerminalFontSize,
+};
+
 // COD-331 Phase 1 shared helper — visible to CodemanApp.prototype methods (outside the IIFE above)
 function _isDebugEchoEnabled() {
   try {
@@ -752,12 +787,13 @@ Object.assign(CodemanApp.prototype, {
   initTerminal() {
     const scrollback = this._userScrollback();
 
+    const initialFontPolicy = this.getTerminalFontPolicy();
+
     this._destroyMobileImePreview();
     this.terminal = new Terminal({
       theme: { ...window.codemanCurrentXtermTheme() },
       fontFamily: window.CodemanTerminalFont.resolve(this.loadAppSettingsFromStorage?.().terminalFontFamily),
-      // Use smaller font on mobile to fit more columns (prevents wrapping of Claude's status line)
-      fontSize: MobileDetection.getDeviceType() === 'mobile' ? 10 : 14,
+      fontSize: initialFontPolicy.size,
       lineHeight: 1.2,
       cursorBlink: false,
       cursorStyle: 'block',
@@ -1683,6 +1719,7 @@ Object.assign(CodemanApp.prototype, {
       if (this._resizeRaf) return;
       this._resizeRaf = requestAnimationFrame(() => {
         this._resizeRaf = null;
+        this.applyTerminalFontPolicyForActiveSession();
         try { this.fitAddon?.fit(); } catch {}
         const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
         const needsRefresh = (typeof MobileDetection !== 'undefined' && MobileDetection.isIOS?.()) || session?.mode === 'opencode';
@@ -1692,6 +1729,7 @@ Object.assign(CodemanApp.prototype, {
       });
     };
     const throttledResize = () => {
+      if (this._isTerminalSessionGone?.(this.activeSessionId)) return;
       // COD-299: the rail controller owns terminal sizing while its width is
       // changing. Ignore observer churn so the final 150ms settle performs the
       // only fit/reflow and PTY resize for the gesture.
@@ -1708,12 +1746,14 @@ Object.assign(CodemanApp.prototype, {
       //
       // By deferring fit() to the trailing edge, there's exactly ONE reflow
       // at the final dimensions, ONE viewport clear, and ONE Ink redraw.
+      this.applyTerminalFontPolicyForActiveSession();
       scheduleImmediateFit();
       if (this._resizeTimeout) {
         clearTimeout(this._resizeTimeout);
       }
       this._resizeTimeout = setTimeout(() => {
         this._resizeTimeout = null;
+        this.applyTerminalFontPolicyForActiveSession();
         // Fit xterm.js to final container dimensions
         if (this.fitAddon) {
           this.fitAddon.fit();
@@ -1730,7 +1770,7 @@ Object.assign(CodemanApp.prototype, {
         // causes Ink to re-render at the new row count, garbling terminal output.
         // Local fit() still runs so xterm knows the viewport size for scrolling.
         const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
-        if (this.activeSessionId && !keyboardUp) {
+        if (this.activeSessionId && !keyboardUp && document.visibilityState !== 'hidden') {
           const dims = this.fitAddon.proposeDimensions();
           // Enforce minimum dimensions to prevent layout issues
           const cols = dims ? Math.max(dims.cols, MIN_COLS) : MIN_COLS;
@@ -1770,22 +1810,12 @@ Object.assign(CodemanApp.prototype, {
               typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
                 ? MobileDetection.getDeviceType()
                 : 'desktop';
-            let sentViaWs = false;
-            if (this._wsReady && this._wsSessionId === this.activeSessionId) {
-              try {
-                this._ws.send(JSON.stringify({ t: 'z', c: cols, r: rows, v: viewportType }));
-                sentViaWs = true;
-              } catch {
-                // Fall through to HTTP POST
-              }
-            }
-            if (!sentViaWs) {
-              fetch(`/api/sessions/${this.activeSessionId}/resize`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cols, rows, viewportType }),
-              }).catch(() => {});
-            }
+            this._sendOrQueueTerminalResize(this.activeSessionId, {
+              t: 'z',
+              c: cols,
+              r: rows,
+              v: viewportType,
+            });
           }
         }
         // Update subagent connection lines and local echo at new dimensions.
@@ -5687,25 +5717,41 @@ Object.assign(CodemanApp.prototype, {
   async restoreTerminalSize() {
     if (!this.activeSessionId) {
       this.showToast('No active session', 'warning');
-      return;
+      return false;
     }
+    if (this._isTerminalSessionGone?.(this.activeSessionId)) return false;
 
     const dims = this.getTerminalDimensions();
     if (!dims) {
       this.showToast('Could not determine terminal size', 'error');
-      return;
+      return false;
     }
 
     try {
+      if (typeof this._terminalViewerActivity?.activate !== 'function') {
+        this.showToast('Failed to restore terminal size', 'error');
+        return false;
+      }
+      // This button is an explicit viewer action, so transfer sizing ownership
+      // before sending the forced passive z frame. If the socket is down, the
+      // controller queues va and sendResize queues the matching z for reconnect.
+      this._terminalViewerActivity.activate('restore-terminal-size');
+      const activationPending = this._terminalViewerActivity.hasPending?.(this.activeSessionId) === true;
       // Force resize even when dimensions match the server's last known state —
       // another device may have changed the PTY size since this client last sent,
       // and force guarantees a SIGWINCH → Ink redraw at the current device's size.
-      await this.sendResize(this.activeSessionId, { force: true });
+      const sent = await this.sendResize(this.activeSessionId, { force: true, retainPending: activationPending });
+      if (activationPending || sent === null) {
+        this.showToast('Terminal restore queued until connection recovers', 'warning');
+        return false;
+      }
 
       this.showToast(`Terminal restored to ${dims.cols}x${dims.rows}`, 'success');
+      return true;
     } catch (err) {
       console.error('Failed to restore terminal size:', err);
       this.showToast('Failed to restore terminal size', 'error');
+      return false;
     }
   },
 
@@ -6634,22 +6680,77 @@ Object.assign(CodemanApp.prototype, {
 
   increaseFontSize() {
     const current = this.terminal.options.fontSize || 14;
-    this.setFontSize(Math.min(current + 2, 24));
+    this.setFontSize(Math.min(current + 2, TERMINAL_FONT_SIZE_MAX));
   },
 
   decreaseFontSize() {
     const current = this.terminal.options.fontSize || 14;
-    this.setFontSize(Math.max(current - 2, 10));
+    const policy = this.getTerminalFontPolicy();
+    this.setFontSize(Math.max(current - 2, policy.min));
   },
 
   setFontSize(size) {
-    this.terminal.options.fontSize = size;
-    document.getElementById('fontSizeDisplay').textContent = size;
+    const policy = this.getTerminalFontPolicy();
+    const requested = Number(size);
+    const next = Number.isInteger(requested)
+      ? Math.max(policy.min, Math.min(requested, TERMINAL_FONT_SIZE_MAX))
+      : policy.size;
+    this.terminal.options.fontSize = next;
+    const display = document.getElementById('fontSizeDisplay');
+    if (display) display.textContent = next;
     this.fitAddon.fit();
-    localStorage.setItem('codeman-font-size', size);
+    try {
+      localStorage.setItem(policy.key, next);
+    } catch {
+      // Storage can be unavailable in private/restricted browser contexts. The
+      // live terminal change remains valid for this page.
+    }
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+  },
+
+  getTerminalFontPolicy(mode, { performanceFallback = false } = {}) {
+    const activeMode = mode ?? this.sessions?.get?.(this.activeSessionId)?.mode;
+    const deviceType =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : 'desktop';
+    const unresolved = window.CodemanTerminalFont.resolveSize({ deviceType, mode: activeMode, stored: null, performanceFallback });
+    let stored = null;
+    try {
+      stored = localStorage.getItem(unresolved.key);
+    } catch {}
+    return window.CodemanTerminalFont.resolveSize({ deviceType, mode: activeMode, stored, performanceFallback });
+  },
+
+  /** Apply cell metrics only. The caller owns any subsequent fit or resize. */
+  applyTerminalFontPolicy(mode, options) {
+    const policy = this.getTerminalFontPolicy(mode, options);
+    if (!this.terminal?.options) return policy;
+    const activeMode = mode ?? this.sessions?.get?.(this.activeSessionId)?.mode;
+    const deviceType =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : 'desktop';
+    const signature = `${deviceType}:${String(activeMode || '').trim().toLowerCase()}:${policy.key}:${policy.size}`;
+    if (this._lastAppliedTerminalFontPolicySignature === signature && this.terminal.options.fontSize === policy.size) {
+      return policy;
+    }
+    const changed = this.terminal.options.fontSize !== policy.size;
+    if (changed) this.terminal.options.fontSize = policy.size;
+    const display = document.getElementById('fontSizeDisplay');
+    if (display) display.textContent = policy.size;
+    if (changed) {
+      this._localEchoOverlay?.refreshFont();
+      this._predictiveEcho?.refreshFont();
+    }
+    this._lastAppliedTerminalFontPolicySignature = signature;
+    return policy;
+  },
+
+  applyTerminalFontPolicyForActiveSession(options) {
+    return this.applyTerminalFontPolicy(this.sessions?.get?.(this.activeSessionId)?.mode, options);
   },
 
   /**
@@ -6669,14 +6770,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   loadFontSize() {
-    const saved = localStorage.getItem('codeman-font-size');
-    if (saved) {
-      const size = parseInt(saved, 10);
-      if (size >= 10 && size <= 24) {
-        this.terminal.options.fontSize = size;
-        document.getElementById('fontSizeDisplay').textContent = size;
-      }
-    }
+    this.applyTerminalFontPolicyForActiveSession();
   },
 
   /**
@@ -6696,17 +6790,60 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Return the dimensions already fitted into xterm without fitting or sending.
+   * @returns {{cols: number, rows: number, viewportType: string}|null}
+   */
+  getFittedTerminalDimensions() {
+    if (!this.terminal) return null;
+    const viewportType =
+      typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
+        ? MobileDetection.getDeviceType()
+        : window.innerWidth < 430
+          ? 'mobile'
+          : window.innerWidth < 768
+            ? 'tablet'
+            : 'desktop';
+    return { cols: this.terminal.cols, rows: this.terminal.rows, viewportType };
+  },
+
+  _queuePendingTerminalResize(sessionId, frame) {
+    this._pendingTerminalResize = { sessionId, frame: { ...frame } };
+  },
+
+  _sendOrQueueTerminalResize(sessionId, frame) {
+    if (!sessionId || sessionId !== this.activeSessionId) return false;
+    if (this._isTerminalSessionGone?.(sessionId)) return false;
+    if (this._wsReady && this._wsSessionId === sessionId && this._ws) {
+      try {
+        this._ws.send(JSON.stringify(frame));
+        if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+        return true;
+      } catch {
+        // Retain the exact latest typed resize for the replacement socket.
+      }
+    }
+    this._queuePendingTerminalResize(sessionId, frame);
+    return false;
+  },
+
+  /**
    * Send resize to a session with minimum dimension enforcement.
    * @param {string} sessionId
-   * @param {{ forceHttp?: boolean, force?: boolean }} [options]
-   * @returns {Promise<boolean>} Whether dimensions changed from the last send
+   * @param {{ force?: boolean, retainPending?: boolean }} [options]
+   * @returns {Promise<boolean|null>} Whether dimensions changed, or null when transport did not accept the frame
    */
   async sendResize(sessionId, options = {}) {
+    // Terminal dimensions belong only to the currently active browser view.
+    // A delayed selection must never report the winner's shared xterm as its own.
+    if (!sessionId || sessionId !== this.activeSessionId || document.visibilityState === 'hidden') return false;
+    if (this._isTerminalSessionGone?.(sessionId)) return false;
     // Fit terminal to container before reading dimensions — ensures local
     // terminal size matches what we report to the server PTY.
+    this.applyTerminalFontPolicyForActiveSession();
     if (this.fitAddon) this.fitAddon.fit();
     const dims = this.getTerminalDimensions();
     if (!dims) return false;
+    if (sessionId !== this.activeSessionId) return false;
     // Did the dimensions actually change since the last resize we sent? Callers
     // use this to skip work (e.g. the post-resize TUI-redraw settle) when no
     // real SIGWINCH was triggered — switching tabs at the same browser size is
@@ -6725,25 +6862,26 @@ Object.assign(CodemanApp.prototype, {
           : window.innerWidth < 768
             ? 'tablet'
             : 'desktop';
-    // Fast path: WebSocket resize
-    if (!options.forceHttp && this._wsReady && this._wsSessionId === sessionId) {
+    const msg = { t: 'z', c: dims.cols, r: dims.rows, v: viewportType };
+    if (options.force) msg.f = true;
+    // Viewer geometry is ownership-sensitive. Only the sizing token attached to
+    // this socket may resize the shared PTY; HTTP has no equivalent identity and
+    // therefore cannot be a safe fallback.
+    if (
+      this._wsReady &&
+      this._wsSessionId === sessionId &&
+      this._ws
+    ) {
+      if (sessionId !== this.activeSessionId) return false;
       try {
-        const msg = { t: 'z', c: dims.cols, r: dims.rows, v: viewportType };
-        if (options.force) msg.f = true;
         this._ws.send(JSON.stringify(msg));
+        if (options.retainPending) this._queuePendingTerminalResize(sessionId, msg);
+        else if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
         return changed;
-      } catch {
-        // Fall through to HTTP POST
-      }
+      } catch {}
     }
-    const body = { ...dims, viewportType };
-    if (options.force) body.force = true;
-    await fetch(`/api/sessions/${sessionId}/resize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    return changed;
+    this._queuePendingTerminalResize(sessionId, msg);
+    return null;
   },
 
   /**

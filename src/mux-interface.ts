@@ -286,8 +286,12 @@ export interface TerminalMultiplexer extends EventEmitter {
   /** Pin a mux window so client attaches do not automatically dictate its size. */
   setManualWindowSize?(muxName: string): boolean;
 
-  /** Explicitly resize a mux window after Codeman accepts a terminal resize. */
-  resizeWindow?(muxName: string, cols: number, rows: number): boolean;
+  /**
+   * Explicitly resize a mux window after Codeman accepts a terminal resize.
+   * Admission stays synchronous/non-blocking; completion reports whether the
+   * authoritative mux command actually succeeded.
+   */
+  resizeWindow?(muxName: string, cols: number, rows: number, onComplete?: (success: boolean) => void): boolean;
 
   // ========== Availability ==========
 

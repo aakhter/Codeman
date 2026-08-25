@@ -163,20 +163,41 @@ const MobileDetection = {
     if (typeof logViewport === 'function') logViewport('updateAppHeight');
   },
 
+  /** Apply device-local font metrics before any resize listener can measure xterm. */
+  syncTerminalFontPolicy() {
+    try {
+      if (typeof app !== 'undefined') app.applyTerminalFontPolicyForActiveSession?.();
+    } catch {}
+  },
+
   /** Initialize mobile detection and set up resize listener */
   init() {
     this.updateBodyClass();
     this.updateAppHeight();
 
-    // Update --app-height on viewport resize (orientation, tab bar toggle)
+    // Update --app-height on viewport resize (orientation, tab bar toggle).
+    // Re-init can observe a different visualViewport object, so detach from
+    // the exact target that owns the old callback before consulting the new one.
+    if (this._appHeightHandler && this._appHeightTarget) {
+      this._appHeightTarget.removeEventListener('resize', this._appHeightHandler);
+      this._appHeightHandler = null;
+      this._appHeightTarget = null;
+    }
     if (window.visualViewport) {
-      this._appHeightHandler = () => this.updateAppHeight();
-      window.visualViewport.addEventListener('resize', this._appHeightHandler);
+      this._appHeightHandler = () => {
+        this.updateAppHeight();
+        this.syncTerminalFontPolicy();
+      };
+      this._appHeightTarget = window.visualViewport;
+      this._appHeightTarget.addEventListener('resize', this._appHeightHandler);
     }
 
     // Debounced resize handler
     let resizeTimeout;
     this._resizeHandler = () => {
+      // MobileDetection installs before the terminal resize listener. Apply
+      // synchronously so its first rAF/fit cannot observe the old breakpoint.
+      this.syncTerminalFontPolicy();
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         this.updateBodyClass();
@@ -204,6 +225,11 @@ const MobileDetection = {
 
   /** Remove event listeners */
   cleanup() {
+    if (this._appHeightHandler && this._appHeightTarget) {
+      this._appHeightTarget.removeEventListener('resize', this._appHeightHandler);
+      this._appHeightHandler = null;
+      this._appHeightTarget = null;
+    }
     if (this._resizeHandler) {
       window.removeEventListener('resize', this._resizeHandler);
       this._resizeHandler = null;
@@ -400,7 +426,7 @@ const KeyboardHandler = {
       // above the mobile toolbar on iPhone. Measure the controls instead of
       // relying on a constant because toolbar height changes across phone
       // widths, safe-area padding, and button wrapping.
-      // For opencode on small iPhones with keyboard, shrink font and collapse toolbar to reclaim rows (6 rows -> 14 rows on SE).
+      // For OpenCode on small iPhones, collapse the toolbar to reclaim rows.
       const isOpencodeMobile = (() => {
         try {
           return (
@@ -431,22 +457,11 @@ const KeyboardHandler = {
           : 0;
         main.style.paddingBottom = `${Math.ceil(toolbarHeight + accessoryHeight + cjkInputHeight)}px`;
       }
-      // Dynamic font size for opencode small viewport: 10 -> 8 to gain ~2 rows
-      if (isOpencodeMobile && typeof app !== 'undefined' && app.terminal) {
-        const targetFont = vvH < 360 && this.keyboardVisible ? 8 : MobileDetection.isMobile?.() ? 10 : 14;
-        if (app.terminal.options.fontSize !== targetFont) {
-          try {
-            app.terminal.options.fontSize = targetFont;
-            // force re-measure cell height now; settle will fit again after layout settles
-            try {
-              app.fitAddon?.fit();
-            } catch {}
-            try {
-              app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
-            } catch {}
-          } catch {}
-        }
-      }
+      // Font choice is stable across keyboard transitions. The viewport settle
+      // below owns the fit after applying the active device/mode policy.
+      try {
+        if (typeof app !== 'undefined') app.applyTerminalFontPolicyForActiveSession?.();
+      } catch {}
     } else {
       this.resetLayout();
     }
@@ -474,13 +489,9 @@ const KeyboardHandler = {
     if (main) {
       main.style.paddingBottom = '';
     }
-    // restore opencode font
+    // Restore the active device/mode policy without writing storage or fitting.
     try {
-      if (typeof app !== 'undefined' && app.terminal && app.terminal.options) {
-        const isMobile = typeof MobileDetection !== 'undefined' && MobileDetection.isMobile?.();
-        const target = isMobile ? 10 : 14;
-        if (app.terminal.options.fontSize !== target) app.terminal.options.fontSize = target;
-      }
+      if (typeof app !== 'undefined') app.applyTerminalFontPolicyForActiveSession?.();
     } catch {}
   },
 
@@ -588,6 +599,9 @@ const KeyboardHandler = {
         // then repaints its xterm canvas before notifying the PTY.
         requestAnimationFrame(() =>
           requestAnimationFrame(() => {
+            try {
+              app.applyTerminalFontPolicyForActiveSession?.();
+            } catch {}
             if (app.fitAddon) {
               try {
                 app.fitAddon.fit();
@@ -616,22 +630,20 @@ const KeyboardHandler = {
 
   /** Send current terminal dimensions to the server (one-shot, for keyboard open/close) */
   _sendTerminalResize() {
-    if (typeof app === 'undefined' || !app.activeSessionId || !app.fitAddon) return;
+    if (
+      typeof app === 'undefined' ||
+      !app.activeSessionId ||
+      typeof app.sendResize !== 'function' ||
+      app._isTerminalSessionGone?.(app.activeSessionId) ||
+      document.visibilityState === 'hidden'
+    )
+      return;
     try {
-      const dims = app.fitAddon.proposeDimensions();
-      if (dims) {
-        const cols = Math.max(dims.cols, 40);
-        const rows = Math.max(dims.rows, 10);
-        app._lastResizeDims = { cols, rows };
-        // Declare the viewport type so resize arbitration can ignore this
-        // while a desktop connection is sizing the same session.
-        const viewportType = MobileDetection.getDeviceType ? MobileDetection.getDeviceType() : 'mobile';
-        fetch(`/api/sessions/${app.activeSessionId}/resize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cols, rows, viewportType }),
-        }).catch(() => {});
-      }
+      // Keyboard settlement is passive geometry maintenance. Keep it on the
+      // token-fenced WebSocket path so a delayed/hidden phone callback cannot
+      // take sizing ownership back from the viewer the user is now using.
+      const pending = app.sendResize(app.activeSessionId);
+      pending?.catch?.(() => {});
     } catch {}
   },
 

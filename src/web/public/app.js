@@ -219,6 +219,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_COMPLETION, '_onSessionCompletion'],
   [SSE_EVENTS.SESSION_ERROR, '_onSessionError'],
   [SSE_EVENTS.SESSION_EXIT, '_onSessionExit'],
+  [SSE_EVENTS.SESSION_INTERACTIVE, '_onSessionInteractive'],
   [SSE_EVENTS.SESSION_IDLE, '_onSessionIdle'],
   [SSE_EVENTS.SESSION_WORKING, '_onSessionWorking'],
   [SSE_EVENTS.SESSION_AUTO_CLEAR, '_onSessionAutoClear'],
@@ -765,12 +766,17 @@ class CodemanApp {
     this._ws = null;            // WebSocket instance for active session
     this._wsSessionId = null;   // Session ID the WS is connected to
     this._wsReady = false;      // True when WS is open and ready for I/O
-    this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | disconnected
+    this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | gone | disconnected
+    this._wsGoneSessionId = null; // exact session named by authoritative 4004/4009 close
+    this._terminalGoneFinalizedSessionIds = new Set();
     this._wsLastClose = null; // { code, reason, at } for transport diagnostics
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
     this._wsCloseRefreshTimer = null;
     this._wsInputSendCount = 0;
     this._httpFallbackSendCount = 0;
+    this._terminalViewerActivity = null;
+    this._terminalViewerActivityPagehideHandler = null;
+    this._pendingTerminalResize = null; // latest ownership-fenced z frame retained during a WS outage
 
     // Terminal write batching with DEC 2026 sync support
     this.pendingWrites = [];
@@ -846,7 +852,6 @@ class CodemanApp {
     // Last rendered connection-indicator tuple; the hot input path skips DOM
     // writes when the freshly computed descriptor is identical (COD-136).
     this._lastIndicatorDescriptor = null;
-    this._postDraining = new Set(); // sessionIds with an in-flight POST drainer
     this._persistReliableTimer = null;
     this._reliableAckTimeoutMs = 4000; // unacked WS frame older than this ⇒ socket likely dead
     this._reliableMaxBytes = 256 * 1024; // cap on the persisted backlog
@@ -1078,6 +1083,7 @@ class CodemanApp {
     requestAnimationFrame(() => {
       this.initTerminal();
       this.loadFontSize();
+      this._initTerminalViewerActivity();
       this.connectSSE();
       // Only fetch state if SSE init event hasn't arrived within 3s (avoids duplicate handleInit)
       this._initFallbackTimer = setTimeout(() => {
@@ -1162,6 +1168,66 @@ class CodemanApp {
       console.log('[CRASH-DIAG] WebGL renderer enabled');
       this._installWebGLLongTaskGuard();
     } catch (_e) { /* WebGL2 unavailable — canvas renderer used */ }
+  }
+
+  _initTerminalViewerActivity() {
+    if (this._terminalViewerActivityPagehideHandler) {
+      window.removeEventListener('pagehide', this._terminalViewerActivityPagehideHandler);
+      this._terminalViewerActivityPagehideHandler = null;
+    }
+    this._terminalViewerActivity?.destroy();
+    const terminalTarget = document.getElementById('terminalContainer');
+    if (!terminalTarget || !window.CodemanTerminalViewerActivity) return;
+
+    const controller = window.CodemanTerminalViewerActivity.create({
+      documentTarget: document,
+      windowTarget: window,
+      terminalTarget,
+      isVisible: () => document.visibilityState === 'visible',
+      isFocused: () => document.hasFocus(),
+      activeSessionId: () => this.activeSessionId,
+      dimensions: () => this.getFittedTerminalDimensions?.() ?? null,
+      transportIdentity: () => {
+        if (
+          !this._wsReady ||
+          this._wsSessionId !== this.activeSessionId ||
+          !this._ws ||
+          this._ws.readyState !== WebSocket.OPEN
+        ) return null;
+        return this._ws;
+      },
+      send: (frame) => {
+        if (
+          !this._wsReady ||
+          this._wsSessionId !== this.activeSessionId ||
+          !this._ws ||
+          this._ws?.readyState !== WebSocket.OPEN
+        ) return false;
+        try {
+          this._ws.send(JSON.stringify(frame));
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      now: () =>
+        typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now(),
+    });
+    this._terminalViewerActivity = controller;
+
+    const pagehideHandler = (event) => {
+      if (event.persisted) return;
+      if (
+        this._terminalViewerActivity !== controller ||
+        this._terminalViewerActivityPagehideHandler !== pagehideHandler
+      ) return;
+      controller.destroy();
+      this._terminalViewerActivity = null;
+      window.removeEventListener('pagehide', pagehideHandler);
+      this._terminalViewerActivityPagehideHandler = null;
+    };
+    this._terminalViewerActivityPagehideHandler = pagehideHandler;
+    window.addEventListener('pagehide', pagehideHandler);
   }
 
   /**
@@ -2212,7 +2278,14 @@ class CodemanApp {
 
   _onSessionResumed(data) {
     const session = data?.id ? this._applySessionActivityEvent(data, 'resumed') : null;
+    if (data?.id) this._clearTerminalSessionGoneForRestart(data.id);
     this._onSessionListMaybeChanged?.();
+    return session;
+  }
+
+  _onSessionInteractive(data) {
+    const session = data?.id ? this._applySessionActivityEvent(data, 'restart') : null;
+    if (data?.id) this._clearTerminalSessionGoneForRestart(data.id);
     return session;
   }
 
@@ -3812,7 +3885,7 @@ class CodemanApp {
   }
 
   _onSessionExit(data) {
-    if (this._wsSessionId === data.id) this._disconnectWs();
+    this._finalizeTerminalSessionGone(data.id);
     const session = this._applySessionActivityEvent(data, 'exit');
     if (session) {
       if (data.id === this.activeSessionId) this._updateLocalEchoState();
@@ -4020,12 +4093,110 @@ class CodemanApp {
   // WebSocket Terminal I/O
   // ═══════════════════════════════════════════════════════════════
 
+  _flushPendingTerminalResize(sessionId, socket) {
+    const pending = this._pendingTerminalResize;
+    if (
+      !pending ||
+      pending.sessionId !== sessionId ||
+      this.activeSessionId !== sessionId ||
+      this._ws !== socket ||
+      !this._wsReady
+    ) return false;
+    try {
+      socket.send(JSON.stringify(pending.frame));
+      if (this._pendingTerminalResize === pending) this._pendingTerminalResize = null;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _isTerminalSessionGone(sessionId) {
+    return (
+      typeof sessionId === 'string' &&
+      (this._terminalGoneFinalizedSessionIds?.has(sessionId) === true ||
+        (sessionId === this.activeSessionId && sessionId === this._wsGoneSessionId && this._wsState === 'gone'))
+    );
+  }
+
+  _finalizeTerminalSessionGone(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+    const finalized = (this._terminalGoneFinalizedSessionIds ??= new Set());
+    const firstFinalization = !finalized.has(sessionId);
+    let hadQueuedInput = false;
+    if (firstFinalization) {
+      finalized.add(sessionId);
+      hadQueuedInput = this._pendingDeliveries?.delete?.(sessionId) === true;
+      if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+      this._terminalViewerActivity?.clearSession?.(sessionId);
+      if (hadQueuedInput) this._persistReliableNow();
+    }
+
+    const stillActive = this.activeSessionId === sessionId;
+    if (stillActive) {
+      this._wsGoneSessionId = sessionId;
+      this._wsState = 'gone';
+    }
+    if (this._wsSessionId === sessionId) this._disconnectWs();
+    if (stillActive) {
+      this._wsState = 'gone';
+      this._updateConnectionIndicator();
+      if (firstFinalization) {
+        this.showToast?.(
+          hadQueuedInput
+            ? 'Session ended — queued terminal input could not be delivered'
+            : 'Terminal session is no longer available',
+          hadQueuedInput ? 'error' : 'warning'
+        );
+      }
+    }
+    return firstFinalization;
+  }
+
+  _clearTerminalSessionGoneForRestart(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+    const finalized = this._terminalGoneFinalizedSessionIds;
+    const wasGone = finalized?.has(sessionId) || this._wsGoneSessionId === sessionId;
+    if (!wasGone) return false;
+    finalized?.delete(sessionId);
+    if (this._wsGoneSessionId === sessionId) this._wsGoneSessionId = null;
+    if (this.activeSessionId === sessionId) {
+      this._wsState = 'disconnected';
+      this._updateConnectionIndicator();
+      this._connectWs(sessionId);
+    }
+    return true;
+  }
+
+  _prepareFreshSocketInputReplay(sessionId, socket) {
+    const list = this._pendingDeliveries?.get?.(sessionId);
+    if (!list || list.length === 0) return true;
+    if (
+      this.activeSessionId !== sessionId ||
+      this._wsSessionId !== sessionId ||
+      this._ws !== socket ||
+      !this._wsReady ||
+      socket?.readyState !== WebSocket.OPEN
+    ) return false;
+    const controller = this._terminalViewerActivity;
+    if (!controller) return false;
+    if (controller.isCurrentTransportActivated?.(sessionId) === true) return true;
+    controller.activate?.('input-replay');
+    return controller.isCurrentTransportActivated?.(sessionId) === true;
+  }
+
   /**
    * Open a WebSocket for terminal I/O on the given session.
-   * Replaces HTTP POST input and SSE terminal output with a single
-   * bidirectional connection. Falls back to SSE+POST if WS fails.
+   * Browser terminal input requires this ownership-capable bidirectional
+   * connection. SSE can still carry output while a transient WS outage queues
+   * reliable browser input for the next activated socket.
    */
   _connectWs(sessionId) {
+    if (this._isTerminalSessionGone(sessionId)) return;
+    this._wsGoneSessionId = null;
+    // A passive resize belongs to the session measured when it was queued. A
+    // real tab switch must not carry that geometry into the next session.
+    if (this._pendingTerminalResize?.sessionId !== sessionId) this._pendingTerminalResize = null;
     this._disconnectWs();
     this._wsState = 'connecting';
     this._updateConnectionIndicator();
@@ -4063,15 +4234,21 @@ class CodemanApp {
             this._reconcileForeignResize(sessionId);
           }, FOREIGN_RESIZE_SETTLE_MS);
         }
-        // Send a typed resize over the fresh socket: syncs PTY dims after
-        // (re)connects AND registers the desktop sizing claim server-side —
-        // selectSession's earlier resizes ran before this WS existed, so they
-        // went over HTTP, which never claims (see ws-routes sizingToken).
-        this.sendResize(sessionId)?.catch?.(() => {});
+        // A reconnect cannot claim sizing by itself. Retry only explicit viewer
+        // activity that occurred while its matching socket was unavailable.
+        this._terminalViewerActivity?.flushPending('ws-open');
+        // Durable input is an explicit user action. Even when no old pending va
+        // survived (reload or an old-socket i failure), establish ownership on
+        // this exact fresh socket before replaying geometry or bytes.
+        const inputReplayReady = this._prepareFreshSocketInputReplay(sessionId, ws);
+        // Then replay the latest passive geometry on the exact fresh socket.
+        // z never activates: the server applies it only if this token owns the
+        // session, otherwise it merely remembers the dimensions for later va.
+        this._flushPendingTerminalResize(sessionId, ws);
         this._startMobileResizeRetry(sessionId);
         // Flush any durably-queued input over the fresh socket (covers frames a
         // prior half-open socket silently dropped, and input typed while offline).
-        this._onWsReady(sessionId);
+        this._onWsReady(sessionId, { activationReady: inputReplayReady });
       }
     };
 
@@ -4121,8 +4298,8 @@ class CodemanApp {
       // reconnects we've already made (pure policy in constants.js):
       //   reconnect      → transient (server restart, network blip, ping timeout);
       //                    schedule a backoff retry while this session stays active.
-      //   retry-fallback → too-many-connections / unknown rejection; show the HTTP
-      //                    fallback but keep retrying so we return to WS when it clears.
+      //   retry-fallback → too-many-connections / unknown rejection; keep input
+      //                    queued and retry until ownership-capable WS returns.
       //   give-up        → 4004 (not found) / 4009 (terminated); the session is gone.
       // _disconnectWs() nulls onclose for intentional disconnects, so we never land here for those.
       const plan = window.CodemanWsReconnect.plan(event.code, this._wsReconnectAttempts || 0);
@@ -4135,8 +4312,8 @@ class CodemanApp {
         this._scheduleWsCloseRefresh(sessionId);
       }
       if (plan.action === 'give-up') {
-        this._wsState = stillActive ? 'fallback' : 'disconnected';
-        this._updateConnectionIndicator();
+        this._clearTimer('_wsReconnectTimer');
+        this._finalizeTerminalSessionGone(sessionId);
       } else if (plan.action === 'reconnect') {
         if (stillActive) {
           this._wsState = 'reconnecting';
@@ -4154,8 +4331,8 @@ class CodemanApp {
           this._updateConnectionIndicator();
         }
       } else {
-        // retry-fallback: surface the HTTP fallback, but keep trying on a bounded
-        // timer so the transport returns to WS once the transient condition clears.
+        // retry-fallback: surface queued reconnect state and keep trying on a
+        // bounded timer until ownership-capable WS returns.
         this._wsState = stillActive ? 'fallback' : 'disconnected';
         this._updateConnectionIndicator();
         if (stillActive) {
@@ -4192,7 +4369,8 @@ class CodemanApp {
     // this first, so a reset would restart the exponential backoff ladder at
     // attempt 0 on every retry (≈0ms tight reconnect loop during an outage).
     // ws.onopen zeroes the counter once a connection actually succeeds.
-    this._wsState = 'disconnected';
+    const preserveGone = this._isTerminalSessionGone(this._wsSessionId || this.activeSessionId);
+    if (!preserveGone) this._wsState = 'disconnected';
     this._stopMobileResizeRetry();
     try {
       this._mobileImePreview?.reset?.();
@@ -4206,7 +4384,7 @@ class CodemanApp {
       this._ws = null;
       this._wsSessionId = null;
       this._wsReady = false;
-      this._wsState = 'disconnected';
+      if (!preserveGone) this._wsState = 'disconnected';
       this._updateConnectionIndicator();
     }
   }
@@ -4252,10 +4430,12 @@ class CodemanApp {
    * blocks the keystroke flush; never silently drops on a half-open socket.
    * @param {string} sessionId
    * @param {string} input
-   * @param {{useMux?: boolean}} [opts] - useMux only affects the POST fallback.
+   * @param {{useMux?: boolean}} [opts] - retained in durable records for compatibility.
    */
   _sendInputAsync(sessionId, input, opts) {
     if (!sessionId || !input) return;
+    if (this._isTerminalSessionGone(sessionId)) return;
+    if (sessionId === this.activeSessionId) this._terminalViewerActivity?.activate?.('terminal-input');
     this._reliableSend(sessionId, input, opts?.useMux === true);
   }
 
@@ -4294,6 +4474,9 @@ class CodemanApp {
 
   /** Record one input frame and kick delivery. The record lives until ACKed. */
   _reliableSend(sessionId, data, useMux) {
+    // A 4004/4009 close is authoritative: no reconnect will ever drain new
+    // records for this still-selected dead terminal.
+    if (this._isTerminalSessionGone(sessionId)) return;
     const seq = this._nextSeq(sessionId);
     const rec = { seq, data, useMux: !!useMux, ts: Date.now(), tries: 0, sentAt: 0 };
     let list = this._pendingDeliveries.get(sessionId);
@@ -4318,6 +4501,10 @@ class CodemanApp {
     const list = this._pendingDeliveries.get(sessionId);
     if (!list || list.length === 0) return;
 
+    // Input typed while ownership activation is pending must stay durable but
+    // undelivered. ws.onopen flushes va, then latest z, then calls _onWsReady.
+    if (this._terminalViewerActivity?.hasPending?.(sessionId)) return;
+
     // Fast path: WebSocket open for this session — fire each not-yet-sent record
     // over the single ordered stream. They stay pending until the server ACKs
     // them ({t:'ia'}); a frame swallowed by a half-open socket is re-sent after
@@ -4330,56 +4517,15 @@ class CodemanApp {
           rec.sentAt = Date.now();
           rec.tries++;
         } catch {
-          break; // socket died mid-send — reconnect/POST drainer retries
+          break; // socket died mid-send — the reconnect drainer retries
         }
       }
       return;
     }
 
-    // Slow path: no WS — POST records in order, awaiting each (the HTTP 2xx is
-    // the ACK). Serialized per session so seq order survives async fetches.
-    if (this._postDraining.has(sessionId)) return;
-    this._postDraining.add(sessionId);
-    (async () => {
-      try {
-        for (;;) {
-          const cur = this._pendingDeliveries.get(sessionId);
-          if (!cur || cur.length === 0) break;
-          // If the WebSocket came back mid-drain, yield to it (the acked stream)
-          // so we don't redundantly re-POST what onopen is already re-sending.
-          if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
-            break;
-          }
-          const rec = cur[0];
-          rec.tries++;
-          rec.sentAt = Date.now();
-          let resp = null;
-          try {
-            const body = { input: rec.data, seq: rec.seq, clientId: this._clientId };
-            if (rec.useMux) body.useMux = true;
-            resp = await fetch(`/api/sessions/${sessionId}/input`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-              keepalive: rec.data.length < 65536,
-            });
-          } catch {
-            resp = null;
-          }
-          if (resp && resp.ok) {
-            this._ackDelivery(sessionId, rec.seq);
-          } else if (resp && (resp.status === 404 || resp.status === 410)) {
-            // Session no longer exists — the input can never land. Drop it
-            // rather than retry forever (not a "lost" prompt: the target is gone).
-            this._ackDelivery(sessionId, rec.seq);
-          } else {
-            break; // offline / 5xx — leave queued; sweep + reconnect retry later
-          }
-        }
-      } finally {
-        this._postDraining.delete(sessionId);
-      }
-    })();
+    // No ownership-capable WS: retain the exact durable queue. Browser input
+    // must never bypass viewer ownership through the trusted HTTP API. The
+    // bounded WS reconnect path will call _onWsReady and redeliver in order.
   }
 
   /** Drop an ACKed record (by exact seq) and persist. */
@@ -4414,8 +4560,12 @@ class CodemanApp {
   }
 
   /** Called from ws.onopen — flush everything pending over the fresh socket. */
-  _onWsReady(sessionId) {
+  _onWsReady(sessionId, options = {}) {
     const list = this._pendingDeliveries.get(sessionId);
+    if (!list || list.length === 0) return;
+    const activationReady =
+      options.activationReady === true || this._prepareFreshSocketInputReplay(sessionId, this._ws);
+    if (!activationReady) return;
     if (list) for (const r of list) r.sentAt = 0; // fresh socket ⇒ re-send all
     this._drainSession(sessionId);
   }
@@ -4423,8 +4573,8 @@ class CodemanApp {
   /**
    * Periodic retry. For the active WS session, an oldest frame unacked past the
    * timeout means the socket is (half-)dead — close it to force a fast reconnect
-   * (onclose → reconnect → onopen → _onWsReady re-sends). Other sessions just
-   * (re)drain over POST.
+   * (onclose → reconnect → onopen → _onWsReady re-sends). Other sessions remain
+   * queued until their ownership-capable WS is active.
    */
   _redeliverSweep() {
     if (this._pendingDeliveries.size === 0) return;
@@ -4597,7 +4747,7 @@ class CodemanApp {
       };
     }
 
-    // With an active terminal, show its transport (WebSocket vs HTTP fallback).
+    // With an active terminal, show its WebSocket delivery state.
     if (this.activeSessionId) {
       let cls, label, detail;
       switch (this._wsState) {
@@ -4605,8 +4755,15 @@ class CodemanApp {
           cls = 'connected'; label = 'WS'; detail = 'Terminal connected over WebSocket';
           break;
         case 'fallback':
-          cls = 'fallback'; label = 'HTTP'; detail = 'WebSocket unavailable — input sent over HTTP';
+          cls = 'reconnecting'; label = 'WS…'; detail = 'WebSocket unavailable — input queued until reconnect';
           break;
+        case 'gone':
+          return {
+            display: 'flex',
+            dotClass: 'connection-dot offline',
+            text: 'Ended',
+            title: 'Terminal session is no longer available',
+          };
         case 'reconnecting':
           cls = 'reconnecting'; label = 'WS…'; detail = 'Reconnecting WebSocket';
           break;
@@ -4780,9 +4937,14 @@ class CodemanApp {
     this._lastOfflineUiKey = '';
     this._updateConnectionLossUi();
     this.connectSSE();
-    // The terminal socket does not always come back on its own (planWsReconnect
-    // 'give-up'), so the same button re-arms it.
-    if (this.activeSessionId && this._wsState !== 'connected') {
+    // Re-arm transiently unavailable terminal transport with the SSE stream.
+    // An authoritative 4004/4009 remains closed: retrying cannot revive a
+    // terminal session the server says no longer exists.
+    if (
+      this.activeSessionId &&
+      this._wsState !== 'connected' &&
+      !this._isTerminalSessionGone(this.activeSessionId)
+    ) {
       this._wsReconnectAttempts = 0;
       this._connectWs(this.activeSessionId);
     }
@@ -8422,6 +8584,8 @@ class CodemanApp {
     // site nobody tagged fails toward acknowledging rather than toward an
     // alert that can never be cleared.
     const userInitiated = options?.auto !== true;
+    // Terminal sizing activity currently shares this audited `auto: true`
+    // intent contract: app-restored selections stay passive, human choices own.
     // `!activeWebviewId`: with a dashboard foregrounded, re-selecting the
     // session behind it is a real switch, not a no-op, so it must not early-return.
     if (this.activeSessionId === sessionId && !this.activeWebviewId && !forceReload) {
@@ -8430,7 +8594,12 @@ class CodemanApp {
       // which tab is showing, and so does the reload seed), and every other
       // clear path runs on the switch this early return skips, leaving a
       // yellow tab that no tap could clear.
-      if (userInitiated) this.markIdleAlertSeen(sessionId);
+      if (userInitiated) {
+        this.markIdleAlertSeen(sessionId);
+        this.applyTerminalFontPolicy?.(this.sessions.get(sessionId)?.mode);
+        try { this.fitAddon?.fit(); } catch {}
+        this._terminalViewerActivity?.activate('session-select');
+      }
       return;
     }
     if (this.activeSessionId === sessionId && forceReload) {
@@ -8453,7 +8622,17 @@ class CodemanApp {
     // Desktop always focuses; touch focuses only while the on-screen keyboard
     // is already open (so a tab switch doesn't pop the keyboard).
     const shouldFocusTerminal = this._shouldFocusTerminalForTabSwitch();
-    if (shouldFocusTerminal && this.terminal) this.terminal.focus();
+    const focusTerminalWithoutActivation = () => {
+      const focusTerminal = () => this.terminal.focus();
+      if (this._terminalViewerActivity?.runWithoutActivation) {
+        this._terminalViewerActivity.runWithoutActivation(focusTerminal);
+      } else {
+        focusTerminal();
+      }
+    };
+    if (shouldFocusTerminal && this.terminal) {
+      focusTerminalWithoutActivation();
+    }
 
     const _selStart = performance.now();
     const _selName = this.sessions.get(sessionId)?.name || sessionId.slice(0,8);
@@ -8477,6 +8656,9 @@ class CodemanApp {
     // back. The ONLY other writers are _enterHistoryView/_exitHistoryView.
     this.terminal.options.scrollback = this._isMirrorSession(sessionId) ? 0 : this._userScrollback();
     this.activeSessionId = sessionId;
+    // Font metrics must match the selected mode before the socket can flush an
+    // activation and before the first fit/resize measures this viewer.
+    this.applyTerminalFontPolicy?.(this.sessions.get(sessionId)?.mode);
     // Repaint the partial-history banner for the tab being switched TO. The
     // replay paths refresh it when their fetch lands; without this the previous
     // session's notice stays on screen until then (#258).
@@ -8494,7 +8676,7 @@ class CodemanApp {
     this._updateSseSubscription(sessionId);
     // Open WebSocket as soon as the active session is known. It does not
     // depend on terminal buffer loading, and opening it early keeps normal
-    // typing on the ordered WS path instead of temporary HTTP fallback.
+    // typing on the ordered WS path instead of briefly accumulating offline.
     this._connectWs(sessionId);
     this.hideWelcome();
     // Terminal-pane entrance: plays for a freshly created session, and on every
@@ -8584,6 +8766,13 @@ class CodemanApp {
       }
     }
 
+    // A restored-session attach can outlive a newer tab selection. Do not let
+    // its continuation measure or resize the winner's shared terminal.
+    if (this._isStaleSelect(selectGen)) {
+      this._clearTerminalLoadState(sessionId, selectGen);
+      return;
+    }
+
     // Load terminal buffer for this session
     // Show cached content instantly while fetching fresh data in background.
     // Use tail mode for faster initial load (128KB is enough for recent visible content).
@@ -8613,6 +8802,7 @@ class CodemanApp {
         try { this.terminal?.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
       }
       this._syncTerminalTouchAction?.();
+      if (userInitiated) this._terminalViewerActivity?.activate('session-select');
 
       // Also push the new dimensions to the PTY. Without this, codex/codeman
       // sees the size that was set the last time the throttled resize handler
@@ -8621,7 +8811,9 @@ class CodemanApp {
       // a small region with empty rows below the status bar.
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
-      const dimsChanged = await this.sendResize(sessionId, { forceHttp: true }).catch(() => false);
+      const dimsChanged = userInitiated && document.visibilityState === 'visible'
+        ? await this.sendResize(sessionId).catch(() => false)
+        : false;
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
@@ -8892,7 +9084,7 @@ class CodemanApp {
       // conversation. Stale Ink frames in the tailed buffer are a cosmetic
       // annoyance that disappear on the user's next keypress; data loss is not
       // acceptable. Do NOT re-introduce Ctrl+L here.
-      this.sendResize(sessionId);
+      if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);
 
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.
@@ -8946,7 +9138,7 @@ class CodemanApp {
       });
 
       _crashDiag.log('FOCUS');
-      if (shouldFocusTerminal && this.terminal) this.terminal.focus();
+      if (shouldFocusTerminal && this.terminal) focusTerminalWithoutActivation();
       this.scrollToLastNonEmptyLine();
       // If we switched INTO this tab while the soft keyboard is already up, no
       // viewport-resize transition fires (handleViewportResize only runs
@@ -9009,8 +9201,16 @@ class CodemanApp {
     // real session removal, never on a tab switch.
     this._pendingDeliveries?.delete(sessionId);
     this._seqCounters?.delete(sessionId);
-    this._postDraining?.delete(sessionId);
     this._persistReliableState();
+    if (this._wsSessionId === sessionId) this._disconnectWs();
+    this._terminalGoneFinalizedSessionIds?.delete(sessionId);
+    if (this._pendingTerminalResize?.sessionId === sessionId) this._pendingTerminalResize = null;
+    this._terminalViewerActivity?.clearSession?.(sessionId);
+    if (this._wsGoneSessionId === sessionId) {
+      this._wsGoneSessionId = null;
+      if (this._wsState === 'gone') this._wsState = 'disconnected';
+      this._updateConnectionIndicator?.();
+    }
     this.ralphStates.delete(sessionId);
     this.ralphClosedSessions.delete(sessionId);
     this.projectInsights.delete(sessionId);
