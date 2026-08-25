@@ -23,7 +23,9 @@ import {
   finishResizeCollection,
   focusPhaseBRuntime,
   launchConcretePhaseBRuntime,
+  measureBrowserQuiescence,
 } from '../scripts/perf/cod-374-playwright-runtime.js';
+import { validateBrowserQuiescence } from '../scripts/perf/cod-374-quiescence.mjs';
 import {
   CANDIDATE_PRODUCT,
   deriveSampleEvidence,
@@ -619,7 +621,7 @@ describe('COD-374 Phase B producer contracts', () => {
     expect(clickedPosition).toEqual({ x: 30, y: expect.closeTo((1.5 * 440) / 3, 8) });
   });
 
-  it('installs a self-contained browser init payload through the production tsx import path', () => {
+  it('uses the production loader for self-contained browser payloads', () => {
     const child = String.raw`
       const { chromium } = await import('playwright');
       const { createServer } = await import('node:http');
@@ -651,7 +653,15 @@ describe('COD-374 Phase B producer contracts', () => {
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const address = server.address();
       const pageErrors = [];
+      const consoleErrors = [];
       page.on('pageerror', (error) => pageErrors.push(error.message));
+      page.on('console', (message) => {
+        const type = message.type();
+        const value = message.text();
+        if (type === 'error' || (type === 'warning' && /(?:crash|exception|uncaught|failed|fatal)/i.test(value))) {
+          consoleErrors.push(type + ': ' + value);
+        }
+      });
       try {
         await installBrowserLatencyInitScript(page);
         await page.goto('http://127.0.0.1:' + address.port);
@@ -663,6 +673,104 @@ describe('COD-374 Phase B producer contracts', () => {
         } catch (error) {
           hookError = error instanceof Error ? error.message : String(error);
         }
+        await originalEvaluate(() => {
+          const browserWindow = window;
+          browserWindow.__cod374PhaseBLongTasks = [{ startTime: 1, duration: 999 }];
+          browserWindow.__cod374PhaseBResizeEvents = [1];
+          browserWindow.__cod374PhaseBResizeCollecting = false;
+          browserWindow.__cod374PhaseBOnResize = () => {
+            if (browserWindow.__cod374PhaseBResizeCollecting) {
+              browserWindow.__cod374PhaseBResizeEvents.push(performance.now());
+            }
+          };
+          window.addEventListener('resize', browserWindow.__cod374PhaseBOnResize);
+          browserWindow.__cod374PhaseBResizeObserver = new ResizeObserver(browserWindow.__cod374PhaseBOnResize);
+          browserWindow.__cod374PhaseBResizeObserver.observe(document.documentElement);
+          browserWindow.__cod374PhaseBLongTaskObserver = new PerformanceObserver((list) => {
+            browserWindow.__cod374PhaseBLongTasks.push(
+              ...list.getEntries().map((entry) => ({ startTime: entry.startTime, duration: entry.duration }))
+            );
+          });
+          browserWindow.__cod374PhaseBLongTaskObserver.observe({ type: 'longtask', buffered: false });
+          const originalTakeRecords = browserWindow.__cod374PhaseBLongTaskObserver.takeRecords.bind(
+            browserWindow.__cod374PhaseBLongTaskObserver
+          );
+          browserWindow.__cod374PhaseBObserverTakeRecordsCalls = 0;
+          browserWindow.__cod374PhaseBLongTaskObserver.takeRecords = () => {
+            browserWindow.__cod374PhaseBObserverTakeRecordsCalls += 1;
+            return originalTakeRecords();
+          };
+          browserWindow.__cod374PhaseBOriginalLongTaskObserver = browserWindow.__cod374PhaseBLongTaskObserver;
+          browserWindow.__cod374PhaseBOriginalResizeObserver = browserWindow.__cod374PhaseBResizeObserver;
+          browserWindow.__cod374LatencyTrace.overflowed = true;
+          browserWindow.__cod374PhaseBTraceOverflowed = true;
+          browserWindow.__cod374PhaseBOriginalRequestAnimationFrame = window.requestAnimationFrame;
+          browserWindow.__cod374PhaseBRafCalls = 0;
+          window.requestAnimationFrame = (callback) =>
+            browserWindow.__cod374PhaseBOriginalRequestAnimationFrame.call(window, (atMs) => {
+              browserWindow.__cod374PhaseBRafCalls += 1;
+              callback(atMs);
+            });
+        });
+        pageErrors.push('stale page error');
+        consoleErrors.push('warning: stale fatal console error');
+        const browserQuiescence = await runtimeModule.measureBrowserQuiescence(page, {
+          pageErrors,
+          consoleErrors,
+        });
+        const browserQuiescenceState = await originalEvaluate(() => {
+          const browserWindow = window;
+          return {
+            observerTakeRecordsCalls: browserWindow.__cod374PhaseBObserverTakeRecordsCalls,
+            rafCalls: browserWindow.__cod374PhaseBRafCalls,
+            longTaskCount: browserWindow.__cod374PhaseBLongTasks.length,
+            resizeCount: browserWindow.__cod374PhaseBResizeEvents.length,
+            resizeCollecting: browserWindow.__cod374PhaseBResizeCollecting,
+            overflowed:
+              browserWindow.__cod374PhaseBTraceOverflowed === true ||
+              browserWindow.__cod374LatencyTrace.overflowed === true,
+            longTaskObserverPreserved:
+              browserWindow.__cod374PhaseBLongTaskObserver === browserWindow.__cod374PhaseBOriginalLongTaskObserver,
+            resizeObserverPreserved:
+              browserWindow.__cod374PhaseBResizeObserver === browserWindow.__cod374PhaseBOriginalResizeObserver,
+          };
+        });
+        await originalEvaluate(() => {
+          setTimeout(() => {
+            window.dispatchEvent(new Event('resize'));
+            queueMicrotask(() => {
+              throw new Error('current-window page error');
+            });
+          }, 250);
+        });
+        const contaminatedBrowserQuiescence = await runtimeModule.measureBrowserQuiescence(page, {
+          pageErrors,
+          consoleErrors,
+        });
+        const browserQuiescenceLifecycle = await originalEvaluate(() => {
+          const browserWindow = window;
+          const resizeCount = browserWindow.__cod374PhaseBResizeEvents.length;
+          browserWindow.__cod374PhaseBResizeCollecting = true;
+          window.dispatchEvent(new Event('resize'));
+          const resizeListenerPreserved = browserWindow.__cod374PhaseBResizeEvents.length === resizeCount + 1;
+          browserWindow.__cod374PhaseBResizeCollecting = false;
+          const longTaskObserverPreserved =
+            browserWindow.__cod374PhaseBLongTaskObserver === browserWindow.__cod374PhaseBOriginalLongTaskObserver;
+          const resizeObserverPreserved =
+            browserWindow.__cod374PhaseBResizeObserver === browserWindow.__cod374PhaseBOriginalResizeObserver;
+          browserWindow.__cod374PhaseBLongTaskObserver.disconnect();
+          browserWindow.__cod374PhaseBResizeObserver.disconnect();
+          window.removeEventListener('resize', browserWindow.__cod374PhaseBOnResize);
+          window.requestAnimationFrame = browserWindow.__cod374PhaseBOriginalRequestAnimationFrame;
+          const requestAnimationFrameRestored =
+            window.requestAnimationFrame === browserWindow.__cod374PhaseBOriginalRequestAnimationFrame;
+          return {
+            longTaskObserverPreserved,
+            resizeObserverPreserved,
+            resizeListenerPreserved,
+            requestAnimationFrameRestored,
+          };
+        });
         await armBrowserLatencyTrial(page, {
           trialId: 'loader-audit', inputIndex: 0, tokenHash: '8e35c2cd3bf6641b', tokenLength: 1, token: 'q'
         });
@@ -677,32 +785,9 @@ describe('COD-374 Phase B producer contracts', () => {
         const hookState = await originalEvaluate("(()=>{const state=window.__cod374LatencyTrace;return{listenerCount:state?.listenerCount,wrappersInstalled:state?.wrappersInstalled}})()");
         const callbackContent = serializedBrowserCallbacks.join('\n');
         const expressionContent = serializedBrowserExpressions.join('\n');
-        const directBrowserFunctions = [
-          installBrowserLatencyInitScript, installBrowserLatencyHooks, armBrowserLatencyTrial,
-          completeBrowserLatencyWindow, readBrowserLatencyTrace, removeBrowserLatencyHooks,
-          runtimeModule.awaitPhaseBAppReadiness, runtimeModule.focusPhaseBRuntime,
-          runtimeModule.finishResizeCollection,
-          runtimeModule.cpuProbe,
-          runtimeModule.terminalText,
-        ];
         const missingAuditExports = ['cpuProbe', 'terminalText', 'captureWindow'].filter(
           (name) => typeof runtimeModule[name] !== 'function'
         );
-        const directFunctionHelpers = directBrowserFunctions.flatMap((callback) =>
-          String(callback).match(/\b(?:__name|__vite\w*|__toESM|__import\w*|import_\w+)\b/g) ?? []
-        );
-        const launchSource = String(runtimeModule.launchConcretePhaseBRuntime);
-        const launchHelperCount = launchSource.match(/\b__name\b/g)?.length ?? 0;
-        const launchOtherHelpers = launchSource.match(/\b(?:__vite\w*|__toESM|__import\w*|import_\w+)\b/g) ?? [];
-        const launchHelpersAreNodeLocal = launchHelperCount === 2
-          && launchSource.includes('const onPageError=__name')
-          && launchSource.includes('const onConsole=__name');
-        const captureSource = String(runtimeModule.captureWindow);
-        const captureHelperCount = captureSource.match(/\b__name\b/g)?.length ?? 0;
-        const captureHelpersAreNodeLocal = captureHelperCount === 2
-          && captureSource.includes('capture:__name')
-          && captureSource.includes('isPresent:__name')
-          && !(captureSource.match(/\b(?:__vite\w*|__toESM|__import\w*|import_\w+)\b/g) ?? []).length;
         const cleanupProof = await removeBrowserLatencyHooks(page);
         process.stdout.write(JSON.stringify({
           payloadKind: typeof captured === 'object' && typeof captured?.content === 'string' ? 'content' : typeof captured,
@@ -711,16 +796,33 @@ describe('COD-374 Phase B producer contracts', () => {
             : ['missing-content'],
           callbackHelpers: [...new Set(callbackContent.match(/\b(?:__name|__vite\w*|__toESM|__import\w*|import_\w+)\b/g) ?? [])],
           expressionHelpers: [...new Set(expressionContent.match(/\b(?:__name|__vite\w*|__toESM|__import\w*|import_\w+)\b/g) ?? [])],
-          directFunctionHelpers: [...new Set(directFunctionHelpers)],
           missingAuditExports,
-          captureHelpersAreNodeLocal,
-          launchHelpersAreNodeLocal,
-          launchOtherHelpers,
           stateCreated,
           hookState,
           hookError,
+          browserQuiescence: {
+            tickCount: browserQuiescence.tickCount,
+            timerIntervalMs: browserQuiescence.timerIntervalMs,
+            driftCount: browserQuiescence.driftsMs.length,
+            measurementErrorHash: browserQuiescence.measurementErrorHash,
+            pageErrorHashes: browserQuiescence.pageErrorHashes,
+            consoleErrorHashes: browserQuiescence.consoleErrorHashes,
+            longTaskDurationsMs: browserQuiescence.longTaskDurationsMs,
+            resizeCount: browserQuiescence.resizeCount,
+            overflowed: browserQuiescence.overflowed,
+          },
+          browserQuiescenceState,
+          contaminatedBrowserQuiescence: {
+            tickCount: contaminatedBrowserQuiescence.tickCount,
+            pageErrorHashes: contaminatedBrowserQuiescence.pageErrorHashes,
+            resizeCount: contaminatedBrowserQuiescence.resizeCount,
+            measurementErrorHash: contaminatedBrowserQuiescence.measurementErrorHash,
+            passed: contaminatedBrowserQuiescence.passed,
+          },
+          browserQuiescenceLifecycle,
           cleanupProof,
           pageErrors,
+          consoleErrors,
         }));
       } finally {
         await browser.close();
@@ -739,18 +841,458 @@ describe('COD-374 Phase B producer contracts', () => {
       forbiddenHelpers: [],
       callbackHelpers: [],
       expressionHelpers: [],
-      directFunctionHelpers: [],
       missingAuditExports: [],
-      captureHelpersAreNodeLocal: true,
-      launchHelpersAreNodeLocal: true,
-      launchOtherHelpers: [],
       stateCreated: true,
       hookState: { listenerCount: 3, wrappersInstalled: true },
       hookError: null,
+      browserQuiescence: {
+        tickCount: 50,
+        timerIntervalMs: 20,
+        driftCount: 50,
+        measurementErrorHash: null,
+        pageErrorHashes: [],
+        consoleErrorHashes: [],
+        longTaskDurationsMs: [],
+        resizeCount: 0,
+        overflowed: false,
+      },
+      browserQuiescenceState: {
+        observerTakeRecordsCalls: 2,
+        rafCalls: 4,
+        longTaskCount: 0,
+        resizeCount: 0,
+        resizeCollecting: false,
+        overflowed: false,
+        longTaskObserverPreserved: true,
+        resizeObserverPreserved: true,
+      },
+      contaminatedBrowserQuiescence: {
+        tickCount: 50,
+        pageErrorHashes: [token('current-window page error')],
+        resizeCount: 1,
+        measurementErrorHash: null,
+        passed: false,
+      },
+      browserQuiescenceLifecycle: {
+        longTaskObserverPreserved: true,
+        resizeObserverPreserved: true,
+        resizeListenerPreserved: true,
+        requestAnimationFrameRestored: true,
+      },
       cleanupProof: { wrappersRestored: true, listenersDisposed: true },
-      pageErrors: [],
+      pageErrors: ['stale page error', 'current-window page error'],
+      consoleErrors: ['warning: stale fatal console error'],
     });
   }, 40_000);
+
+  it('measures browser quiescence with 50 sequential ticks and snapshots reset diagnostics', async () => {
+    const calls: string[] = [];
+    const pageErrors = ['stale page error'];
+    const consoleErrors = ['stale console error'];
+    const page: any = {
+      evaluate: async (expression: string) => {
+        calls.push('evaluate');
+        expect(typeof expression).toBe('string');
+        expect(expression).not.toMatch(/\b__name\b/);
+        if (expression.includes('for (let index = 0; index < 50; index += 1)')) {
+          return {
+            tickCount: 50,
+            driftsMs: Array.from({ length: 50 }, (_, index) => index / 10),
+            overflowed: false,
+            measurementError: null,
+          };
+        }
+        if (expression.includes('pendingLongTasks')) {
+          return { longTaskDurationsMs: [], resizeCount: 0, overflowed: false };
+        }
+      },
+    };
+
+    const evidence = await measureBrowserQuiescence(page, {
+      pageErrors,
+      consoleErrors,
+      resetTraceDiagnostics: async () => calls.push('reset-trace'),
+      snapshotTraceDiagnostics: async () => {
+        calls.push('snapshot-trace');
+        return { overflowed: false };
+      },
+    });
+
+    expect(calls).toEqual(['reset-trace', 'evaluate', 'evaluate', 'evaluate', 'snapshot-trace']);
+    expect(evidence).toEqual({
+      tickCount: 50,
+      timerIntervalMs: 20,
+      driftsMs: Array.from({ length: 50 }, (_, index) => index / 10),
+      p95DriftMs: 4.7,
+      maxDriftMs: 4.9,
+      longTaskDurationsMs: [],
+      pageErrorHashes: [],
+      consoleErrorHashes: [],
+      resizeCount: 0,
+      overflowed: false,
+      measurementErrorHash: null,
+      passed: true,
+    });
+    expect(validateBrowserQuiescence(evidence)).toBe(evidence);
+  });
+
+  it('fails browser quiescence closed for drift, long tasks, resize, trace overflow, and diagnostics', async () => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    const page: any = {
+      evaluate: async () => {
+        pageErrors.push('page exploded');
+        consoleErrors.push('warning: fatal browser condition');
+        return {
+          tickCount: 50,
+          driftsMs: [...Array(48).fill(0), 11, 26],
+          longTaskDurationsMs: [51],
+          resizeCount: 1,
+          overflowed: false,
+          measurementError: null,
+        };
+      },
+    };
+
+    const evidence = await measureBrowserQuiescence(page, {
+      pageErrors,
+      consoleErrors,
+      snapshotTraceDiagnostics: async () => ({ overflowed: true }),
+    });
+
+    expect(evidence).toMatchObject({
+      tickCount: 50,
+      p95DriftMs: 0,
+      maxDriftMs: 26,
+      longTaskDurationsMs: [51],
+      pageErrorHashes: [token('page exploded')],
+      consoleErrorHashes: [token('warning: fatal browser condition')],
+      resizeCount: 1,
+      overflowed: true,
+      measurementErrorHash: null,
+      passed: false,
+    });
+  });
+
+  it('returns safe failed partial browser quiescence evidence when browser evaluation fails', async () => {
+    const evidence = await measureBrowserQuiescence(
+      {
+        evaluate: async () => {
+          throw new Error('evaluation transport failed');
+        },
+      } as any,
+      { pageErrors: [], consoleErrors: [] }
+    );
+
+    expect(evidence).toEqual({
+      tickCount: 0,
+      timerIntervalMs: 20,
+      driftsMs: [],
+      p95DriftMs: 0,
+      maxDriftMs: 0,
+      longTaskDurationsMs: [],
+      pageErrorHashes: [],
+      consoleErrorHashes: [],
+      resizeCount: 0,
+      overflowed: false,
+      measurementErrorHash: token('Error:evaluation transport failed'),
+      passed: false,
+    });
+    expect(validateBrowserQuiescence(evidence)).toBe(evidence);
+  });
+
+  it('preserves 0-49 completed ticks in safe failed browser quiescence evidence', async () => {
+    const evidence = await measureBrowserQuiescence(
+      {
+        evaluate: async () => ({
+          tickCount: 49,
+          driftsMs: Array(49).fill(2),
+          longTaskDurationsMs: [],
+          resizeCount: 0,
+          overflowed: false,
+          measurementError: 'Error:timer failed',
+        }),
+      } as any,
+      { pageErrors: [], consoleErrors: [] }
+    );
+
+    expect(evidence).toMatchObject({
+      tickCount: 49,
+      driftsMs: Array(49).fill(2),
+      p95DriftMs: 2,
+      maxDriftMs: 2,
+      measurementErrorHash: token('Error:timer failed'),
+      passed: false,
+    });
+  });
+
+  it('retains simultaneous browser quiescence contamination when timer measurement fails', async () => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    const evidence = await measureBrowserQuiescence(
+      {
+        evaluate: async () => {
+          pageErrors.push('tick page error');
+          consoleErrors.push('error: tick console error');
+          return {
+            tickCount: 17,
+            driftsMs: Array(17).fill(3),
+            longTaskDurationsMs: [75],
+            resizeCount: 2,
+            overflowed: true,
+            measurementError: 'Error:tick timer failed',
+          };
+        },
+      } as any,
+      { pageErrors, consoleErrors }
+    );
+
+    expect(evidence).toMatchObject({
+      tickCount: 17,
+      driftsMs: Array(17).fill(3),
+      longTaskDurationsMs: [75],
+      pageErrorHashes: [token('tick page error')],
+      consoleErrorHashes: [token('error: tick console error')],
+      resizeCount: 2,
+      overflowed: true,
+      measurementErrorHash: token('Error:tick timer failed'),
+      passed: false,
+    });
+    expect(validateBrowserQuiescence(evidence)).toBe(evidence);
+  });
+
+  it('binds browser quiescence page and console diagnostics to the timer window only', async () => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    const evidence = await measureBrowserQuiescence(
+      {
+        evaluate: async () => {
+          pageErrors.push('tick page error');
+          consoleErrors.push('error: tick console error');
+          return {
+            tickCount: 50,
+            driftsMs: Array(50).fill(0),
+            longTaskDurationsMs: [],
+            resizeCount: 0,
+            overflowed: false,
+            measurementError: null,
+          };
+        },
+      } as any,
+      {
+        pageErrors,
+        consoleErrors,
+        resetTraceDiagnostics: async () => {
+          pageErrors.push('pre-reset page error');
+          consoleErrors.push('error: pre-reset console error');
+        },
+        snapshotTraceDiagnostics: async () => {
+          pageErrors.push('post-snapshot page error');
+          consoleErrors.push('error: post-snapshot console error');
+          return { overflowed: false };
+        },
+      }
+    );
+
+    expect(evidence.pageErrorHashes).toEqual([token('tick page error')]);
+    expect(evidence.consoleErrorHashes).toEqual([token('error: tick console error')]);
+  });
+
+  it('retains browser quiescence evidence when the trace snapshot fails', async () => {
+    const pageErrors: string[] = [];
+    const evidence = await measureBrowserQuiescence(
+      {
+        evaluate: async (expression: string) => {
+          if (expression.includes('for (let index = 0; index < 50; index += 1)')) {
+            pageErrors.push('tick page error');
+            return { tickCount: 50, driftsMs: Array(50).fill(1), overflowed: false, measurementError: null };
+          }
+          if (expression.includes('pendingLongTasks')) {
+            return { longTaskDurationsMs: [88], resizeCount: 3, overflowed: false };
+          }
+        },
+      } as any,
+      {
+        pageErrors,
+        consoleErrors: [],
+        snapshotTraceDiagnostics: async () => {
+          throw new Error('trace snapshot failed');
+        },
+      }
+    );
+
+    expect(evidence).toMatchObject({
+      tickCount: 50,
+      driftsMs: Array(50).fill(1),
+      longTaskDurationsMs: [88],
+      pageErrorHashes: [token('tick page error')],
+      resizeCount: 3,
+      overflowed: true,
+      measurementErrorHash: token('Error:trace snapshot failed'),
+      passed: false,
+    });
+    expect(validateBrowserQuiescence(evidence)).toBe(evidence);
+  });
+
+  it('collects browser quiescence diagnostics only while the static tick payload is armed', async () => {
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    const longTasks: Array<{ label: string; duration: number }> = [];
+    const resizeEvents: string[] = [];
+    let resizeCollecting = false;
+    let traceOverflowed = false;
+    const assignResizeState = (expression: string, before: number, after: number) => {
+      const matches = [...expression.slice(before, after).matchAll(/__cod374PhaseBResizeCollecting = (true|false)/g)];
+      if (matches.length) resizeCollecting = matches.at(-1)![1] === 'true';
+    };
+    const inject = (label: string, { trace = false } = {}) => {
+      longTasks.push({ label, duration: label === 'in-loop' ? 60 : 90 });
+      if (resizeCollecting) resizeEvents.push(label);
+      if (trace) traceOverflowed = true;
+      pageErrors.push(`${label} page error`);
+      consoleErrors.push(`error: ${label} console error`);
+    };
+    const evidence = await measureBrowserQuiescence(
+      {
+        evaluate: async (expression: string) => {
+          if (expression.includes('__cod374PhaseBLongTaskObserver?.takeRecords();')) {
+            longTasks.length = 0;
+            resizeEvents.length = 0;
+            traceOverflowed = false;
+            assignResizeState(expression, 0, expression.length);
+            inject('pre-gap', { trace: true });
+            return;
+          }
+          if (expression.includes('for (let index = 0; index < 50; index += 1)')) {
+            const loopAt = expression.indexOf('for (let index = 0; index < 50; index += 1)');
+            assignResizeState(expression, 0, loopAt);
+            if (expression.slice(0, loopAt).includes('__cod374PhaseBLongTasks.length = 0')) longTasks.length = 0;
+            if (expression.slice(0, loopAt).includes('__cod374PhaseBResizeEvents.length = 0')) resizeEvents.length = 0;
+            if (expression.slice(0, loopAt).includes('__cod374PhaseBTraceOverflowed = false')) traceOverflowed = false;
+            inject('in-loop');
+            const tickOverflowed = traceOverflowed;
+            assignResizeState(expression, loopAt, expression.length);
+            return {
+              tickCount: 50,
+              driftsMs: Array(50).fill(0),
+              measurementError: null,
+              overflowed: tickOverflowed,
+            };
+          }
+          inject('post-gap', { trace: true });
+          assignResizeState(expression, 0, expression.length);
+          const selectedLongTasks = expression.includes('__cod374PhaseBWindowStartedMs')
+            ? longTasks.filter((entry) => entry.label === 'in-loop')
+            : longTasks;
+          return {
+            longTaskDurationsMs: selectedLongTasks.map((entry) => entry.duration),
+            resizeCount: resizeEvents.length,
+            overflowed: traceOverflowed,
+          };
+        },
+      } as any,
+      { pageErrors, consoleErrors }
+    );
+
+    expect(evidence).toMatchObject({
+      longTaskDurationsMs: [60],
+      pageErrorHashes: [token('in-loop page error')],
+      consoleErrorHashes: [token('error: in-loop console error')],
+      resizeCount: 1,
+      overflowed: false,
+      measurementErrorHash: null,
+      passed: false,
+    });
+  });
+
+  it('disarms browser quiescence when executed timer payload timestamps throw', async () => {
+    const descriptors = new Map(
+      ['window', 'performance', 'requestAnimationFrame', 'setTimeout'].map((name) => [
+        name,
+        Object.getOwnPropertyDescriptor(globalThis, name),
+      ])
+    );
+    try {
+      for (const failurePoint of ['initial', 'finally'] as const) {
+        let nowCalls = 0;
+        const browserWindow: any = {
+          __cod374PhaseBLongTasks: [],
+          __cod374PhaseBResizeEvents: [],
+          __cod374PhaseBResizeCollecting: false,
+          __cod374PhaseBTraceOverflowed: false,
+          __cod374LatencyTrace: { overflowed: false },
+        };
+        Object.defineProperties(globalThis, {
+          window: { configurable: true, value: browserWindow },
+          performance: {
+            configurable: true,
+            value: {
+              now: () => {
+                nowCalls += 1;
+                if (failurePoint === 'initial' || nowCalls === 52) throw new Error(`${failurePoint} timestamp failed`);
+                return (nowCalls - 1) * 20;
+              },
+            },
+          },
+          requestAnimationFrame: {
+            configurable: true,
+            value: (callback: (atMs: number) => void) => {
+              queueMicrotask(() => callback(0));
+              return 1;
+            },
+          },
+          setTimeout: {
+            configurable: true,
+            value: (callback: () => void) => {
+              queueMicrotask(callback);
+              return 1;
+            },
+          },
+        });
+
+        const evidence = await measureBrowserQuiescence(
+          { evaluate: async (expression: string) => (0, eval)(expression) } as any,
+          { pageErrors: [], consoleErrors: [] }
+        );
+
+        expect(evidence).toMatchObject({
+          measurementErrorHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+          passed: false,
+        });
+        expect(browserWindow.__cod374PhaseBResizeCollecting).toBe(false);
+      }
+    } finally {
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete (globalThis as any)[name];
+      }
+    }
+  });
+
+  it('measures browser quiescence without starting CPU calibration or capture work', async () => {
+    const evaluations: unknown[] = [];
+    const page: any = {
+      evaluate: async (expression: unknown) => {
+        evaluations.push(expression);
+        return {
+          tickCount: 50,
+          driftsMs: Array(50).fill(0),
+          longTaskDurationsMs: [],
+          resizeCount: 0,
+          overflowed: false,
+          measurementError: null,
+        };
+      },
+    };
+    await measureBrowserQuiescence(page, { pageErrors: [], consoleErrors: [] });
+    expect(evaluations).toHaveLength(3);
+    for (const expression of evaluations) {
+      expect(expression).toEqual(expect.any(String));
+      expect(expression).not.toContain('400_000');
+      expect(expression).not.toContain('dispatchRapidKeys');
+    }
+    expect(evaluations.filter((expression) => String(expression).includes('index < 50'))).toHaveLength(1);
+  });
 
   it('joins the real parse, render, and RAF visibility chain to its selected write', async () => {
     const callbacks: Record<string, () => void> = {};

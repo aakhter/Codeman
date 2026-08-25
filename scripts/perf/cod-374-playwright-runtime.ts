@@ -15,9 +15,261 @@ import {
   validateBrowserLatencyTrace,
 } from '../../test/utils/cod374-latency-trace.js';
 import { Cod370OpenCodeFixture, hasMandatoryCleanupProof } from '../../test/utils/cod370-opencode-fixture.js';
+import {
+  BROWSER_MAX_DRIFT_MS,
+  BROWSER_MAX_P95_DRIFT_MS,
+  BROWSER_TICK_COUNT,
+  BROWSER_TIMER_INTERVAL_MS,
+  nearestRankPercentile,
+} from './cod-374-quiescence.mjs';
 
 const execFileAsync = promisify(execFile);
 const INPUTS = ['q', 'z', '1'];
+const MAX_BROWSER_DIAGNOSTICS = 32;
+const BROWSER_QUIESCENCE_RESET_EXPRESSION = String.raw`(async () => {
+  const browserWindow = window;
+  browserWindow.__cod374PhaseBLongTasks ??= [];
+  browserWindow.__cod374PhaseBResizeEvents ??= [];
+  browserWindow.__cod374PhaseBLongTaskObserver?.takeRecords();
+  browserWindow.__cod374PhaseBLongTasks.length = 0;
+  browserWindow.__cod374PhaseBResizeEvents.length = 0;
+  browserWindow.__cod374PhaseBResizeCollecting = false;
+  if (browserWindow.__cod374LatencyTrace && 'overflowed' in browserWindow.__cod374LatencyTrace) {
+    browserWindow.__cod374LatencyTrace.overflowed = false;
+  }
+  browserWindow.__cod374PhaseBTraceOverflowed = false;
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  browserWindow.__cod374PhaseBLongTasks.length = 0;
+  browserWindow.__cod374PhaseBResizeEvents.length = 0;
+  if (browserWindow.__cod374LatencyTrace && 'overflowed' in browserWindow.__cod374LatencyTrace) {
+    browserWindow.__cod374LatencyTrace.overflowed = false;
+  }
+  browserWindow.__cod374PhaseBTraceOverflowed = false;
+})()`;
+
+const BROWSER_QUIESCENCE_TICK_EXPRESSION = String.raw`(async () => {
+  const browserWindow = window;
+  const driftsMs = [];
+  let measurementError = null;
+  browserWindow.__cod374PhaseBLongTasks.length = 0;
+  browserWindow.__cod374PhaseBResizeEvents.length = 0;
+  if (browserWindow.__cod374LatencyTrace && 'overflowed' in browserWindow.__cod374LatencyTrace) {
+    browserWindow.__cod374LatencyTrace.overflowed = false;
+  }
+  browserWindow.__cod374PhaseBTraceOverflowed = false;
+  const startedAtMs = performance.now();
+  browserWindow.__cod374PhaseBWindowStartedMs = startedAtMs;
+  browserWindow.__cod374PhaseBResizeCollecting = true;
+  try {
+    let previousAt = startedAtMs;
+    for (let index = 0; index < 50; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const now = performance.now();
+      driftsMs.push(Math.max(0, now - previousAt - 20));
+      previousAt = now;
+    }
+  } catch (error) {
+    measurementError = error instanceof Error ? error.name + ':' + error.message : String(error);
+  } finally {
+    browserWindow.__cod374PhaseBResizeCollecting = false;
+    browserWindow.__cod374PhaseBWindowEndedMs = performance.now();
+    browserWindow.__cod374PhaseBWindowOverflowed =
+      browserWindow.__cod374PhaseBTraceOverflowed === true ||
+      browserWindow.__cod374LatencyTrace?.overflowed === true;
+  }
+  return {
+    tickCount: driftsMs.length,
+    driftsMs,
+    overflowed: browserWindow.__cod374PhaseBWindowOverflowed,
+    measurementError,
+  };
+})()`;
+
+const BROWSER_QUIESCENCE_SNAPSHOT_EXPRESSION = String.raw`(async () => {
+  const browserWindow = window;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  const pendingLongTasks = browserWindow.__cod374PhaseBLongTaskObserver?.takeRecords() ?? [];
+  browserWindow.__cod374PhaseBLongTasks.push(
+    ...pendingLongTasks.map((entry) => ({ startTime: entry.startTime, duration: entry.duration })),
+  );
+  const startedAtMs = browserWindow.__cod374PhaseBWindowStartedMs;
+  const endedAtMs = browserWindow.__cod374PhaseBWindowEndedMs;
+  return {
+    longTaskDurationsMs: browserWindow.__cod374PhaseBLongTasks
+      .filter((entry) => entry.startTime >= startedAtMs && entry.startTime <= endedAtMs)
+      .map((entry) => entry.duration),
+    resizeCount: browserWindow.__cod374PhaseBResizeEvents.length,
+    overflowed: browserWindow.__cod374PhaseBWindowOverflowed === true,
+  };
+})()`;
+
+interface BrowserQuiescenceTickResult {
+  tickCount: number;
+  driftsMs: number[];
+  overflowed: boolean;
+  measurementError: string | null;
+}
+
+interface BrowserQuiescenceDiagnostics {
+  longTaskDurationsMs: number[];
+  resizeCount: number;
+  overflowed: boolean;
+}
+
+interface BrowserQuiescenceOptions {
+  pageErrors: string[];
+  consoleErrors: string[];
+  resetTraceDiagnostics?: () => Promise<void>;
+  snapshotTraceDiagnostics?: () => Promise<{ overflowed?: boolean }>;
+}
+
+function diagnosticHash(value: unknown): string {
+  return createHash('sha256').update(String(value)).digest('hex').slice(0, 16);
+}
+
+function browserQuiescenceEvidence({
+  tick,
+  diagnostics,
+  pageErrors,
+  consoleErrors,
+  traceOverflowed,
+  measurementError,
+}: {
+  tick?: Partial<BrowserQuiescenceTickResult>;
+  diagnostics?: Partial<BrowserQuiescenceDiagnostics>;
+  pageErrors: string[];
+  consoleErrors: string[];
+  traceOverflowed: boolean;
+  measurementError: unknown | null;
+}) {
+  const rawDrifts = Array.isArray(tick?.driftsMs) ? tick.driftsMs : [];
+  const driftsMs = rawDrifts
+    .slice(0, BROWSER_TICK_COUNT)
+    .map((value) => (Number.isFinite(value) ? Math.min(60_000, Math.max(0, value)) : 0));
+  const rawLongTasks = Array.isArray(diagnostics?.longTaskDurationsMs) ? diagnostics.longTaskDurationsMs : [];
+  const diagnosticOverflow =
+    rawLongTasks.length > MAX_BROWSER_DIAGNOSTICS ||
+    pageErrors.length > MAX_BROWSER_DIAGNOSTICS ||
+    consoleErrors.length > MAX_BROWSER_DIAGNOSTICS ||
+    (Number.isInteger(diagnostics?.resizeCount) && diagnostics.resizeCount! > 1_000);
+  const longTaskDurationsMs = rawLongTasks
+    .slice(0, MAX_BROWSER_DIAGNOSTICS)
+    .map((value) => (Number.isFinite(value) ? Math.min(60_000, Math.max(0, value)) : 0));
+  const pageErrorHashes = pageErrors.slice(0, MAX_BROWSER_DIAGNOSTICS).map(diagnosticHash);
+  const consoleErrorHashes = consoleErrors.slice(0, MAX_BROWSER_DIAGNOSTICS).map(diagnosticHash);
+  const resizeCount = Number.isInteger(diagnostics?.resizeCount)
+    ? Math.min(1_000, Math.max(0, diagnostics.resizeCount!))
+    : 0;
+  const overflowed = (tick?.overflowed ?? diagnostics?.overflowed) === true || traceOverflowed || diagnosticOverflow;
+  const p95DriftMs = driftsMs.length ? nearestRankPercentile(driftsMs, 95) : 0;
+  const maxDriftMs = driftsMs.length ? Math.max(...driftsMs) : 0;
+  const measurementErrorHash =
+    measurementError === null
+      ? null
+      : diagnosticHash(
+          measurementError instanceof Error ? `${measurementError.name}:${measurementError.message}` : measurementError
+        );
+  const passed =
+    measurementErrorHash === null &&
+    tick?.tickCount === BROWSER_TICK_COUNT &&
+    driftsMs.length === BROWSER_TICK_COUNT &&
+    p95DriftMs <= BROWSER_MAX_P95_DRIFT_MS &&
+    maxDriftMs <= BROWSER_MAX_DRIFT_MS &&
+    longTaskDurationsMs.length === 0 &&
+    pageErrorHashes.length === 0 &&
+    consoleErrorHashes.length === 0 &&
+    resizeCount === 0 &&
+    !overflowed;
+  return {
+    tickCount: driftsMs.length,
+    timerIntervalMs: BROWSER_TIMER_INTERVAL_MS,
+    driftsMs,
+    p95DriftMs,
+    maxDriftMs,
+    longTaskDurationsMs,
+    pageErrorHashes,
+    consoleErrorHashes,
+    resizeCount,
+    overflowed,
+    measurementErrorHash,
+    passed,
+  };
+}
+
+export async function measureBrowserQuiescence(page: Pick<Page, 'evaluate'>, options: BrowserQuiescenceOptions) {
+  let tick: BrowserQuiescenceTickResult | undefined;
+  let diagnostics: BrowserQuiescenceDiagnostics | undefined;
+  let traceOverflowed = false;
+  let measurementError: unknown | null = null;
+  try {
+    await options.resetTraceDiagnostics?.();
+    await page.evaluate(BROWSER_QUIESCENCE_RESET_EXPRESSION);
+  } catch (error) {
+    return browserQuiescenceEvidence({
+      pageErrors: [],
+      consoleErrors: [],
+      traceOverflowed: false,
+      measurementError: error,
+    });
+  }
+
+  const pageErrorStart = options.pageErrors.length;
+  const consoleErrorStart = options.consoleErrors.length;
+  try {
+    tick = await page.evaluate(BROWSER_QUIESCENCE_TICK_EXPRESSION);
+    if (
+      !tick ||
+      !Array.isArray(tick.driftsMs) ||
+      tick.tickCount !== tick.driftsMs.length ||
+      tick.tickCount < 0 ||
+      tick.tickCount > BROWSER_TICK_COUNT ||
+      !tick.driftsMs.every((value) => Number.isFinite(value) && value >= 0 && value <= 60_000) ||
+      typeof tick.overflowed !== 'boolean' ||
+      (tick.measurementError !== null && typeof tick.measurementError !== 'string')
+    ) {
+      throw new Error('invalid browser quiescence timer result');
+    }
+    measurementError = tick.measurementError;
+  } catch (error) {
+    measurementError = error;
+  }
+  const pageErrorEnd = options.pageErrors.length;
+  const consoleErrorEnd = options.consoleErrors.length;
+
+  try {
+    diagnostics = await page.evaluate(BROWSER_QUIESCENCE_SNAPSHOT_EXPRESSION);
+    if (
+      !diagnostics ||
+      !Array.isArray(diagnostics.longTaskDurationsMs) ||
+      !diagnostics.longTaskDurationsMs.every((value) => Number.isFinite(value) && value >= 0 && value <= 60_000) ||
+      !Number.isInteger(diagnostics.resizeCount) ||
+      diagnostics.resizeCount < 0 ||
+      typeof diagnostics.overflowed !== 'boolean'
+    ) {
+      throw new Error('invalid browser quiescence diagnostics result');
+    }
+  } catch (error) {
+    measurementError ??= error;
+  }
+  try {
+    traceOverflowed = (await options.snapshotTraceDiagnostics?.())?.overflowed === true;
+  } catch (error) {
+    traceOverflowed = true;
+    measurementError ??= error;
+  }
+
+  return browserQuiescenceEvidence({
+    tick,
+    diagnostics,
+    pageErrors: options.pageErrors.slice(pageErrorStart, pageErrorEnd),
+    consoleErrors: options.consoleErrors.slice(consoleErrorStart, consoleErrorEnd),
+    traceOverflowed,
+    measurementError,
+  });
+}
 
 function median(values: number[]): number {
   const sorted = [...values].sort((left, right) => left - right);
@@ -420,6 +672,20 @@ export async function launchConcretePhaseBRuntime({ runtimeRoot, plan }: { runti
           tmuxSession: `${identities.muxName}:${identities.tmuxSessionId}`,
           tempRoot: fixture.root,
         };
+      },
+      async measureBrowserQuiescence() {
+        return measureBrowserQuiescence(fixture.phonePage!, {
+          pageErrors,
+          consoleErrors,
+          ...(secret
+            ? {
+                resetTraceDiagnostics: async () => {
+                  await fixture.mobileTraceSnapshot(secret, true);
+                },
+                snapshotTraceDiagnostics: async () => fixture.mobileTraceSnapshot(secret),
+              }
+            : {}),
+        });
       },
       async captureRepetition() {
         const cells = [];
