@@ -25,6 +25,7 @@
 ### Task 1: Pure host and browser quiescence contracts
 
 **Files:**
+
 - Create: `scripts/perf/cod-374-quiescence.mjs`
 - Create: `test/perf-cod-374-quiescence.test.ts`
 
@@ -43,9 +44,7 @@ import {
 expect(HOST_SAMPLE_COUNT).toBe(11);
 expect(calculateCpuIdlePercent({ idle: 100n, total: 200n }, { idle: 180n, total: 300n })).toBe(80);
 expect(() => validateHostQuiescence(hostEvidence({ idlePercent: 79.999 }))).toThrow('host is not quiescent');
-expect(() => validateHostQuiescence(hostEvidence({ firstLoad1: 4.001, cpuCount: 8 }))).toThrow(
-  'host is not quiescent',
-);
+expect(() => validateHostQuiescence(hostEvidence({ firstLoad1: 4.001, cpuCount: 8 }))).toThrow('host is not quiescent');
 ```
 
 Also cover malformed/decreasing counters, fewer than 11 samples, less than 5,000 ms, final load failure, and exact 80%/4.0 pass boundaries.
@@ -70,7 +69,8 @@ export const HOST_MAX_LOAD_PER_CPU = 0.5;
 export function calculateCpuIdlePercent(first, last) {
   const idleDelta = last.idle - first.idle;
   const totalDelta = last.total - first.total;
-  if (idleDelta < 0n || totalDelta <= 0n || idleDelta > totalDelta) throw new Error('COD-374 quiescence invalid: CPU counters');
+  if (idleDelta < 0n || totalDelta <= 0n || idleDelta > totalDelta)
+    throw new Error('COD-374 quiescence invalid: CPU counters');
   return Number((idleDelta * 100_000n) / totalDelta) / 1_000;
 }
 ```
@@ -119,6 +119,7 @@ git commit -m "test(perf): COD-374 add quiescence evidence contracts"
 ### Task 2: Real prelaunch host sampler
 
 **Files:**
+
 - Modify: `scripts/perf/cod-374-quiescence.mjs`
 - Modify: `test/perf-cod-374-quiescence.test.ts`
 
@@ -162,6 +163,7 @@ git commit -m "test(perf): COD-374 measure host quiescence"
 ### Task 3: Browser pre-capture measurement
 
 **Files:**
+
 - Modify: `scripts/perf/cod-374-playwright-runtime.ts`
 - Modify: `test/perf-cod-374-runner.test.ts`
 
@@ -201,6 +203,7 @@ git commit -m "test(perf): COD-374 measure browser quiescence"
 ### Task 4: Fail-closed runner lifecycle integration
 
 **Files:**
+
 - Modify: `scripts/perf/cod-374-runner.mjs`
 - Modify: `test/perf-cod-374-runner.test.ts`
 
@@ -240,6 +243,7 @@ git commit -m "test(perf): COD-374 gate calibration on quiescence"
 ### Task 5: Schema, signature, and report binding
 
 **Files:**
+
 - Modify: `scripts/perf/cod-374-summarize.mjs`
 - Modify: `test/perf-cod-374-report.test.ts`
 
@@ -283,6 +287,7 @@ git commit -m "test(perf): COD-374 bind quiescence evidence"
 ### Task 6: Protocol documentation and manifest closure
 
 **Files:**
+
 - Modify: `scripts/perf/cod-374-summarize.mjs`
 - Modify: `test/perf-cod-374-report.test.ts`
 - Modify: `docs/reports/cod-374/README.md`
@@ -310,6 +315,7 @@ git commit -m "docs: COD-374 document calibration quiescence gate"
 ### Task 7: Full scoped verification and review
 
 **Files:**
+
 - Verify all files changed by Tasks 1–6.
 
 - [ ] **Step 1: Run focused performance and integration suites sequentially**
