@@ -632,11 +632,15 @@ describe('COD-374 Phase B producer contracts', () => {
     await mkdir(join(repositoryRoot, 'node_modules/esbuild'), { recursive: true });
     await mkdir(join(repositoryRoot, 'node_modules/playwright-core'), { recursive: true });
     await mkdir(join(repositoryRoot, 'packages/workspace'), { recursive: true });
+    await mkdir(join(repositoryRoot, '.worktrees/transient'), { recursive: true });
+    await mkdir(join(repositoryRoot, 'tmp/transient'), { recursive: true });
+    await symlink('..', join(repositoryRoot, 'node_modules/aicodeman'), 'dir');
     await symlink('../packages/workspace', join(repositoryRoot, 'node_modules/workspace'), 'dir');
     const packageLock = '{"lockfileVersion":3}\n';
     const installedLock = `${JSON.stringify({
       lockfileVersion: 3,
       packages: {
+        'node_modules/aicodeman': { resolved: '', link: true },
         'node_modules/example': { version: '1.0.0' },
         'node_modules/hoisted-transitive': { version: '1.0.0' },
         'node_modules/workspace': { version: '1.0.0' },
@@ -664,12 +668,16 @@ describe('COD-374 Phase B producer contracts', () => {
     await writeFile(join(repositoryRoot, 'node_modules/esbuild/index.js'), 'export const compiler = 1;\n');
     await writeFile(join(repositoryRoot, 'node_modules/playwright-core/index.js'), 'export const browser = 1;\n');
     await writeFile(join(repositoryRoot, 'packages/workspace/index.js'), 'export const workspace = 1;\n');
+    await writeFile(join(repositoryRoot, '.worktrees/transient/ignored.js'), 'export const transient = 1;\n');
+    await symlink('/etc/passwd', join(repositoryRoot, 'tmp/transient/runtime-link'));
     const options = {
       runtimeRoot,
       repositoryRoot,
       expectedLockSha256: hash64(packageLock),
     };
     const proof = await provisionRuntimeDependencies(options);
+    await writeFile(join(repositoryRoot, '.worktrees/transient/ignored.js'), 'export const transient = 2;\n');
+    await expect(verifyProvisionedRuntimeDependencies({ ...options, expectedProof: proof })).resolves.toEqual(proof);
     await writeFile(join(repositoryRoot, 'node_modules/hoisted-transitive/index.js'), 'export const nested = 2;\n');
     await expect(verifyProvisionedRuntimeDependencies({ ...options, expectedProof: proof })).rejects.toThrow(
       /dependency identity changed/i

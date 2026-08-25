@@ -425,7 +425,12 @@ async function verifiedHarnessDependencyRoot(repositoryRoot, expectedLockSha256)
         if (seen.has(identity)) return;
         seen.add(identity);
         for (const child of (await readdir(absolutePath)).sort()) {
-          if (child === '.git' || child === 'node_modules') continue;
+          if (
+            child === '.git' ||
+            child === 'node_modules' ||
+            (relativePath === '.' && (child === '.worktrees' || child === 'tmp'))
+          )
+            continue;
           await walk(join(absolutePath, child), `${relativePath}/${child}`);
         }
         return;
