@@ -45,6 +45,46 @@ renamed, and ignored paths are all subject to the exact allowlist. Each allowlis
 file; its Git mode and content hash feed the deterministic manifest. Patch applicability or cleanup failure blocks
 publication.
 
+## Two-stage quiescence gate
+
+Every attempt applies up to two gates in this exact order. First, after clean-repository preflight but before overlay,
+server, browser, tmux, or OpenCode allocation, the runner measures host quiescence. A host rejection is terminal and
+never runs the browser gate; only a passing host measurement may allocate the disposable runtime. Second, after exact
+runtime readiness and provenance checks but before either CPU calibration or sample capture, the runner measures browser
+quiescence. Gate evidence is measured once and bound into the reserved attempt, runtime observation, immutable attempt
+JSON, and report audit; a plan value or caller assertion cannot replace it.
+
+The host gate takes exactly 11 monotonic aggregate `/proc/stat` samples separated by ten 500 ms delays, with at least
+5,000 ms between the first and final sample. Aggregate idle across that complete window must be at least 80 percent.
+The first and final one-minute load averages must both be no greater than `cpuCount * 0.5`. First and final current-UID
+process inventories must contain no unrelated Vitest runner, Playwright test runner, COD-374 runner, COD-370/COD-374
+disposable runtime, or Chromium process associated with one of those conflicts. The current runner PID and its
+start-identity-matched ancestor chain are allowed; PID reuse fails closed.
+
+Host process evidence retains only a fixed classification, a 16-hex SHA-256 command hash, decimal `/proc` start
+identity, and `allowedAncestor`; raw command lines and paths are forbidden. The classifier retains at most 32 allowed
+ancestors and 32 conflicts, scans at most 4,096 `/proc` entries and 512 current-UID processes, reads at most 32 KiB per
+command and 2 MiB in aggregate, and rejects read, parse, disappearance, identity, or bound failures instead of retrying.
+
+The browser gate first resets the gate's long-task, resize, and trace-overflow state, then brackets exactly 50 sequential
+20 ms timers with `performance.now()`. Each drift is `max(0, actual interval - 20 ms)`. The p95 is the nearest-rank
+95th percentile and must be at most 10 ms; maximum drift must be at most 25 ms. The timer window must contain zero long
+tasks, page errors, serious console errors, resize events, or trace overflow. Page and console diagnostics are sliced
+from immediately before the timer loop through its completion; resize and overflow collection are armed for that loop;
+afterward a zero-delay turn and two animation frames drain observer records, and only long tasks whose start time lies
+between the recorded timer-window start and end are retained. Page-error, serious-console-error, and other error
+diagnostic arrays retain only bounded hashes and are capped at 32 entries; long-task gate evidence retains only bounded
+numeric duration values, not text. Overflow or malformed/unbounded evidence fails closed.
+
+A failed host gate publishes one terminal rejected `preflight` attempt with code `host-not-quiescent`, complete host
+evidence, `browser: null`, and zero cells/samples; no runtime resource is allocated. A failed browser gate publishes one
+terminal rejected `partial` attempt with code `browser-not-quiescent`, complete host/browser evidence, zero cells/samples,
+runtime provenance, and aggregate cleanup proof. Each gate is invoked once: there is no wait-until-idle loop, retry,
+replacement attempt, selective sample, CPU calibration, or capture after failure. The immutable global schedule remains
+off/on/off calibration followed by baseline/candidate/candidate/baseline diagnostics; any rejection stops it, and the
+report renders the measurements and retained failure rather than rehabilitating an attempt. Every prior invalid
+experiment and its recorded history remains immutable.
+
 ## Experiment lifecycle and storage
 
 Live evidence must use a newly created, current-UID `0700` regular directory directly under resolved `os.tmpdir()`, with

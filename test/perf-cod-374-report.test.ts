@@ -1219,6 +1219,22 @@ describe('COD-374 lifecycle and report policy', () => {
 });
 
 describe('COD-374 overlay and runtime provenance', () => {
+  it('freezes every protocol implementation file into the harness manifest', () => {
+    expect(HARNESS_FILES).toEqual([
+      'scripts/perf/cod-374-summarize.mjs',
+      'scripts/perf/cod-374-runner.mjs',
+      'scripts/perf/cod-374-playwright-runtime.ts',
+      'scripts/perf/cod-374-quiescence.mjs',
+      'test/perf-cod-374-report.test.ts',
+      'test/perf-cod-374-runner.test.ts',
+      'test/perf-cod-374-quiescence.test.ts',
+      'test/utils/cod374-latency-trace.ts',
+      'test/mobile/cod374-input-latency.test.ts',
+      'test/utils/cod370-opencode-fixture.ts',
+      'docs/reports/cod-374/README.md',
+    ]);
+  });
+
   it('requires retained runtime vendor proof only after a runtime is proven', () => {
     const accepted: any = repetition('calibration', 'trace-off', 1, 1);
     accepted.provenance.runtimeVendorHash = null;
@@ -1360,7 +1376,7 @@ describe('COD-374 overlay and runtime provenance', () => {
     ).rejects.toThrow(/cleanup failed/i);
   });
 
-  it('verifies clean executing Git objects and dependency hashes', async () => {
+  it('verifies every harness file as an exact clean Git blob and content hash', async () => {
     const rows: any[] = completeDiagnostic();
     const content = Buffer.from('fixture harness object');
     const lock = Buffer.from('lock');
@@ -1370,7 +1386,9 @@ describe('COD-374 overlay and runtime provenance', () => {
       row.provenance.dependencies.packageLockSha256 = createHash('sha256').update(lock).digest('hex');
       row.provenance.dependencies.vendorManifestSha256 = createHash('sha256').update(vendor).digest('hex');
     }
+    const gitCalls: string[][] = [];
     const git = async (args: string[]) => {
+      gitCalls.push(args);
       const spec = args.at(-1)!;
       if (args[0] === 'show') return content;
       if (args[0] === 'status') return Buffer.from('');
@@ -1391,6 +1409,12 @@ describe('COD-374 overlay and runtime provenance', () => {
         read: async (file: string) => (file.endsWith('package-lock.json') ? lock : vendor),
       })
     ).resolves.toBeUndefined();
+    expect(
+      gitCalls.filter(([command, ...args]) => command === 'rev-parse' && args[0]?.startsWith(`${HARNESS_COMMIT}:`))
+    ).toEqual(HARNESS_FILES.map((file) => ['rev-parse', `${HARNESS_COMMIT}:${file}`]));
+    expect(gitCalls.filter(([command]) => command === 'show')).toEqual(
+      HARNESS_FILES.map((file) => ['show', `${HARNESS_COMMIT}:${file}`])
+    );
   });
 });
 

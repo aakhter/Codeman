@@ -49,7 +49,7 @@
 - Test: `test/perf-cod-374-trace.test.ts`
 - Test: `test/routes/perf-trace-routes.test.ts`
 
-- [ ] **Step 1: Write the failing collector contracts**
+- [x] **Step 1: Write the failing collector contracts**
 
 Define the wished-for public API in the test:
 
@@ -76,7 +76,7 @@ it('fails closed at the fixed capacity and never accepts raw text fields', () =>
 
 Add schema tests that accept only enumerated stages, safe scalar fields, bounded IDs/hashes, nonnegative byte counts, and integer ordinals/sequences.
 
-- [ ] **Step 2: Run the collector test and verify RED**
+- [x] **Step 2: Run the collector test and verify RED**
 
 Run:
 
@@ -86,7 +86,7 @@ npm run test:perf -- test/perf-cod-374-trace.test.ts
 
 Expected: FAIL because `src/perf/mobile-input-trace.ts` does not exist.
 
-- [ ] **Step 3: Implement the minimal fixed-schema collector**
+- [x] **Step 3: Implement the minimal fixed-schema collector**
 
 Implement a bounded collector with this shape:
 
@@ -126,7 +126,7 @@ export interface MobileInputTraceEvent {
 
 Use `performance.timeOrigin + performance.now()` for `epochMs`, `process.hrtime.bigint().toString()` for `monoNs`, and SHA-256 truncated to 16 hexadecimal characters for identifiers/content supplied to the trace helper. Export one process-global collector configured from `CODEMAN_TEST_MOBILE_TRACE_SECRET` and `CODEMAN_TEST_MOBILE_TRACE_CAPACITY`, but keep `createMobileInputTraceCollector` injectable for tests. Capacity must be `1..20_000` and default to 4,096.
 
-- [ ] **Step 4: Write the failing route contracts**
+- [x] **Step 4: Write the failing route contracts**
 
 Test these behaviors with Fastify injection:
 
@@ -152,7 +152,7 @@ it('requires the exact secret and clears only after an authenticated request', a
 
 Wrong or missing secrets return 404, not 401/403, to avoid advertising the route.
 
-- [ ] **Step 5: Run the route test and verify RED**
+- [x] **Step 5: Run the route test and verify RED**
 
 Run:
 
@@ -162,11 +162,11 @@ npm test -- test/routes/perf-trace-routes.test.ts
 
 Expected: FAIL because the route module is absent.
 
-- [ ] **Step 6: Implement conditional route registration**
+- [x] **Step 6: Implement conditional route registration**
 
 Register `registerPerfTraceRoutes` from `src/web/server.ts` only when the global collector is enabled. The route must not be present in a normal test, development, or production server without all enabling variables.
 
-- [ ] **Step 7: Verify GREEN and static gates**
+- [x] **Step 7: Verify GREEN and static gates**
 
 Run:
 
@@ -180,7 +180,7 @@ git diff --check
 
 Expected: all commands exit 0; route tests prove absence and secret fencing.
 
-- [ ] **Step 8: Commit Task 1**
+- [x] **Step 8: Commit Task 1**
 
 ```bash
 git add src/perf/mobile-input-trace.ts src/web/routes/perf-trace-routes.ts src/web/server.ts \
@@ -197,7 +197,7 @@ git commit -m "test(perf): COD-374 add bounded latency trace collector"
 - Modify: `test/routes/ws-routes.test.ts`
 - Create or modify: `test/session-terminal-trace.test.ts`
 
-- [ ] **Step 1: Write failing WebSocket route ordering tests**
+- [x] **Step 1: Write failing WebSocket route ordering tests**
 
 Inject an enabled collector into the route registration through an optional dependency that defaults to the process-global collector. Assert this exact stage order for one tagged input:
 
@@ -221,7 +221,7 @@ Add separate tests proving:
 - malformed/oversized frames never create a successful write event;
 - disabled tracing leaves existing behavior and event count unchanged.
 
-- [ ] **Step 2: Run the focused route test and verify RED**
+- [x] **Step 2: Run the focused route test and verify RED**
 
 ```bash
 npm test -- test/routes/ws-routes.test.ts -t "COD-374"
@@ -229,11 +229,11 @@ npm test -- test/routes/ws-routes.test.ts -t "COD-374"
 
 Expected: FAIL because no trace events are emitted.
 
-- [ ] **Step 3: Add minimal input boundary calls**
+- [x] **Step 3: Add minimal input boundary calls**
 
 Add trace calls immediately around the existing operations; do not change delivery order, error handling, ACK behavior, or protocol. Hash the session ID and do not hash/store `msg.d` on the input path. Use the parsed client ID and sequence only after validation.
 
-- [ ] **Step 4: Write failing terminal-output stage tests**
+- [x] **Step 4: Write failing terminal-output stage tests**
 
 Use the Session test factory to call the existing PTY-output handler with a harmless ANSI chunk and assert:
 
@@ -252,7 +252,7 @@ expect(outputStages).toEqual([
 
 Assert monotonically increasing ordinals, exact byte counts, 16-character hashes, a single flush for a micro-batch, and no raw output text in the snapshot.
 
-- [ ] **Step 5: Run the output tests and verify RED**
+- [x] **Step 5: Run the output tests and verify RED**
 
 ```bash
 npm test -- test/session-terminal-trace.test.ts test/routes/ws-routes.test.ts -t "COD-374"
@@ -260,11 +260,11 @@ npm test -- test/session-terminal-trace.test.ts test/routes/ws-routes.test.ts -t
 
 Expected: FAIL because Session/output route boundaries are not instrumented.
 
-- [ ] **Step 6: Add minimal output boundary calls**
+- [x] **Step 6: Add minimal output boundary calls**
 
 Record PTY callback receipt at each interactive PTY `onData` entry, handler entry and terminal emission in Session, and WebSocket route receipt/enqueue/flush/send. Use a per-session output ordinal generated by the collector and a bounded hash/byte count. Do not change the 8ms batching timer or terminal output bytes.
 
-- [ ] **Step 7: Verify GREEN and regression gates**
+- [x] **Step 7: Verify GREEN and regression gates**
 
 ```bash
 npm run test:perf -- test/perf-cod-374-trace.test.ts
@@ -278,7 +278,7 @@ git diff --check
 
 Expected: all focused tests and static gates exit 0; any existing lint warning is reported with its unchanged file/line.
 
-- [ ] **Step 8: Commit Task 2**
+- [x] **Step 8: Commit Task 2**
 
 ```bash
 git add src/session.ts src/web/routes/ws-routes.ts test/session-terminal-trace.test.ts test/routes/ws-routes.test.ts
@@ -720,3 +720,28 @@ git commit -m "test(perf): COD-374 record input latency attribution"
 - [ ] **Step 10: Review and Jira handoff**
 
 Request independent spec and quality reviews. Fix every Critical or Important finding and rerun the affected gates. Post a Jira COD-374 comment with branch, commits, exact revisions, commands, trace overhead, raw/report paths, causal conclusion or uncertainty, cleanup, and review results. Keep COD-370 and COD-374 open unless the evidence and any separately approved fix satisfy their respective acceptance gates.
+
+## Quiescence gate implementation evidence (2026-08-25)
+
+- Pure host/browser evidence, bounded process classification, and the real host sampler were committed as
+  `802837d5ea5e25376dbc8f887f3bd50e286e0241` (`test(perf): COD-374 add quiescence evidence contracts`).
+- Browser timer-window measurement and its production-loader contracts were committed as
+  `50815ac580cff9b86fbf1d52556732c60c0b2836` (`test(perf): COD-374 measure browser quiescence`).
+- The one-shot host-before-allocation and browser-before-CPU-calibration runner gates, immutable lifecycle handling,
+  schema/signature/report binding, and focused report/runner contracts were committed as
+  `109f16ca93a3e2c765dbc26de534dbca28cf32c3` (`test(perf): COD-374 gate calibration on quiescence`).
+- Protocol closure began with an intentional report-suite RED: 109 tests passed and the new exact manifest contract
+  failed because `scripts/perf/cod-374-quiescence.mjs` and `test/perf-cod-374-quiescence.test.ts` were absent. Adding
+  those two files to `HARNESS_FILES` made the focused report suite pass 110/110. The manifest continues to cover
+  executable harness code, tests, runtime/fixture support, and the protocol README; design and implementation-plan
+  documents are not runtime evidence and remain outside the established manifest boundary.
+- Task 1 and Task 2 checkboxes above now reflect their existing committed implementations. Task 3 and Task 4
+  implementation steps were already marked complete; the calibration, diagnostic matrix, evidence generation, final
+  review, Jira handoff, push, merge, and deployment steps remain unchecked.
+- Final Task 6 verification passed the focused report/runner/quiescence suite 220/220, focused Prettier, Node syntax for
+  both quiescence and summarizer modules, and `git diff --check`. The protocol closure commit uses subject
+  `docs: COD-374 document calibration quiescence gate`.
+
+**NO calibration, diagnostic ABBA, raw cohort, or attribution report was run by this implementation work.** Every prior
+invalid experiment remains terminal and unchanged; any future experiment requires separate authorization after the
+full scoped implementation review.
