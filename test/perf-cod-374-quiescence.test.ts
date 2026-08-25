@@ -26,6 +26,8 @@ import {
 } from '../scripts/perf/cod-374-quiescence.mjs';
 
 const hash16 = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 16);
+const processHash = (command: string, cwd?: string, exe?: string) =>
+  hash16(cwd === undefined && exe === undefined ? command : [command, cwd ?? '', exe ?? ''].join('\0'));
 
 function hostEvidence(overrides: Record<string, unknown> = {}) {
   return {
@@ -317,6 +319,124 @@ describe('COD-374 host evidence', () => {
       })
     ).toThrow('COD-374 quiescence invalid: process inventory cardinality');
   });
+
+  it('classifies actual generic fixture server, OpenCode, and tmux commands from disposable path identity', () => {
+    const root = '/tmp/cod374-fixture-123/runtime';
+    const processes = [
+      {
+        pid: 100,
+        ppid: 50,
+        uid: 1_000,
+        startIdentity: '1000',
+        command: 'node scripts/perf/cod-374-runner.mjs',
+        cwd: root,
+        exe: '/usr/bin/node',
+      },
+      {
+        pid: 300,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3000',
+        command: 'node node_modules/.bin/tsx src/index.ts web',
+        cwd: root,
+        exe: '/usr/bin/node',
+      },
+      {
+        pid: 301,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3010',
+        command: 'opencode',
+        cwd: root,
+        exe: '/usr/bin/opencode',
+      },
+      {
+        pid: 302,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3020',
+        command: 'tmux -L cod370-opencode-302-m0abc12z new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+      {
+        pid: 303,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3030',
+        command: '/usr/bin/tmux -L cod374-opencode-303-m0abc130 new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+      {
+        pid: 304,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3040',
+        command: 'tmux -L cod370-opencode-dev-team new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+      {
+        pid: 305,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3050',
+        command: 'tmux -L personal-305-1724572802 new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+      {
+        pid: 306,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3060',
+        command: 'tmux -L cod370-opencode-306-M0ABC131 new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+      {
+        pid: 307,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3070',
+        command: 'tmux -L cod374-opencode-307-m0abc-132 new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+      {
+        pid: 308,
+        ppid: 1,
+        uid: 1_000,
+        startIdentity: '3080',
+        command: 'tmux -L cod370-opencode-308 new-session',
+        cwd: '/tmp',
+        exe: '/usr/bin/tmux',
+      },
+    ];
+    const records = classifyHostProcesses({
+      currentPid: 100,
+      ancestorPids: [{ pid: 100, startIdentity: '1000' }],
+      processes,
+    });
+
+    expect(records[0]).toEqual({
+      classification: 'allowed-ancestor',
+      commandHash: processHash(processes[0].command, processes[0].cwd, processes[0].exe),
+      startIdentity: '1000',
+      allowedAncestor: true,
+    });
+    expect(records.slice(1).map(({ classification }) => classification)).toEqual([
+      'disposable-runtime',
+      'disposable-runtime',
+      'disposable-runtime',
+      'disposable-runtime',
+    ]);
+    expect(JSON.stringify(records)).not.toContain(root);
+    expect(records).toHaveLength(5);
+    expect(JSON.stringify(records)).not.toContain('cod370-opencode-302');
+    expect(JSON.stringify(records)).not.toContain('cod374-opencode-303');
+  });
 });
 
 describe('bounded proc reads', () => {
@@ -400,20 +520,27 @@ describe('stable and bounded process inventory', () => {
   ])(
     'rejects a PID %s change across the stable read without retrying',
     async (_label, finalPpid, finalStart, finalUid) => {
-      const readProcFile = vi
-        .fn()
-        .mockResolvedValueOnce(procStat(300, 1, '3000'))
-        .mockResolvedValueOnce(Buffer.from('node\0worker.js\0'))
-        .mockResolvedValueOnce(procStat(300, finalPpid, finalStart));
-      const lstatPath = vi
-        .fn()
-        .mockResolvedValueOnce({ uid: 1_000, dev: 1, ino: 300 })
-        .mockResolvedValueOnce({ uid: finalUid, dev: 1, ino: 300 });
-      await expect(readStableProcessRecord(300, 1_000, { readProcFile, lstatPath })).rejects.toThrow(
-        'COD-374 quiescence invalid: unstable process identity'
-      );
-      expect(readProcFile).toHaveBeenCalledTimes(3);
-      expect(lstatPath).toHaveBeenCalledTimes(2);
+      let statRead = 0;
+      let baseMetadataRead = 0;
+      const readProcFile = vi.fn(async (path: string) => {
+        if (path.endsWith('/cmdline')) return Buffer.from('node\0worker.js\0');
+        statRead += 1;
+        return statRead === 3 ? procStat(300, finalPpid, finalStart) : procStat(300, 1, '3000');
+      });
+      const lstatPath = vi.fn(async (path: string) => {
+        if (path === '/proc/300') {
+          baseMetadataRead += 1;
+          return { uid: baseMetadataRead === 2 ? finalUid : 1_000, dev: 1, ino: 300 };
+        }
+        return { uid: 1_000, dev: 1, ino: path.endsWith('/cwd') ? 301 : 302 };
+      });
+      const readLinkPath = vi.fn(async (path: string) => (path.endsWith('/cwd') ? '/tmp/work' : '/usr/bin/node'));
+      const realpathPath = vi.fn(async (path: string) => readLinkPath(path));
+      await expect(
+        readStableProcessRecord(300, 1_000, { readProcFile, lstatPath, readLinkPath, realpathPath })
+      ).rejects.toThrow('COD-374 quiescence invalid: unstable process identity');
+      expect(readProcFile).toHaveBeenCalledTimes(5);
+      expect(lstatPath).toHaveBeenCalledTimes(6);
     }
   );
 
@@ -427,6 +554,32 @@ describe('stable and bounded process inventory', () => {
     ).rejects.toThrow('COD-374 quiescence invalid: process inventory work bound');
     expect(readProcess).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['benign to Vitest', Buffer.from('node\0worker.js\0'), Buffer.from('node\0vitest\0run\0race.test.ts\0')],
+    ['Vitest to benign', Buffer.from('node\0vitest\0run\0race.test.ts\0'), Buffer.from('node\0worker.js\0')],
+  ])(
+    'rejects an exec transition from %s while process identity remains stable',
+    async (_label, firstCommand, lastCommand) => {
+      const stat = procStat(300, 1, '3000');
+      const commands = [firstCommand, lastCommand];
+      const readProcFile = vi.fn(async (path: string) => (path.endsWith('/cmdline') ? commands.shift() : stat));
+      const lstatPath = vi.fn(async (path: string) => ({
+        uid: 1_000,
+        dev: 1,
+        ino: path.endsWith('/cwd') ? 301 : path.endsWith('/exe') ? 302 : 300,
+      }));
+      const readLinkPath = vi.fn(async (path: string) =>
+        path.endsWith('/cwd') ? '/tmp/cod374-fixture/runtime' : '/usr/bin/node'
+      );
+      const realpathPath = vi.fn(async (path: string) => readLinkPath(path));
+
+      await expect(
+        readStableProcessRecord(300, 1_000, { readProcFile, lstatPath, readLinkPath, realpathPath })
+      ).rejects.toThrow('COD-374 quiescence invalid: unstable process identity');
+      expect(commands).toHaveLength(0);
+    }
+  );
 
   it.each(['node vitest run replacement.test.ts', 'node node_modules/@playwright/test/cli.js test replacement'])(
     'rejects a parent PID reused as %s before it can enter the ancestor allowlist',
@@ -477,6 +630,39 @@ describe('stable and bounded process inventory', () => {
     ).rejects.toThrow('COD-374 quiescence invalid: process inventory work bound');
     expect(readProcess).toHaveBeenCalledTimes(65);
   });
+
+  it.each(['ENOENT', 'ESRCH'])(
+    'retains a safe disappeared observation for expected %s inventory races',
+    async (code) => {
+      const readProcess = vi.fn(async (pid: number) => {
+        if (pid === 2) {
+          const error = new Error('raw /proc/2 path');
+          Object.assign(error, { code });
+          throw error;
+        }
+        return { pid, ppid: 1, uid: 1_000, startIdentity: `${pid}0`, command: 'node worker.js' };
+      });
+      const records = await collectCurrentUidProcesses(1_000, {
+        listProcEntries: vi.fn(async () => ['1', '2', '3']),
+        readProcess,
+      });
+      const classified = classifyHostProcesses({
+        currentPid: 1,
+        ancestorPids: [{ pid: 1, startIdentity: '10' }],
+        processes: records,
+      });
+
+      expect(readProcess).toHaveBeenCalledTimes(3);
+      expect(classified).toContainEqual({
+        classification: 'disappeared',
+        commandHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+        startIdentity: '0',
+        allowedAncestor: false,
+      });
+      expect(JSON.stringify(classified)).not.toContain('/proc/2');
+      expect(JSON.stringify(classified)).not.toContain('"pid"');
+    }
+  );
 });
 
 describe('COD-374 browser evidence', () => {
@@ -648,6 +834,42 @@ describe('measureHostQuiescence', () => {
     expect(result.measurementErrorHash).toMatch(/^[0-9a-f]{16}$/);
     expect(JSON.stringify(result)).not.toContain('/proc/888');
   });
+
+  it.each(['first', 'final'])(
+    'retains a disappeared conflict at the %s inventory boundary without retry',
+    async (boundary) => {
+      const ancestors = [
+        { pid: 100, ppid: 50, uid: 1_000, startIdentity: '1000', command: 'node host-gate' },
+        { pid: 50, ppid: 1, uid: 1_000, startIdentity: '500', command: 'bash' },
+      ];
+      const disappeared = {
+        pid: 777,
+        ppid: 0,
+        uid: 1_000,
+        startIdentity: '0',
+        command: 'disappeared:777',
+        disappeared: true as const,
+      };
+      const inventory = vi
+        .fn()
+        .mockResolvedValueOnce(boundary === 'first' ? [...ancestors, disappeared] : ancestors)
+        .mockResolvedValueOnce(boundary === 'final' ? [...ancestors, disappeared] : ancestors);
+      const adapters = samplerAdapters({ inventory });
+
+      await expect(measureHostQuiescence({ currentPid: 100, adapters })).rejects.toMatchObject({
+        message: 'COD-374 host is not quiescent',
+        evidence: {
+          sampleCount: 11,
+          measurementErrorHash: null,
+          passed: false,
+          processes: expect.arrayContaining([
+            expect.objectContaining({ classification: 'disappeared', startIdentity: '0', allowedAncestor: false }),
+          ]),
+        },
+      });
+      expect(inventory).toHaveBeenCalledTimes(2);
+    }
+  );
 
   it('classifies first and final observations before deduping a reused process identity', async () => {
     const benign = { pid: 777, ppid: 1, uid: 1_000, startIdentity: '7770', command: 'node harmless-worker.js' };

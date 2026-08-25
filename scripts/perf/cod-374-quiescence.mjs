@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstat, open, opendir } from 'node:fs/promises';
+import { lstat, open, opendir, readlink, realpath } from 'node:fs/promises';
 import { cpus, loadavg } from 'node:os';
 
 export const HOST_SAMPLE_COUNT = 11;
@@ -57,6 +57,7 @@ const PROCESS_CLASSIFICATIONS = new Set([
   'disposable-runtime',
   'associated-chromium',
   'ancestor-pid-reused',
+  'disappeared',
 ]);
 
 function invalid(message = 'evidence') {
@@ -134,14 +135,30 @@ export function calculateCpuIdlePercent(first, last) {
   return Number((idleDelta * 100_000n) / totalDelta) / 1_000;
 }
 
-function processClassification(command) {
-  const normalized = command.toLowerCase();
+function processIdentityText(processRecord) {
+  if (processRecord.cwd === undefined && processRecord.exe === undefined) return processRecord.command;
+  return [processRecord.command, processRecord.cwd ?? '', processRecord.exe ?? ''].join('\0');
+}
+
+function processObservationHash(processRecord) {
+  if (processRecord.cwd === undefined && processRecord.exe === undefined) return hash16(processRecord.command);
+  return hash16(processIdentityText(processRecord));
+}
+
+function processClassification(processRecord) {
+  const normalized = processIdentityText(processRecord).toLowerCase();
   if (/(?:^|[\s/])vitest(?:[\s/.]|$)/.test(normalized)) return 'vitest';
   if (/(?:^|[\s/@])playwright(?:[\s/.]|$)/.test(normalized) && /(?:^|\s)test(?:[\s/]|$)/.test(normalized)) {
     return 'playwright-runner';
   }
   if (/cod-374-(?:runner|summarize|quiescence)(?:\.mjs)?/.test(normalized)) return 'cod-374-runner';
-  if (/(?:\/tmp\/|\s)cod(?:-?370|-?374)[a-z0-9._-]*(?:runtime|overlay|worktree)/.test(normalized)) {
+  if (/^(?:\S*\/)?tmux\s+-L\s+cod(?:370|374)-opencode-[0-9]+-[0-9a-z]+(?:\s|$)/.test(processRecord.command)) {
+    return 'disposable-runtime';
+  }
+  if (
+    /(?:^|[\s\0])\/tmp\/cod-?(?:370|374)[a-z0-9._/-]*(?:[\s\0]|$)/.test(normalized) ||
+    /cod-?(?:370|374)[a-z0-9._-]*(?:runtime|overlay|worktree|socket|tmux|root)/.test(normalized)
+  ) {
     return 'disposable-runtime';
   }
   return null;
@@ -165,6 +182,17 @@ function validRawProcess(processRecord) {
   ) {
     invalid('process inventory');
   }
+  for (const field of ['cwd', 'exe']) {
+    if (
+      processRecord[field] !== undefined &&
+      (typeof processRecord[field] !== 'string' ||
+        processRecord[field].length === 0 ||
+        processRecord[field].length > 4_096)
+    ) {
+      invalid('process inventory');
+    }
+  }
+  if (processRecord.disappeared !== undefined && processRecord.disappeared !== true) invalid('process inventory');
 }
 
 export function classifyHostProcesses({ currentPid, ancestorPids, processes }) {
@@ -192,18 +220,19 @@ export function classifyHostProcesses({ currentPid, ancestorPids, processes }) {
   if (processes.length > MAX_CURRENT_UID_PROCESSES) invalid('process inventory work bound');
   for (const processRecord of processes) validRawProcess(processRecord);
   if (
-    processes.reduce((total, processRecord) => total + Buffer.byteLength(processRecord.command), 0) >
+    processes.reduce((total, processRecord) => total + Buffer.byteLength(processIdentityText(processRecord)), 0) >
     MAX_TOTAL_COMMAND_BYTES
   ) {
     invalid('process inventory work bound');
   }
 
   const classifications = processes.map((processRecord) => {
+    if (processRecord.disappeared === true) return 'disappeared';
     if (allowed.get(processRecord.pid) === processRecord.startIdentity) {
       return 'allowed-ancestor';
     }
     if (allowed.has(processRecord.pid)) return 'ancestor-pid-reused';
-    return processClassification(processRecord.command);
+    return processClassification(processRecord);
   });
   const indexesByPid = new Map();
   for (const [index, processRecord] of processes.entries()) {
@@ -242,7 +271,7 @@ export function classifyHostProcesses({ currentPid, ancestorPids, processes }) {
     .filter(({ classification }) => classification !== null)
     .map(({ processRecord, classification }) => ({
       classification,
-      commandHash: hash16(processRecord.command),
+      commandHash: processObservationHash(processRecord),
       startIdentity: processRecord.startIdentity,
       allowedAncestor: classification === 'allowed-ancestor',
     }))
@@ -474,31 +503,73 @@ function parseProcessStat(value) {
 export async function readStableProcessRecord(
   pid,
   uid,
-  { readProcFile = readBoundedProcFile, lstatPath = lstat } = {}
+  { readProcFile = readBoundedProcFile, lstatPath = lstat, readLinkPath = readlink, realpathPath = realpath } = {}
 ) {
   if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(uid) || uid < 0) invalid('process inventory');
   const base = `/proc/${pid}`;
   const firstMetadata = await lstatPath(base);
   if (firstMetadata.uid !== uid) return null;
   const first = parseProcessStat(await readProcFile(`${base}/stat`, { maxBytes: 4_096, encoding: 'utf8' }));
-  const cmdline = await readProcFile(`${base}/cmdline`, { maxBytes: 32 * 1024 });
+  const firstCmdline = await readProcFile(`${base}/cmdline`, { maxBytes: 32 * 1024 });
+  const readPathSnapshot = async (name) => {
+    const path = `${base}/${name}`;
+    const metadata = await lstatPath(path);
+    const [link, resolved] = await Promise.all([readLinkPath(path), realpathPath(path)]);
+    if (
+      metadata.uid !== uid ||
+      typeof link !== 'string' ||
+      link.length === 0 ||
+      link.length > 4_096 ||
+      typeof resolved !== 'string' ||
+      resolved.length === 0 ||
+      resolved.length > 4_096
+    ) {
+      invalid('unstable process identity');
+    }
+    return { uid: metadata.uid, dev: metadata.dev, ino: metadata.ino, link, resolved };
+  };
+  const firstPaths = { cwd: await readPathSnapshot('cwd'), exe: await readPathSnapshot('exe') };
+  const middle = parseProcessStat(await readProcFile(`${base}/stat`, { maxBytes: 4_096, encoding: 'utf8' }));
+  const lastCmdline = await readProcFile(`${base}/cmdline`, { maxBytes: 32 * 1024 });
+  const lastPaths = { cwd: await readPathSnapshot('cwd'), exe: await readPathSnapshot('exe') };
   const last = parseProcessStat(await readProcFile(`${base}/stat`, { maxBytes: 4_096, encoding: 'utf8' }));
   const finalMetadata = await lstatPath(base);
+  const samePath = (left, right) =>
+    left.uid === right.uid &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.link === right.link &&
+    left.resolved === right.resolved;
   if (
+    !Buffer.isBuffer(firstCmdline) ||
+    !Buffer.isBuffer(lastCmdline) ||
+    !firstCmdline.equals(lastCmdline) ||
+    !samePath(firstPaths.cwd, lastPaths.cwd) ||
+    !samePath(firstPaths.exe, lastPaths.exe) ||
     finalMetadata.uid !== uid ||
     finalMetadata.dev !== firstMetadata.dev ||
     finalMetadata.ino !== firstMetadata.ino ||
     first.pid !== pid ||
+    middle.pid !== pid ||
     last.pid !== pid ||
+    first.ppid !== middle.ppid ||
     first.ppid !== last.ppid ||
+    first.startIdentity !== middle.startIdentity ||
     first.startIdentity !== last.startIdentity
   ) {
     invalid('unstable process identity');
   }
-  if (!Buffer.isBuffer(cmdline)) invalid('process command');
-  const command = cmdline.toString('utf8').replaceAll('\0', ' ').trim();
+  const command = firstCmdline.toString('utf8').replaceAll('\0', ' ').trim();
   if (!command) invalid('process command');
-  return { pid, ppid: first.ppid, uid, startIdentity: first.startIdentity, command };
+  return {
+    pid,
+    ppid: first.ppid,
+    uid,
+    startIdentity: first.startIdentity,
+    command,
+    cwd: firstPaths.cwd.resolved,
+    exe: firstPaths.exe.resolved,
+  };
 }
 
 export async function collectCurrentUidProcesses(
@@ -517,11 +588,28 @@ export async function collectCurrentUidProcesses(
   const processes = [];
   let commandBytes = 0;
   for (const name of pidNames) {
-    const processRecord = await readProcess(Number(name), uid);
+    const pid = Number(name);
+    let processRecord;
+    try {
+      processRecord = await readProcess(pid, uid);
+    } catch (error) {
+      if (error !== null && typeof error === 'object' && (error.code === 'ENOENT' || error.code === 'ESRCH')) {
+        processRecord = {
+          pid,
+          ppid: 0,
+          uid,
+          startIdentity: '0',
+          command: `disappeared:${pid}`,
+          disappeared: true,
+        };
+      } else {
+        throw error;
+      }
+    }
     if (processRecord === null) continue;
     validRawProcess(processRecord);
     if (processRecord.uid !== uid) invalid('process inventory');
-    commandBytes += Buffer.byteLength(processRecord.command);
+    commandBytes += Buffer.byteLength(processIdentityText(processRecord));
     processes.push(processRecord);
     if (processes.length > MAX_CURRENT_UID_PROCESSES || commandBytes > MAX_TOTAL_COMMAND_BYTES) {
       invalid('process inventory work bound');
