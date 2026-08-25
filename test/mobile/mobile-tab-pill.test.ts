@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Browser, BrowserContext } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import type { WebServer } from '../../src/web/server.js';
 import { getBrowser } from './helpers/browser.js';
 import { PORTS } from './helpers/constants.js';
@@ -7,6 +7,50 @@ import { createTestServer, stopTestServer } from './helpers/server.js';
 
 const PORT = PORTS.MOBILE_TAB_PILL;
 const BASE_URL = `http://localhost:${PORT}`;
+
+async function dispatchDownSwipe(page: Page, selector: string, distance = 80): Promise<void> {
+  await page.evaluate(
+    ({ targetSelector, swipeDistance }) => {
+      const target = document.querySelector(targetSelector);
+      if (!(target instanceof HTMLElement)) throw new Error(`Missing swipe target: ${targetSelector}`);
+      const rect = target.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const startY = rect.top + Math.max(1, rect.height / 2);
+      const touch = (y: number) =>
+        new Touch({
+          identifier: 1,
+          target,
+          clientX: x,
+          clientY: y,
+          pageX: x,
+          pageY: y,
+        });
+
+      target.dispatchEvent(
+        new TouchEvent('touchstart', {
+          touches: [touch(startY)],
+          changedTouches: [touch(startY)],
+          bubbles: true,
+        })
+      );
+      target.dispatchEvent(
+        new TouchEvent('touchmove', {
+          touches: [touch(startY + swipeDistance)],
+          changedTouches: [touch(startY + swipeDistance)],
+          bubbles: true,
+        })
+      );
+      target.dispatchEvent(
+        new TouchEvent('touchend', {
+          touches: [],
+          changedTouches: [touch(startY + swipeDistance)],
+          bubbles: true,
+        })
+      );
+    },
+    { targetSelector: selector, swipeDistance: distance }
+  );
+}
 
 describe('Mobile session-switcher pill eligibility', () => {
   let browser: Browser;
@@ -128,5 +172,45 @@ describe('Mobile session-switcher pill eligibility', () => {
         }))
       )
       .toEqual({ sheetOpen: false, scrimOpen: false, expanded: 'false' });
+  });
+
+  it('keeps the sheet open when a downward swipe starts on the session list', async () => {
+    const context = await browser.newContext({ viewport: { width: 440, height: 900 }, hasTouch: true });
+    contexts.push(context);
+    const page = await context.newPage();
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+
+    await page.evaluate(() => window.MobileTabSheet.toggle(true));
+    await dispatchDownSwipe(page, '#mobileTabList');
+
+    expect(
+      await page.evaluate(() => ({
+        sheetOpen: document.getElementById('mobileTabSheet')?.classList.contains('open'),
+        scrimOpen: document.getElementById('mobileTabScrim')?.classList.contains('open'),
+        expanded: document.getElementById('mobileTabPill')?.getAttribute('aria-expanded'),
+        bodyOverflow: document.body.style.overflow,
+      }))
+    ).toEqual({ sheetOpen: true, scrimOpen: true, expanded: 'true', bodyOverflow: 'hidden' });
+  });
+
+  it('closes the sheet when a downward swipe starts on the top handle', async () => {
+    const context = await browser.newContext({ viewport: { width: 440, height: 900 }, hasTouch: true });
+    contexts.push(context);
+    const page = await context.newPage();
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+
+    await page.evaluate(() => window.MobileTabSheet.toggle(true));
+    await dispatchDownSwipe(page, '#mobileTabSheet .sheet-handle');
+
+    expect(
+      await page.evaluate(() => ({
+        sheetOpen: document.getElementById('mobileTabSheet')?.classList.contains('open'),
+        scrimOpen: document.getElementById('mobileTabScrim')?.classList.contains('open'),
+        expanded: document.getElementById('mobileTabPill')?.getAttribute('aria-expanded'),
+        bodyOverflow: document.body.style.overflow,
+      }))
+    ).toEqual({ sheetOpen: false, scrimOpen: false, expanded: 'false', bodyOverflow: '' });
   });
 });

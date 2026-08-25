@@ -115,23 +115,33 @@ const MobileTabSheet = {
         this.render();
       })
     );
-    // Swipe down to close
-    const sheet = document.getElementById('mobileTabSheet');
-    let startY = 0;
-    sheet.addEventListener(
+    // Swipe down from the top handle to close. Content gestures belong to their
+    // own controls, especially the vertically scrollable session list.
+    const handle = document.querySelector('#mobileTabSheet .sheet-handle');
+    let startY = null;
+    handle?.addEventListener(
       'touchstart',
       (e) => {
-        startY = e.touches[0].clientY;
+        startY = e.touches[0]?.clientY ?? null;
       },
       { passive: true }
     );
-    sheet.addEventListener(
+    handle?.addEventListener(
       'touchmove',
       (e) => {
-        if (e.touches[0].clientY - startY > 50) this.toggle(false);
+        const currentY = e.touches[0]?.clientY;
+        if (startY !== null && currentY !== undefined && currentY - startY > 50) {
+          startY = null;
+          this.toggle(false);
+        }
       },
       { passive: true }
     );
+    const resetHandleSwipe = () => {
+      startY = null;
+    };
+    handle?.addEventListener('touchend', resetHandleSwipe, { passive: true });
+    handle?.addEventListener('touchcancel', resetHandleSwipe, { passive: true });
     // ESC to close
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.toggle(false);
