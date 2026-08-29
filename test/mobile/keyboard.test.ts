@@ -480,7 +480,8 @@ describe('Virtual Keyboard', () => {
       // Tab replaced /clear in the simple bar; /clear and /compact live in the
       // extended bar only. Flip both this line and the button in
       // keyboard-accessory.js together if that product call is revisited.
-      expect(actions).toEqual(['scroll-up', 'scroll-down', 'init', 'tab', 'paste', 'esc', 'dismiss']);
+      // `readmymind` (the 🧠 key) joined the simple bar in a070fc43.
+      expect(actions).toEqual(['scroll-up', 'scroll-down', 'init', 'tab', 'paste', 'readmymind', 'esc', 'dismiss']);
     });
 
     it('double-tap confirm on /clear button', async () => {
@@ -749,7 +750,14 @@ describe('Virtual Keyboard', () => {
       expect(result.afterScroll).toContain('xterm-helper-textarea');
     });
 
-    it('routes CJK textarea typing through local echo on Enter', async () => {
+    // `70742d40` removed CJK local-echo buffering deliberately: accumulating
+    // characters until Enter was itself the bug, because a composed CJK word has
+    // to reach the PTY as it is committed. Every keystroke is now flushed and the
+    // textarea reset to its zero-width-space sentinel, so NEITHER the overlay nor
+    // the textarea holds text between keys — the terminal's own echo is the
+    // feedback. This used to assert the accumulate-then-flush contract; it now
+    // pins the immediate-send one, so re-introducing buffering fails here.
+    it('sends CJK textarea typing straight through without local-echo buffering', async () => {
       await page.evaluate(() => {
         window.__sentInputs = [];
         const sessionId = 'mobile-cjk-local-echo-test';
@@ -788,18 +796,21 @@ describe('Virtual Keyboard', () => {
         pendingText: app._localEchoOverlay.pendingText,
         sentInputs: window.__sentInputs,
       }));
-      expect(beforeEnter.visibleText).toBe('hello');
+      // Nothing is held back: the textarea is flushed and reset per keystroke,
+      // and the local-echo overlay is bypassed entirely\u2026
+      expect(beforeEnter.visibleText).toBe('');
       expect(beforeEnter.pendingText).toBe('');
-      expect(beforeEnter.sentInputs).toEqual([]);
+      // \u2026and the characters are already on the wire, not held back until Enter.
+      expect(beforeEnter.sentInputs.join('')).toBe('hello');
 
       await page.keyboard.press('Enter');
-      await page.waitForFunction(() => window.__sentInputs?.length === 2);
+      await page.waitForFunction(() => window.__sentInputs?.some((input) => input.includes('\r')));
       const afterEnter = await page.evaluate(() => ({
         pendingText: app._localEchoOverlay.pendingText,
         sentInputs: window.__sentInputs,
       }));
       expect(afterEnter.pendingText).toBe('');
-      expect(afterEnter.sentInputs).toEqual(['hello', '\r']);
+      expect(afterEnter.sentInputs.join('')).toBe('hello\r');
     });
 
     it('shows the CJK textarea on mobile for server override only inside an active session', async () => {
@@ -978,6 +989,11 @@ describe('Virtual Keyboard', () => {
           id: 'mobile-readback-tap-test',
           mode: 'codex',
           status: 'running',
+          // `fa7e7008` narrowed tap classification from a mode check to the live
+          // `cliMouseTracking` flag the server publishes as it strips the CLI's
+          // mouse DECSETs. A real pane running this TUI has tracking on; without
+          // the flag every tap classifies as 'input' and the row is never content.
+          cliMouseTracking: true,
         });
         app._sendInputAsync = (_sessionId: string, input: string) => {
           window.__sentInputs.push(input);
@@ -1024,6 +1040,7 @@ describe('Virtual Keyboard', () => {
           mode: 'claude',
           cliVersion: '2.1.220',
           status: 'working',
+          cliMouseTracking: true, // see fa7e7008 note above
         });
         app._sendInputAsync = (_sessionId: string, input: string) => {
           window.__sentInputs.push(input);
@@ -1083,6 +1100,7 @@ describe('Virtual Keyboard', () => {
           mode: 'claude',
           cliVersion: '2.1.220',
           status: 'working',
+          cliMouseTracking: true, // see fa7e7008 note above
         });
         app._sendInputAsync = (_sessionId: string, input: string) => {
           window.__sentInputs.push(input);
@@ -1262,11 +1280,20 @@ describe('Virtual Keyboard', () => {
         app.hideWelcome();
         app._updateCjkInputState();
 
+        // COD-187 routes a mirror tab's drag into _handleUserScrollIntent, which
+        // runs at scrollback 0 and therefore never reaches terminal.scrollLines.
+        // Spy on the funnel itself — that is what "the drag reached the terminal"
+        // means for these modes now. Both are recorded so either route counts.
         const originalScrollLines = app.terminal.scrollLines.bind(app.terminal);
         const scrollCalls: number[] = [];
         app.terminal.scrollLines = (lines: number) => {
           scrollCalls.push(lines);
           return originalScrollLines(lines);
+        };
+        const originalScrollIntent = app._handleUserScrollIntent.bind(app);
+        app._handleUserScrollIntent = (lines: number) => {
+          scrollCalls.push(lines);
+          return originalScrollIntent(lines);
         };
 
         const target =
@@ -1334,11 +1361,20 @@ describe('Virtual Keyboard', () => {
         app.hideWelcome();
         app._updateCjkInputState();
 
+        // COD-187 routes a mirror tab's drag into _handleUserScrollIntent, which
+        // runs at scrollback 0 and therefore never reaches terminal.scrollLines.
+        // Spy on the funnel itself — that is what "the drag reached the terminal"
+        // means for these modes now. Both are recorded so either route counts.
         const originalScrollLines = app.terminal.scrollLines.bind(app.terminal);
         const scrollCalls: number[] = [];
         app.terminal.scrollLines = (lines: number) => {
           scrollCalls.push(lines);
           return originalScrollLines(lines);
+        };
+        const originalScrollIntent = app._handleUserScrollIntent.bind(app);
+        app._handleUserScrollIntent = (lines: number) => {
+          scrollCalls.push(lines);
+          return originalScrollIntent(lines);
         };
 
         const target = document.getElementById('terminalContainer');

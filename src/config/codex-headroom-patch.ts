@@ -12,7 +12,7 @@
  */
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from 'node:fs';
 import { getHeadroomConfig, isHeadroomHealthy } from './headroom-routing.js';
 
 const TOP_START = '# >>> codeman-headroom (managed) >>>';
@@ -61,7 +61,13 @@ export function patchText(original: string, proxyUrl: string): string {
 }
 
 function writeAtomic(path: string, content: string): void {
-  const tmp = join(dirname(path), `.config.toml.headroom.${process.pid}.${Date.now()}.tmp`);
+  const dir = dirname(path);
+  // COD-346: on a machine that has never run codex, ~/.codex does not exist and
+  // the temp write threw ENOENT. reconcileCodexHeadroomPatch() catches and logs,
+  // so nothing failed — the Headroom patch just silently never applied. 0700
+  // because a codex config carries provider settings.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = join(dir, `.config.toml.headroom.${process.pid}.${Date.now()}.tmp`);
   writeFileSync(tmp, content, { mode: 0o600 });
   renameSync(tmp, path);
 }
