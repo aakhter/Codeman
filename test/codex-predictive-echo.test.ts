@@ -1159,11 +1159,19 @@ async function spanCount(page: Page): Promise<number> {
 }
 
 async function waitForPaneText(scenario: Scenario, text: string, timeoutMs = 10_000): Promise<string> {
+  // COD-346: on a timeout the old message named only what it wanted, so a failure
+  // could not be told apart from a slow render without reproducing it — and this
+  // one only misfires under full-suite load (5/5 green in isolation). Carry the
+  // last captured frame into the error: `abc` present without `XYZ` is #219
+  // recurring, an empty composer is codex still painting.
+  let lastPane = '';
   return waitUntil(
     `tmux pane to contain ${JSON.stringify(text)}`,
     () => {
       const pane = scenario.capturePane().text;
-      return pane.includes(text) ? pane : false;
+      lastPane = pane;
+      if (pane.includes(text)) return pane;
+      throw new Error(`last pane tail: ${JSON.stringify(lastPane.slice(-400))}`);
     },
     timeoutMs
   );
