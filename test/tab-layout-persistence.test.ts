@@ -206,6 +206,26 @@ describe('normalizeOrMigrateOwnerTabLayout', () => {
     expect(twice.layout).toEqual(once.layout);
   });
 
+  it('migrates an owner named constructor instead of reading the inherited prototype key', () => {
+    const result = normalizeOrMigrateOwnerTabLayout(
+      baseInput({
+        owner: 'constructor',
+        layouts: {
+          alice: {
+            version: 1,
+            groups: [],
+            ungrouped: [],
+            updatedAt: 'old',
+          },
+        },
+      })
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.layouts.constructor).toBeDefined();
+    expect(result.layout.version).toBe(0);
+  });
+
   it('accepts exactly 512 refs and rejects 513 atomically without truncation', () => {
     const sessions = Array.from({ length: MAX_TAB_REFS }, (_, i) => ({ id: `s-${i}`, createdAt: i }));
     const accepted = normalizeOrMigrateOwnerTabLayout(baseInput({ persistedSessions: sessions }));

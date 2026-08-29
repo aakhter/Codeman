@@ -237,7 +237,10 @@ minutes, never retry the credential.
 flushed slightly *after* the `stop` hook fires, so a read taken the instant the wait
 returns is too early (verified live: empty on the first call, full prose seconds later).
 It is also `""` before the worker's first completed turn, and permanently `""` for
-`shell`, `opencode`, `gemini`, `antigravity` and `pi`, which write no Claude transcript.
+`shell`, `opencode`, `gemini`, `antigravity`, `pi` and `grok`, which write no transcript at
+all. `deepseek` is NOT one of those — it is read from `$DSH_HOME/sessions/**` and lags
+for the same reason claude does (the harness finalizes the assistant message just after
+it reports `idle`), so poll it the same way.
 
 **Fix** Poll it, bounded (10 tries, 1 s apart). If it is still empty on a hook-less mode,
 that is expected, not a failure: read `terminal?tail=` and strip ANSI instead.
@@ -279,7 +282,7 @@ than into an existing checkout.
 | start case + session in one call | `POST /api/v1/quick-start` |
 | create a session in an arbitrary directory (no case, **no PTY**, id at `.data.session.id`) | `POST /api/v1/sessions`, then `POST /api/v1/sessions/:id/interactive` or `.../shell` to start it, see [Starting a worker](#starting-a-worker) |
 | send input | `POST /api/v1/sessions/:id/input` |
-| **read a worker's answer** (claude/codex) | `GET /api/v1/sessions/:id/last-response` → `.data.{text,timestamp}`, clean transcript text, no TUI noise. ⚠️ **Poll it**, see [symptom 7](#7-last-response-returns-an-empty-string-right-after-stop) |
+| **read a worker's answer** (claude/codex/deepseek) | `GET /api/v1/sessions/:id/last-response` → `.data.{text,timestamp}`, clean transcript text, no TUI noise. ⚠️ **Poll it**, see [symptom 7](#7-last-response-returns-an-empty-string-right-after-stop) |
 | read terminal (tail is in **BYTES**, raw ANSI) | `GET /api/v1/sessions/:id/terminal?tail=3000` → `.data.terminalBuffer`, for *diagnosis* (unsubmitted prompt?), not for reading answers |
 | full tmux scrollback (context bomb; post-mortems only) | `GET /api/v1/sessions/:id/terminal?full=1` |
 | background agents, one session | `GET /api/v1/sessions/:id/subagents` |
@@ -321,7 +324,7 @@ on signals and markers for exactly this reason.
 ⚠️ `GET /api/v1/sessions/:id/output` → `.data.textOutput` looks like the obvious read
 but stays **empty for interactive tmux-backed sessions** (it is fed only by the legacy
 JSON-stream path). Verified empty on live claude and shell sessions. Use
-`last-response` for claude/codex answers; only fall back to `terminal?tail=` for
+`last-response` for claude/codex/deepseek answers; only fall back to `terminal?tail=` for
 hook-less modes, or to diagnose a prompt that was never submitted, and strip ANSI:
 
 ```bash
@@ -336,19 +339,20 @@ ESC=$(printf '\033')
 
 `POST /api/v1/quick-start` body (all optional):
 `{"caseName":"worker-1","mode":"claude","sessionName":"w9-worker","effort":"high"}`
-,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi`; response is
+,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi|grok|deepseek`; response is
 `.data.{sessionId, caseName, casePath}`. Creates the case directory (a real directory
 on the user's disk) if missing, do not retry it in a loop, and remember the name.
 
 ⚠️ A `mode` whose CLI is **not installed on the server** fails the spawn with
 `OPERATION_FAILED`; it never falls back to claude. Probe first whenever you did not pick
 the mode yourself: `GET /api/v1/claude/status`, `GET /api/v1/opencode/status`,
-`GET /api/v1/codex/status`, `GET /api/v1/gemini/status`, `GET /api/v1/antigravity/status`
+`GET /api/v1/codex/status`, `GET /api/v1/gemini/status`, `GET /api/v1/antigravity/status`, `GET /api/v1/grok/status`, `GET /api/v1/deepseek/status`
 and `GET /api/v1/pi/status` each return `.data.{available, path}` (no session needed).
-Pi's also carries `.data.version`, because `pi` is a short generic name that an unrelated
-binary on `$PATH` can shadow: the resolver rejects one whose `--version` is not
-semver-shaped, so `available:false` there can mean "a different `pi` is in front" rather
-than "nothing is installed". `shell` has no CLI to probe.
+Pi's and grok's also carry `.data.version`, because `pi` is a short generic name and
+`grok` is a name with npm squatters, so an unrelated binary on `$PATH` can shadow either:
+the resolver rejects one whose `--version` is not version-shaped, so `available:false`
+there can mean "a different `pi`/`grok` is in front" rather than "nothing is installed".
+`shell` has no CLI to probe.
 
 ⚠️ **Branch on `.success` before reading `.data.sessionId`.** On any failure the field
 is absent, `jq -r` prints the literal string `null`, and every later call then targets
@@ -462,10 +466,10 @@ Quirks that will bite you:
   session answers with an empty timeline rather than a 404.
 - ⚠️ **`active-tools` proves presence, never absence.** It is fed by the BashToolParser,
   which reads Claude's rendered `● Bash(…)` lines, and `_processExpensiveParsers`
-  returns early for every external CLI mode (`session.ts:2136`), so it is permanently
-  `[]` on `opencode`/`codex`/`gemini`/`antigravity`/`pi`. ⚠️ **`shell` is NOT one of those**
-  (`isExternalCliMode`, `session.ts:165-167`, lists only those five), so the parser does
-  run on a shell worker, and `TEXT_COMMAND_PATTERN` (`bash-tool-parser.ts:88`) matches
+  returns early for every external CLI mode (`session.ts:2261`), so it is permanently
+  `[]` on `opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`deepseek`. ⚠️ **`shell` is NOT one of those**
+  (`isExternalCliMode`, `session.ts:174-183`, lists only those six), so the parser does
+  run on a shell worker, and `TEXT_COMMAND_PATTERN` (`bash-tool-parser.ts:89`) matches
   bare `tail|cat|head|less|grep|watch|multitail <path>` lines with no `● Bash(` wrapper:
   a shell worker running `cat build.log` really does populate this. In practice it stays
   empty for most shell work. It also never sees non-Bash
@@ -639,10 +643,14 @@ block, so a linked case or a raw `workingDir` had no hooks at all. `POST
 session-create path installs hooks regardless of how the directory got there. See
 [symptom 8](#8-send-and-wait-resolves-instantly-with-signalidle-and-the-answer-is-last-turns).
 
-Default `until` set: `stop,idle,exit`. On non-claude modes the server silently drops
-`stop`/`blocked` from the *default* set (echoed back as `wait.until`, e.g.
+Default `until` set: `stop,idle,exit`. On modes with no hook signals the server silently
+drops `stop`/`blocked` from the *default* set (echoed back as `wait.until`, e.g.
 `["idle","exit"]` on shell); requesting them *explicitly* there is a 400 naming the
-mode. ⚠️ That 400 is about **mode**, so a hooks-less *claude* session accepts
+mode. ⚠️ `deepseek` is not one of those: its harness reports its own lifecycle, so it
+keeps the full default set and accepts an explicit `until=stop`. ⚠️ For dsh the answer is
+per-SESSION rather than per-mode — a session created with `statusReporting: false` has no
+bridge, and an explicit `until=stop` there is a 400 naming that setting. ⚠️ That 400 is
+otherwise about **mode**, so a hooks-less *claude* session accepts
 `until=stop` happily and then never resolves it. ⚠️ On hook-less modes the lifecycle
 signals are also **coarse in practice**: a
 short shell command produced **no** `idle` transition within 60 s (verified live), so
@@ -790,7 +798,8 @@ for environment and setup problems.
 | `CODEMAN_MUX` unset but you seem to be in a session | remote-SSH case: the env vars are not exported there. Fail closed, refuse to act |
 | connection refused from inside a container | a loopback-bound server is unreachable from a container, and `CODEMAN_DOCKER_BRIDGE_HOOKS=1` does **not** fix that: it opens a hooks-only listener, so hook events start flowing but `/api/v1/*` stays refused. Driving the API from inside a Docker case needs a reachable bind (an operator decision); report it, don't retry |
 | wait routes 404 on a valid session id | read the `.error` text: a `Route ...` prefix means the server predates the wait endpoints (< 1.13.0; a dev build can serve them while reporting an older version, so probe, never version-compare), poll `terminal?tail=` and say so. `Session ... not found` means your id is wrong, not the server |
-| wait on `stop` never resolves | non-claude mode, or hooks not reaching the server (Docker/remote), or a case created by Codeman < 1.13.0 against an `--https` install (its hook curls lacked `-k` and TLS-failed silently; a 1.13.0+ server rewrites them the next time a session starts in that case). Use markers or `idle,exit` |
+| wait on `stop` never resolves | a mode with no hook signals, or hooks not reaching the server (Docker/remote), or a case created by Codeman < 1.13.0 against an `--https` install (its hook curls lacked `-k` and TLS-failed silently; a 1.13.0+ server rewrites them the next time a session starts in that case). Use markers or `idle,exit` |
+| wait on `stop` never resolves, on a **dsh** worker whose pane clearly finished | that profile does not implement the harness's supervisor contract, which Codeman cannot detect at request time (an unrecognized profile is treated as launchable on purpose). The wait is accepted and then times out. Drive that worker with markers, or switch to a profile that reports — `@deepseek-harness-tui/dsh-tui` does |
 | new claude worker ignores its first prompt | it was showing the first-run trust dialog and Codeman's auto-accept did not fire (it is bounded by a 90 s window and an attempt cap); use the readiness recipe in SKILL.md, wait for `shift+tab` first, accept the dialog only as the bounded fallback |
 | readiness burns its whole budget, then the worker answers fine anyway | you matched `bypass`, which is the statusline of ONE permission mode. Codeman spawns `--dangerously-skip-permissions` by default, but the server's `claudeMode` setting also has `auto` (`auto mode on`), `allowedTools` and `normal` (both `don't ask on`), and the effective per-session value is not exposed on `GET /api/v1/sessions/:id`. Match **`shift+tab`** instead: every mode's status bar ends `(shift+tab to cycle)` (measured per mode against claude-cli 2.1.226). Expect `blocked` signals mid-turn on the non-default modes |
 | ANSI escapes survive the strip pipeline | `sed -e 's/\x1b…'` on macOS: `\x1b` is GNU-only, BSD sed matches nothing and strips nothing. Use the `ESC=$(printf '\033')` form above |

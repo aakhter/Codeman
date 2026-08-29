@@ -8,7 +8,7 @@
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
  * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
- * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' (which CLI backend)
+ * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
@@ -16,6 +16,8 @@
  * - GeminiConfig — Gemini CLI-specific settings (model, approvalMode, resumeSession)
  * - AntigravityConfig — Antigravity CLI (agy) settings (model, dangerouslySkipPermissions, resumeConversationId)
  * - PiConfig — Pi CLI (pi.dev) settings (model, provider, thinking, resume/continue, project trust)
+ * - GrokConfig — Grok Build CLI (xAI `grok`) settings (model, alwaysApprove, resume/continue)
+ * - DeepSeekConfig — DeepSeek Harness (`dsh`) settings (profile, permissionMode, resume, status bridge)
  *
  * Cross-domain relationships:
  * - SessionState.respawnConfig embeds RespawnConfig (respawn domain)
@@ -62,7 +64,16 @@ export interface SessionActivityProjection {
 export type ClaudeMode = 'dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools';
 
 /** Session mode: which CLI backend a session runs */
-export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi';
+export type SessionMode =
+  | 'claude'
+  | 'shell'
+  | 'opencode'
+  | 'codex'
+  | 'gemini'
+  | 'antigravity'
+  | 'pi'
+  | 'grok'
+  | 'deepseek';
 export type SessionCheckpointMode = 'compact' | 'clear' | 'new';
 
 export interface SessionCheckpointState {
@@ -89,7 +100,7 @@ export interface SessionCheckpointState {
 
 export type RemoteCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek'
 >;
 
 /**
@@ -203,7 +214,7 @@ export interface RemoteSessionInfo {
 /** Which CLI backends a Docker case can run (same set as remote). */
 export type DockerCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek'
 >;
 
 /** Container engine. Docker and Podman differ in the uid/userns + host-gateway alias. */
@@ -411,6 +422,85 @@ export interface PiConfig {
 }
 
 /**
+ * Grok Build CLI (xAI `grok`) session configuration.
+ *
+ * Grok has Claude-style permission modes; the bypass switch is `--always-approve`
+ * ("auto-approve all tool executions", the CLI's `bypassPermissions` mode). Deny
+ * rules from `~/.grok/config.toml` / project `.grok/config.toml` still apply on
+ * top of it. Verified against grok 1.0.5.
+ */
+export interface GrokConfig {
+  /** Model ID (e.g. "grok-4.5", or a custom `[model.<name>]` from config.toml). Passed via --model. */
+  model?: string;
+  /**
+   * Auto-approve all tool executions (passes --always-approve). Absent = grok's
+   * own default permission mode (ask). Multi-user: forced off for non-granted
+   * owners by the only-if-sent clamp branch, like codex/antigravity — the
+   * absent-config spawn already defaults safe.
+   */
+  alwaysApprove?: boolean;
+  /** Continue the most recent session for the working directory (-c). Skipped when resumeSessionId is set. */
+  continueSession?: boolean;
+  /** Resume a specific session by ID (--resume). Ids only, never titles or paths. */
+  resumeSessionId?: string;
+}
+
+/**
+ * DeepSeek Harness (`dsh`) session configuration.
+ *
+ * Two things make this config shaped unlike every sibling above it.
+ *
+ * **1. The agent is a PROFILE, not the binary.** `dsh` is a launcher: it boots
+ * `$DSH_HOME/profiles/<name>`, an ordered stack of plugin-bundle patch layers.
+ * DeepSeek ships only `web`, `headless` and `base`, so the interactive terminal
+ * agent is always a third-party profile the user installed. `profile` is
+ * therefore the primary knob, and an absent one resolves to the first
+ * pane-capable profile found (see resolveDefaultDeepSeekProfile).
+ *
+ * **2. Permissions are an ENV VAR, not a flag.** The harness has no
+ * `--dangerously-skip-permissions` equivalent; its sandbox and approval rows are
+ * config, driven by one documented input, `DSH_PERMISSION_MODE`, with three
+ * presets (measured from `dsh --dump-default-config`):
+ *
+ *   read-only          sandbox read-only,          approval ask
+ *   workspace-write    sandbox workspace-write,    approval ask     <- default
+ *   danger-full-access sandbox danger-full-access, approval never
+ *
+ * This is the one place a Codeman env export is the RIGHT mechanism rather than
+ * the forbidden one: unlike `CLAUDE_CODE_EFFORT_LEVEL` (which hard-locks
+ * in-session `/effort`), `DSH_PERMISSION_MODE` is read with `??` as a boot-time
+ * DEFAULT, so it stays a soft default the user can still change in-session. It
+ * is exported via `tmux setenv`, never on the spawn command line.
+ */
+export interface DeepSeekConfig {
+  /**
+   * Profile under `$DSH_HOME/profiles` to boot (`dsh --profile <name>`). Absent
+   * = the first pane-capable profile installed. A `web`/`headless` profile is
+   * refused at spawn time: neither can drive an interactive pane.
+   */
+  profile?: string;
+  /**
+   * Sandbox + approval preset, exported as `DSH_PERMISSION_MODE`. Absent = the
+   * harness's own `workspace-write` default, which still ASKS — which is why the
+   * multi-user clamp only needs the only-if-sent branch here, like
+   * codex/antigravity/grok rather than pi.
+   */
+  permissionMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /** Resume the most recent session for this workspace (`--resume`). */
+  resumeSession?: boolean;
+  /** Resume a specific session by ID (`--resume <id>`). Wins over resumeSession. */
+  resumeSessionId?: string;
+  /**
+   * Report idle/working/blocked back to Codeman through the Herdr-compatible
+   * status shim (see `deepseek-status-shim.ts`). Default ON: it upgrades this
+   * mode from output-stabilization guessing to definitive hook events. Only
+   * TUIs that implement the contract report; for one that does not, this is
+   * inert rather than harmful.
+   */
+  statusReporting?: boolean;
+}
+
+/**
  * Configuration for creating a new session
  */
 export interface SessionConfig {
@@ -608,6 +698,10 @@ export interface SessionState {
   antigravityConfig?: AntigravityConfig;
   /** Pi-specific configuration (only for mode === 'pi') */
   piConfig?: PiConfig;
+  /** Grok-specific configuration (only for mode === 'grok') */
+  grokConfig?: GrokConfig;
+  /** DeepSeek Harness configuration (only for mode === 'deepseek') */
+  deepSeekConfig?: DeepSeekConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
   /**

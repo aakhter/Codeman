@@ -201,7 +201,13 @@ describe('TabLayoutService COD-359 compatibility', () => {
     expect(h.order).toEqual(['a']);
   });
 
-  it('rejects foreign, unknown, and prototype-inherited regular legacy ids without publication', async () => {
+  // Upstream 74194e4f made this path DROP foreign/unknown ids instead of 400ing:
+  // the browser debounces its reorder push and swallows errors, so a session
+  // deleted inside that window used to cost the user the whole reorder, and the
+  // endpoint sits on the stable /api/v1 surface. The security property is
+  // unchanged and is what this test now pins — a foreign id must never enter the
+  // owner's layout — only the signalling moved from a throw to a silent drop.
+  it('drops foreign, unknown, and prototype-inherited regular legacy ids from the layout', async () => {
     const h = createHarness({
       layouts: { alice: layout(['a']) },
       order: ['a', 'b'],
@@ -212,11 +218,10 @@ describe('TabLayoutService COD-359 compatibility', () => {
     });
 
     for (const id of ['b', 'unknown', 'constructor']) {
-      await expect(h.service.putLegacyOrder({ owner: 'alice', isAdmin: false }, [id, 'a'])).rejects.toThrow(
-        /not owned/
-      );
+      const result = await h.service.putLegacyOrder({ owner: 'alice', isAdmin: false }, [id, 'a']);
+      expect(result.order).toEqual(['a']);
+      expect(h.layouts.alice.ungrouped).toEqual([{ kind: 'session', id: 'a' }]);
     }
-    expect(h.store.commitTabLayoutProjection).not.toHaveBeenCalled();
   });
 
   it('uses latest committed state for overlapping owner projections without losing either update', async () => {

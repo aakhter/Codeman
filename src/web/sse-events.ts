@@ -25,7 +25,8 @@
  * - **Plan orchestration** (5): started, progress, subagent, completed, cancelled
  * - **Tunnel** (7): started, stopped, progress, error, qrRotated, qrRegenerated, qrAuthUsed
  * - **Image / attachments** (2): image:detected, attachment:detected
- * - **Hooks** (9): idle_prompt, permission_prompt, elicitation_dialog, elicitation_complete, elicitation_response, stop, teammate_idle, task_completed, suppressed
+ * - **Hooks** (10): idle_prompt, permission_prompt, elicitation_dialog, elicitation_complete, elicitation_response, stop, agent_working, teammate_idle, task_completed, suppressed
+ *   (agent_working is the odd one out: reported by the DeepSeek Harness status bridge, not by a Claude Code hook)
  * - **Approvals** (3): pending, updated, resolved (cross-session Approvals Inbox)
  * - **Orchestrator** (12): stateChanged, planProgress, planReady, phase*, verification, task*, completed, error
  * - **Clipboard** (1): write
@@ -121,7 +122,7 @@ export const SessionMessage = 'session:message' as const;
 export const SessionInteractive = 'session:interactive' as const;
 /** Prompt sent to session for execution. */
 export const SessionRunning = 'session:running' as const;
-/** Claude plan-usage telemetry (5-hour + weekly limits) parsed from the statusline. */
+/** Combined Claude and main Codex plan-usage telemetry for the shared header chip. */
 export const SessionStatusTelemetry = 'session:statusTelemetry' as const;
 /** Session parked (COD-124): detached from mux + CLI stopped gracefully, state preserved for resume. */
 export const SessionParked = 'session:parked' as const;
@@ -370,6 +371,13 @@ export const HookElicitationComplete = 'hook:elicitation_complete' as const;
 export const HookElicitationResponse = 'hook:elicitation_response' as const;
 /** Claude Code hook: response complete. */
 export const HookStop = 'hook:stop' as const;
+/**
+ * Agent started a turn. NOT a Claude Code hook: this one is reported by the
+ * DeepSeek Harness status bridge, which is why the name is agent-generic. It
+ * exists so a dialog answered in the terminal clears its alert immediately
+ * instead of waiting for the turn to end.
+ */
+export const HookAgentWorking = 'hook:agent_working' as const;
 /** Claude Code hook: teammate went idle. */
 export const HookTeammateIdle = 'hook:teammate_idle' as const;
 /** Claude Code hook: teammate task completed. */
@@ -641,6 +649,7 @@ export const SseEvent = {
   HookElicitationComplete,
   HookElicitationResponse,
   HookStop,
+  HookAgentWorking,
   HookTeammateIdle,
   HookTaskCompleted,
   HookSuppressed,

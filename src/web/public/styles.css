@@ -348,7 +348,8 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   .history-view-all-btn,
   .session-tab .tab-mode.gemini,
   .session-tab .tab-mode.antigravity,
-  .session-tab .tab-mode.pi
+  .session-tab .tab-mode.pi,
+  .session-tab .tab-mode.grok
 ) {
   color: var(--accent-d);
 }
@@ -1116,6 +1117,49 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab {
 }
 html[data-tab-orientation='vertical'] {
   --lineage-vertical-gutter: 14px;
+}
+.tab-rail-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  cursor: ew-resize;
+  touch-action: none;
+  transition: background-color 0.15s ease;
+}
+
+.tab-rail-resize-handle:hover,
+.tab-rail-resize-handle:focus-visible {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+html:not([data-tab-orientation='vertical']) .tab-rail-resize-handle {
+  display: none;
+}
+
+.tab-rail-resize-shield:not([hidden]) {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  cursor: ew-resize;
+}
+
+body.tab-rail-resizing,
+body.tab-rail-resizing * {
+  cursor: ew-resize !important;
+  user-select: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-rail,
+  .tab-rail-resize-handle {
+    transition: none !important;
+  }
 }
 
 .session-tab {
@@ -1981,8 +2025,47 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   display: none;
 }
 
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.25;
+}
+
 html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
   display: inline;
+}
+
+:is(
+  html[data-tab-orientation='vertical'] .tab-rail,
+  html[data-session-list='sidebar'] .session-sidebar
+) .session-tab .tab-name.tab-name-renaming {
+  display: flex;
+  align-items: center;
+  -webkit-box-orient: initial;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+}
+
+:is(
+  html[data-tab-orientation='vertical'] .tab-rail,
+  html[data-session-list='sidebar'] .session-sidebar
+) .tab-name-renaming .tab-rename-prefix {
+  flex: 0 0 auto;
+}
+
+:is(
+  html[data-tab-orientation='vertical'] .tab-rail,
+  html[data-session-list='sidebar'] .session-sidebar
+) .tab-name-renaming .tab-rename-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
 }
 
 /* Tab folder path — hidden by default, shown via .tabs-show-folder on container */
@@ -2809,6 +2892,15 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-placement-stat
 .session-tab:focus-within > .tab-actions > .tab-more,
 .session-tab.active > .tab-actions > .tab-more,
 .tab-focus-shortcut > .tab-actions > .tab-more,
+html[data-session-list='sidebar'][data-sidebar='expanded'] .session-sidebar .tab-name-row > .tab-actions > .tab-more,
+html[data-tab-orientation='vertical']:not(.tab-rail-compact) .tab-rail .tab-name-row > .tab-actions > .tab-more,
+html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active > .tab-actions > .tab-more {
+  display: inline-flex;
+}
+
+.session-tab:hover > .tab-actions > .tab-more,
+.session-tab:focus-within > .tab-actions > .tab-more,
+.session-tab.active > .tab-actions > .tab-more,
 html[data-session-list='sidebar'][data-sidebar='expanded'] .session-sidebar
   :is(.session-tab:hover, .session-tab:focus-within, .session-tab.active)
   .tab-name-row
@@ -2885,6 +2977,27 @@ html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active .tab-
 
 .tab-rail-action-menu .danger {
   color: var(--red);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+  width: min(220px, 44vw);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-range-field output {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 /* Pop-out button is opt-in (App Settings → Tab Bar, default off; per-device).
@@ -2979,6 +3092,21 @@ body.solo-mode .btn-lifecycle-log {
 .session-tab .tab-mode.pi {
   background: rgba(244, 114, 182, 0.2);
   color: #f472b6;
+}
+
+.session-tab .tab-mode.grok {
+  background: rgba(212, 212, 216, 0.18);
+  color: #d4d4d8;
+}
+
+/* DeepSeek: the vendor's own brand blue. Deliberately NOT added to the
+   light-skin `--accent-d` override list above (which rescues gemini/antigravity/
+   pi/grok, whose pastels wash out on paper backgrounds) — this indigo already
+   carries enough contrast on the light skins, and overriding it would throw away
+   the one cue that separates a dsh tab from its neighbours. */
+.session-tab .tab-mode.deepseek {
+  background: rgba(77, 107, 254, 0.18);
+  color: #7c93ff;
 }
 
 /* Timer Banner - Compact */
@@ -4362,6 +4490,41 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   transform: translateY(-1px);
 }
 
+/* Grok (xAI): monochrome charcoal identity, matching .btn-toolbar.btn-run.mode-grok
+   and .run-mode-dot.grok so the welcome action reads as the same backend. */
+.welcome-btn-grok {
+  background: linear-gradient(135deg, #131316 0%, #27272a 55%, #3f3f46 100%);
+  border-color: rgba(212, 212, 216, 0.4);
+  color: #f4f4f5;
+  box-shadow: 0 2px 8px rgba(212, 212, 216, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.welcome-btn-grok:hover {
+  background: linear-gradient(135deg, #1f1f23 0%, #3f3f46 55%, #52525b 100%);
+  box-shadow: 0 4px 20px rgba(212, 212, 216, 0.22), 0 0 40px rgba(161, 161, 170, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(228, 228, 231, 0.5);
+  color: #fafafa;
+  transform: translateY(-1px);
+}
+
+/* DeepSeek Harness: the #4d6bfe blue identity, matching
+   .btn-toolbar.btn-run.mode-deepseek and .run-mode-dot.deepseek so the welcome
+   action reads as the same backend. */
+.welcome-btn-deepseek {
+  background: linear-gradient(135deg, #101a4d 0%, #2740c4 55%, #4d6bfe 100%);
+  border-color: rgba(124, 147, 255, 0.4);
+  color: #eef2ff;
+  box-shadow: 0 2px 8px rgba(77, 107, 254, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.welcome-btn-deepseek:hover {
+  background: linear-gradient(135deg, #16225f 0%, #3350e6 55%, #6b83ff 100%);
+  box-shadow: 0 4px 20px rgba(77, 107, 254, 0.3), 0 0 40px rgba(39, 64, 196, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(150, 170, 255, 0.5);
+  color: #f8faff;
+  transform: translateY(-1px);
+}
+
 .welcome-btn-gemini {
   background: linear-gradient(135deg, #10243f 0%, #174ea6 55%, #4f46e5 100%);
   border-color: rgba(96, 165, 250, 0.4);
@@ -5491,6 +5654,44 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: #fff1f7;
 }
 
+/* Grok mode colors. Same cascade note as pi above: this base-sheet pair only
+   renders on the `og` skin — the nested `html:not([data-skin="og"])` block
+   re-declares `.btn-toolbar.btn-run` at a HIGHER specificity, so grok also
+   carries a rule inside that block (search `.btn-toolbar.btn-run.mode-grok`). */
+.btn-toolbar.btn-run.mode-grok,
+.btn-toolbar.btn-run-gear.mode-grok {
+  background: linear-gradient(135deg, #131316 0%, #27272a 55%, #3f3f46 100%);
+  border-color: rgba(212, 212, 216, 0.5);
+  color: #f4f4f5;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.btn-toolbar.btn-run.mode-grok:hover,
+.btn-toolbar.btn-run-gear.mode-grok:hover {
+  background: linear-gradient(135deg, #1f1f23 0%, #3f3f46 55%, #52525b 100%);
+  box-shadow: 0 0 12px rgba(212, 212, 216, 0.28), 0 2px 8px rgba(63, 63, 70, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(228, 228, 231, 0.6);
+  color: #fafafa;
+}
+
+/* DeepSeek mode colors. Same cascade note as pi/grok above: this base-sheet pair
+   only renders on the `og` skin — the nested `html:not([data-skin="og"])` block
+   re-declares `.btn-toolbar.btn-run` at a HIGHER specificity, so deepseek also
+   carries a rule inside that block (search `.btn-toolbar.btn-run.mode-deepseek`). */
+.btn-toolbar.btn-run.mode-deepseek,
+.btn-toolbar.btn-run-gear.mode-deepseek {
+  background: linear-gradient(135deg, #101a4d 0%, #2740c4 55%, #4d6bfe 100%);
+  border-color: rgba(124, 147, 255, 0.55);
+  color: #eef2ff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.btn-toolbar.btn-run.mode-deepseek:hover,
+.btn-toolbar.btn-run-gear.mode-deepseek:hover {
+  background: linear-gradient(135deg, #16225f 0%, #3350e6 55%, #6b83ff 100%);
+  box-shadow: 0 0 12px rgba(77, 107, 254, 0.35), 0 2px 8px rgba(39, 64, 196, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(150, 170, 255, 0.65);
+  color: #f8faff;
+}
+
 /* Dropdown menu */
 .run-mode-menu {
   display: none;
@@ -5574,6 +5775,8 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 .run-mode-dot.gemini { background: #8ab4f8; }
 .run-mode-dot.antigravity { background: #22d3ee; }
 .run-mode-dot.pi { background: #f472b6; }
+.run-mode-dot.grok { background: #a1a1aa; }
+.run-mode-dot.deepseek { background: #4d6bfe; }
 .run-mode-dot.shell { background: #94a3b8; }
 
 /* Phone-only Enter button (see index.html). Hidden by default at every width;
@@ -14658,17 +14861,20 @@ kbd {
 }
 
 /* Plan-usage chip (App Settings → Display → "Plan Usage Limits"). Shows the
-   live 5-hour + weekly plan limits parsed from the Claude statusline. Ships
+   live Claude and Codex plan limits in provider rows. Ships
    hidden via the marker class below because display is PER-DEVICE and the
    server cannot read localStorage; settings-ui.js reveals it on load (desktop
    default ON, handhelds OFF) and on a live toggle. */
 .header-plan-usage {
   display: inline-flex !important;
-  align-items: center;
-  height: 22px;
-  padding: 0 0.5rem;
-  border-radius: 11px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  min-height: 22px;
+  padding: 3px 0.5rem;
+  border-radius: 8px;
   font-size: 0.7rem;
+  line-height: 1.1;
   font-weight: 500;
   font-family: 'SF Mono', Monaco, monospace;
   color: var(--text-dim);
@@ -14676,6 +14882,23 @@ kbd {
   border: 1px solid rgba(255, 255, 255, 0.08);
   white-space: nowrap;
   cursor: default;
+}
+.header-plan-usage .pu-row {
+  display: flex;
+  align-items: baseline;
+}
+.header-plan-usage .pu-provider {
+  width: 46px;
+  flex: 0 0 46px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.header-plan-usage .pu-windows {
+  display: inline-flex;
+  align-items: baseline;
 }
 /* Readable two-window layout: dim uppercase label + bold, color-coded value. */
 .header-plan-usage .pu-win {
@@ -16961,6 +17184,25 @@ html:not([data-skin="og"]) {
   color: #fff1f7;
 }
 .btn-toolbar.btn-run.mode-pi:hover { box-shadow: 0 0 14px -2px rgba(244, 114, 182, 0.45); }
+/* Grok keeps its charcoal identity on the non-og skins. Same specificity trap
+   as pi above: without this rule the generic `.btn-toolbar.btn-run` in this
+   nested block wins and grok renders as generic claude blue. */
+.btn-toolbar.btn-run.mode-grok {
+  background: linear-gradient(135deg, #27272a, #52525b);
+  border-color: #18181b;
+  color: #fafafa;
+}
+.btn-toolbar.btn-run.mode-grok:hover { box-shadow: 0 0 14px -2px rgba(161, 161, 170, 0.5); }
+/* DeepSeek keeps its indigo on the non-og skins — same specificity trap as pi
+   and grok above: without this rule the generic `.btn-toolbar.btn-run` in this
+   nested block wins and deepseek renders as generic claude blue, which is the
+   one colour it must not be mistaken for. */
+.btn-toolbar.btn-run.mode-deepseek {
+  background: linear-gradient(135deg, #2740c4, #4d6bfe);
+  border-color: #1b2a8f;
+  color: #f8faff;
+}
+.btn-toolbar.btn-run.mode-deepseek:hover { box-shadow: 0 0 14px -2px rgba(77, 107, 254, 0.55); }
 .btn-toolbar.btn-run-gear {
   background: var(--accent-d);
   border-color: var(--accent);
@@ -19696,6 +19938,22 @@ html[data-tab-orientation='vertical'] .home-sessions {
   font-size: 0.75rem;
 }
 
+@media (min-width: 1200px) {
+  #sessionOptionsModal .modal-content.modal-lg {
+    width: min(1120px, 96vw);
+    max-width: min(1120px, 96vw);
+  }
+
+  #sessionOptionsModal #context-tab {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #sessionOptionsModal #context-tab > .set-section-head,
+  #sessionOptionsModal #context-tab > .set-section-blurb {
+    grid-column: 1 / -1;
+  }
+}
+
 #sessionOptionsModal .set-group + .set-group {
   margin-top: 16px;
 }
@@ -20038,11 +20296,13 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab.active .tab-clos
 /* Drag-reorder indicators become horizontal edges. The class names stay
    drag-over-left / drag-over-right (they read as before/after now) so app.js,
    the base rules above and the generated gesture bundle need no renaming. */
-html[data-session-list="sidebar"] .session-sidebar .session-tab.drag-over-left {
+html[data-session-list="sidebar"] .session-sidebar .session-tab.drag-over-left,
+html[data-tab-orientation='vertical'] .tab-rail .session-tab.drag-over-left {
   box-shadow: 0 -2px 0 0 var(--accent);
 }
 
-html[data-session-list="sidebar"] .session-sidebar .session-tab.drag-over-right {
+html[data-session-list="sidebar"] .session-sidebar .session-tab.drag-over-right,
+html[data-tab-orientation='vertical'] .tab-rail .session-tab.drag-over-right {
   box-shadow: 0 2px 0 0 var(--accent);
 }
 
@@ -20055,19 +20315,31 @@ html[data-session-list="sidebar"] .session-tab.tab-filtered-out {
   display: none !important;
 }
 
-/* --- Rich rows (sessionListLayout 'sidebar-rich') ----------------------- */
+/* --- Rich rows (sessionListLayout 'sidebar-rich' + tabRailDetail 'rich') --- */
 /* The detailed variant of the SAME sidebar: identical column, identical
    re-parented #sessionTabs, identical filter and Alt+B toggle. The only
    difference is that each row also carries the line the desktop home rail and
    the phone overview carry — when the session was first created, how long it
    has been in the state it is in, and a status pill.
 
-   Everything here is scoped to html[data-sidebar-detail="rich"], which
+   The VERTICAL TAB RAIL is the second surface that draws those rows (it is a
+   docked column too, and #sessionTabs is the same element re-parented into it),
+   so every rule below carries a rail twin as an extra COMMA-GROUPED selector.
+   Deliberately not :is(): an :is() list takes its most specific argument's
+   specificity, which would silently raise the sidebar arm from (0,3,1) to the
+   rail arm's (0,5,1) and let these paint rules outrank things they never used
+   to. Grouped selectors each keep their own weight.
+
+   Sidebar rules are scoped to html[data-sidebar-detail="rich"], which
    applySessionListLayout() only ever sets to 'rich' while data-session-list is
-   'sidebar'. `.tab-meta` is emitted by the row template exclusively in that
-   mode, so these rules have nothing to match anywhere else — the display:none
-   below is the second lock, not the mechanism. */
-html[data-sidebar-detail="rich"] .session-sidebar .tab-meta {
+   'sidebar'; rail rules to html[data-tab-orientation='vertical']
+   [data-tab-rail-detail='rich']:not(.tab-rail-compact), so a rail dragged below
+   240px drops back to simple rows the same way the collapsed sidebar does.
+   `.tab-meta` is emitted by the row template exclusively in those modes, so
+   these rules have nothing to match anywhere else — the display:none below is
+   the second lock, not the mechanism. */
+html[data-sidebar-detail="rich"] .session-sidebar .tab-meta,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta {
   display: flex;
   align-items: center;
   gap: 0.35em;
@@ -20089,33 +20361,56 @@ html[data-sidebar-detail="rich"] .session-sidebar .tab-meta {
   display: none;
 }
 
-html[data-sidebar-detail="rich"] .session-sidebar .tab-meta-item {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-meta-item,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta-item {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-html[data-sidebar-detail="rich"] .session-sidebar .tab-meta-key {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-meta-key,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta-key {
   margin-right: 0.35em;
   opacity: 0.7;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
-html[data-sidebar-detail="rich"] .session-sidebar .tab-meta-sep {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-meta-sep,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta-sep {
   opacity: 0.45;
+}
+
+/* Narrower than the detailed default (the .tab-rail-tight class,
+   _setTabRailWidth): the created stamp is dropped rather than shown as
+   "CREA…". Its value stays reachable as the tooltip on the meta LINE
+   (`.tab-meta` carries both absolute stamps, _sidebarRichMetaHTML) — the title
+   on the hidden `.tab-meta-created` itself goes away with it, since a
+   `display: none` element has no hover target. */
+html.tab-rail-tight[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta-created,
+html.tab-rail-tight[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta-sep {
+  display: none;
+}
+
+/* On a rail narrower than the detailed default, the state duration is the last
+   thing that should go: it is the number the row is sorted by, and the pill
+   next to it is only a word. The created stamp ellipsizes instead. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta-since {
+  flex-shrink: 0;
 }
 
 /* While a session is actually doing something, how long it has been doing it is
    what the eye should land on — same emphasis the home rail gives it. */
-html[data-sidebar-detail="rich"] .session-sidebar .session-tab.tab-state-working .tab-meta-since {
+html[data-sidebar-detail="rich"] .session-sidebar .session-tab.tab-state-working .tab-meta-since,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab.tab-state-working .tab-meta-since {
   color: var(--green);
   opacity: 0.95;
 }
 
 /* Pushed hard right and never shrinking, so the stamps ellipsize before the
    status word does. */
-html[data-sidebar-detail="rich"] .session-sidebar .tab-pill {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill {
   flex-shrink: 0;
   margin-left: auto;
   padding: 0.1em 0.5em;
@@ -20132,19 +20427,23 @@ html[data-sidebar-detail="rich"] .session-sidebar .tab-pill {
 /* Same three colors as every other session surface: red means a question is
    pending, yellow means it wants input, green means work is happening. */
 html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--needs,
-html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--error {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--error,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--needs,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--error {
   background: color-mix(in srgb, var(--red) 18%, transparent);
   border-color: color-mix(in srgb, var(--red) 45%, transparent);
   color: var(--red);
 }
 
-html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--waiting {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--waiting,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--waiting {
   background: color-mix(in srgb, var(--yellow) 18%, transparent);
   border-color: color-mix(in srgb, var(--yellow) 45%, transparent);
   color: var(--yellow);
 }
 
-html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--working {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--working,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--working {
   background: color-mix(in srgb, var(--green) 15%, transparent);
   border-color: color-mix(in srgb, var(--green) 40%, transparent);
   color: var(--green);
@@ -20158,7 +20457,8 @@ html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--checking_agents {
 
 /* Muted one step further than the idle dot: the pill is a block of color, so it
    reads louder than a 9px dot at the same mix. */
-html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--idle {
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--idle,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--idle {
   background: color-mix(in srgb, var(--green) 7%, transparent);
   border-color: color-mix(in srgb, var(--green) 18%, var(--border));
   color: color-mix(in srgb, var(--green) 45%, var(--text-muted));
@@ -20173,7 +20473,8 @@ html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--idle {
    then just a status dot and its badges. Without the guard, `align-items:
    flex-start` and a 0.15rem top margin on .tab-status would push that dot off
    the centre line of every row in the rail. */
-html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sidebar .session-tab {
+html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sidebar .session-tab,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab {
   align-items: flex-start;
   padding: 0.45rem 0.5rem;
 }
@@ -20182,7 +20483,10 @@ html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sideba
    three-line one it drifts low, so pin it to the name it acts on. */
 html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sidebar .session-tab .tab-actions,
 html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sidebar .session-tab .tab-number,
-html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sidebar .session-tab .tab-status {
+html[data-sidebar-detail="rich"]:not([data-sidebar="collapsed"]) .session-sidebar .session-tab .tab-status,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-name-row > .tab-actions,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-number,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-status {
   margin-top: 0.15rem;
 }
 

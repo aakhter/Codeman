@@ -493,11 +493,16 @@ describe('Run launch synchronization', () => {
       ['runAntigravity', [dataCall]],
       ['runGemini', [dataCall]],
       ['runPi', [dataCall]],
+      ['runGrok', [dataCall]],
+      ['runDeepSeek', [dataCall]],
     ]);
     let totalCallsites = 0;
 
     for (const [method, expectedCalls] of expectedByMethod) {
-      const startMarker = `  async ${method}(options = {}) {`;
+      // Upstream's runGrok/runDeepSeek take no options argument yet, so accept
+      // either signature rather than silently skipping those two callsites.
+      const withOptions = `  async ${method}(options = {}) {`;
+      const startMarker = src.includes(withOptions) ? withOptions : `  async ${method}() {`;
       const start = src.indexOf(startMarker);
       const end = src.indexOf('\n  },', start + startMarker.length);
       expect(start, `${method}() must exist`).toBeGreaterThanOrEqual(0);
@@ -509,8 +514,8 @@ describe('Run launch synchronization', () => {
       totalCallsites += calls.length;
     }
 
-    expect(totalCallsites).toBe(9);
-    expect([...src.matchAll(/await this\._ensureCreatedSessionVisible\(/g)]).toHaveLength(9);
+    expect(totalCallsites).toBe(11);
+    expect([...src.matchAll(/await this\._ensureCreatedSessionVisible\(/g)]).toHaveLength(11);
   });
 
   it('coalesces overlapping Run activations and disables the button while the request is active', async () => {

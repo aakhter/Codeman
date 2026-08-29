@@ -1,4 +1,6 @@
-/** @fileoverview Pure compatibility translation between legacy session order and owner tab layouts. */
+/**
+ * @fileoverview Pure compatibility translation between legacy session order and owner tab layouts.
+ */
 
 import { mergeSessionOrder, normalizeSessionOrder } from './session-order.js';
 import {
@@ -45,14 +47,12 @@ export function applyLegacySessionRank(
     return refs.map((ref) => (isRanked(ref) ? ranked[rankedIndex++] : { ...ref }));
   };
 
-  return normalizeTabLayout(
-    {
-      ...layout,
-      groups: layout.groups.map((group) => ({ ...group, refs: rankContainer(group.refs) })),
-      ungrouped: rankContainer(layout.ungrouped),
-    },
-    metadata
-  );
+  const transformed: TabLayout = {
+    ...layout,
+    groups: layout.groups.map((group) => ({ ...group, refs: rankContainer(group.refs) })),
+    ungrouped: rankContainer(layout.ungrouped),
+  };
+  return normalizeTabLayout(transformed, metadata);
 }
 
 export function recomposeGlobalSessionOrder(

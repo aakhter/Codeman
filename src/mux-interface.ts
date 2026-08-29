@@ -19,6 +19,8 @@ import type {
   EffortLevel,
   AntigravityConfig,
   PiConfig,
+  GrokConfig,
+  DeepSeekConfig,
   SessionRemote,
   SessionDocker,
 } from './types.js';
@@ -89,6 +91,8 @@ export interface CreateSessionOptions {
   geminiConfig?: GeminiConfig;
   antigravityConfig?: AntigravityConfig;
   piConfig?: PiConfig;
+  grokConfig?: GrokConfig;
+  deepSeekConfig?: DeepSeekConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Ephemeral — not written to disk. */
@@ -130,6 +134,8 @@ export interface RespawnPaneOptions {
   geminiConfig?: GeminiConfig;
   antigravityConfig?: AntigravityConfig;
   piConfig?: PiConfig;
+  grokConfig?: GrokConfig;
+  deepSeekConfig?: DeepSeekConfig;
   /** Resume a previous Claude conversation when respawning */
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */

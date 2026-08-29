@@ -3575,7 +3575,7 @@ Object.assign(CodemanApp.prototype, {
     }
     titleSpan.appendChild(document.createTextNode(this._historyRowLabel(s, shortDir)));
 
-    // Badge row: mode (claude/codex/opencode/gemini/antigravity/pi/shell) + a LIVE pill.
+    // Badge row: mode (claude/codex/opencode/gemini/antigravity/pi/grok/deepseek/shell) + a LIVE pill.
     const badgeRow = document.createElement('div');
     badgeRow.className = 'history-item-badges';
     if (s.mode) {

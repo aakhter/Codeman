@@ -116,6 +116,8 @@ describe('applyLegacySessionRank', () => {
     expect(result.groups[0].name).toBe('Work');
     expect(validateTabLayout(result)).toEqual(result);
     expect(result).not.toBe(input);
+    expect(result.groups[0]).not.toBe(input.groups[0]);
+    expect(result.groups[0].refs[0]).not.toBe(input.groups[0].refs[0]);
   });
 });
 

@@ -405,7 +405,9 @@ export class TabLayoutService {
       const currentIds = new Set(projection.currentIds);
       const persistedBefore = beforeOrder.filter((id) => beforeIds.has(id));
       const persistedAfter = accepted.sessionOrder.filter((id) => currentIds.has(id));
-      if (!sameOrder(projection.previousOrder, projection.order) || !sameOrder(persistedBefore, persistedAfter)) {
+      const layoutOrderChanged = !sameOrder(projection.previousOrder, projection.order);
+      const persistedOwnerSliceChanged = !sameOrder(persistedBefore, persistedAfter);
+      if (layoutOrderChanged || persistedOwnerSliceChanged) {
         changedEntries.push([projection.owner, persistedAfter]);
       }
     }
@@ -607,10 +609,13 @@ export class TabLayoutService {
       const invalid = refs.find((ref) => !owned.has(refKey(ref)));
       if (invalid)
         throw new TabLayoutValidationError(`ref is not owned by layout owner: ${invalid.kind}:${invalid.id}`);
-      const normalized = normalizeTabLayout({ ...validated, version: current.version }, prepared.metadata);
+      const normalized = normalizeTabLayout(
+        { ...validated, version: prepared.authoritative.version },
+        prepared.metadata
+      );
       return {
         status: 'updated',
-        layout: this.commit(owner, current, normalized, prepared.metadata, prepared.current),
+        layout: this.commit(owner, prepared.authoritative, normalized, prepared.metadata, prepared.current),
       };
     });
   }
@@ -628,10 +633,14 @@ export class TabLayoutService {
           .filter((item) => item.kind === 'session' && item.ownerValid && item.visible)
           .map((item) => item.id)
       );
-      const invalid = normalized.find((id) => !visible.has(id));
-      if (invalid) throw new TabLayoutValidationError(`session is not owned by layout owner: ${invalid}`);
+      // Unknown or foreign ids are DROPPED, never a 400: the browser debounces
+      // its reorder push (and swallows errors), so a session deleted inside
+      // that window would otherwise cost the user the whole reorder — and the
+      // endpoint sits on the stable /api/v1 surface, where the pre-layout
+      // server merged leniently. Same philosophy as resolveParentSessionId.
+      const requestedVisible = normalized.filter((id) => visible.has(id));
       const currentKnown = flattenOwnerSessionOrder(prepared.authoritative).filter((id) => visible.has(id));
-      const effective = mergeSessionOrder(normalized, currentKnown);
+      const effective = mergeSessionOrder(requestedVisible, currentKnown);
       const ranked = applyLegacySessionRank(prepared.authoritative, effective, prepared.metadata);
       const needsLayout = prepared.needsReconciliationCommit || !sameLayout(prepared.authoritative, ranked);
       const base = prepared.current ?? { ...prepared.authoritative, version: -1 };
@@ -659,8 +668,10 @@ export class TabLayoutService {
         const { persisted, live } = this.sessionRecords();
         for (const record of persisted) knownOwners.set(record.id, ownerOf(record));
         for (const record of live) knownOwners.set(record.id, ownerOf(record));
-        const invalid = normalized.find((id) => !knownOwners.has(id));
-        if (invalid) throw new TabLayoutValidationError(`session is not visible machine-wide: ${invalid}`);
+        // Unknown ids are DROPPED, never a 400 — see putOwnerLegacyOrder. In
+        // single-user mode every request is the synthetic admin, so this path
+        // IS the one the browser's debounced (error-swallowing) push hits.
+        const known = normalized.filter((id) => knownOwners.has(id));
 
         const publications: OwnerProjectionPublication[] = [];
         const updates: Record<string, TabLayout> = Object.create(null) as Record<string, TabLayout>;
@@ -671,7 +682,7 @@ export class TabLayoutService {
               .filter((item) => item.kind === 'session' && item.ownerValid && item.visible)
               .map((item) => item.id)
           );
-          const requestedOwner = normalized.filter((id) => visible.has(id));
+          const requestedOwner = known.filter((id) => visible.has(id));
           const currentKnown = flattenOwnerSessionOrder(prepared.authoritative).filter((id) => visible.has(id));
           const effective = mergeSessionOrder(requestedOwner, currentKnown);
           const ranked = applyLegacySessionRank(prepared.authoritative, effective, prepared.metadata);
@@ -681,7 +692,7 @@ export class TabLayoutService {
           if (needsLayout) updates[owner] = next;
           publications.push({ owner, previous: prepared.current, next, metadata: prepared.metadata });
         }
-        const change = this.publish(updates, publications, normalized);
+        const change = this.publish(updates, publications, known);
         return { order: [...change.globalOrder], ...change };
       });
       if (result) return result;
@@ -840,6 +851,8 @@ export class TabLayoutService {
         const ids = byOwner.get(owner) ?? [];
         const prepared = await this.prepareUnlocked(owner);
         const current = prepared.current;
+        // Normalize and prune together so stale cleanup, orphan materialization,
+        // and missing-ref repair remain one versioned server mutation.
         const next = normalizeTabLayout(
           materializeOrphans(prepared.authoritative, ids, prepared.metadata),
           prepared.metadata
@@ -864,6 +877,12 @@ export class TabLayoutService {
    * commits only after the resource cleanup finishes.
    */
   async runSessionDeletion<T>(removed: readonly RemovedTabLayoutSession[], action: () => Promise<T>): Promise<T> {
+    // A failed restoration must not lock the user out of explicitly closing a
+    // tab for the rest of the process lifetime: degrade to best-effort deletion
+    // without layout coordination. Only the AUTOMATED stale sweep stays
+    // fail-closed on 'failed' (runStaleSessionCleanup), because that one picks
+    // its victims itself from state a failed restore may have left incomplete.
+    if (this.restorationState === 'failed') return action();
     this.assertDeletionReady();
     if (this.restorationState === 'skipped' || removed.length === 0) return action();
     const owners = new Set(removed.map(ownerOf));
@@ -1018,6 +1037,9 @@ export class TabLayoutService {
   }
 
   async webviewDeleted(owner: string, id: string): Promise<void> {
+    // Same explicit-user-action escape hatch as runSessionDeletion: a failed
+    // restore skips layout coordination instead of failing the delete.
+    if (this.restorationState === 'failed') return;
     this.assertDeletionReady();
     if (this.restorationState === 'skipped') return;
     await this.withOwner(owner, async () => {

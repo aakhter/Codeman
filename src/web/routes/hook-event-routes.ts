@@ -13,7 +13,7 @@ import { HookEventSchema, isValidWorkingDir } from '../schemas.js';
 import { sanitizeHookData, parseBody } from '../route-helpers.js';
 import { persistDockerCaseClaudeSessionId } from '../../docker-hosts.js';
 import { getDataDir } from '../../config/instance.js';
-import { sessionWaits, hooksAvailableForMode } from '../session-wait-registry.js';
+import { sessionWaits, hooksAvailableForMode, sessionHookOptions } from '../session-wait-registry.js';
 import { approvalInbox, type ApprovalKind } from '../approval-inbox.js';
 import { buildPaneCapture } from '../pane-capture.js';
 import type { SessionPort, EventPort, RespawnPort, ConfigPort, InfraPort, AgentActivityPort } from '../ports/index.js';
@@ -26,8 +26,34 @@ const APPROVAL_KIND_BY_EVENT: Record<string, ApprovalKind> = {
   idle_prompt: 'idle',
 };
 
-/** Hook events that close a session's pending item without an inbox answer. */
-const APPROVAL_RESOLVING_EVENTS = new Set(['stop', 'elicitation_complete', 'elicitation_response']);
+/**
+ * Hook events that close a session's pending item without an inbox answer.
+ *
+ * `agent_working` is here because it is the DeepSeek status bridge's report that
+ * a turn STARTED, and a harness turn cannot be running while one of its own
+ * modal approvals is on screen — so the agent moving means the dialog was
+ * answered, in the terminal, by the user. That is the same conclusion the claude
+ * path reaches through pane capture, which cannot help here because its frame
+ * parser is Claude-dialog-shaped.
+ */
+const APPROVAL_RESOLVING_EVENTS = new Set(['stop', 'elicitation_complete', 'elicitation_response', 'agent_working']);
+
+/**
+ * Last DeepSeek status-bridge sequence number seen per session.
+ *
+ * The Herdr contract the dsh TUI speaks stamps every report with `--seq <n>`
+ * and RETRIES failed deliveries with backoff — so a stale report can land
+ * AFTER a newer one, and applying it in arrival order resolves an approval
+ * with a retried `working` while the harness sits blocked, or releases a wait
+ * with a retried `idle` mid-turn. A report whose seq is not newer than the
+ * last accepted one is dropped, but only inside a short window: the TUI's
+ * retry backoff is seconds, so a LOWER seq arriving after the window is a
+ * restarted TUI's fresh numbering (same pane, new generation), not a stale
+ * retry, and must be accepted. Insertion-order eviction bounds the map.
+ */
+const dshSeqBySession = new Map<string, { seq: number; at: number }>();
+const DSH_SEQ_STALE_WINDOW_MS = 60_000;
+const DSH_SEQ_MAX_SESSIONS = 500;
 
 const ACTIVITY_KIND_BY_EVENT: Partial<Record<string, Exclude<HookKind, 'raw_idle'>>> = {
   stop: 'stop',
@@ -95,6 +121,22 @@ export function registerHookEventRoutes(
     const summaryTracker = ctx.runSummaryTrackers.get(sessionId);
     if (summaryTracker && event !== 'stop') summaryTracker.recordHookEvent(event, safeData);
 
+    // DeepSeek status-bridge ordering: drop a stale retried report (see
+    // dshSeqBySession above). Success rather than an error, so the shim exits 0
+    // and the TUI does not keep retrying a report that will stay stale.
+    if (data && data.source === 'dsh-status-shim' && typeof data.seq === 'number') {
+      const last = dshSeqBySession.get(sessionId);
+      const now = Date.now();
+      if (last && data.seq <= last.seq && now - last.at < DSH_SEQ_STALE_WINDOW_MS) {
+        return {};
+      }
+      if (!dshSeqBySession.has(sessionId) && dshSeqBySession.size >= DSH_SEQ_MAX_SESSIONS) {
+        const oldest = dshSeqBySession.keys().next().value;
+        if (oldest !== undefined) dshSeqBySession.delete(oldest);
+      }
+      dshSeqBySession.set(sessionId, { seq: data.seq, at: now });
+    }
+
     // Wake anything blocked on `GET /api/sessions/:id/wait`. Hooks are the only
     // DEFINITIVE signals Codeman gets (`idle` is inferred from output stabilization
     // and can flap mid-turn), so these two are what an orchestrating agent should
@@ -107,8 +149,8 @@ export function registerHookEventRoutes(
     // also the cheap half of the forgery surface — a `stop` claimed for a session that
     // could never legitimately emit one is now dropped instead of steering another
     // agent's control flow.
-    const waitSession = session;
-    if (waitSession && hooksAvailableForMode(waitSession.mode)) {
+    const waitSession = ctx.sessions.get(sessionId);
+    if (waitSession && hooksAvailableForMode(waitSession.mode, sessionHookOptions(waitSession))) {
       if (event === 'stop') {
         sessionWaits.notifySignal(sessionId, 'stop');
         summaryTracker?.recordHookEvent(event, safeData);
@@ -117,7 +159,8 @@ export function registerHookEventRoutes(
       }
     }
     // Even a mode-mismatched stop remains raw evidence in the run summary.
-    if (event === 'stop' && !hooksAvailableForMode(waitSession.mode)) summaryTracker?.recordHookEvent(event, safeData);
+    if (event === 'stop' && waitSession && !hooksAvailableForMode(waitSession.mode, sessionHookOptions(waitSession)))
+      summaryTracker?.recordHookEvent(event, safeData);
 
     // Transcript discovery is identity evidence, not a human-facing legacy hook
     // effect, so preserve it even when the prompt itself is suppressed below.
@@ -179,7 +222,7 @@ export function registerHookEventRoutes(
     // session that can never show one must not create an answerable item).
     let approvalId: string | undefined;
     const approvalKind = APPROVAL_KIND_BY_EVENT[event];
-    if (session && hooksAvailableForMode(session.mode)) {
+    if (session && hooksAvailableForMode(session.mode, sessionHookOptions(session))) {
       if (approvalKind) {
         const toolInput =
           safeData.tool_input && typeof safeData.tool_input === 'object'
@@ -221,12 +264,15 @@ export function registerHookEventRoutes(
     // the browser loaded with. Debounced, so a hook burst costs one broadcast.
     ctx.broadcastSessionStateDebounced(sessionId);
 
-    // Send push notifications for hook events
+    // Send push notifications for hook events. Push Approve/Deny actions ride
+    // on approvalId, and the answer route refuses keystrokes for dsh dialogs
+    // (third-party TUI, unmeasured contract) — so a dsh push stays a plain
+    // notification instead of offering buttons whose answer would be refused.
     ctx.sendPushNotifications(`hook:${event}`, {
       sessionId,
       sessionName,
       ...safeData,
-      ...(approvalId && { approvalId }),
+      ...(approvalId && session?.mode !== 'deepseek' && { approvalId }),
     });
 
     return {};

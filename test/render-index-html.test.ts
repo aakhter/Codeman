@@ -18,6 +18,8 @@ import { isCodexAvailable } from '../src/utils/codex-cli-resolver.js';
 import { isGeminiAvailable } from '../src/utils/gemini-cli-resolver.js';
 import { isAntigravityAvailable } from '../src/utils/antigravity-cli-resolver.js';
 import { isPiAvailable } from '../src/utils/pi-cli-resolver.js';
+import { isGrokAvailable } from '../src/utils/grok-cli-resolver.js';
+import { isDeepSeekAvailable, isDeepSeekRunnable } from '../src/utils/deepseek-cli-resolver.js';
 import { isCloudflaredAvailable } from '../src/utils/cloudflared-resolver.js';
 import { isGitAvailable } from '../src/git-clone.js';
 
@@ -52,6 +54,21 @@ vi.mock('../src/utils/pi-cli-resolver.js', () => ({
   isPiAvailable: vi.fn(() => false),
   resolvePiDir: vi.fn(() => null),
   getPiCliVersion: vi.fn(() => null),
+}));
+vi.mock('../src/utils/grok-cli-resolver.js', () => ({
+  isGrokAvailable: vi.fn(() => false),
+  resolveGrokDir: vi.fn(() => null),
+  getGrokCliVersion: vi.fn(() => null),
+}));
+// DeepSeek is the one mode with a two-part availability answer (binary AND a
+// pane-capable profile), so both probes are mocked independently.
+vi.mock('../src/utils/deepseek-cli-resolver.js', () => ({
+  isDeepSeekAvailable: vi.fn(() => false),
+  isDeepSeekRunnable: vi.fn(() => false),
+  resolveDeepSeekDir: vi.fn(() => null),
+  getDeepSeekCliVersion: vi.fn(() => null),
+  listDeepSeekProfiles: vi.fn(() => []),
+  resolveDefaultDeepSeekProfile: vi.fn(() => null),
 }));
 vi.mock('../src/utils/cloudflared-resolver.js', () => ({
   isCloudflaredAvailable: vi.fn(() => false),
@@ -150,6 +167,7 @@ describe('WebServer.renderIndexHtml', () => {
     vi.mocked(isGeminiAvailable).mockReturnValue(false);
     vi.mocked(isAntigravityAvailable).mockReturnValue(false);
     vi.mocked(isPiAvailable).mockReturnValue(true);
+    vi.mocked(isGrokAvailable).mockReturnValue(false);
     vi.mocked(isCloudflaredAvailable).mockReturnValue(true);
     vi.mocked(isGitAvailable).mockReturnValue(true);
     const { server } = makeServer({});
@@ -164,6 +182,9 @@ describe('WebServer.renderIndexHtml', () => {
       gemini: false,
       antigravity: false,
       pi: true,
+      grok: false,
+      deepseek: false,
+      deepseekBinary: false,
       cloudflared: true,
       git: true,
     });
@@ -179,6 +200,9 @@ describe('WebServer.renderIndexHtml', () => {
       isGeminiAvailable,
       isAntigravityAvailable,
       isPiAvailable,
+      isGrokAvailable,
+      isDeepSeekAvailable,
+      isDeepSeekRunnable,
       isCloudflaredAvailable,
       isGitAvailable,
     ]) {

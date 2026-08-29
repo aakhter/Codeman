@@ -1,12 +1,16 @@
 /**
- * @fileoverview COD-299 — accessible, device-local vertical session-rail sizing.
+ * @fileoverview Accessible, device-local vertical session-rail sizing.
  *
- * Width policy is pure in constants.js. This mixin owns DOM interaction,
- * persistence, and the one settled terminal resize sent after a gesture.
+ * Pointer + keyboard resizing for the vertical tab rail (`tabOrientation:
+ * 'vertical'`), with a preferred width persisted per device (`tabRailWidth`)
+ * and re-clamped against the viewport on resize. During a drag it takes
+ * ownership of terminal refits (`_tabRailResizeOwnsObserver` suppresses
+ * terminal-ui's throttled ResizeObserver) and performs ONE settle-time resize,
+ * reverting per-frame below 40 columns so the PTY is never thrashed.
  *
- * @mixin Extends CodemanApp.prototype via Object.assign
- * @dependency app.js (CodemanApp)
- * @dependency constants.js (window.CodemanTabRail)
+ * @dependency CodemanApp (app.js) - methods attach to its prototype
+ * @dependency CodemanTabRail (constants.js) - width policy (resolveWidth, bounds)
+ * @loadorder 6.5 (after app.js, before terminal-ui.js)
  */
 
 Object.assign(CodemanApp.prototype, {
@@ -26,7 +30,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _getCurrentTabRailWidth() {
-    const fromCss = parseFloat(document.documentElement.style.getPropertyValue('--tab-rail-width'));
+    const fromCss = Number.parseFloat(document.documentElement.style.getPropertyValue('--tab-rail-width'));
     if (Number.isFinite(fromCss)) return fromCss;
     const measured = document.getElementById('tabRail')?.getBoundingClientRect?.().width;
     return Number.isFinite(measured) && measured > 0 ? measured : window.CodemanTabRail?.DEFAULT_WIDTH || 256;
@@ -68,7 +72,27 @@ Object.assign(CodemanApp.prototype, {
     const wasCompact = root.classList.contains('tab-rail-compact');
     const compact = resolved < 240;
     root.classList.toggle('tab-rail-compact', compact);
-    if (wasCompact !== compact) this._fullRenderSessionTabs?.();
+    // Second, softer threshold, CSS-only: a detailed row carries two stamps and
+    // below ~288px the created one ellipsizes to "CREA…", which says nothing.
+    // It is dropped there instead, leaving the state duration (the number the
+    // list is ordered by) and its pill intact. No re-render — unlike the rows
+    // themselves, this is a display toggle on markup that is already there.
+    root.classList.toggle('tab-rail-tight', resolved < 288);
+    if (wasCompact !== compact) {
+      // The folder line is owned by applyTabWrapSettings(), whose railRich
+      // input reads the compact class this function just toggled — without
+      // re-running it, a rich rail dragged below 240px kept emitting folder
+      // rows (and, for a stored width < 240, kept them across reloads: the
+      // boot-time wrap pass runs before this function first applies the
+      // class). It re-renders only when the folder flag actually flipped, so
+      // cover the flip-without-folder-change case (a simple-detail rail
+      // crossing 240px still changes the row-action affordance) without
+      // rendering twice.
+      const prevTall = this._tallTabsEnabled;
+      this.applyTabWrapSettings?.();
+      const wrapRendered = prevTall !== undefined && this._tallTabsEnabled !== prevTall;
+      if (!wrapRendered) this._fullRenderSessionTabs?.();
+    }
     const handle = document.getElementById('tabRailResizeHandle');
     if (handle) {
       handle.setAttribute('aria-valuemax', String(effectiveMax));
@@ -147,11 +171,28 @@ Object.assign(CodemanApp.prototype, {
     }, 150);
   },
 
+  /**
+   * The width a rail gets when the user has never picked one.
+   *
+   * Detailed rows carry a third line ("created 3d ago · working 12m" plus a
+   * status pill) and at 256px that line ellipsizes before it is finished — the
+   * same reason the rich SIDEBAR is 300px and the simple one 260px. 320px is
+   * the existing Wide preset, so a fresh detailed rail lands on a named choice
+   * rather than reading "Custom" in the settings select.
+   *
+   * Only the DEFAULT moves: a width the user has actually chosen (stored) is
+   * never overridden, and dragging the rail narrower is never fought — below
+   * 240px the rows drop back to simple ones on their own.
+   */
+  _defaultTabRailWidth() {
+    const rich = document.documentElement.dataset.tabRailDetail !== 'simple';
+    if (rich) return window.CodemanTabRail?.RICH_DEFAULT_WIDTH ?? 320;
+    return window.CodemanTabRail?.DEFAULT_WIDTH ?? 256;
+  },
+
   applyTabRailWidth(options = {}) {
     const settings = this.loadAppSettingsFromStorage();
-    const requested = settings.tabRailWidth ?? window.CodemanTabRail?.DEFAULT_WIDTH ?? 256;
-    // Preserve a user's preferred width when a narrow viewport temporarily
-    // forces a smaller effective width. Only static corruption is normalized.
+    const requested = settings.tabRailWidth ?? this._defaultTabRailWidth();
     const preferred = window.CodemanTabRail?.resolveWidth({ width: requested }) ?? 256;
     if (options.settle) this._claimTabRailResize();
     const resolved = this._setTabRailWidth(preferred);
@@ -197,7 +238,8 @@ Object.assign(CodemanApp.prototype, {
     try {
       if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
     } catch {}
-    this._scheduleTabRailSettle(this._tabRailDragWidth || this._getCurrentTabRailWidth());
+    const preferred = window.CodemanTabRail?.resolveWidth({ width: this._tabRailDragWidth }) ?? this._tabRailDragWidth;
+    this._scheduleTabRailSettle(this._tabRailDragWidth || this._getCurrentTabRailWidth(), preferred);
   },
 
   _onTabRailKeyDown(event) {
@@ -205,13 +247,14 @@ Object.assign(CodemanApp.prototype, {
       key: event.key,
       shiftKey: event.shiftKey,
       currentWidth: this._getCurrentTabRailWidth(),
+      defaultWidth: this._defaultTabRailWidth?.(),
       ...this._getTabRailBounds(),
     });
     if (width === null || width === undefined) return;
     event.preventDefault();
     this._claimTabRailResize();
-    this._setTabRailWidth(width);
-    this._scheduleTabRailSettle(width);
+    const effective = this._setTabRailWidth(width);
+    this._scheduleTabRailSettle(effective, window.CodemanTabRail.resolveWidth({ width }));
   },
 
   initTabRailResize() {
@@ -250,14 +293,20 @@ Object.assign(CodemanApp.prototype, {
     handle.addEventListener('dblclick', (event) => {
       event.preventDefault();
       this._claimTabRailResize();
-      const width = this._setTabRailWidth(window.CodemanTabRail?.DEFAULT_WIDTH || 256);
-      this._scheduleTabRailSettle(width);
+      // Rich-aware: resetting a detailed rail to 256 would land it below the
+      // 288px tight threshold and silently drop the created stamp.
+      const preferred = this._defaultTabRailWidth?.() ?? (window.CodemanTabRail?.DEFAULT_WIDTH || 256);
+      const effective = this._setTabRailWidth(preferred);
+      this._scheduleTabRailSettle(effective, preferred);
     });
 
     let resizeTimer = null;
     window.addEventListener('resize', () => {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => this.applyTabRailWidth(), 100);
+      resizeTimer = setTimeout(() => {
+        this.applyTabOrientation?.();
+        this.applyTabRailWidth({ persist: false });
+      }, 100);
     });
   },
 
