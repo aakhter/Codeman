@@ -143,6 +143,10 @@ describe('WebServer agent activity ownership', () => {
       session: Session,
       ctx: ReturnType<ReturnType<typeof internals>['createRouteContext']>
     ) => Promise<void>;
+    // Fired synchronously from inside the hook's own frame read. That read is the one
+    // choke point the suppression decision cannot skip, which makes it the only place a
+    // staleness signal can be injected with guaranteed ordering (COD-385).
+    onFrameCapture?: (session: Session, ctx: ReturnType<ReturnType<typeof internals>['createRouteContext']>) => void;
     event?: 'idle_prompt' | 'stop';
   }) {
     const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
@@ -151,7 +155,11 @@ describe('WebServer agent activity ownership', () => {
       source: options.processSource,
     });
     const state = internals(server);
-    state.mux.capturePaneText = vi.fn(() => options.frame);
+    let onFrameCapture: (() => void) | undefined;
+    state.mux.capturePaneText = vi.fn(() => {
+      onFrameCapture?.();
+      return options.frame;
+    });
     vi.spyOn(subagentWatcher, 'reconcileConversation').mockResolvedValue([]);
     await state.setupRoutes();
     const ctx = state.createRouteContext();
@@ -175,6 +183,7 @@ describe('WebServer agent activity ownership', () => {
     vi.spyOn(subagentWatcher, 'getSemanticSnapshot').mockReturnValue({ revision: 1, agents: [info] });
     subagentWatcher.emit('subagent:discovered', info);
     state.sse.broadcast = vi.fn();
+    onFrameCapture = options.onFrameCapture ? () => options.onFrameCapture!(session, ctx) : undefined;
     const responsePromise = state.app.inject({
       method: 'POST',
       url: '/api/hook-event',
@@ -217,18 +226,16 @@ describe('WebServer agent activity ownership', () => {
   });
 
   it('falls through when terminal activity makes otherwise matching frame evidence stale', async () => {
-    let inspectionStarted!: () => void;
-    let releaseInspection!: () => void;
-    const started = new Promise<void>((resolve) => (inspectionStarted = resolve));
-    const blocked = new Promise<number[]>((resolve) => (releaseInspection = () => resolve([])));
-    let inspections = 0;
+    // The staleness signal has to land INSIDE the window the hook decides in. Staging it
+    // across promises (block an inspection, fire terminalActivity from duringHook) was
+    // genuinely racy: which inspection the hook awaits is not fixed — a background
+    // reconcile can consume it — so the signal could arrive after the decision and the
+    // idle hook was suppressed instead of falling through. Measured ~2 failures in 3 on
+    // an unchanged tree, and still ~1 in 10 after blocking the first inspection instead.
+    // The frame read is the one step the suppression decision cannot skip, so firing
+    // from there is ordered by construction rather than by scheduling luck (COD-385).
     const processSource: ProcessInspectionSource = {
-      listPids: async () => {
-        inspections += 1;
-        if (inspections === 1) return [];
-        inspectionStarted();
-        return blocked;
-      },
+      listPids: async () => [],
       readCmdline: async () => '',
       readEnviron: async () => '',
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
@@ -237,11 +244,7 @@ describe('WebServer agent activity ownership', () => {
     const result = await exerciseIdleHook({
       frame: matchingFrame(1),
       processSource,
-      duringHook: async (session, ctx) => {
-        await started;
-        ctx.agentActivity.terminalActivity(session);
-        releaseInspection();
-      },
+      onFrameCapture: (session, ctx) => ctx.agentActivity.terminalActivity(session),
     });
     expect(result.events).toContain(SseEvent.HookIdlePrompt);
     expect(result.events).not.toContain(SseEvent.HookSuppressed);

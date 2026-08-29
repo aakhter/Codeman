@@ -488,7 +488,15 @@ describe('home screens: one order, one numbering', () => {
     expect(branch).not.toContain('this.sessionOrder[idx]');
 
     const activate = appJs.slice(appJs.indexOf('_activateVisibleTabNumber(number) {'));
-    expect(activate.slice(0, 400)).toContain('refAtAltNumber(projection.visibleRefs, number)');
+    // The refs argument was extracted into _tabAltRefs() (which prefers an explicit
+    // altRefs ordering and falls back to visibleRefs). Still the same projection, one
+    // hop further out — assert the hop rather than the old inlined expression, and pin
+    // that the accessor really is projection-derived so this cannot drift into a
+    // non-projection source (COD-385).
+    expect(activate.slice(0, 400)).toContain('refAtAltNumber(this._tabAltRefs(projection), number)');
+    const altRefs = appJs.slice(appJs.indexOf('_tabAltRefs(projection) {'));
+    expect(altRefs.slice(0, 200)).toContain('projection?.altRefs');
+    expect(altRefs.slice(0, 200)).toContain('projection?.visibleRefs');
     // Both tab kinds are reachable by number, not just sessions.
     expect(activate.slice(0, 400)).toMatch(/kind === 'session'[\s\S]{0,200}kind === 'webview'/);
 

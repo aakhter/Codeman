@@ -54,9 +54,27 @@ describe('Pi CLI resolution', () => {
     }
   });
 
-  it('contains no production VITEST environment bypass', () => {
+  // COD-334 removed two different VITEST checks and this test used to grep the whole file
+  // for `process.env.VITEST` to keep them out. Upstream then restored ONE of them (the
+  // ambient probe's hermeticity gate, which returns null so an unprobed candidate is
+  // REJECTED), and the blunt grep cannot tell that apart from the one that actually
+  // mattered: a bypass that ACCEPTED a candidate without probing its identity at all.
+  // Pin the invariant instead of the substring — identity validation is never skipped,
+  // and any surviving VITEST gate fails closed.
+  it('never lets a VITEST check accept a pi candidate without probing its identity', () => {
     const source = readFileSync(new URL('../src/utils/pi-cli-resolver.ts', import.meta.url), 'utf8');
-    expect(source).not.toContain('process.env.VITEST');
+
+    const validateBlock = source.slice(
+      source.indexOf('validateCandidate:'),
+      source.indexOf('now,', source.indexOf('validateCandidate:'))
+    );
+    expect(validateBlock).not.toContain('VITEST');
+
+    // Every remaining gate must fail closed (`return null`), never `accepted: true`.
+    for (const line of source.split('\n').filter((l) => l.includes('process.env.VITEST'))) {
+      expect(line).toContain('return null');
+      expect(line).not.toContain('accepted');
+    }
   });
 
   it('rejects generic and common pi candidates before accepting login-shell Pi with its version', () => {

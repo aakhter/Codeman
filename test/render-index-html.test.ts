@@ -27,6 +27,10 @@ import { isGitAvailable } from '../src/git-clone.js';
 vi.mock('../src/utils/claude-cli-resolver.js', () => ({
   isClaudeAvailable: vi.fn(() => false),
   findClaudeDir: vi.fn(() => null),
+  // The WebServer constructor probes the local Claude runtime version (COD-350).
+  // This mock fully replaces the module, so every export the server reaches for
+  // has to be listed here or construction throws before a single assertion runs.
+  getClaudeCliVersion: vi.fn(() => null),
 }));
 vi.mock('../src/utils/opencode-cli-resolver.js', () => ({
   isOpenCodeAvailable: vi.fn(() => false),

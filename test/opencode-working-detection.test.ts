@@ -3,10 +3,16 @@ import { detectExternalCliWorkingFrame, Session } from '../src/session.js';
 import { workingFramePollCoordinator } from '../src/working-frame-poll-coordinator.js';
 
 describe('Opencode working detection', () => {
-  it('detects esc to interrupt as working', () => {
-    expect(detectExternalCliWorkingFrame('esc to interrupt', 'opencode')).toBe(true);
-    expect(detectExternalCliWorkingFrame('ESC TO INTERRUPT', 'opencode')).toBe(true);
-    expect(detectExternalCliWorkingFrame('some text • esc to interrupt more', 'opencode')).toBe(true);
+  // COD-375: opencode's IDLE frame carries `esc interrupt` (and `⬝`), so the interrupt
+  // hint cannot prove working for this mode — it latched sessions busy forever. Only
+  // `Working`, the `… (Ns` timer, or a braille spinner count. This test used to assert
+  // the opposite; it now pins the fix so the false-positive cannot come back.
+  it('does not treat esc to interrupt alone as working (idle frames carry it)', () => {
+    expect(detectExternalCliWorkingFrame('esc to interrupt', 'opencode')).toBe(false);
+    expect(detectExternalCliWorkingFrame('ESC TO INTERRUPT', 'opencode')).toBe(false);
+    expect(detectExternalCliWorkingFrame('some text • esc to interrupt more', 'opencode')).toBe(false);
+    // …but the same frame WITH a real working signal still reads as working.
+    expect(detectExternalCliWorkingFrame('Working • esc to interrupt', 'opencode')).toBe(true);
   });
 
   it('detects Working word as working', () => {
@@ -68,17 +74,20 @@ describe('Opencode idle transition (spinner latch regression)', () => {
     expect(idleEvents.length).toBe(1);
   });
 
-  it('esc to interrupt keeps busy and flips idle after quiet window', () => {
+  // Driven by `Working` rather than `esc to interrupt` since COD-375 (see above); the
+  // behaviour under test is the latch itself — repeated working frames hold busy, and
+  // the quiet window is what releases it.
+  it('a working frame keeps busy and flips idle after quiet window', () => {
     const idleEvents: number[] = [];
     session.on('idle', () => idleEvents.push(Date.now()));
     (session as unknown as { _resetBuffers(): void })._resetBuffers();
     (session as unknown as { _armExternalCliIdleTimer(): void })._armExternalCliIdleTimer();
 
-    feed('some text • esc to interrupt more');
+    feed('some text • Working more');
     expect(session.isWorking).toBe(true);
 
     vi.advanceTimersByTime(1000);
-    feed('still esc to interrupt');
+    feed('still Working');
     vi.advanceTimersByTime(4000);
     expect(session.isWorking).toBe(true);
     vi.advanceTimersByTime(6000);

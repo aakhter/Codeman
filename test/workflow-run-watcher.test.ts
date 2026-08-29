@@ -17,9 +17,37 @@ const PROJECT_HASH = '-home-arkon-default-claudeman';
 const SESSION_UUID = '388113c8-cd01-4e80-93a8-3be66ab1519b';
 const RUN_ID = 'wf_test1234-abc';
 
+/**
+ * The newest timestamp in the captured fixture below. getRecentRuns() filters on
+ * WALL CLOCK, so a fixture with fixed 2026-06-14 timestamps silently ages out of the
+ * window and the suite starts failing on a DATE rather than on a change: the
+ * `getRecentRunSummaries(100000)` test below (a ~69-day window) went red on its own
+ * around 2026-08-23 and was still red when COD-385 triaged the gate.
+ *
+ * Anchoring the capture to "a minute ago" keeps every internal delta (durations, the
+ * ordering between agents) byte-identical while making the run permanently recent.
+ */
+const CAPTURE_NEWEST_AT = 1781467524143;
+const CAPTURE_TIME_SHIFT = Date.now() - CAPTURE_NEWEST_AT - 60_000;
+
+/** Shifts epoch-ms values into the present, leaving durations/counts untouched. */
+function anchorEpochsToNow<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(anchorEpochsToNow) as unknown as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, anchorEpochsToNow(v)])
+    ) as T;
+  }
+  // Only plausible epoch-ms values move; durationMs/token counts are far below this.
+  if (typeof value === 'number' && value > 1_600_000_000_000 && value < 2_000_000_000_000) {
+    return (value + CAPTURE_TIME_SHIFT) as unknown as T;
+  }
+  return value;
+}
+
 /** A run JSON shaped like a real (killed) run: all three agent states + the bloat fields. */
 function sampleRunJson() {
-  return {
+  return anchorEpochsToNow({
     runId: RUN_ID,
     timestamp: '2026-06-15T00:00:00.000Z',
     taskId: 'task_abc',
@@ -98,7 +126,7 @@ function sampleRunJson() {
         lastProgressAt: 1781466999980,
       },
     ],
-  };
+  });
 }
 
 describe('WorkflowRunWatcher', () => {

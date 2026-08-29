@@ -51,6 +51,10 @@ function mountFileBrowserDom() {
 
 function makeApp(activeSessionId: string | null = null): any {
   const app = Object.create(CodemanApp.prototype);
+  // The constructor never runs here, so anything it seeds has to be seeded by hand.
+  // _debouncedCall() indexes into this map, and handleInit now reaches it through
+  // renderMuxSessions() — an undefined map threw "cannot read 'muxSessions'" (COD-385).
+  app._debounceTimers = Object.create(null);
   app._elemCache = {};
   app.activeSessionId = activeSessionId;
   app.fileBrowserDragListeners = {};
@@ -349,6 +353,10 @@ describe('COD-235 direct active-session mutation sync', () => {
     app.syncSessionOrder = vi.fn();
     app.updateCost = vi.fn();
     app.renderSessionTabs = vi.fn();
+    // Stubbed for the same reason as renderSessionTabs: this test pins the ORDER of the
+    // active-session clear and the header sync, not Monitor rendering — and leaving it
+    // real would schedule a 100ms debounce that outlives the test.
+    app.renderMuxSessions = vi.fn();
     app.stopSystemStatsPolling = vi.fn();
     app.cleanupAllFloatingWindows = vi.fn();
     app.isSoloWindow = false;

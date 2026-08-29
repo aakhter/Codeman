@@ -1035,7 +1035,13 @@ describe('COD-319 Focus smart group rendering', () => {
     expect(focus.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
     expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
     expect(focus.querySelector('[data-tab-focus-shortcut="webview:web"]')).not.toBeNull();
-    expect(focus.querySelector('.tab-number, [data-tab-ref-drag]')).toBeNull();
+    // COD-372 (`044f7749`, "number Focus shortcuts first") deliberately gave Focus
+    // shortcuts their own Alt numbering — it updated tab-layout-app.test.ts and
+    // keyboard-shortcuts.test.ts but missed this older COD-319 assertion, which had
+    // been written when shortcuts carried no number at all (COD-385). The rest of
+    // COD-319's rule still holds: no drag handles, no tab semantics.
+    expect(focus.querySelector('[data-tab-ref-drag]')).toBeNull();
+    expect(focus.querySelector('.tab-number')?.textContent).toBe('1');
     expect(focus.querySelector('[aria-selected]')).toBeNull();
     expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.hasAttribute('oncontextmenu')).toBe(
       false

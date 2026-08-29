@@ -173,11 +173,16 @@ describe('Codex tab resize behavior', () => {
     expect(cacheRestore).toBeGreaterThan(-1);
     expect(busyClear).toBeGreaterThan(cacheRestore);
     expect(needsRewrite).toBeGreaterThan(busyClear);
-    expect(replayBlock).toContain('clearedForBusy');
-    expect(replayBlock).toContain('preserveSnapshotScrollback');
-    // needsRewrite is unconditionally forced by clearedForBusy — mode-agnostic
-    // since COD-92 removed the codex-only carve-out from this guard.
-    expect(replayBlock).toContain('clearedForBusy || (!preserveSnapshotScrollback');
+    // The local was renamed clearedForBusy -> clearedBeforeFresh and the expression
+    // wrapped across lines; it is still passed as the `clearedForBusy` input to the
+    // preserve predicate, and the guard shape is unchanged. Matched on collapsed
+    // whitespace so a rename of the LOCAL cannot masquerade as a logic change (COD-385).
+    const replayFlat = replayBlock.replace(/\s+/g, ' ');
+    expect(replayFlat).toContain('clearedForBusy: clearedBeforeFresh');
+    expect(replayFlat).toContain('preserveSnapshotScrollback');
+    // needsRewrite is unconditionally forced by the cleared-for-busy flag —
+    // mode-agnostic since COD-92 removed the codex-only carve-out from this guard.
+    expect(replayFlat).toContain('clearedBeforeFresh || (!preserveSnapshotScrollback');
 
     // Behavioural: clearedForBusy alone must defeat preservation, even with
     // every other input set to favour preserving the snapshot (restored
@@ -232,6 +237,11 @@ describe('Codex tab resize behavior', () => {
     const loadStart = source.indexOf('const bufferLoadOwner = this._beginBufferLoad(selectGen);');
     const selectDone = source.indexOf('_crashDiag.log(`SELECT_DONE:', loadStart);
     const selectBlock = source.slice(loadStart, selectDone);
+    // Prettier wrapped these calls across lines, which broke single-line greps while
+    // the argument lists were unchanged. Match on whitespace-collapsed source so a
+    // reformat cannot fail the gate (COD-385).
+    const flat = (text) => text.replace(/\s+/g, ' ');
+    const selectBlockFlat = flat(selectBlock);
     const catchBlock = source.slice(
       source.indexOf('} catch (err) {', selectDone),
       source.indexOf("console.error('Failed to load session terminal:'", selectDone)
@@ -239,11 +249,13 @@ describe('Codex tab resize behavior', () => {
 
     expect(staleHelper).toContain('this._finishBufferLoad(selectGen)');
     expect(loadStart).toBeGreaterThan(-1);
-    expect(selectBlock).toContain('this.chunkedTerminalWrite(cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)');
-    expect(selectBlock).toContain(
-      'this.chunkedTerminalWrite(data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner)'
+    expect(selectBlockFlat).toContain(
+      'this.chunkedTerminalWrite( cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner )'
     );
-    expect(selectBlock).toContain('this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty })');
+    expect(selectBlockFlat).toContain(
+      'this.chunkedTerminalWrite( data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner )'
+    );
+    expect(selectBlockFlat).toContain('this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty })');
     expect(catchBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
     expect(selectBlock).not.toContain('this._finishBufferLoad()');
     expect(catchBlock).not.toContain('this._finishBufferLoad()');

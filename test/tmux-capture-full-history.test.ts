@@ -81,7 +81,25 @@ describe('COD-189 local history-limit ordering', () => {
   it('sets -g history-limit in the SAME invocation, BEFORE new-session (pane inherits it)', () => {
     // history-limit only applies to panes created after it is set, and
     // respawn-pane reuses the initial pane — an after-the-fact set never lands.
-    const combined = source.indexOf('set-option -g history-limit ${Math.floor(historyLimit)} \\\\; new-session -ds');
-    expect(combined).toBeGreaterThan(-1);
+    // Asserted as an ORDERING rather than one literal command string: the expression
+    // was refactored (`Math.floor(historyLimit)` -> `safeHistoryLimit`) and a tmux-3.7
+    // live-resize branch was added alongside it, which silently broke the old grep
+    // while the invariant itself still held (COD-385).
+    const assignment = source.slice(
+      source.indexOf('const createSessionCommand ='),
+      source.indexOf('execSync(createSessionCommand')
+    );
+    expect(assignment).not.toBe('');
+
+    // The legacy branch (tmux < 3.7, no live pane resize) is the one that must set the
+    // GLOBAL option first, because the pane inherits it only at creation time.
+    const legacyBranch = assignment.slice(assignment.indexOf(': `'));
+    const globalSet = legacyBranch.indexOf('set-option -g history-limit');
+    const newSession = legacyBranch.indexOf('new-session -ds');
+    expect(globalSet).toBeGreaterThan(-1);
+    expect(newSession).toBeGreaterThan(-1);
+    expect(globalSet).toBeLessThan(newSession);
+    // Same shell invocation (tmux command separator), not a follow-up call.
+    expect(legacyBranch.slice(globalSet, newSession)).toContain(';');
   });
 });
