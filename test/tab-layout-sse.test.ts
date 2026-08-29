@@ -14,6 +14,36 @@ function client() {
   };
 }
 
+function backpressuredClient(options: { throwAfterBackpressure?: boolean } = {}) {
+  const writes: string[] = [];
+  let firstWrite = true;
+  let onDrain: (() => void) | undefined;
+  const raw = {
+    write(chunk: string) {
+      if (!firstWrite && options.throwAfterBackpressure) throw new Error('client disconnected');
+      writes.push(chunk);
+      if (firstWrite) {
+        firstWrite = false;
+        return false;
+      }
+      return true;
+    },
+    once(event: string, callback: () => void) {
+      if (event === 'drain') onDrain = callback;
+      return raw;
+    },
+  };
+  return {
+    writes,
+    reply: { raw } as unknown as FastifyReply,
+    drain: () => {
+      const callback = onDrain;
+      onDrain = undefined;
+      callback?.();
+    },
+  };
+}
+
 function scriptedBackpressuredClient(outcomes: Array<boolean | Error>) {
   const writes: string[] = [];
   let onDrain: (() => void) | undefined;

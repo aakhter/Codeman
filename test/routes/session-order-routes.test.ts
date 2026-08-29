@@ -5,7 +5,7 @@
  * Asserts the uniform envelope contract:
  *   SUCCESS -> 2xx, { success: true, data: { order } }
  *   ERROR   -> 4xx/5xx, { success: false, error, errorCode }
- * Legacy callers are bridged through the authenticated owner-scoped tab-layout service.
+ * Legacy callers are routed through the authenticated owner-scoped tab-layout service.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -13,6 +13,7 @@ import fastifyCookie from '@fastify/cookie';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
+import { TabLayoutValidationError } from '../../src/tab-layout.js';
 
 // registerSessionRoutes pulls in session.js which can shell out; stub the bits
 // that would touch the OS at import/registration time. None are needed by the
@@ -29,16 +30,22 @@ interface LocalHarness {
   ctx: MockRouteContext;
 }
 
-async function buildHarness(identity?: { username: string; role: 'admin' | 'user' }): Promise<LocalHarness> {
+async function buildHarness(authUser = { username: 'alice', role: 'user' as const }): Promise<LocalHarness> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
-  if (identity) {
-    app.addHook('onRequest', async (request) => {
-      (request as unknown as { authUser: typeof identity }).authUser = identity;
-    });
-  }
+  app.addHook('onRequest', async (req) => {
+    (req as unknown as { authUser: typeof authUser }).authUser = authUser;
+  });
 
   const ctx = createMockRouteContext();
+  Object.assign(ctx.tabLayouts, {
+    putLegacyOrder: vi.fn(async (_actor: unknown, order: string[]) => ({
+      order: [...order],
+      changedOwnerOrders: {},
+      globalOrder: [...order],
+      globalChanged: true,
+    })),
+  });
   registerSessionRoutes(app, ctx as unknown as Parameters<typeof registerSessionRoutes>[1]);
 
   // Mirror production's uniform-envelope preSerialization hook (server.ts).
@@ -65,6 +72,7 @@ describe('PUT /api/session-order', () => {
   let harness: LocalHarness;
 
   beforeEach(async () => {
+    vi.stubEnv('CODEMAN_MULTIUSER', '1');
     harness = await buildHarness();
   });
 
@@ -73,43 +81,38 @@ describe('PUT /api/session-order', () => {
     vi.unstubAllEnvs();
   });
 
-  it('routes the single-user admin legacy writer through the machine-wide layout bridge', async () => {
+  it('routes a regular legacy PUT through the authenticated owner layout service', async () => {
+    vi.mocked(harness.ctx.tabLayouts.putLegacyOrder).mockResolvedValueOnce({
+      order: ['a', 'b'],
+      changedOwnerOrders: { alice: ['a', 'b'] },
+      globalOrder: ['a', 'b'],
+      globalChanged: true,
+    });
     const res = await harness.app.inject({
       method: 'PUT',
       url: '/api/session-order',
-      payload: { order: ['a', 'b', 'c'] },
+      payload: { order: ['b', 'a'] },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ success: true, data: { order: ['a', 'b', 'c'] } });
-    expect(harness.ctx.tabLayouts.putLegacyOrder).toHaveBeenCalledWith({ owner: '@single', isAdmin: true }, [
-      'a',
-      'b',
-      'c',
-    ]);
-    expect(harness.ctx.store.setSessionOrder).not.toHaveBeenCalled();
+    expect(harness.ctx.tabLayouts.putLegacyOrder).toHaveBeenCalledWith({ owner: 'alice', isAdmin: false }, ['b', 'a']);
+    expect(res.json().data.order).toEqual(['a', 'b']);
   });
 
-  it('routes a regular multi-user writer through only the authenticated owner', async () => {
+  it('uses the machine-wide admin bridge for an admin caller', async () => {
     await harness.app.close();
-    vi.stubEnv('CODEMAN_MULTIUSER', '1');
-    harness = await buildHarness({ username: 'alice', role: 'user' });
-
+    harness = await buildHarness({ username: 'root', role: 'admin' });
     const res = await harness.app.inject({
       method: 'PUT',
       url: '/api/session-order',
-      payload: { order: ['a2', 'a1'] },
+      payload: { order: ['b', 'a'] },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(harness.ctx.tabLayouts.putLegacyOrder).toHaveBeenCalledWith({ owner: 'alice', isAdmin: false }, [
-      'a2',
-      'a1',
-    ]);
-    expect(harness.ctx.store.setSessionOrder).not.toHaveBeenCalled();
+    expect(harness.ctx.tabLayouts.putLegacyOrder).toHaveBeenCalledWith({ owner: 'root', isAdmin: true }, ['b', 'a']);
   });
 
-  it('does not revive the legacy writer for malformed bodies', async () => {
+  it('rejects malformed bodies before invoking the service', async () => {
     const res = await harness.app.inject({
       method: 'PUT',
       url: '/api/session-order',
@@ -119,6 +122,23 @@ describe('PUT /api/session-order', () => {
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
     const body = res.json();
     expect(body.success).toBe(false);
-    expect(harness.ctx.store.setSessionOrder).not.toHaveBeenCalled();
+    expect(harness.ctx.tabLayouts.putLegacyOrder).not.toHaveBeenCalled();
+  });
+
+  it('maps owner-boundary validation failures to INVALID_INPUT', async () => {
+    vi.mocked(harness.ctx.tabLayouts.putLegacyOrder).mockRejectedValueOnce(
+      new TabLayoutValidationError('session is not owned by layout owner: foreign')
+    );
+    const res = await harness.app.inject({
+      method: 'PUT',
+      url: '/api/session-order',
+      payload: { order: ['foreign'] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      success: false,
+      errorCode: ApiErrorCode.INVALID_INPUT,
+    });
   });
 });

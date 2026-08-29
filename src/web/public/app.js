@@ -292,6 +292,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.HOOK_ELICITATION_COMPLETE, '_onHookElicitationComplete'],
   [SSE_EVENTS.HOOK_ELICITATION_RESPONSE, '_onHookElicitationResponse'],
   [SSE_EVENTS.HOOK_STOP, '_onHookStop'],
+  [SSE_EVENTS.HOOK_AGENT_WORKING, '_onHookAgentWorking'],
   [SSE_EVENTS.HOOK_TEAMMATE_IDLE, '_onHookTeammateIdle'],
   [SSE_EVENTS.HOOK_TASK_COMPLETED, '_onHookTaskCompleted'],
 
@@ -785,6 +786,10 @@ class CodemanApp {
     this._terminalOutputAcceptanceEpoch = 0;
     this._mobileImeCommitOwnership = null;
     this.writeFrameScheduled = false;
+    // xterm.write() parses asynchronously. Keep at most one live-output chunk
+    // inside xterm so its private WriteBuffer cannot bypass our 128KB cap.
+    this._terminalWriteInFlight = false;
+    this._terminalWriteInFlightBytes = 0;
     this._wasAtBottomBeforeWrite = true; // Default to true for sticky scroll
     this.syncWaitTimeout = null; // Timeout for incomplete sync blocks
     this._isLoadingBuffer = false; // true during chunkedTerminalWrite — blocks live SSE writes
@@ -792,6 +797,9 @@ class CodemanApp {
     this._loadBufferQueueAcceptanceEpochs = null;
     this._bufferLoadSeq = 0;
     this._bufferLoadOwner = null;
+    // Single-flight token for terminal buffer recovery. The identity check also
+    // lets a session switch invalidate an older fetch without blocking the new tab.
+    this._terminalRefreshOwner = null;
 
     // Flicker filter state (buffers output after screen clears)
     this.flickerFilterBuffer = '';
@@ -1134,6 +1142,11 @@ class CodemanApp {
       this.applySkin();
       this.applyLocalization();
       this.applySessionListLayout();
+      // A fresh device seeding tabOrientation from the server would otherwise
+      // show no rail until a resize or a settings save: the boot-time call ran
+      // before this async load resolved. Must stay AFTER applySessionListLayout
+      // (same ordering rule as the settings-save path).
+      this.applyTabOrientation?.();
       this.applyMonitorVisibility();
       this.applyLineageLineSettings?.();
       // ultracodeFloatingWindows syncs from the server (non-display key), but on a
@@ -1948,7 +1961,15 @@ class CodemanApp {
       this._sseHandlerWrappers = new Map();
       for (const [event, method] of _SSE_HANDLER_MAP) {
         const fn = this[method];
+        const wsOwnsTerminal =
+          method === '_onSSETerminal' ||
+          method === '_onSSENeedsRefresh' ||
+          method === '_onSSEClearTerminal';
         this._sseHandlerWrappers.set(event, (e) => {
+          // While WS owns terminal I/O, the parallel SSE stream is redundant.
+          // Drop it before JSON.parse so a busy terminal cannot turn duplicate
+          // SSE traffic/backpressure into another expensive buffer replay.
+          if (wsOwnsTerminal && this._wsReady) return;
           try {
             fn.call(this, e.data ? JSON.parse(e.data) : {});
           } catch (err) {
@@ -2378,18 +2399,18 @@ class CodemanApp {
     if (this.sessions.size === 0) this.stopSystemStatsPolling();
   }
 
-  // SSE wrappers — skip terminal events when WebSocket is delivering for this session.
+  // SSE wrappers — skip terminal events while WebSocket owns active terminal I/O.
   // WS handler calls the underlying _onSession* methods directly.
   _onSSETerminal(data) {
-    if (this._wsReady && this._wsSessionId === data.id) return;
+    if (this._wsReady) return;
     this._onSessionTerminal(data);
   }
   _onSSENeedsRefresh(data) {
-    if (this._wsReady && this._wsSessionId === data?.id) return;
+    if (this._wsReady) return;
     this._onSessionNeedsRefresh(data);
   }
   _onSSEClearTerminal(data) {
-    if (this._wsReady && this._wsSessionId === data?.id) return;
+    if (this._wsReady) return;
     this._onSessionClearTerminal(data);
   }
 
@@ -2410,15 +2431,15 @@ class CodemanApp {
       }
       if (data.data.length > 32768) _crashDiag.log(`TERMINAL: ${(data.data.length/1024).toFixed(0)}KB`);
 
-      // Hard cap: track total bytes queued in render buffers (pendingWrites +
-      // flickerFilterBuffer). When rAF is throttled (tab backgrounded, GPU
-      // busy), data accumulates with no flush, reaching 889KB+ and freezing
-      // Chrome for minutes. Drop data beyond 128KB and schedule a buffer
-      // reload to recover the display once the burst subsides.
+      // Hard cap all app-owned render queues plus the one xterm chunk currently
+      // parsing. Check the incoming frame too; otherwise a single large frame can
+      // jump over the cap. Dropped data is recovered from the canonical buffer.
       const queued = (this.pendingWrites?.reduce((s, w) => s + w.length, 0) || 0)
-        + (this.flickerFilterBuffer?.length || 0);
-      if (queued > 131072) { // 128KB — drop to prevent accumulation
-        // Schedule a self-recovery: reload the full terminal buffer once the
+        + (this.flickerFilterBuffer?.length || 0)
+        + (this._loadBufferQueue?.reduce((s, w) => s + w.length, 0) || 0)
+        + (this._terminalWriteInFlightBytes || 0);
+      if (queued + data.data.length > 131072) { // 128KB — drop to prevent accumulation
+        // Schedule a self-recovery once the
         // queue drains (debounced to avoid hammering the API during sustained bursts).
         if (!this._clientDropRecoveryTimer) {
           this._clientDropRecoveryTimer = setTimeout(() => {
@@ -3296,9 +3317,13 @@ class CodemanApp {
           ? 'Antigravity'
           : mode === 'pi'
             ? 'Pi'
-            : mode === 'opencode'
-              ? 'OpenCode'
-              : 'Claude';
+            : mode === 'grok'
+              ? 'Grok'
+              : mode === 'deepseek'
+                ? 'DeepSeek'
+                : mode === 'opencode'
+                  ? 'OpenCode'
+                  : 'Claude';
   }
 
   async toggleResponseViewer() {
@@ -3414,10 +3439,12 @@ class CodemanApp {
     }
   }
 
-  async _onSessionNeedsRefresh() {
+  async _onSessionNeedsRefresh(event = {}) {
     // Server sends this after SSE backpressure clears — terminal data was dropped,
     // so reload the buffer to recover from any display corruption.
-    if (!this.activeSessionId || !this.terminal) return;
+    const sessionId = this.activeSessionId;
+    if (event?.id && event.id !== sessionId) return;
+    if (!sessionId || !this.terminal) return;
     // Skip if buffer load already in progress — avoids competing clear+rewrite cycles
     if (this._isLoadingBuffer) return;
     // COD-187: mirror tabs recover with a cheap frame refetch, never a history
@@ -3426,27 +3453,30 @@ class CodemanApp {
       if (this._viewMode !== 'history') await this._refreshMirrorFrame(this.activeSessionId);
       return;
     }
-    const sessionId = this.activeSessionId;
+    if (this._terminalRefreshOwner?.sessionId === sessionId) return;
+    const refreshOwner = { sessionId };
+    this._terminalRefreshOwner = refreshOwner;
     try {
-      // Recovery should restore the WHOLE picture, so ask for full history
-      // rather than a tail. Measured on a 900-line shell pane: the tail rewrite
-      // replaced an 869-row buffer with 158 rows, so every backpressure refresh
-      // silently destroyed most of the scrollback it was meant to repair.
-      //
-      // A repaint-mode pane is the opposite case (tmux keeps ~one frame for it),
-      // so the full capture can be SMALLER than what xterm already holds. Reuse
-      // the same downgrade guard as the scroll-to-top re-pull and fall back to
-      // the historical tail there, leaving that case exactly as it was.
-      let res = await fetch(`/api/sessions/${sessionId}/terminal?full=1`);
+      // A shell can retain a multi-megabyte/100k-line tmux history. Automatic
+      // recovery stays bounded just like normal shell selection; only the
+      // explicit "Load full history" action is allowed to pay for a full replay.
+      // TUI modes still recover the whole picture, with the downgrade guard for
+      // repaint-mode panes whose tmux capture can be smaller than xterm's buffer.
+      const useFullHistory = this.sessions.get(sessionId)?.mode !== 'shell';
+      let res = await fetch(
+        useFullHistory
+          ? `/api/sessions/${sessionId}/terminal?full=1`
+          : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`
+      );
       let data = (await res.json())?.data ?? {};
-      if (data.terminalBuffer && this._replayWouldShrinkBuffer(data.terminalBuffer)) {
+      if (useFullHistory && data.terminalBuffer && this._replayWouldShrinkBuffer(data.terminalBuffer)) {
         res = await fetch(`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
         data = (await res.json())?.data ?? {};
       }
       // Bail on a tab switch mid-fetch: writing here would paint this session's
       // history into the terminal the user is now looking at. The window is two
       // fetches wide in the fallback case, so this guard is not optional.
-      if (this.activeSessionId !== sessionId) return;
+      if (this.activeSessionId !== sessionId || this._terminalRefreshOwner !== refreshOwner) return;
       if (data.terminalBuffer) {
         // This refresh is SERVER-triggered, so a user quietly reading scrollback
         // did not ask for it and must not be dragged to the bottom by it (#259).
@@ -3476,6 +3506,8 @@ class CodemanApp {
       }
     } catch (err) {
       console.error('needsRefresh reload failed:', err);
+    } finally {
+      if (this._terminalRefreshOwner === refreshOwner) this._terminalRefreshOwner = null;
     }
   }
 
@@ -3991,8 +4023,8 @@ class CodemanApp {
     }
   }
 
-  // Claude plan usage limits (5-hour + weekly) — account-global, so the latest
-  // sample from any session drives the shared header chip.
+  // Claude + Codex plan usage limits — account-global, so the latest sample
+  // drives the shared header chip.
   _onSessionStatusTelemetry(data) {
     this.updatePlanUsageChip(data);
     // Persist last-known so the chip shows immediately on the next page load /
@@ -4019,9 +4051,6 @@ class CodemanApp {
     const chip = document.getElementById('planUsageChip');
     if (!chip || !data) return;
     const pct = (w) => (w && typeof w.usedPercentage === 'number' ? Math.round(w.usedPercentage) : null);
-    const five = pct(data.fiveHour);
-    const seven = pct(data.sevenDay);
-    if (five === null && seven === null) return;
     // Per-window color by how much is used up: green < 60%, yellow 60–84%, red ≥ 85%.
     const colorClass = (p) => (p >= 85 ? 'pu-red' : p >= 60 ? 'pu-yellow' : 'pu-green');
     // innerHTML here is XSS-safe ONLY because every interpolated value is a
@@ -4035,12 +4064,23 @@ class CodemanApp {
       if (!Number.isFinite(n)) return '';
       return `<span class="pu-win"><span class="pu-label">${label}</span><span class="pu-val ${colorClass(n)}">${n}%</span></span>`;
     };
-    chip.innerHTML = [seg('5h', five), seg('7d', seven)].filter(Boolean).join('<span class="pu-sep">·</span>');
+    const row = (provider, usage) => {
+      const windows = [seg('5h', pct(usage?.fiveHour)), seg('7d', pct(usage?.sevenDay))].filter(Boolean);
+      if (!windows.length) return '';
+      return `<span class="pu-row"><span class="pu-provider">${provider}</span><span class="pu-windows">${windows.join('<span class="pu-sep">·</span>')}</span></span>`;
+    };
+    const rows = [row('Claude', data), row('Codex', data.codex)].filter(Boolean);
+    chip.innerHTML = rows.length ? rows.join('') : '—';
     const resetStr = (w) => (w && w.resetAt ? new Date(w.resetAt).toLocaleString() : '—');
-    chip.title =
-      `Claude plan usage\n` +
-      `5-hour limit: ${five ?? '—'}% used (resets ${resetStr(data.fiveHour)})\n` +
-      `Weekly limit: ${seven ?? '—'}% used (resets ${resetStr(data.sevenDay)})`;
+    const details = (provider, usage) => {
+      const lines = [];
+      const five = pct(usage?.fiveHour);
+      const seven = pct(usage?.sevenDay);
+      if (five !== null) lines.push(`5-hour limit: ${five}% used (resets ${resetStr(usage.fiveHour)})`);
+      if (seven !== null) lines.push(`Weekly limit: ${seven}% used (resets ${resetStr(usage.sevenDay)})`);
+      return lines.length ? `${provider} plan usage\n${lines.join('\n')}` : '';
+    };
+    chip.title = [details('Claude', data), details('Codex', data.codex)].filter(Boolean).join('\n\n') || 'Plan usage limits';
   }
 
   // Scheduled runs
@@ -5103,14 +5143,24 @@ class CodemanApp {
     this._flickerFilterMaxAcceptanceEpoch = 0;
     // Clear pending terminal writes
     this._clearTimer('syncWaitTimeout');
+    this._clearTimer('_clientDropRecoveryTimer');
     this.pendingWrites = [];
     this._pendingWriteAcceptanceEpochs = [];
     this._pendingWritesMaxAcceptanceEpoch = 0;
     this.writeFrameScheduled = false;
+    // Release the one-chunk-in-flight gate with the rest of the write queue.
+    // flushPendingWrites() early-returns while this is set, so a reset that
+    // cleared everything EXCEPT this flag would leave live output permanently
+    // stalled if xterm's parse callback never lands (disposed terminal, or a
+    // throw inside the async parse). A late callback is harmless: it clears an
+    // already-clear flag and schedules a flush.
+    this._terminalWriteInFlight = false;
+    this._terminalWriteInFlightBytes = 0;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
     this._loadBufferQueueAcceptanceEpochs = null;
     this._bufferLoadOwner = null;
+    this._terminalRefreshOwner = null;
     // Abort any in-flight chunkedTerminalWrite (SSE reconnect reloads buffers)
     this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
     // Preserve local echo overlay text across SSE reconnect — just hide until
@@ -6363,7 +6413,10 @@ class CodemanApp {
 
   resolveSessionSidebarFontSize(value) {
     const size = Number(value);
-    return Number.isInteger(size) && size >= 11 && size <= 18 ? size : 14;
+    // Default 12, matching the sidebar's historical 0.75rem name size: a user
+    // who never touches the slider must not get silently restyled (14 here
+    // bumped every existing sidebar install on the rail feature's release).
+    return Number.isInteger(size) && size >= 11 && size <= 18 ? size : 12;
   }
 
   applySessionSidebarFontSize(settings = null) {
@@ -6385,12 +6438,24 @@ class CodemanApp {
     return document.documentElement.dataset.sessionList === 'sidebar';
   }
 
+  _tabOrientation() {
+    return document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
+  }
+
+  /**
+   * True when the session list renders as a vertical column: the sidebar layout
+   * OR the vertical tab rail. Axis decisions (drag insertion side, active-tab
+   * scroll-into-view, floating-window anchors) must use THIS, not
+   * isSessionSidebarActive() alone — the rail leaves data-session-list at
+   * 'header', so the sidebar predicate reads a vertical rail as horizontal.
+   */
+  _isVerticalTabList() {
+    return this.isSessionSidebarActive() || this._tabOrientation() === 'vertical';
+  }
+
   shouldInlineSessionActions() {
     if (this.isSessionSidebarActive()) return !this.isSessionSidebarCollapsed();
-    return (
-      this._tabOrientation() === 'vertical' &&
-      !document.documentElement.classList.contains('tab-rail-compact')
-    );
+    return this._tabOrientation() === 'vertical' && !document.documentElement.classList.contains('tab-rail-compact');
   }
 
   /**
@@ -6406,6 +6471,38 @@ class CodemanApp {
   isSessionSidebarRich() {
     const root = document.documentElement;
     return root.dataset.sessionList === 'sidebar' && root.dataset.sidebarDetail === 'rich';
+  }
+
+  /**
+   * True when the VERTICAL TAB RAIL (tabOrientation 'vertical') is showing the
+   * detailed rows: the same "created 3d ago · working 12m" line and status pill
+   * the rich sidebar and both home screens carry.
+   *
+   * A docked column is not a tab strip — that was the argument for the rich
+   * sidebar, and the rail is a docked column too, so it defaults to rich and
+   * `tabRailDetail: 'simple'` is the opt-out.
+   *
+   * The compact carve-out is not cosmetic: below 240px the rail already drops
+   * the row actions to a hover affordance, and three lines of stamps in a
+   * ~208px column ellipsize into noise. `_setTabRailWidth()` re-renders the
+   * tabs whenever that class flips, so this gate is re-read at the right moment.
+   */
+  isTabRailRich() {
+    const root = document.documentElement;
+    return (
+      root.getAttribute('data-tab-orientation') === 'vertical' &&
+      root.dataset.tabRailDetail === 'rich' &&
+      !root.classList.contains('tab-rail-compact')
+    );
+  }
+
+  /**
+   * The one gate the render paths ask: does THIS list draw detailed rows?
+   * Either vertical surface can, and neither can be on at once (the sidebar
+   * owns the tabs whenever it is active, which forces the rail off).
+   */
+  isRichTabRows() {
+    return this.isSessionSidebarRich() || this.isTabRailRich();
   }
 
   /**
@@ -6586,7 +6683,7 @@ class CodemanApp {
       this.showHomeSessions?.();
     }
     // Only the rich rows carry stamps that go stale with no event behind them.
-    if (this.isSessionSidebarRich()) this._startSidebarRichClock();
+    if (this.isRichTabRows()) this._startSidebarRichClock();
     else this._stopSidebarRichClock();
   }
 
@@ -6706,13 +6803,14 @@ class CodemanApp {
   }
 
   /**
-   * The per-row model for a rich sidebar row: which state the session is in,
-   * when it was first created, and how long it has been in that state.
+   * The per-row model for a rich row (detailed sidebar or vertical tab rail):
+   * which state the session is in, when it was first created, and how long it
+   * has been in that state.
    *
    * Classification is `_mobileOverviewState()` and the state duration is
    * `_mobileOverviewSince()` (both mobile-overview.js), NOT re-derived here —
-   * the sidebar, the desktop home rail and the phone overview must never
-   * disagree about what "working" means or about which stamp measures it.
+   * the sidebar, the rail, the desktop home rail and the phone overview must
+   * never disagree about what "working" means or about which stamp measures it.
    *
    * Guarded like every other cross-file consumer in this app: a stale cached
    * mobile-overview.js must degrade to a row with no meta line, not throw and
@@ -6759,7 +6857,21 @@ class CodemanApp {
       parts.push(stamp(row.since.key, row.since.at, 'for', 'tab-meta-since'));
     }
     parts.push(`<span class="tab-pill tab-pill--${escapeHtml(row.state)}">${escapeHtml(row.pill)}</span>`);
-    return `<span class="tab-meta" data-i18n-skip>${parts.join('')}</span>`;
+    // Both absolute stamps ALSO on the line itself, not only on the two items.
+    // Below 288px the rail hides `.tab-meta-created` (the `tab-rail-tight`
+    // rule), and a tooltip on a `display: none` element has no hover target —
+    // so without this the created stamp is not merely shrunk, it is gone with
+    // no way to ask for it. The pill and the gaps around the stamps are the
+    // hover targets that remain; an item's own title still wins over this one
+    // where the item is visible.
+    const lineTitle = [
+      row.createdAt ? `First created: ${new Date(row.createdAt).toLocaleString()}` : '',
+      row.since && row.since.at ? `${row.since.key}: ${new Date(row.since.at).toLocaleString()}` : '',
+    ]
+      .filter(Boolean)
+      .join('  \u00B7  ');
+    const lineTitleAttr = lineTitle ? ` title="${escapeHtml(lineTitle)}"` : '';
+    return `<span class="tab-meta"${lineTitleAttr} data-i18n-skip>${parts.join('')}</span>`;
   }
 
   /** Same formatter as both home screens, so a duration is written the same way everywhere. */
@@ -6804,7 +6916,7 @@ class CodemanApp {
   _startSidebarRichClock() {
     if (this._sidebarRichClock) return;
     this._sidebarRichClock = setInterval(() => {
-      if (!this.isSessionSidebarRich()) {
+      if (!this.isRichTabRows()) {
         this._stopSidebarRichClock();
         return;
       }
@@ -6896,12 +7008,13 @@ class CodemanApp {
       ) || container.querySelector('.session-tab.active');
     if (!tab) return;
 
-    // Sidebar layout: the list scrolls VERTICALLY in its own scroller, so the
-    // horizontal computeTabScrollLeft math below would always no-op (scrollLeft
-    // pinned at 0). With 25+ sessions the active row is routinely below the
-    // fold; 'nearest' never scrolls when it is already visible, and only the
-    // list's own scroller moves — the drawer and document stay put.
-    if (this.isSessionSidebarActive()) {
+    // Sidebar layout AND the vertical rail: the list scrolls VERTICALLY in its
+    // own scroller, so the horizontal computeTabScrollLeft math below would
+    // always no-op (scrollLeft pinned at 0). With 25+ sessions the active row
+    // is routinely below the fold; 'nearest' never scrolls when it is already
+    // visible, and only the list's own scroller moves — drawer/rail and
+    // document stay put.
+    if (this._isVerticalTabList()) {
       tab.scrollIntoView({ block: 'nearest' });
       return;
     }
@@ -6932,12 +7045,13 @@ class CodemanApp {
 
   /**
    * Where a floating window (subagent / ultracode) attaches to its parent tab.
-   * Header strip: below the tab, connector runs vertically. Sidebar: to the
-   * RIGHT of the tab, connector runs horizontally — otherwise the window spawns
-   * on top of the sidebar and its bezier loops backwards underneath it.
+   * Header strip: below the tab, connector runs vertically. Sidebar AND the
+   * vertical rail: to the RIGHT of the tab, connector runs horizontally —
+   * otherwise the window spawns on top of the list and its bezier loops
+   * backwards underneath it.
    */
   _tabAnchor(rect) {
-    if (this.isSessionSidebarActive()) {
+    if (this._isVerticalTabList()) {
       return {
         x: rect.right,
         y: rect.top + rect.height / 2,
@@ -7032,7 +7146,7 @@ class CodemanApp {
     if (canIncremental) {
       // Read once for the whole pass, like the full-rebuild path: this touches
       // the DOM and the loop below runs for every session on every SSE tick.
-      const richRows = this.isSessionSidebarRich();
+      const richRows = this.isRichTabRows();
       // Incremental update - only modify changed properties
       for (const [id, session] of this.sessions) {
         const tab = container.querySelector(`.session-tab[data-id="${id}"]`);
@@ -7149,6 +7263,9 @@ class CodemanApp {
               nameEl.textContent = name;
             }
             nameEl.dataset.fullName = name;
+            tab.title = _p && _p.suffix
+              ? (session.workingDir ? `${_p.prefix} (${session.workingDir})` : _p.prefix)
+              : (session.workingDir || '');
           }
           const tooltip = session.workingDir && session.workingDir !== name
             ? `${name}\n${session.workingDir}`
@@ -7241,11 +7358,12 @@ class CodemanApp {
     // The full-render path already redraws the connection SVG; this incremental
     // one does not, and a badge appearing widens a tab and shifts every tab after
     // it, sliding the lineage arcs off their anchors. Only pay for it when there
-    // is something anchored to tab rects: lineage arcs, or — in sidebar layout,
-    // where lineage is skipped and the edge count stays 0 — the subagent/
-    // ultracode connectors, whose rows a badge changes the HEIGHT of. Same
-    // widening as the strip-scroll listener in session-lineage.js.
-    if (this._lineageEdgeCount > 0 || this.isSessionSidebarActive()) this.updateConnectionLines();
+    // is something anchored to tab rects: lineage arcs, or — in a VERTICAL list
+    // (sidebar, where lineage is skipped and the edge count stays 0, or the
+    // rail, which can show connectors with zero lineage edges too) — the
+    // subagent/ultracode connectors, whose rows a badge changes the HEIGHT of.
+    // Same widening as the strip-scroll listener in session-lineage.js.
+    if (this._lineageEdgeCount > 0 || this._isVerticalTabList()) this.updateConnectionLines();
 
     this.applySidebarFilter(this._sidebarFilter);
   }
@@ -7280,6 +7398,11 @@ class CodemanApp {
         })
       : 'horizontal';
     if (orientation === 'vertical') {
+      container.classList.remove('tabs-auto-wrap');
+      return;
+    }
+
+    if (manualTwoRows || deviceType !== 'desktop') {
       container.classList.remove('tabs-auto-wrap');
       this._applyHeaderRightWrap(deviceType, false, false);
       return;
@@ -7486,7 +7609,7 @@ class CodemanApp {
     ];
     // Read once, not per session: isSessionSidebarRich() touches the DOM and
     // this loop runs for every tab on every full rebuild.
-    const richRows = this.isSessionSidebarRich();
+    const richRows = this.isRichTabRows();
     let _tabIdx = 0;
     for (const ref of tabOrder) {
       if (ref.kind === 'webview') {
@@ -7535,7 +7658,7 @@ class CodemanApp {
       // Keep the complete name in the DOM. #232's horizontal view hides the
       // generated prefix span; COD-299's vertical rail reveals and wraps it.
       const parsedName = parseSessionPrefix(name);
-      const tabLabelHtml = parsedName && parsedName.suffix
+      const tabLabel = parsedName && parsedName.suffix
         ? `<span class="tab-name-prefix">${escapeHtml(parsedName.prefix)}: </span>${escapeHtml(parsedName.suffix)}`
         : escapeHtml(name);
       // COD-299: CSS may clamp the visible label after two lines, but the native
@@ -7553,9 +7676,10 @@ class CodemanApp {
       const accessibleName = `${placement ? `${name} session, ${placement.description}` : `${name} session`}, ${activity.ariaPhrase}`;
       const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
 
-      // Rich sidebar rows only: the home screen's created/state stamps and a
-      // status pill. richRow is null in every other layout, and both helpers
-      // below collapse to '' — the header strip's markup is unchanged.
+      // Rich rows only (the detailed sidebar OR the vertical tab rail): the home
+      // screen's created/state stamps and a status pill. richRow is null in every
+      // other layout, and both helpers below collapse to '' — the header strip's
+      // markup is unchanged.
       const richRow = richRows ? this._sidebarRichRow(id, session) : null;
       const richMeta = this._sidebarRichMetaHTML(richRow);
       const richClass = richRow ? ` tab-state-${richRow.state}` : '';
@@ -7574,8 +7698,8 @@ class CodemanApp {
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : ''}
-              <span class="tab-name" data-session-id="${escapeHtml(id)}" data-full-name="${escapeHtml(name)}">${tabLabelHtml}</span>
+              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : mode === 'grok' ? '<span class="tab-mode grok" aria-hidden="true">gk</span>' : mode === 'deepseek' ? '<span class="tab-mode deepseek" aria-hidden="true">ds</span>' : ''}
+              <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
               ${inlineSessionActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
@@ -8274,6 +8398,7 @@ class CodemanApp {
     this._tabCompletionBaseText = null;
     this._clearTimer('_tabCompletionFallback');
     this._clearTimer('_clientDropRecoveryTimer');
+    this._terminalRefreshOwner = null;
 
     // Clean up pending terminal writes to prevent old session data from appearing in new session
     this._clearTimer('syncWaitTimeout');
@@ -8281,6 +8406,14 @@ class CodemanApp {
     this._pendingWriteAcceptanceEpochs = [];
     this._pendingWritesMaxAcceptanceEpoch = 0;
     this.writeFrameScheduled = false;
+    // Release the one-chunk-in-flight gate with the rest of the write queue.
+    // flushPendingWrites() early-returns while this is set, so a reset that
+    // cleared everything EXCEPT this flag would leave live output permanently
+    // stalled if xterm's parse callback never lands (disposed terminal, or a
+    // throw inside the async parse). A late callback is harmless: it clears an
+    // already-clear flag and schedules a flush.
+    this._terminalWriteInFlight = false;
+    this._terminalWriteInFlightBytes = 0;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
     this._loadBufferQueueAcceptanceEpochs = null;
@@ -8609,9 +8742,12 @@ class CodemanApp {
       this._pendingWriteAcceptanceEpochs = [];
       this._pendingWritesMaxAcceptanceEpoch = 0;
       this.writeFrameScheduled = false;
+      this._terminalWriteInFlight = false;
+      this._terminalWriteInFlightBytes = 0;
       this._isLoadingBuffer = false;
       this._loadBufferQueue = null;
       this._loadBufferQueueAcceptanceEpochs = null;
+      this._terminalRefreshOwner = null;
       this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
       this.activeSessionId = null;
     }
@@ -8659,6 +8795,7 @@ class CodemanApp {
     // Font metrics must match the selected mode before the socket can flush an
     // activation and before the first fit/resize measures this viewer.
     this.applyTerminalFontPolicy?.(this.sessions.get(sessionId)?.mode);
+    this._activateFileBrowserSession?.(sessionId);
     // Repaint the partial-history banner for the tab being switched TO. The
     // replay paths refresh it when their fetch lands; without this the previous
     // session's notice stays on screen until then (#258).
@@ -9315,7 +9452,11 @@ class CodemanApp {
               ? 'Kill Tmux & Antigravity'
               : session.mode === 'pi'
                 ? 'Kill Tmux & Pi'
-                : 'Kill Tmux & Claude Code';
+                : session.mode === 'grok'
+                  ? 'Kill Tmux & Grok'
+                  : session.mode === 'deepseek'
+                    ? 'Kill Tmux & DeepSeek'
+                    : 'Kill Tmux & Claude Code';
     }
 
     document.getElementById('closeConfirmModal').classList.add('active');

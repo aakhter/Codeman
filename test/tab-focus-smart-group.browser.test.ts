@@ -150,8 +150,13 @@ describe('COD-319 Focus smart group in Chromium', () => {
     await shortcut.waitFor();
     expect(await shortcut.count()).toBe(1);
     expect(await shortcut.getAttribute('aria-current')).toBe('page');
-    expect(await shortcut.locator('.tab-number, [data-tab-ref-drag]').count()).toBe(0);
-    expect(await page!.locator('[data-id="s1"] .tab-number').textContent()).toBe('1');
+    // COD-372 (`044f7749`) numbers Focus shortcuts FIRST: the shortcut takes Alt+1,
+    // its canonical row drops its badge entirely, and the remaining canonical rows
+    // number on from there. This used to assert the shortcut carried no badge at all.
+    // The drag handle is still stripped — only the number came back.
+    expect(await shortcut.locator('[data-tab-ref-drag]').count()).toBe(0);
+    expect(await shortcut.locator('.tab-number').textContent()).toBe('1');
+    expect(await page!.locator('[data-id="s1"] .tab-number').count()).toBe(0);
     expect(await page!.locator('[data-webview-id="w1"] .tab-number').textContent()).toBe('2');
     expect(await page!.locator('[aria-selected="true"]').count()).toBe(1);
 

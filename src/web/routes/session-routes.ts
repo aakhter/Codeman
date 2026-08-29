@@ -24,6 +24,8 @@ import {
   type GeminiConfig,
   type AntigravityConfig,
   type PiConfig,
+  type GrokConfig,
+  type DeepSeekConfig,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -54,6 +56,7 @@ import { TabLayoutValidationError } from '../../tab-layout.js';
 import {
   sessionWaits,
   resolveWaitSignals,
+  sessionHookOptions,
   signalForStatus,
   WaitCapacityError,
   type WaitSignal,
@@ -158,6 +161,7 @@ import {
   readDockerHosts,
   toSessionDocker,
 } from '../../docker-hosts.js';
+import { readDeepSeekLastResponse } from '../../deepseek-transcript.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
@@ -460,6 +464,18 @@ export function _resetPasteRateBuckets(): void {
  * session user could simply answer "yes" to in the terminal, so merely omitting
  * `--approve` is not a clamp. Forcing `approveProjectTrust: false` makes
  * buildPiCommand emit `--no-approve`, and the prompt never appears.
+ *
+ * Grok is like Codex/Antigravity: the bypass switch is `alwaysApprove`
+ * (`--always-approve`), and an ABSENT config already spawns in grok's own
+ * ask-mode default, so only a sent config needs the flag forced off.
+ *
+ * DeepSeek joins the same only-if-sent branch, but its switch is not a flag: the
+ * harness has no command-line permission option, and its sandbox/approval rows
+ * read `DSH_PERMISSION_MODE`. Omitting that export leaves the harness on its own
+ * `workspace-write` preset, which still asks, so an absent config is already
+ * safe; a sent one is forced down to `workspace-write` rather than to
+ * `read-only`, because the clamp exists to remove PRIVILEGE, not to break a
+ * session's ability to edit its own workspace.
  */
 /**
  * COD-124 unit 2, Gap A — computes which live automations are armed against
@@ -518,15 +534,19 @@ async function clampExternalCliBypassForOwner(
   codexConfig: CodexConfig | undefined,
   geminiConfig: GeminiConfig | undefined,
   antigravityConfig: AntigravityConfig | undefined,
-  piConfig: PiConfig | undefined
+  piConfig: PiConfig | undefined,
+  grokConfig: GrokConfig | undefined,
+  deepSeekConfig: DeepSeekConfig | undefined
 ): Promise<{
   codexConfig: CodexConfig | undefined;
   geminiConfig: GeminiConfig | undefined;
   antigravityConfig: AntigravityConfig | undefined;
   piConfig: PiConfig | undefined;
+  grokConfig: GrokConfig | undefined;
+  deepSeekConfig: DeepSeekConfig | undefined;
 }> {
   const granted = await canUsernameRunPrivilegedCommands(owner);
-  if (granted) return { codexConfig, geminiConfig, antigravityConfig, piConfig };
+  if (granted) return { codexConfig, geminiConfig, antigravityConfig, piConfig, grokConfig, deepSeekConfig };
   // Non-granted: force codex/antigravity bypass off (only meaningful when a config was
   // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default)
   // and pi to --no-approve (clamps an explicit true AND pi's own "ask" default).
@@ -536,16 +556,100 @@ async function clampExternalCliBypassForOwner(
     ? { ...antigravityConfig, dangerouslySkipPermissions: false }
     : antigravityConfig;
   const clampedPi: PiConfig = { ...(piConfig ?? {}), approveProjectTrust: false };
+  const clampedGrok = grokConfig ? { ...grokConfig, alwaysApprove: false } : grokConfig;
+  const clampedDeepSeek = deepSeekConfig
+    ? { ...deepSeekConfig, permissionMode: 'workspace-write' as const }
+    : deepSeekConfig;
   return {
     codexConfig: clampedCodex,
     geminiConfig: clampedGemini,
     antigravityConfig: clampedAntigravity,
     piConfig: clampedPi,
+    grokConfig: clampedGrok,
+    deepSeekConfig: clampedDeepSeek,
   };
 }
 
 /** Test hook: the clamp is the multi-user safety gate for the external CLIs' privileged flags. */
 export const _clampExternalCliBypassForOwner = clampExternalCliBypassForOwner;
+
+/**
+ * Env-var keys a non-granted owner must not be able to set, because each one
+ * hands back privilege the config clamp above just removed — or, for the last,
+ * redirects a credential the server injects.
+ *
+ * All are DeepSeek's, and all are reachable because `DSH_*` and `DEEPSEEK_*` are
+ * allowlisted `envOverrides` prefixes (schemas.ts) — which they have to be, since
+ * that is also how a user configures the harness's non-privileged knobs.
+ *
+ * - `DSH_PERMISSION_MODE` IS the harness's permission switch. Every other CLI's
+ *   bypass is a command-line FLAG, reachable only through the per-CLI config the
+ *   clamp already owns; this one is an env var, so the config clamp alone is
+ *   half a gate.
+ * - `DSH_HOME` points the launcher at a profile tree, and a profile's plugin code
+ *   executes at BOOT, before any approval row can apply. A user who can write a
+ *   workspace can put a profile in it, so this is the wider of the two.
+ * - `DEEPSEEK_BASE_URL` aims the provider endpoint, and `_configureDeepSeek()`
+ *   forwards the SERVER's own `DEEPSEEK_API_KEY` into every dsh pane before
+ *   `applyEnvOverrides()` runs — so a non-granted owner who could set the base
+ *   URL would have the operator's API key sent as a bearer credential to a host
+ *   of their choosing. (`DEEPSEEK_API_KEY` itself stays overridable: supplying
+ *   your OWN key removes privilege rather than granting it.)
+ */
+const OWNER_CLAMPED_ENV_KEYS = ['DSH_PERMISSION_MODE', 'DSH_HOME', 'DEEPSEEK_BASE_URL'] as const;
+
+/**
+ * Env-var half of the multi-user bypass clamp.
+ *
+ * `clampExternalCliBypassForOwner()` clamps the per-CLI CONFIG, and for every CLI
+ * but DeepSeek that is the whole story. Here it is not: `applyEnvOverrides()` runs
+ * AFTER `_configureDeepSeek()` in tmux-manager, so an override sent on the SAME
+ * request lands last and wins, and a non-granted owner could restore
+ * `danger-full-access` on the very request the config clamp downgraded.
+ *
+ * Keys are DROPPED rather than rewritten: dropping falls through to what
+ * `_configureDeepSeek()` exports, which is the clamped config and the server's own
+ * `DSH_HOME`, i.e. exactly the intended state. No-op in single-user mode and for a
+ * granted owner, like every other clamp here
+ * (`canUsernameRunPrivilegedCommands()` returns true when `!isMultiUserMode()`),
+ * and it returns the caller's own object untouched when there is nothing to strip.
+ */
+async function clampEnvOverridesForOwner(
+  owner: string | undefined,
+  envOverrides: Record<string, string> | undefined
+): Promise<Record<string, string> | undefined> {
+  if (!envOverrides) return envOverrides;
+  if (!OWNER_CLAMPED_ENV_KEYS.some((key) => key in envOverrides)) return envOverrides;
+  if (await canUsernameRunPrivilegedCommands(owner)) return envOverrides;
+  const clamped = { ...envOverrides };
+  for (const key of OWNER_CLAMPED_ENV_KEYS) delete clamped[key];
+  return clamped;
+}
+
+/** Test hook: the env-var half of the same multi-user safety gate. */
+export const _clampEnvOverridesForOwner = clampEnvOverridesForOwner;
+
+/**
+ * Why a DeepSeek session cannot start, or null when it can.
+ *
+ * Availability for this mode is TWO questions, not one, because `dsh` is a
+ * profile launcher rather than an agent: the binary must resolve (and prove it
+ * is the harness and not Debian's dancer's shell), AND a profile that can occupy
+ * a pane must exist. Reporting only the first would let the Run button spawn a
+ * pane that dies instantly, which is the single most confusing failure this mode
+ * can produce, so each half gets its own actionable message.
+ *
+ * A profile named EXPLICITLY is checked on both counts: existence, and whether
+ * it is pane-capable — `web` serves a browser UI and `headless` answers one task
+ * and exits, so both would present as "the tab immediately died".
+ */
+async function resolveDeepSeekLaunchError(requestedProfile?: string): Promise<string | null> {
+  // Thin async wrapper: the implementation moved into the resolver module so
+  // CRON fires can ask the same question before constructing a Session; the
+  // dynamic import keeps this file's startup free of the probe machinery.
+  const { resolveDeepSeekLaunchError: impl } = await import('../../utils/deepseek-cli-resolver.js');
+  return impl(requestedProfile);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Agent wait helpers (shared by GET /wait, GET /wait-output, POST /input)
@@ -984,6 +1088,8 @@ export function registerSessionRoutes(
       body.mode !== 'gemini' &&
       body.mode !== 'antigravity' &&
       body.mode !== 'pi' &&
+      body.mode !== 'grok' &&
+      body.mode !== 'deepseek' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       (workingDir.startsWith(CASES_DIR + '/') || workingDir.startsWith(managedCasesBase + '/'));
@@ -1083,6 +1189,16 @@ export function registerSessionRoutes(
         }
       }
     }
+    if (body.mode === 'deepseek') {
+      const err = await resolveDeepSeekLaunchError(body.deepSeekConfig?.profile);
+      if (err) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, err);
+    }
+    if (body.mode === 'grok') {
+      const { isGrokAvailable, getGrokNotFoundMessage } = await import('../../utils/grok-cli-resolver.js');
+      if (!isGrokAvailable()) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getGrokNotFoundMessage());
+      }
+    }
 
     // Pre-validate resumeSessionId: check that the conversation file actually exists
     // in Claude's projects directory. If not, skip resume to avoid confusing
@@ -1127,9 +1243,14 @@ export function registerSessionRoutes(
               ? body.antigravityConfig?.model
               : mode === 'pi'
                 ? body.piConfig?.model
-                : mode !== 'shell'
-                  ? modelConfig?.defaultModel || undefined
-                  : undefined;
+                : mode === 'grok'
+                  ? body.grokConfig?.model
+                  : // DeepSeek's model is a composition entry in the profile's config
+                    // tree, not a session flag, so there is deliberately nothing to
+                    // read here (see docs/deepseek-integration.md).
+                    mode !== 'shell' && mode !== 'deepseek'
+                    ? modelConfig?.defaultModel || undefined
+                    : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     // Section 6.3: force non-granted users to a classifier-guarded mode.
     const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, owner);
@@ -1139,12 +1260,16 @@ export function registerSessionRoutes(
       geminiConfig: gatedGeminiConfig,
       antigravityConfig: gatedAntigravityConfig,
       piConfig: gatedPiConfig,
+      grokConfig: gatedGrokConfig,
+      deepSeekConfig: gatedDeepSeekConfig,
     } = await clampExternalCliBypassForOwner(
       owner,
       body.codexConfig,
       body.geminiConfig,
       body.antigravityConfig,
-      body.piConfig
+      body.piConfig,
+      body.grokConfig,
+      body.deepSeekConfig
     );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
@@ -1164,8 +1289,10 @@ export function registerSessionRoutes(
       geminiConfig: mode === 'gemini' ? gatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? gatedAntigravityConfig : undefined,
       piConfig: mode === 'pi' ? gatedPiConfig : undefined,
+      grokConfig: mode === 'grok' ? gatedGrokConfig : undefined,
+      deepSeekConfig: mode === 'deepseek' ? gatedDeepSeekConfig : undefined,
       resumeSessionId: validatedResumeId,
-      envOverrides: body.envOverrides,
+      envOverrides: await clampEnvOverridesForOwner(owner, body.envOverrides),
       effort: body.effort,
       truecolorEnabled,
       checkpointEnabled,
@@ -1418,6 +1545,8 @@ export function registerSessionRoutes(
         session.mode !== 'gemini' &&
         session.mode !== 'antigravity' &&
         session.mode !== 'pi' &&
+        session.mode !== 'grok' &&
+        session.mode !== 'deepseek' &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -1608,7 +1737,10 @@ export function registerSessionRoutes(
       wait === true || (typeof wait === 'string' && wait.trim().length > 0) || (Array.isArray(wait) && wait.length > 0);
     let until: readonly WaitSignal[] = [];
     if (wantsWait) {
-      const resolved = resolveWaitSignals(wait === true ? undefined : wait, { mode: session.mode });
+      const resolved = resolveWaitSignals(wait === true ? undefined : wait, {
+        mode: session.mode,
+        ...sessionHookOptions(session),
+      });
       if (resolved.error) return createErrorResponse(ApiErrorCode.INVALID_INPUT, resolved.error);
       until = resolved.until;
     }
@@ -1795,7 +1927,7 @@ export function registerSessionRoutes(
 
     // Shared with the `wait` field on POST .../input: unknown token is a 400,
     // hook-only signals are rejected explicitly but dropped from the default.
-    const { until, error } = resolveWaitSignals(query.until, { mode: session.mode });
+    const { until, error } = resolveWaitSignals(query.until, { mode: session.mode, ...sessionHookOptions(session) });
     if (error) return createErrorResponse(ApiErrorCode.INVALID_INPUT, error);
 
     // The value actually applied after clamping, echoed below: a caller that asked
@@ -2316,6 +2448,35 @@ export function registerSessionRoutes(
         hasContext: blocks.length > 0,
         messages: query.context === 'full' ? blocks : undefined,
       };
+    }
+
+    // DeepSeek Harness writes a real structured transcript under
+    // `$DSH_HOME/sessions/**`, so read that rather than segmenting the pane.
+    // ⚠️ For dsh the pane fallback is not merely coarse, it is WRONG: dsh-TUI
+    // paints a full-screen splash, and the segmenter served its ASCII-art logo
+    // back as the worker's answer (measured), which an agent polling for a
+    // reply reads as a reply. So an EMPTY transcript result still wins over the
+    // pane — "nothing said yet" is the honest answer. Only `null`, meaning a
+    // Node too old to decode zstd, falls through to the segmenter below.
+    // ⚠️ Local sessions only: a docker case's harness writes its transcript
+    // inside the CONTAINER's ~/.dsh (the workspace bind-mount does not cover
+    // it) and a remote-SSH case's lives on the remote host, so the local
+    // reader would scan a $DSH_HOME that can never hold this session's file
+    // and return "nothing said yet" forever — an agent polling that worker
+    // would starve on an answer that exists. Those configurations keep the
+    // pane segmenter below: coarse, but the real conversation.
+    if (session.mode === 'deepseek' && !session.docker && !session.remote) {
+      const deepSeekQuery = req.query as { context?: string };
+      const full = deepSeekQuery.context === 'full';
+      const transcript = await readDeepSeekLastResponse(session, { blocks: full });
+      if (transcript) {
+        return {
+          text: transcript.text,
+          timestamp: transcript.timestamp,
+          hasContext: transcript.text.length > 0 || transcript.blocks.length > 0,
+          messages: full ? transcript.blocks : undefined,
+        };
+      }
     }
 
     // OpenCode / Gemini / Antigravity / Pi render their own TUIs and write no
@@ -3104,6 +3265,8 @@ export function registerSessionRoutes(
       geminiConfig,
       antigravityConfig,
       piConfig,
+      grokConfig,
+      deepSeekConfig,
       envOverrides,
       effort,
       parentSessionId,
@@ -3161,6 +3324,8 @@ export function registerSessionRoutes(
         (geminiConfig && mode !== 'gemini') ||
         (antigravityConfig && mode !== 'antigravity') ||
         (piConfig && mode !== 'pi') ||
+        (grokConfig && mode !== 'grok') ||
+        (deepSeekConfig && mode !== 'deepseek') ||
         (openCodeConfig && mode !== 'opencode')
       ) {
         return createErrorResponse(
@@ -3190,6 +3355,8 @@ export function registerSessionRoutes(
         geminiConfig ||
         antigravityConfig ||
         piConfig ||
+        grokConfig ||
+        deepSeekConfig ||
         openCodeConfig
       ) {
         return createErrorResponse(
@@ -3286,6 +3453,20 @@ export function registerSessionRoutes(
         }
       }
 
+      // Check Grok availability if requested
+      if (mode === 'grok') {
+        const { isGrokAvailable, getGrokNotFoundMessage } = await import('../../utils/grok-cli-resolver.js');
+        if (!isGrokAvailable()) {
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getGrokNotFoundMessage());
+        }
+      }
+
+      // Check DeepSeek Harness availability if requested (binary AND a pane-capable profile).
+      if (mode === 'deepseek') {
+        const err = await resolveDeepSeekLaunchError(deepSeekConfig?.profile);
+        if (err) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, err);
+      }
+
       // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
       let linkedCases: Record<string, string> = {};
       try {
@@ -3330,8 +3511,15 @@ export function registerSessionRoutes(
         writeFileSync(join(resolvedCasePath, 'CLAUDE.md'), claudeMd);
 
         // Write .claude/settings.local.json with hooks for desktop notifications
-        // (Claude-specific — OpenCode, Codex, Gemini, and Antigravity use their own systems)
-        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini' && mode !== 'antigravity' && mode !== 'pi') {
+        // (Claude-specific — OpenCode, Codex, Gemini, Antigravity, Pi and Grok use their own systems)
+        if (
+          mode !== 'opencode' &&
+          mode !== 'codex' &&
+          mode !== 'gemini' &&
+          mode !== 'antigravity' &&
+          mode !== 'pi' &&
+          mode !== 'grok'
+        ) {
           await writeHooksConfig(resolvedCasePath);
         }
 
@@ -3403,6 +3591,8 @@ export function registerSessionRoutes(
       mode !== 'gemini' &&
       mode !== 'antigravity' &&
       mode !== 'pi' &&
+      mode !== 'grok' &&
+      mode !== 'deepseek' &&
       !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
@@ -3425,9 +3615,12 @@ export function registerSessionRoutes(
               ? antigravityConfig?.model
               : mode === 'pi'
                 ? piConfig?.model
-                : mode !== 'shell'
-                  ? qsModelConfig?.defaultModel || undefined
-                  : undefined;
+                : mode === 'grok'
+                  ? grokConfig?.model
+                  : // DeepSeek's model lives in the profile's config tree, not here.
+                    mode !== 'shell' && mode !== 'deepseek'
+                    ? qsModelConfig?.defaultModel || undefined
+                    : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const qsEffectiveClaudeMode = await resolveClaudeModeForUsername(qsClaudeModeConfig.claudeMode, owner);
     // Section 6.3: clamp Codex/Gemini/Antigravity bypass switches for a non-granted owner (no-op single-user/granted).
@@ -3436,7 +3629,19 @@ export function registerSessionRoutes(
       geminiConfig: qsGatedGeminiConfig,
       antigravityConfig: qsGatedAntigravityConfig,
       piConfig: qsGatedPiConfig,
-    } = await clampExternalCliBypassForOwner(owner, codexConfig, geminiConfig, antigravityConfig, piConfig);
+      grokConfig: qsGatedGrokConfig,
+      deepSeekConfig: qsGatedDeepSeekConfig,
+    } = await clampExternalCliBypassForOwner(
+      owner,
+      codexConfig,
+      geminiConfig,
+      antigravityConfig,
+      piConfig,
+      grokConfig,
+      deepSeekConfig
+    );
+    // Same owner clamp for env overrides as POST /api/sessions (upstream 74194e4f).
+    const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsTruecolorEnabled = await ctx.getTruecolorEnabled();
     const qsCheckpointEnabled = await ctx.getCheckpointDefaultEnabled();
@@ -3461,7 +3666,9 @@ export function registerSessionRoutes(
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
       piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
-      envOverrides,
+      grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
+      deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
+      envOverrides: qsGatedEnvOverrides,
       effort,
       truecolorEnabled: qsTruecolorEnabled,
       checkpointEnabled: qsCheckpointEnabled,
@@ -3521,7 +3728,7 @@ export function registerSessionRoutes(
         });
         ctx.broadcast(SseEvent.SessionInteractive, { id: session.id, mode: 'shell' });
       } else {
-        // 'claude', 'opencode', 'codex', 'gemini', and 'antigravity' modes use startInteractive()
+        // every non-shell mode ('claude', the external CLIs) uses startInteractive()
         await session.startInteractive();
         getLifecycleLog().log({
           event: 'started',

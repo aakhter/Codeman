@@ -1,5 +1,72 @@
 # aicodeman
 
+## 1.23.2
+
+### Patch Changes
+
+- Codex plan usage in the header chip, a visible inline rename in the session sidebar, and an installer that no longer loses Tailscale access on a re-run.
+
+  **Codex plan usage in the header chip** (#346): the plan-usage chip used to show Claude's 5-hour and weekly limits without saying they were Claude's, which stops being a detail the moment you run more than one CLI. It now renders one compact row per provider, Claude above Codex, each labelled and colour-coded by how much is used up. Claude's numbers still come from Codeman's marked `statusLine.command` exporter; Codex's come from the signed-in host CLI's read-only `account/rateLimits/read` app-server request at startup and every five minutes, so credentials stay inside the CLI and no auth material reaches the browser. Only the main `codex` bucket is read (model-specific buckets such as Spark are separate limits and are deliberately excluded), and the Codex row is omitted entirely when no 5-hour or weekly window is available, rather than inventing one.
+
+  **Inline rename is visible in the session sidebar** (#345): starting a rename on a sidebar row opened a focused input you could not see. The row's ellipsis clamp was still painting over the live editor, so text and caret went in blind. The sidebar now gets the same unclamped editor layout the vertical tab rail already had. Covered by a Chromium regression test that asserts the painted `overflow` and the input's measured width, not just the class name.
+
+  **install.sh keeps Tailscale access on a re-run**: a re-run whose build failed could drop a working Tailscale binding instead of preserving it. The installer now offers Tailscale setup again on re-run rather than losing it, and the README describes the three-way network-access prompt (Tailscale / LAN / local-only) as it actually behaves.
+
+  ### Thanks
+  - @JackStuart for #346
+  - @fibr for #345
+  - @tailong-wu for #342, whose analysis of the terminal refresh replay loop matched a fix that had landed on master a few hours earlier
+
+## 1.23.1
+
+### Patch Changes
+
+- Fix a fresh-Linux install failure, and bound the browser terminal's live write queue.
+
+  **install.sh now installs a build toolchain.** Reported against a stock Ubuntu 24 server: node-pty publishes prebuilt binaries for darwin and win32 only, so on Linux it is always compiled from source during `npm install`. The installer set up Node, tmux and git but never a compiler, so a machine without `build-essential` died deep inside node-gyp with `not found: make` — which reads like an npm bug rather than a missing system package. `make`, a C++ compiler and `python3` are now checked up front exactly like git and tmux, installed per distro (apt / dnf / pacman / apk / zypper) behind the same consent prompt, and re-verified afterwards rather than assumed. If `npm install` fails anyway — including on `install.sh update` — it now names the missing tools and the command that installs them instead of leaving a node-gyp stack trace as the last word.
+
+  **Bounded live xterm backpressure** (#339): live output is now one chunk in flight at a time, released by xterm's own parse callback, so xterm's private WriteBuffer can no longer hide an unbounded backlog behind the browser's 128 KiB render cap; queued, loading and incoming bytes all count against that cap. Automatic drop recovery for a shell stays on the bounded 1 MiB tail — a 100k-line shell capture is tens of MiB, and parsing it on the main thread is the freeze the cap exists to prevent — while TUI modes still recover full history behind the existing downgrade guard. Duplicate SSE terminal events are dropped before JSON parsing while WebSocket owns terminal I/O, and recovery is single-flight per active session. Follow-up hardening: the three write-queue reset paths now also release the in-flight gate, so a parse callback that never lands cannot leave live output permanently stalled.
+
+  **File Viewer searches the workspace** (#340): the File Viewer search box now queries the server-side file search endpoint with a 250 ms debounce and strict response validation, instead of filtering only the part of the tree already loaded. Tree and search state are scoped to the active session, the hidden-file preference and independent request epochs, so a stale response cannot repaint the panel; cached-tree restoration, directory results and reset behaviour survive session switches and both panel-hide paths.
+
+  ### Thanks
+  - @dignfei for #339
+  - @aakhter for #340
+
+- 858b15e: Search the full session workspace from File Viewer while keeping results scoped to the active session and hidden-file preference.
+
+## 1.23.0
+
+### Minor Changes
+
+- DeepSeek Harness as a ninth run mode, DeepSeek agent workers, and detailed rows for the vertical tab rail.
+
+  **DeepSeek Harness (`dsh`) run mode** (#337): DeepSeek's plugin-native agent framework joins Claude Code, shell, OpenCode, Codex, Gemini, Antigravity, Pi and Grok as a run mode. The harness is a profile launcher rather than an agent, so availability is two questions (binary AND a pane-capable profile): the Run button gates on both, a missing terminal profile is offered as a one-click install (`POST /api/deepseek/install-profile`, the only endpoint in Codeman that installs third-party code, fenced accordingly), and the resolver demands the harness's own help banner so Debian's unrelated `dsh` (dancer's shell) can never be spawned. Its permission switch is the `DSH_PERMISSION_MODE` env export (the harness has no bypass flag), injected via tmux setenv and clamped for non-granted owners in multi-user mode, including the env-override path. The community TUI's supervisor-reporting contract makes deepseek the first non-Claude mode with REAL lifecycle signals: a generated status shim turns its idle/working/blocked reports into definitive `stop`/`permission_prompt`/`agent_working` hook events, so dsh sessions get real respawn triggers, real wait signals and red "needs you" alerts instead of output-stabilization guesswork. The vendor's browser UI opens as a managed web tab through a background `dsh web` fenced to Codeman's origin. Docker image support included.
+
+  **DeepSeek agent workers** (#341): the codeman agent skill can spawn and drive dsh workers like claude ones — tasked, waited on and read with the same calls. `GET /api/sessions/:id/last-response` reads the harness's real zstd transcript (one frame per append; the reader walks frame boundaries itself, since a naive decode silently truncates to the first frame), distinguishes real prompts from plugin-injected context, and reports a failed turn's provider error instead of an empty answer.
+
+  **Vertical tab rail: detailed rows** (#338): the vertical rail can now show the home screen's per-session line (created stamp, state duration, status pill) via the new per-device `tabRailDetail` setting (default detailed; `simple` restores the 1.22.0 rows). One shared row model and one gate (`isRichTabRows()`) keep the rail, the rich sidebar and both home screens in agreement about what "working" means. A never-sized rail opens at the 320px Wide preset; below 288px the created stamp is dropped, below 240px rows fall back to simple. Also fixes Escape during an inline tab rename committing an empty name (the session then displayed its folder name).
+
+  **Review hardening across all three** (post-review commits on each PR): multi-user owners without the bypass grant can no longer redirect the server's forwarded `DEEPSEEK_API_KEY` via a `DEEPSEEK_BASE_URL` override; waits on `stop`/`blocked` are refused for docker/remote dsh sessions (their status bridge cannot reach the harness) and docker/remote dsh sessions keep the pane reader (their transcripts are not local); dsh approvals are alerts answered in the terminal, never blind keystrokes into a third-party TUI; the status shim forwards the contract's `--seq` token (stale retried reports are dropped server-side) and treats 4xx as permanent so a misconfigured session cannot rate-limit the hook endpoint for the whole instance; concurrent DeepSeek web-UI starts are serialized; cron deepseek jobs run the same launch gate as the HTTP paths; the installer's dsh identity probe is stdin-closed, bounded and memoized; transcript reads are memoized per (path, mtime, size) so 1s polling stops decoding unchanged files; the rail's width dialog, compact-threshold folder rows and reset affordances are rich-aware.
+
+### Patch Changes
+
+- b330f1d: Vertical tab rail: detailed rows, and a rename cancel that no longer wipes the name.
+
+  The vertical rail (Tab Orientation → Vertical) now draws the same per-session
+  line the home screen and the rich sidebar draw — when the session was created,
+  how long it has been in the state it is in, the folder it runs in, and a status
+  pill — instead of just the name. New per-device setting **Vertical Rail Rows**
+  (`tabRailDetail`, App Settings → Appearance → Tabs) with `Detailed` as the
+  default and `Simple (name only)` as the opt-out. A rail that has never been
+  sized now opens at 320px (the existing Wide preset) so the line fits; a narrower
+  rail sheds the created stamp below 288px and falls back to simple rows below
+  240px.
+
+  Also fixes a data-loss bug in the inline tab rename that predates the rail:
+  pressing Escape cleared the input and blurred it, and the blur handler commits —
+  so cancelling a rename stored an EMPTY session name and the tab fell back to its
+  folder label. Escape now cancels without a request, in every layout.
 ## 1.22.5
 
 ### Patch Changes
@@ -41,6 +108,13 @@
 
 ### Minor Changes
 
+- 3f8c8e9: Add Grok Build (xAI `grok`) as a seventh CLI run mode. SessionMode gains 'grok', with its own resolver (version-probed, since the name has npm squatters; GET /api/grok/status surfaces path + version), GrokConfig (model, alwaysApprove -> --always-approve, resume/continue), GROK*\*/XAI*\* env allowlist entries, the multi-user only-if-sent bypass clamp, Docker (own image step + per-file credential seeding) and remote-SSH command defaults, cron agentType, run-mode/welcome/tab UI with a charcoal identity, and docs (grok-integration.md + plan). Verified end to end against grok 1.0.5 on an isolated instance.
+- 74194e4: Add the owner-scoped tab-layout model, persistence, API, lifecycle repair, and synchronized legacy ordering foundation.
+- e3a2fb7: Add an optional resizable vertical session rail with responsive layout, complete labels, accessible controls, and stable inline rename.
+
+### Patch Changes
+
+- Fix the file preview's dead pop-out control: a real detach button now opens the previewed file in a browser tab (raw route for PDFs/images/media/text, converted-PDF preview for docx/pptx) and the copy button reports when a preview has no text to copy instead of silently doing nothing. Review-driven hardening for the new tab features: PUT /api/session-order drops unknown ids again instead of rejecting the whole write (a session deleted inside the browser's debounce window could silently lose the user's reorder), a failed mux restore no longer blocks explicit session/webview deletion for the process lifetime (the automated stale sweep stays fail-closed), and the vertical rail gains the axis-awareness the sidebar-only predicates missed: correct drag-reorder insertion, active-tab scroll-into-view, floating windows anchored beside rail tabs, connector redraws on rail scroll, server-seeded orientation applied on first load, a pre-paint stamp so vertical mode no longer flashes through the header strip, and a 12px session-name default matching the sidebar's historical size so untouched installs are not restyled.
 - 9851aaf: Add an optional resizable vertical session rail with responsive layout, complete labels, accessible controls, and stable inline rename.
 
 ## 1.21.1

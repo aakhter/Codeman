@@ -167,7 +167,10 @@ describe('COD-232 terminal document link activation in a real browser', () => {
         if (!app.__cod232TouchCounters) {
           app.__cod232TouchCounters = { touch: 0, sgr: 0, click: 0, input: 0 };
           for (const [name, key] of [
-            ['_handleTerminalTouchTap', 'touch'],
+            // `_handleMobileTerminalTap` is what touchend calls now;
+            // `_handleTerminalTouchTap` is no longer on the touch path at all, so
+            // counting it made this assertion vacuous (always 0, never checked).
+            ['_handleMobileTerminalTap', 'touch'],
             ['_sendSyntheticSgrTap', 'sgr'],
             ['_dispatchSyntheticTerminalClick', 'click'],
             ['_sendInputAsync', 'input'],
@@ -185,11 +188,17 @@ describe('COD-232 terminal document link activation in a real browser', () => {
         app.__cod232TouchCounters.input = 0;
 
         app.terminal.reset();
-        await new Promise<void>((resolve) => app.terminal.write(`Created ${path}`, resolve));
+        // Terminate the line. `f2d3a7e3` made a tap on the CARET's own logical line
+        // mean "place the cursor in text the user typed" (`_tapIsOnCaretLine`), so
+        // it classifies as 'input' and never activates a link. This fixture used to
+        // leave the cursor parked on the path it had just written, which is not what
+        // a session looks like — agent output scrolls above the composer.
+        await new Promise<void>((resolve) => app.terminal.write(`Created ${path}\r\n`, resolve));
         app.terminal.scrollToBottom();
 
         const buffer = app.terminal.buffer.active;
-        const bufferLine = buffer.baseY + buffer.cursorY + 1;
+        // The path row is the one ABOVE the caret now.
+        const bufferLine = buffer.baseY + buffer.cursorY;
         const viewportRow = bufferLine - buffer.viewportY;
         const screen = app.terminal.element.querySelector('.xterm-screen');
         const rect = screen.getBoundingClientRect();

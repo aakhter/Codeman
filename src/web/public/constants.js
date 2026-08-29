@@ -191,6 +191,9 @@ function resolveTabOrientation(input) {
 // and keyboard behavior do not depend on browser layout timing.
 const TAB_RAIL_MIN_WIDTH = 208;
 const TAB_RAIL_DEFAULT_WIDTH = 256;
+/** Detailed rows carry a third line, and it ellipsizes at 256px — see the
+    rich sidebar's own 300px column. 320px is the existing Wide preset. */
+const TAB_RAIL_RICH_DEFAULT_WIDTH = 320;
 const TAB_RAIL_MAX_WIDTH = 360;
 
 function resolveTabRailWidth(input = {}) {
@@ -213,7 +216,9 @@ function resolveTabRailKeyboardWidth(input = {}) {
   let width;
   if (key === 'Home') width = TAB_RAIL_MIN_WIDTH;
   else if (key === 'End') width = TAB_RAIL_MAX_WIDTH;
-  else if (key === 'Enter') width = TAB_RAIL_DEFAULT_WIDTH;
+  // Enter resets to the caller's effective default (the rich rail's Wide
+  // preset, not 256 — see _defaultTabRailWidth); absent that, the base default.
+  else if (key === 'Enter') width = Number(input.defaultWidth) || TAB_RAIL_DEFAULT_WIDTH;
   else if (key === 'ArrowLeft' || key === 'ArrowRight') {
     const direction = key === 'ArrowLeft' ? -1 : 1;
     width = (Number(input.currentWidth) || TAB_RAIL_DEFAULT_WIDTH) + direction * (input.shiftKey ? 32 : 8);
@@ -387,9 +392,10 @@ function computeLineagePath(input) {
       if (py < min || py > max || cy < min || cy > max) return null;
     }
 
-    const stripLeft = strip && Number.isFinite(Number(strip.left))
-      ? Number(strip.left)
-      : Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_TRACK_INSET_PX * 2;
+    const stripLeft =
+      strip && Number.isFinite(Number(strip.left))
+        ? Number(strip.left)
+        : Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_TRACK_INSET_PX * 2;
     const requestedTrack =
       stripLeft + LINEAGE_VERTICAL_TRACK_INSET_PX + depth * LINEAGE_VERTICAL_SIBLING_STEP_PX;
     const trackX = Math.min(requestedTrack, Math.min(pLeft, cLeft) - LINEAGE_VERTICAL_ANCHOR_CLEARANCE_PX);
@@ -819,6 +825,7 @@ if (typeof window !== 'undefined') {
   };
   window.CodemanTabRail = {
     DEFAULT_WIDTH: TAB_RAIL_DEFAULT_WIDTH,
+    RICH_DEFAULT_WIDTH: TAB_RAIL_RICH_DEFAULT_WIDTH,
     MIN_WIDTH: TAB_RAIL_MIN_WIDTH,
     MAX_WIDTH: TAB_RAIL_MAX_WIDTH,
     resolveWidth: resolveTabRailWidth,
@@ -1095,6 +1102,7 @@ const SSE_EVENTS = {
   HOOK_ELICITATION_COMPLETE: 'hook:elicitation_complete',
   HOOK_ELICITATION_RESPONSE: 'hook:elicitation_response',
   HOOK_STOP: 'hook:stop',
+  HOOK_AGENT_WORKING: 'hook:agent_working',
   HOOK_TEAMMATE_IDLE: 'hook:teammate_idle',
   HOOK_TASK_COMPLETED: 'hook:task_completed',
   HOOK_SUPPRESSED: 'hook:suppressed',

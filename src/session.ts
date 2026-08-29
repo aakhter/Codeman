@@ -55,6 +55,8 @@ import {
   type SessionAttachmentHistoryItem,
   type AntigravityConfig,
   type PiConfig,
+  type GrokConfig,
+  type DeepSeekConfig,
   type SessionRemote,
   type SessionSource,
   type SessionDocker,
@@ -273,7 +275,15 @@ const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 const TMUX_ABSOLUTE_ROW_START_PATTERN = /\x1b\[\d+;1H/g;
 
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || mode === 'pi';
+  return (
+    mode === 'opencode' ||
+    mode === 'codex' ||
+    mode === 'gemini' ||
+    mode === 'antigravity' ||
+    mode === 'pi' ||
+    mode === 'grok' ||
+    mode === 'deepseek'
+  );
 }
 
 export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
@@ -421,6 +431,10 @@ function getModeLabel(mode: SessionMode): string {
       return 'Antigravity';
     case 'pi':
       return 'Pi';
+    case 'grok':
+      return 'Grok';
+    case 'deepseek':
+      return 'DeepSeek';
     case 'shell':
       return 'Shell';
     case 'claude':
@@ -437,8 +451,9 @@ function getModeLabel(mode: SessionMode): string {
  * repaint via cursor positioning, so dropping the alt-screen switch is safe —
  * content stays in the normal buffer. Excluded: `shell` (arbitrary programs like
  * vim/less/htop legitimately need the alt screen), `opencode` (renders its own
- * TUI that may rely on it) and `pi` (below). Keep parity with the replay-side
- * strip in session-routes.ts.
+ * TUI that may rely on it), `pi` (below) and `grok` (a fullscreen alt-screen TUI
+ * with mouse support, i.e. the opencode case, not the Ink case). Keep parity
+ * with the replay-side strip in session-routes.ts.
  *
  * ⚠️ Being excluded here does NOT preserve the alt screen. Every excluded mode
  * falls through to isMuxAltScreenOnlyStripMode(), which strips the alt-screen
@@ -803,6 +818,11 @@ export class Session extends EventEmitter {
   private _antigravityConfig: AntigravityConfig | undefined;
   // Pi configuration (only for mode === 'pi')
   private _piConfig: PiConfig | undefined;
+  // Grok configuration (only for mode === 'grok')
+  private _grokConfig: GrokConfig | undefined;
+
+  // DeepSeek Harness configuration (only for mode === 'deepseek')
+  private _deepSeekConfig: DeepSeekConfig | undefined;
   private _resumeSessionId: string | undefined;
 
   // Native external-CLI session/rollout id captured at PARK time (COD-124 unit 2,
@@ -910,6 +930,10 @@ export class Session extends EventEmitter {
       antigravityConfig?: AntigravityConfig;
       /** Pi configuration (only for mode === 'pi') */
       piConfig?: PiConfig;
+      /** Grok configuration (only for mode === 'grok') */
+      grokConfig?: GrokConfig;
+      /** DeepSeek Harness configuration (only for mode === 'deepseek') */
+      deepSeekConfig?: DeepSeekConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
       resumeSessionId?: string;
       /** Native external-CLI session/rollout id captured at park time (COD-124 unit 2, Gap B) */
@@ -1054,6 +1078,16 @@ export class Session extends EventEmitter {
     // Apply Pi configuration
     if (config.piConfig) {
       this._piConfig = config.piConfig;
+    }
+
+    // Apply DeepSeek Harness configuration
+    if (config.deepSeekConfig) {
+      this._deepSeekConfig = config.deepSeekConfig;
+    }
+
+    // Apply Grok configuration
+    if (config.grokConfig) {
+      this._grokConfig = config.grokConfig;
     }
 
     // Apply env overrides (exported at spawn, not persisted to disk).
@@ -1255,6 +1289,34 @@ export class Session extends EventEmitter {
   /** Remote-SSH metadata when this session runs on a remote host, else undefined. */
   get remote(): SessionRemote | undefined {
     return this._remote;
+  }
+
+  /**
+   * `deepSeekConfig.statusReporting` verbatim: `undefined` when the caller sent
+   * none (i.e. ON), `false` when the user disarmed the status bridge for this
+   * session.
+   *
+   * Exposed because whether a dsh session can deliver `stop`/`blocked` is a
+   * per-SESSION fact, not a per-mode one, and `hooksAvailableForMode()` is pure
+   * and holds no `Session` reference by design. Undefined for every other mode,
+   * where the flag is meaningless.
+   */
+  get deepSeekStatusReporting(): boolean | undefined {
+    return this._deepSeekConfig?.statusReporting;
+  }
+
+  /**
+   * This session's `DSH_HOME` override, if it set one.
+   *
+   * Deliberately ONE key rather than an `envOverrides` getter: the map can hold
+   * provider credentials (`DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, …) and is
+   * kept off the public `SessionState` for exactly that reason. The transcript
+   * reader needs the profile tree's location and nothing else, so that is all
+   * this exposes.
+   */
+  get deepSeekHomeOverride(): string | undefined {
+    const value = this._envOverrides?.DSH_HOME;
+    return value && value.trim() ? value.trim() : undefined;
   }
 
   /** Owning username in multi-user mode, else undefined. */
@@ -2115,6 +2177,8 @@ export class Session extends EventEmitter {
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
+      grokConfig: this._grokConfig,
+      deepSeekConfig: this._deepSeekConfig,
       resumeSessionId: this._resumeSessionId,
       nativeResumeId: this._nativeResumeId,
       effort: this._effort,
@@ -2400,6 +2464,8 @@ export class Session extends EventEmitter {
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
+      grokConfig: this._grokConfig,
+      deepSeekConfig: this._deepSeekConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
       effort: this._effort,
@@ -2722,6 +2788,8 @@ export class Session extends EventEmitter {
             geminiConfig: this._geminiConfig,
             antigravityConfig: this._antigravityConfig,
             piConfig: this._piConfig,
+            grokConfig: this._grokConfig,
+            deepSeekConfig: this._deepSeekConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
@@ -2814,6 +2882,16 @@ export class Session extends EventEmitter {
       // Pi sessions require tmux for env override injection via setenv
       if (this.mode === 'pi') {
         throw new Error('Pi sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      // Grok sessions require tmux for XAI_API_KEY / GROK_* injection via setenv
+      if (this.mode === 'grok') {
+        throw new Error('Grok sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      // DeepSeek sessions require tmux for DEEPSEEK_API_KEY / DSH_PERMISSION_MODE
+      // injection via setenv — and for the HERDR_* status-bridge triple, without
+      // which the mode silently loses its definitive idle/blocked signals.
+      if (this.mode === 'deepseek') {
+        throw new Error('DeepSeek Harness sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session

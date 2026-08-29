@@ -181,6 +181,45 @@ describe('Inline rename input', () => {
     expect(renameStillActive).toBe(true);
   });
 
+  it('Escape cancels the rename instead of committing an empty name', async () => {
+    await resetState();
+    expect(await startRename('esc-cancel', 'rail-beta')).toBe(true);
+
+    // Escape used to clear the field and blur, and the blur handler commits —
+    // so cancelling a rename PUT an empty name, and the tab fell back to its
+    // folder label (measured against a live server, in the header strip as well
+    // as both vertical layouts). The observable here is the REQUEST: this
+    // harness's server has no such session, so a failed PUT would leave the
+    // local map looking innocent.
+    const result = await page.evaluate(async () => {
+      const app = (window as unknown as { app: { _activeRename: unknown } }).app;
+      const calls: string[] = [];
+      const origFetch = window.fetch;
+      window.fetch = (async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return new Response('{"success":true}', { status: 200 });
+      }) as typeof window.fetch;
+
+      const inputEl = document.querySelector('input.tab-rename-input') as HTMLInputElement;
+      inputEl.value = 'typed-but-abandoned';
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      // The blur that follows the input's removal must not resurrect the commit.
+      inputEl.dispatchEvent(new Event('blur'));
+      await new Promise((r) => setTimeout(r, 50));
+
+      window.fetch = origFetch;
+      return {
+        renamePuts: calls.filter((url) => url.includes('/api/sessions/esc-cancel/name')),
+        renameActive: !!app._activeRename,
+        inputStillInDom: document.body.contains(inputEl),
+      };
+    });
+
+    expect(result.renamePuts).toEqual([]);
+    expect(result.renameActive).toBe(false);
+    expect(result.inputStillInDom).toBe(false);
+  });
+
   it('CJK guard: regular Enter (no IME) DOES commit', async () => {
     await resetState();
     expect(await startRename('regular-enter', 'OldName')).toBe(true);
@@ -242,6 +281,9 @@ describe('Inline rename input', () => {
         renameActiveAfter: !!app._activeRename,
         sessionGone: !app.sessions.has('ghost-id'),
         fetchFired,
+        renameClassActive:
+          document.querySelector('.tab-name[data-session-id="ghost-id"]')?.classList.contains('tab-name-renaming') ??
+          false,
       };
     });
 
@@ -250,6 +292,7 @@ describe('Inline rename input', () => {
     expect(result.sessionGone).toBe(true);
     // Cancel path skips the API call — deleting a session shouldn't trigger a stale rename PUT.
     expect(result.fetchFired).toBe(false);
+    expect(result.renameClassActive).toBe(false);
   });
 
   it('Ghost tab: _cleanupSessionData for a DIFFERENT session does NOT cancel rename', async () => {
@@ -1242,6 +1285,7 @@ describe('Inline rename input', () => {
           app: {
             _activeRename: { sessionId: string } | null;
             sessions: Map<string, { id: string; name: string }>;
+            renderSessionTabs: () => void;
             startInlineRename: (id: string) => void;
           };
         }
@@ -1265,6 +1309,14 @@ describe('Inline rename input', () => {
       tabName.textContent = 'Second';
       wrap.appendChild(tabName);
       document.body.appendChild(wrap);
+
+      // Cancelling the first rename is allowed to repaint the tab list. Model
+      // that synchronously so a target captured before cancel() becomes stale.
+      const originalRenderSessionTabs = app.renderSessionTabs;
+      app.renderSessionTabs = () => {
+        const current = document.querySelector('.tab-name[data-session-id="second-id"]');
+        current?.replaceWith(current.cloneNode(true));
+      };
       app.startInlineRename('second-id');
       const firstLabel = document.querySelector('.tab-name[data-session-id="first-id"]') as HTMLElement | null;
       return {

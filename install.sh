@@ -125,6 +125,22 @@ PI_SEARCH_PATHS=(
     "$HOME/bin/pi"
 )
 
+# DeepSeek Harness search paths (from src/utils/deepseek-cli-resolver.ts)
+DSH_SEARCH_PATHS=(
+    "$HOME/.local/bin/dsh"
+    "/usr/local/bin/dsh"
+    "$HOME/.npm-global/bin/dsh"
+    "$HOME/bin/dsh"
+)
+
+# Grok CLI search paths (from src/utils/grok-cli-resolver.ts)
+GROK_SEARCH_PATHS=(
+    "$HOME/.grok/bin/grok"
+    "$HOME/.local/bin/grok"
+    "/usr/local/bin/grok"
+    "$HOME/bin/grok"
+)
+
 # Antigravity CLI search paths (from src/utils/antigravity-cli-resolver.ts)
 ANTIGRAVITY_SEARCH_PATHS=(
     "$HOME/.local/bin/agy"
@@ -229,7 +245,11 @@ print_security_notice() {
             echo -e "  ${YELLOW}${BOLD}Security:${NC}"
             echo -e "    Codeman binds ${BOLD}127.0.0.1${NC} (this machine only) — no password needed by default."
             echo -e "    To reach it from another device, do ONE of:"
-            echo -e "      ${CYAN}•${NC} tailscale serve / cloudflared tunnel   ${DIM}(recommended)${NC}, or"
+            if check_tailscale; then
+                echo -e "      ${CYAN}•${NC} ${CYAN}bash $INSTALL_DIR/install.sh tailscale${NC}   ${DIM}(Tailscale is installed here; HTTPS, recommended)${NC}, or"
+            else
+                echo -e "      ${CYAN}•${NC} tailscale serve / cloudflared tunnel   ${DIM}(recommended)${NC}, or"
+            fi
             echo -e "      ${CYAN}•${NC} ${CYAN}codeman web --host 0.0.0.0${NC}  AND set ${CYAN}CODEMAN_PASSWORD${NC}"
             echo -e "    A non-loopback bind without a password still starts, but warns loudly."
             echo -e "    ${DIM}Details: docs/security-architecture.md${NC}"
@@ -394,6 +414,27 @@ check_git() {
 
 check_tmux() {
     command -v tmux &>/dev/null
+}
+
+# node-pty ships prebuilt binaries for darwin and win32 ONLY, so on Linux it is
+# always compiled from source during `npm install`. Without a toolchain that
+# fails deep inside node-gyp with `not found: make`, which reads like an npm bug
+# rather than a missing system package (issue: fresh Ubuntu 24 server install).
+# So the toolchain is checked up front, exactly like git and tmux.
+#
+# Returns a human-readable list of what is missing, empty when all present.
+missing_build_tools() {
+    local missing=""
+    command -v make &>/dev/null || missing="make"
+    if ! command -v c++ &>/dev/null && ! command -v g++ &>/dev/null && ! command -v clang++ &>/dev/null; then
+        missing="${missing:+$missing, }a C++ compiler (g++)"
+    fi
+    command -v python3 &>/dev/null || missing="${missing:+$missing, }python3"
+    printf '%s' "$missing"
+}
+
+check_build_tools() {
+    [[ -z "$(missing_build_tools)" ]]
 }
 
 check_claude() {
@@ -562,6 +603,88 @@ get_pi_path() {
     fi
 
     for path in "${PI_SEARCH_PATHS[@]}"; do
+        if [[ -x "$path" ]]; then
+            echo "$path"
+            return
+        fi
+    done
+}
+
+# `grok` has known squatters too (the unrelated @vibe-kit/grok-cli), so the
+# server-side resolver additionally probes `grok --version`. Detection here only
+# feeds the "you have no AI CLI" hint, so a plain executable test is enough.
+check_grok() {
+    if command -v grok &>/dev/null; then
+        return 0
+    fi
+
+    for path in "${GROK_SEARCH_PATHS[@]}"; do
+        if [[ -x "$path" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# `dsh` is the hardest name of the lot: Debian ships an unrelated `dsh`
+# (dancer's shell). The server-side resolver settles it by demanding the
+# harness's own help banner; detection here only feeds the "you have no AI CLI"
+# hint, so the same banner grep is enough — but unlike every sibling probe it
+# EXECUTES the candidate, so it must be bounded. </dev/null is load-bearing
+# twice over: a foreign binary that blocks on stdin would hang the install, and
+# under `curl | bash` a child that reads stdin EATS THE REST OF THIS SCRIPT.
+# The timeout (where coreutils ships one; stock macOS has none) bounds a binary
+# that ignores EOF, mirroring the server resolver's own EXEC_TIMEOUT_MS.
+dsh_banner_probe() {
+    local runner=()
+    if command -v timeout &>/dev/null; then runner=(timeout 5); fi
+    "${runner[@]}" "$1" --help </dev/null 2>/dev/null | grep -qi "DeepSeek Harness"
+}
+
+# Resolved ONCE and memoized: the probe executes a possibly-foreign binary, and
+# the check/get/reminder call sites together used to re-run the whole scan many
+# times per install.
+DSH_RESOLVE_DONE=""
+DSH_RESOLVED_PATH=""
+resolve_dsh() {
+    [[ -n "$DSH_RESOLVE_DONE" ]] && return 0
+    DSH_RESOLVE_DONE=1
+    local candidate path
+    if command -v dsh &>/dev/null; then
+        candidate="$(command -v dsh)"
+        if dsh_banner_probe "$candidate"; then
+            DSH_RESOLVED_PATH="$candidate"
+            return 0
+        fi
+    fi
+
+    for path in "${DSH_SEARCH_PATHS[@]}"; do
+        if [[ -x "$path" ]] && dsh_banner_probe "$path"; then
+            DSH_RESOLVED_PATH="$path"
+            return 0
+        fi
+    done
+    return 0
+}
+
+check_dsh() {
+    resolve_dsh
+    [[ -n "$DSH_RESOLVED_PATH" ]]
+}
+
+get_dsh_path() {
+    resolve_dsh
+    echo "$DSH_RESOLVED_PATH"
+}
+
+get_grok_path() {
+    if command -v grok &>/dev/null; then
+        command -v grok
+        return
+    fi
+
+    for path in "${GROK_SEARCH_PATHS[@]}"; do
         if [[ -x "$path" ]]; then
             echo "$path"
             return
@@ -834,6 +957,50 @@ install_git_suse() {
     info "Installing Git via zypper..."
     ensure_sudo
     run_as_root zypper install -y git
+}
+
+# Build toolchain for node-pty's source compile (see missing_build_tools).
+install_buildtools_debian() {
+    info "Installing build tools via apt (build-essential, python3)..."
+    ensure_sudo
+    run_as_root apt-get update -qq
+    run_as_root apt-get install -y -qq build-essential python3
+}
+
+install_buildtools_fedora() {
+    info "Installing build tools (gcc, gcc-c++, make, python3)..."
+    ensure_sudo
+    if command -v dnf &>/dev/null; then
+        run_as_root dnf install -y gcc gcc-c++ make python3
+    else
+        run_as_root yum install -y gcc gcc-c++ make python3
+    fi
+}
+
+install_buildtools_arch() {
+    info "Installing build tools via pacman (base-devel, python)..."
+    ensure_sudo
+    run_as_root pacman -Sy --noconfirm base-devel python
+}
+
+install_buildtools_alpine() {
+    info "Installing build tools via apk (build-base, python3)..."
+    ensure_sudo
+    run_as_root apk add --no-cache build-base python3
+}
+
+install_buildtools_suse() {
+    info "Installing build tools via zypper..."
+    ensure_sudo
+    run_as_root zypper install -y gcc gcc-c++ make python3
+}
+
+install_buildtools_macos() {
+    # macOS normally never gets here: node-pty ships darwin prebuilds. Only a
+    # forced source build needs a compiler, and Xcode CLT is its only supplier.
+    info "Requesting Xcode Command Line Tools..."
+    xcode-select --install 2>/dev/null || true
+    die "Finish the Xcode Command Line Tools install in the dialog, then re-run this installer."
 }
 
 install_cloudflared_macos() {
@@ -1711,6 +1878,41 @@ setup_tailscale_access() {
     return 0
 }
 
+# A loopback install with Tailscale already connected but nothing fronting
+# Codeman is one command away from working remote access — and that is exactly
+# where a user lands when the first install died BEFORE the network-access
+# prompt (it runs after the build, so any build failure costs the network step
+# too) or when they finished a broken build by hand instead of re-running the
+# installer. Detect that state on re-run and offer the retrofit, rather than
+# leaving them to discover `install.sh tailscale` on their own. Never nags a
+# deliberate network bind, and never nags once a serve mapping already exists.
+maybe_offer_tailscale_repair() {
+    # A non-loopback bind already has network access; leave that choice alone.
+    if [[ "$EXISTING_FOUND" == "1" && -n "$EXISTING_HOST" && "$EXISTING_HOST" != "127.0.0.1" ]]; then
+        return 0
+    fi
+    check_tailscale || return 0
+    command -v node &>/dev/null || return 0
+    [[ "$(ts_status_field 's.BackendState')" == "Running" ]] || return 0
+    # Already fronting Codeman: nothing to repair.
+    [[ -z "$(detect_tailscale_serve_url)" ]] || return 0
+
+    echo ""
+    info "Tailscale is connected here, but no serve mapping fronts Codeman yet."
+    if [[ "$NONINTERACTIVE" == "1" ]] || ! has_tty; then
+        echo -e "  ${DIM}Enable HTTPS access from your tailnet with:${NC} ${CYAN}bash $INSTALL_DIR/install.sh tailscale${NC}"
+        return 0
+    fi
+    if ! prompt_yes_no "Set up Tailscale HTTPS access now? (your tailnet is the login; no password needed)" "y"; then
+        echo -e "  ${DIM}Any time later:${NC} ${CYAN}bash $INSTALL_DIR/install.sh tailscale${NC}"
+        return 0
+    fi
+    if setup_tailscale_access; then
+        verify_tailscale_access || true
+    fi
+    return 0
+}
+
 # `install.sh tailscale`: retrofit Tailscale access onto an existing install
 # (also the target of every "set it up later" hint above).
 setup_tailscale_subcommand() {
@@ -1963,6 +2165,29 @@ setup_tunnel_service() {
 # Installation Helpers
 # ============================================================================
 
+# npm install with an actionable message for the failure that actually happens
+# on a fresh Linux box: no toolchain, so node-pty cannot compile.
+npm_install_deps() {
+    if npm install --quiet --no-fund --no-audit 2>/dev/null; then
+        return 0
+    fi
+    if npm install --no-fund --no-audit; then
+        return 0
+    fi
+
+    error "npm install failed."
+    if [[ "$(detect_os)" == "linux" ]] && ! check_build_tools; then
+        error "Missing native build tools: $(missing_build_tools)"
+        error "node-pty has no Linux prebuilds, so it must compile from source."
+        error "Install them and re-run this installer:"
+        error "  Debian/Ubuntu:  sudo apt-get install -y build-essential python3"
+        error "  Fedora/RHEL:    sudo dnf install -y gcc gcc-c++ make python3"
+        error "  Arch:           sudo pacman -S --noconfirm base-devel python"
+        error "  Alpine:         sudo apk add build-base python3"
+    fi
+    exit 1
+}
+
 install_dependency() {
     local dep_name="$1"
     local os="$2"
@@ -2076,6 +2301,31 @@ main() {
         fi
     fi
 
+    # Native build toolchain. node-pty compiles from source on Linux, so this is
+    # a hard requirement there, not a nicety.
+    if [[ "$os" == "linux" ]]; then
+        info "Checking build tools (node-pty compiles from source on Linux)..."
+        local missing_tools
+        missing_tools="$(missing_build_tools)"
+        if [[ -z "$missing_tools" ]]; then
+            success "Build tools are installed"
+        else
+            warn "Missing build tools: $missing_tools"
+            headless_guard "install build tools (system package via sudo)"
+            if prompt_yes_no "Install the build tools now?"; then
+                install_dependency "buildtools" "$os" "$distro"
+                hash -r 2>/dev/null || true
+                missing_tools="$(missing_build_tools)"
+                if [[ -n "$missing_tools" ]]; then
+                    die "Build tools still missing after install: $missing_tools. Install them manually and re-run."
+                fi
+                success "Build tools installed"
+            else
+                die "A build toolchain (make, g++, python3) is required: node-pty has no Linux prebuilds and compiles from source."
+            fi
+        fi
+    fi
+
     # AI CLI (Codeman drives one of: Claude Code, OpenCode, Codex, Gemini, Antigravity, Pi)
     local has_claude=false
     local has_opencode=false
@@ -2083,6 +2333,8 @@ main() {
     local has_gemini=false
     local has_antigravity=false
     local has_pi=false
+    local has_grok=false
+    local has_dsh=false
 
     info "Checking AI CLI tools..."
     if check_claude; then
@@ -2109,17 +2361,25 @@ main() {
         has_pi=true
         success "Pi CLI found at $(get_pi_path)"
     fi
+    if check_grok; then
+        has_grok=true
+        success "Grok CLI found at $(get_grok_path)"
+    fi
+    if check_dsh; then
+        has_dsh=true
+        success "DeepSeek Harness found at $(get_dsh_path)"
+    fi
 
-    if [[ "$has_claude" == "false" && "$has_opencode" == "false" && "$has_codex" == "false" && "$has_gemini" == "false" && "$has_antigravity" == "false" && "$has_pi" == "false" ]]; then
+    if [[ "$has_claude" == "false" && "$has_opencode" == "false" && "$has_codex" == "false" && "$has_gemini" == "false" && "$has_antigravity" == "false" && "$has_pi" == "false" && "$has_grok" == "false" && "$has_dsh" == "false" ]]; then
         echo ""
-        warn "No AI CLI found. Codeman needs at least one: Claude Code, OpenCode, Codex, Antigravity, Gemini, or Pi."
+        warn "No AI CLI found. Codeman needs at least one: Claude Code, OpenCode, Codex, Antigravity, Gemini, Pi, Grok, or DeepSeek Harness."
         headless_guard "install an AI CLI (curl | bash from its vendor)"
         echo ""
         echo -e "  ${BOLD}Which AI CLI would you like to install?${NC}"
         echo -e "    ${CYAN}1)${NC} Claude Code  (Anthropic)"
         echo -e "    ${CYAN}2)${NC} OpenCode     (open-source)"
         echo -e "    ${CYAN}3)${NC} Both"
-        echo -e "    ${CYAN}4)${NC} Skip         (I'll install one myself, e.g. Codex, Antigravity or Pi)"
+        echo -e "    ${CYAN}4)${NC} Skip         (I'll install one myself, e.g. Codex, Antigravity, Pi or Grok)"
         echo ""
 
         local cli_choice=""
@@ -2167,6 +2427,7 @@ main() {
             info "Install one later, e.g.: npm install -g @openai/codex                          (Codex)"
             info "                    or: curl -fsSL https://antigravity.google/cli/install.sh | bash  (Antigravity)"
             info "                    or: npm install -g --ignore-scripts @earendil-works/pi-coding-agent   (Pi)"
+            info "                    or: curl -fsSL https://x.ai/cli/install.sh | bash                     (Grok)"
         elif [[ "$has_claude" == "false" ]] && [[ "$has_opencode" == "false" ]]; then
             die "The selected AI CLI failed to install. Install one manually and re-run the installer."
         fi
@@ -2232,7 +2493,7 @@ main() {
     # ========================================================================
 
     info "Installing dependencies..."
-    npm install --quiet --no-fund --no-audit 2>/dev/null || npm install --no-fund --no-audit
+    npm_install_deps
 
     info "Building..."
     npm run build --quiet 2>/dev/null || npm run build
@@ -2467,13 +2728,14 @@ main() {
     echo -e "    https://github.com/Ark0N/Codeman"
     echo ""
 
-    if ! check_claude && ! check_opencode && ! check_codex && ! check_gemini && ! check_antigravity && ! check_pi; then
+    if ! check_claude && ! check_opencode && ! check_codex && ! check_gemini && ! check_antigravity && ! check_pi && ! check_grok && ! check_dsh; then
         echo -e "  ${YELLOW}${BOLD}Reminder:${NC} Install at least one AI CLI to start using Codeman:"
         echo -e "    ${CYAN}curl -fsSL https://claude.ai/install.sh | bash${NC}                # Claude Code"
         echo -e "    ${CYAN}curl -fsSL https://opencode.ai/install | bash${NC}                 # OpenCode"
         echo -e "    ${CYAN}npm install -g @openai/codex${NC}                                  # Codex"
         echo -e "    ${CYAN}curl -fsSL https://antigravity.google/cli/install.sh | bash${NC}   # Antigravity"
         echo -e "    ${CYAN}npm install -g --ignore-scripts @earendil-works/pi-coding-agent${NC}  # Pi"
+        echo -e "    ${CYAN}curl -fsSL https://x.ai/cli/install.sh | bash${NC}                 # Grok"
         echo ""
     fi
 
@@ -2527,7 +2789,7 @@ update() {
 
     git fetch --quiet origin
     git reset --hard "origin/$BRANCH" --quiet
-    npm install --quiet --no-fund --no-audit 2>/dev/null || npm install --no-fund --no-audit
+    npm_install_deps
     npm run build --quiet 2>/dev/null || npm run build
     date -u +%Y-%m-%dT%H:%M:%SZ > "$INSTALL_DIR/.install-complete"
     success "Updated to $(node -e "console.log(require('./package.json').version)")"
@@ -2563,6 +2825,10 @@ update() {
         BIND_PASSWORD="$EXISTING_PASSWORD"
         BIND_ACK="$EXISTING_ACK"
     fi
+
+    # An update is the only place a half-configured install gets a second
+    # chance at remote access; the fresh-install path asks outright.
+    maybe_offer_tailscale_repair
 
     print_security_notice
 }

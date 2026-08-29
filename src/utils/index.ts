@@ -39,7 +39,13 @@ export {
 } from './claude-cli-resolver.js';
 export { spawnPtyWithHelperRepair } from './node-pty-repair.js';
 export { resolveOpenCodeDir, getOpenCodeNotFoundMessage } from './opencode-cli-resolver.js';
-export { resolveCodexDir, isCodexAvailable, getCodexNotFoundMessage } from './codex-cli-resolver.js';
+export {
+  resolveCodexDir,
+  resolveCodexBinaryPath,
+  isCodexAvailable,
+  getCodexNotFoundMessage,
+  readCodexPlanUsage,
+} from './codex-cli-resolver.js';
 export { resolveGeminiDir, isGeminiAvailable, getGeminiNotFoundMessage } from './gemini-cli-resolver.js';
 export {
   resolveAntigravityDir,
@@ -58,3 +64,17 @@ export {
 export type { ProbeHost, ToolResult, ToolStatus } from './dependency-checker.js';
 export { renderTable, renderJson, computeExitCode } from './dependency-report.js';
 export type { DependencyReportJson } from './dependency-report.js';
+export { resolveGrokDir, isGrokAvailable, getGrokCliVersion, getGrokNotFoundMessage } from './grok-cli-resolver.js';
+export {
+  resolveDeepSeekDir,
+  isDeepSeekAvailable,
+  isDeepSeekRunnable,
+  getDeepSeekCliVersion,
+  getDeepSeekNotFoundMessage,
+  listDeepSeekProfiles,
+  resolveDefaultDeepSeekProfile,
+  isLaunchableProfile,
+  resolveDshHome,
+  profileExists,
+} from './deepseek-cli-resolver.js';
+export type { DeepSeekProfile, DeepSeekProfileKind } from './deepseek-cli-resolver.js';

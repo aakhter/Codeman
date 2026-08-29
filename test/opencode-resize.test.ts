@@ -89,19 +89,24 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
     ({ context, page } = await freshPage());
     await navigateAndWait(page);
 
-    // Intercept resize API calls to track when they happen
-    const resizeCalls: Array<{ url: string; cols: number; rows: number }> = [];
-    await page.route('**/api/sessions/*/resize', async (route) => {
-      const request = route.request();
-      const body = request.postDataJSON();
-      resizeCalls.push({
-        url: request.url(),
-        cols: body.cols,
-        rows: body.rows,
-      });
-      // Let the request through to the server
-      await route.continue();
+    // COD-370 (`8bb9c972`) fenced the HTTP resize fallback off: viewer geometry
+    // is ownership-sensitive and only the sizing token on the terminal socket may
+    // resize the shared PTY, so `POST /api/sessions/:id/resize` is no longer on
+    // this path at all. Watch the socket frame (`{t:'z',c,r}`) instead — routing
+    // the retired endpoint made this assertion unsatisfiable, not merely stale.
+    await page.addInitScript(() => {
+      (window as any).__resizeFrames = [];
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (payload: any) {
+        try {
+          const msg = JSON.parse(payload);
+          if (msg?.t === 'z') (window as any).__resizeFrames.push({ url: this.url, cols: msg.c, rows: msg.r });
+        } catch {}
+        return send.call(this, payload);
+      };
     });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.body.classList.contains('app-loaded'), { timeout: 5000 });
 
     // Create a session via API (simulating what quick-start does)
     const sessionId = await page.evaluate(async () => {
@@ -116,6 +121,12 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
 
     expect(sessionId).toBeTruthy();
 
+    // Only frames caused by the SELECTION count. The window-resize handler and
+    // the pending-frame flush both put `t:'z'` on the same socket, so without
+    // this reset the assertion passes even with sendResize stubbed out — which
+    // is exactly what a mutation check caught.
+    await page.evaluate(() => ((window as any).__resizeFrames.length = 0));
+
     // Call selectSession (which is what runOpenCode does after fix)
     await page.evaluate(async (sid: string) => {
       const app = (window as unknown as { app: { selectSession: (id: string) => Promise<void> } }).app;
@@ -123,9 +134,12 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
     }, sessionId);
 
     // Wait for the resize to be sent (it's fire-and-forget in selectSession)
-    await page.waitForTimeout(500);
+    await page.waitForFunction(() => ((window as any).__resizeFrames?.length ?? 0) >= 1, { timeout: 10_000 });
 
-    // Verify resize was called with reasonable dimensions (not 120x40 default)
+    // Verify resize was sent with reasonable dimensions (not the 120x40 default)
+    const resizeCalls: Array<{ url: string; cols: number; rows: number }> = await page.evaluate(
+      () => (window as any).__resizeFrames
+    );
     expect(resizeCalls.length).toBeGreaterThanOrEqual(1);
     const lastResize = resizeCalls[resizeCalls.length - 1];
     expect(lastResize.url).toContain(sessionId);
@@ -135,6 +149,18 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
     // 1280x800 viewport, we should get something reasonable (>= 40 cols).
     expect(lastResize.cols).toBeGreaterThanOrEqual(40);
     expect(lastResize.rows).toBeGreaterThanOrEqual(10);
+    // "Not stuck at 120x40" really means the frame carries what this xterm
+    // actually measured, so pin it to the live dimensions rather than to a
+    // floor that the 120x40 default would clear anyway.
+    // Read xterm directly, not getTerminalDimensions(): the frame is built from
+    // the same helper, so comparing against it would move both sides together
+    // and assert nothing.
+    expect(
+      await page.evaluate(() => ({ cols: (window as any).app.terminal.cols, rows: (window as any).app.terminal.rows }))
+    ).toEqual({
+      cols: lastResize.cols,
+      rows: lastResize.rows,
+    });
 
     // Cleanup
     await page.evaluate(async (sid: string) => {
@@ -247,7 +273,11 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
     }, sessionId);
 
     // Intercept terminal fetches so the refresh path has deterministic content.
-    const terminalRoute = '**/api/sessions/*/terminal';
+    // Trailing `*` matters: `6866a617` made the recovery fetch ask for
+    // `?full=1` (and fall back to `?tail=`), and a glob without it stops
+    // matching the query string, so the route silently never fired and the
+    // refresh saw the real server's empty buffer instead of the fixture.
+    const terminalRoute = '**/api/sessions/*/terminal*';
 
     await page.route(terminalRoute, async (route) => {
       await route.fulfill({

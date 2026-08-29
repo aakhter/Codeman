@@ -74,14 +74,29 @@ describe('TabLayoutService', () => {
     await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).rejects.toThrow(/restoration.*pending/i);
     expect(action).not.toHaveBeenCalled();
 
+    // Upstream 7a340fe7 made 'failed' fail OPEN for an EXPLICIT user deletion: a
+    // failed restore must not lock the user out of closing a tab for the rest of
+    // the process lifetime, so it degrades to best-effort deletion without layout
+    // coordination. Only the AUTOMATED stale sweep stays fail-closed on 'failed'
+    // (runStaleSessionCleanup), because that one picks its own victims.
     h.service.markRestorationFailed();
-    await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).rejects.toThrow(/restoration.*failed/i);
-    expect(action).not.toHaveBeenCalled();
+    await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).resolves.toBe('removed');
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(h.store.setTabLayout).not.toHaveBeenCalled();
+    action.mockClear();
 
     h.service.markRestorationSkipped();
     await expect(h.service.runSessionDeletion([{ id: 'mine' }], action)).resolves.toBe('removed');
     expect(action).toHaveBeenCalledTimes(1);
     expect(h.store.setTabLayout).not.toHaveBeenCalled();
+  });
+
+  it('keeps the automated stale sweep fail-closed when restoration failed', async () => {
+    const h = createHarness({ layouts: { '@single': existing([{ kind: 'session', id: 'mine' }]) } });
+    const sweep = vi.fn(async () => undefined);
+    h.service.markRestorationFailed();
+    await expect(h.service.runStaleSessionCleanup(new Set(['mine']), sweep)).rejects.toThrow(/restoration.*failed/i);
+    expect(sweep).not.toHaveBeenCalled();
   });
 
   it('prepares and commits a complete-state session deletion around the resource action', async () => {

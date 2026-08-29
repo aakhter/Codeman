@@ -145,6 +145,8 @@ export function defaultDockerCommandForMode(mode: SessionMode): string {
     gemini: 'exec gemini',
     antigravity: 'exec agy',
     pi: 'exec pi',
+    grok: 'exec grok',
+    deepseek: 'exec dsh',
   };
   return commands[mode as DockerCommandMode] || commands.shell;
 }
@@ -613,6 +615,27 @@ const CRED_STORES: CredStorePolicy[] = [
   {
     rel: '.pi/agent',
     seedFiles: ['auth.json', 'settings.json', 'trust.json', 'models.json', 'models-store.json'],
+  },
+  // Grok (xAI) keeps auth + config in `~/.grok`, but that dir ALSO holds
+  // `sessions/`, `memory/`, `downloads/` (the ~100MB binary itself) and `bin/`,
+  // so seedWhole would copy all of it into every container start. Seed only what
+  // grok needs to authenticate and behave consistently. Same trade-off as pi:
+  // in-container grok sessions are invisible host-side, so `grok -c` inside a
+  // Docker case only sees that container's own history.
+  {
+    rel: '.grok',
+    seedFiles: ['auth.json', 'config.toml', 'pager.toml'],
+  },
+  // DeepSeek Harness keeps credentials in `~/.dsh/.env` (0600) and composition in
+  // `settings.yaml` / `cordis.patch.yml`. `profiles/` is deliberately NOT seeded:
+  // it is a pnpm workspace holding a full node_modules tree per profile, which is
+  // both enormous and host-arch-specific. An in-container dsh therefore needs its
+  // profile installed IN the image (see docker/agent.Dockerfile), and the seeded
+  // files only supply auth and model composition. Same host-invisibility trade-off
+  // as pi and grok: `~/.dsh/sessions` inside a container is that container's own.
+  {
+    rel: '.dsh',
+    seedFiles: ['.env', 'settings.yaml', 'cordis.patch.yml'],
   },
   { rel: '.config/gcloud', seedWhole: true },
   { rel: '.config/opencode', seedWhole: true },

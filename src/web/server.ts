@@ -110,10 +110,11 @@ import {
   attachSessionListeners,
   detachSessionListeners,
 } from './session-listener-wiring.js';
-import { sessionWaits, hooksAvailableForMode } from './session-wait-registry.js';
+import { sessionWaits } from './session-wait-registry.js';
 import { intentStore } from '../intent-store.js';
 import { AI_CHECK_MODEL } from '../config/ai-defaults.js';
 import { approvalInbox } from './approval-inbox.js';
+import { stopDeepSeekWeb } from '../deepseek-web-server.js';
 import {
   wireRespawnListeners,
   setupTimedRespawn,
@@ -296,7 +297,9 @@ import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.j
 import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { MAX_PASTE_IMAGE_BYTES } from '../config/buffer-limits.js';
 import { SseEvent, approvalResolvedEventPayload } from './sse-events.js';
-import { getLatestPlanUsage } from './plan-usage-latest.js';
+import { getLatestPlanUsage, setLatestCodexPlanUsage } from './plan-usage-latest.js';
+import { telemetrySignature } from '../usage-telemetry.js';
+import { readCodexPlanUsage, resolveCodexBinaryPath } from '../utils/codex-cli-resolver.js';
 import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
 import { isMultiUserMode } from '../config/multiuser.js';
@@ -344,6 +347,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Length range covers crypto.randomUUID() (36 chars) plus any short stable IDs,
 // while capping growth of `sseClientsById` and blocking pathological inputs.
 const SSE_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const CODEX_USAGE_POLL_INTERVAL_MS = 5 * 60_000;
 
 function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -431,8 +435,8 @@ export class WebServer extends EventEmitter {
   private sse: SseStreamManager;
   private store = getStore();
   private tabLayouts!: TabLayoutService;
-  private host: string;
   private port: number;
+  private host: string;
   private https: boolean;
   private testMode: boolean;
   private mux: TerminalMultiplexer;
@@ -445,6 +449,8 @@ export class WebServer extends EventEmitter {
   private cachedSessionsList: { data: unknown[]; timestamp: number } | null = null;
   // Token recording for daily stats (track what's been recorded to avoid double-counting)
   private lastRecordedTokens: Map<string, { input: number; output: number }> = new Map();
+  private codexUsageRefreshInFlight = false;
+  private lastCodexUsageSignature: string | null = null;
   // Server startup time for respawn grace period calculation
   private readonly serverStartTime: number = Date.now();
   // Pending respawn start timers (for cleanup on shutdown)
@@ -1850,7 +1856,10 @@ export class WebServer extends EventEmitter {
    */
   private async captureIntentPrompt(sessionId: string, text: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session || !hooksAvailableForMode(session.mode)) return;
+    // `mode === 'claude'` directly: the intent profile is fed from Claude's own
+    // transcript, so this is a claude question, not a hooks-available one (which
+    // `deepseek` now answers yes to).
+    if (!session || session.mode !== 'claude') return;
     try {
       const settings = await this.readSettings();
       if (settings.readMyMindEnabled !== true) return;
@@ -2200,6 +2209,8 @@ export class WebServer extends EventEmitter {
         { isGeminiAvailable },
         { isAntigravityAvailable },
         { isPiAvailable },
+        { isGrokAvailable },
+        { isDeepSeekRunnable, isDeepSeekAvailable },
         { isCloudflaredAvailable },
         { isGitAvailable },
       ] = await Promise.all([
@@ -2209,6 +2220,8 @@ export class WebServer extends EventEmitter {
         import('../utils/gemini-cli-resolver.js'),
         import('../utils/antigravity-cli-resolver.js'),
         import('../utils/pi-cli-resolver.js'),
+        import('../utils/grok-cli-resolver.js'),
+        import('../utils/deepseek-cli-resolver.js'),
         import('../utils/cloudflared-resolver.js'),
         import('../git-clone.js'),
       ]);
@@ -2219,6 +2232,14 @@ export class WebServer extends EventEmitter {
         gemini: isGeminiAvailable(),
         antigravity: isAntigravityAvailable(),
         pi: isPiAvailable(),
+        grok: isGrokAvailable(),
+        // RUNNABLE, not merely installed: `dsh` is a profile launcher, and a dsh
+        // with no pane-capable profile would offer a Run button that spawns a
+        // pane which dies on arrival. The Add-Profile affordance in the run menu
+        // keys off `deepseekBinary` instead, so a user who has the binary but no
+        // profile is offered the fix rather than a greyed-out entry.
+        deepseek: isDeepSeekRunnable(),
+        deepseekBinary: isDeepSeekAvailable(),
         cloudflared: isCloudflaredAvailable(),
         // Not a run mode: the Add Case → Clone tab is an offer this box cannot
         // keep without git (issue #236), same reasoning as cloudflared above.
@@ -3288,6 +3309,23 @@ export class WebServer extends EventEmitter {
     }
   }
 
+  private async refreshCodexPlanUsage(): Promise<void> {
+    if (this.codexUsageRefreshInFlight) return;
+    this.codexUsageRefreshInFlight = true;
+    try {
+      const binaryPath = resolveCodexBinaryPath();
+      const usage = binaryPath ? await readCodexPlanUsage(binaryPath, APP_VERSION) : null;
+      const signature = usage ? telemetrySignature(usage) : '';
+      if (signature === this.lastCodexUsageSignature) return;
+      this.lastCodexUsageSignature = signature;
+      const snapshot = setLatestCodexPlanUsage(usage);
+      this.cachedLightState = null;
+      this.broadcast(SseEvent.SessionStatusTelemetry, snapshot);
+    } finally {
+      this.codexUsageRefreshInFlight = false;
+    }
+  }
+
   async start(): Promise<void> {
     // Non-loopback bind without a password no longer refuses to start (0.9.0):
     // it starts and warns loudly at the listen point below. See the bind-policy
@@ -3435,6 +3473,15 @@ export class WebServer extends EventEmitter {
     // Ensure the COD-54 hook secret exists on disk before any session exports
     // $CODEMAN_HOOK_SECRET_FILE — hook curls cat that path at execution time.
     getHookSecret();
+
+    // Main Codex subscription limits come from the signed-in local CLI. Keep
+    // this read-only and host-scoped; multi-user SSE routing makes it admin-only.
+    if (!this.testMode) {
+      void this.refreshCodexPlanUsage();
+      this.cleanup.setInterval(() => void this.refreshCodexPlanUsage(), CODEX_USAGE_POLL_INTERVAL_MS, {
+        description: 'Codex plan-usage refresh',
+      });
+    }
 
     // Start scheduled runs cleanup timer
     this.cleanup.setInterval(
@@ -3699,6 +3746,8 @@ export class WebServer extends EventEmitter {
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
               piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
+              grokConfig: muxSession.mode === 'grok' ? savedState?.grokConfig : undefined,
+              deepSeekConfig: muxSession.mode === 'deepseek' ? savedState?.deepSeekConfig : undefined,
               envOverrides: {
                 ...savedEnvOverrides,
                 ...codexProviderRecovery.environment,
@@ -4106,6 +4155,12 @@ export class WebServer extends EventEmitter {
       this._dockerBridgeServer.close();
       this._dockerBridgeServer = null;
     }
+
+    // The background `dsh web` is detached so its whole plugin tree can be
+    // signalled at once, which also means it would OUTLIVE Codeman and hold its
+    // port against the next start — the exact EADDRINUSE this feature already
+    // got wrong once.
+    void stopDeepSeekWeb();
 
     // Dispose all managed timers (intervals + resettable timeouts)
     this.cleanup.dispose();

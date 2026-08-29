@@ -66,6 +66,19 @@ Object.assign(CodemanApp.prototype, {
     this._notifySession(data.sessionId, 'info', 'hook-stop', 'Response Complete', data.reason || 'Claude has finished responding');
   },
 
+  _onHookAgentWorking(data) {
+    // The agent started a turn, so whatever it was blocked on is gone. Reported
+    // by the DeepSeek status bridge; a harness turn cannot run while one of its
+    // own modal approvals is on screen, so this means the dialog was answered in
+    // the terminal. Same clearing as _onHookElicitationComplete, and notably NOT
+    // a notification: a turn STARTING is not news.
+    if (data.sessionId) {
+      this.clearPendingHooks(data.sessionId, 'elicitation_dialog');
+      this.clearPendingHooks(data.sessionId, 'permission_prompt');
+      this.clearPendingHooks(data.sessionId, 'idle_prompt');
+    }
+  },
+
   _onHookTeammateIdle(data) {
     const session = this.sessions.get(data.sessionId);
     this._notifySession(data.sessionId, 'warning', 'hook-teammate-idle', 'Teammate Idle', `A teammate is idle in ${session?.name || data.sessionId}`);
@@ -409,10 +422,19 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsTabOrientation').value =
       settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
     const tabRailWidth = window.CodemanTabRail?.resolveWidth({
-      width: settings.tabRailWidth ?? defaults.tabRailWidth ?? 256,
+      // Same default resolution as applyTabRailWidth(): a rail that has never
+      // been sized shows the width it is actually rendering at, which for
+      // detailed rows is the Wide preset rather than 256. The rich-aware
+      // default must come BEFORE the per-device defaults blob: the handheld
+      // blob carries tabRailWidth: 256, which applyTabRailWidth() never reads,
+      // so consulting it first showed a tablet's unsized rich rail as 256 while
+      // it rendered at 320 — and a routine Save then PERSISTED the 256.
+      width: settings.tabRailWidth ?? this._defaultTabRailWidth?.() ?? defaults.tabRailWidth ?? 256,
     }) ?? 256;
     const tabRailWidthSelect = document.getElementById('appSettingsTabRailWidth');
     if (tabRailWidthSelect) this.syncTabRailWidthSetting?.(tabRailWidth);
+    const tabRailDetailSelect = document.getElementById('appSettingsTabRailDetail');
+    if (tabRailDetailSelect) tabRailDetailSelect.value = settings.tabRailDetail ?? defaults.tabRailDetail ?? 'rich';
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     document.getElementById('appSettingsSessionListLayout').value =
@@ -1310,6 +1332,8 @@ Object.assign(CodemanApp.prototype, {
       ['welcomeAntigravityBtn', 'antigravity'],
       ['welcomeGeminiBtn', 'gemini'],
       ['welcomePiBtn', 'pi'],
+      ['welcomeGrokBtn', 'grok'],
+      ['welcomeDeepSeekBtn', 'deepseek'],
       // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
       // without cloudflared can only ever produce "cloudflared not found".
       ['welcomeTunnelBtn', 'cloudflared'],
@@ -2210,6 +2234,7 @@ Object.assign(CodemanApp.prototype, {
       tabOrientation: document.getElementById('appSettingsTabOrientation').value,
       tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
+      tabRailDetail: document.getElementById('appSettingsTabRailDetail').value,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       sessionSidebarFontSize: this.resolveSessionSidebarFontSize(
@@ -2732,7 +2757,10 @@ Object.assign(CodemanApp.prototype, {
         // COD-286: phones are forced horizontal by resolveTabOrientation anyway;
         // this keeps the picker honest if the layout ever reaches a tablet width.
         tabOrientation: 'horizontal',
+        tabRailWidth: 256,
+        tabRailDetail: 'rich',
         sessionListLayout: 'header',
+        sessionSidebarFontSize: 12,
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
         webglRendererEnabled: false, // mobile always uses the DOM renderer
@@ -3088,6 +3116,14 @@ Object.assign(CodemanApp.prototype, {
     const previous = root.getAttribute('data-tab-orientation') || 'horizontal';
     root.setAttribute('data-tab-orientation', orientation);
 
+    // Row detail rides on its OWN attribute, exactly like the sidebar's
+    // data-sidebar-detail: every html[data-tab-orientation='vertical'] rule in
+    // styles.css keeps matching both variants untouched, and the gate in app.js
+    // reads one attribute instead of re-parsing localStorage per tab.
+    const previousDetail = root.dataset.tabRailDetail || 'rich';
+    const detail = (settings.tabRailDetail ?? defaults.tabRailDetail ?? 'rich') === 'simple' ? 'simple' : 'rich';
+    root.dataset.tabRailDetail = detail;
+
     const tabsEl = document.getElementById('sessionTabs');
     const rail = document.getElementById('tabRail');
     const header = document.querySelector('.header');
@@ -3113,20 +3149,46 @@ Object.assign(CodemanApp.prototype, {
       tabsEl.setAttribute('aria-orientation', sidebarOwnsTabs || orientation === 'vertical' ? 'vertical' : 'horizontal');
     }
 
-    const shouldSettleRailWidth =
+    const settleRailWidth =
       options.settleRailWidth === true && (orientation === 'vertical' || previous !== orientation);
-    this.applyTabRailWidth?.({ settle: shouldSettleRailWidth });
-
-    if (previous !== orientation) {
-      // The rail takes width from the terminal pane, so xterm must re-measure —
-      // the ResizeObserver would eventually catch it, but 300ms late (COD-213).
+    this.applyTabRailWidth?.({ settle: settleRailWidth });
+    const orientationChanged = previous !== orientation;
+    // A detail flip counts as a change on its own: simple ⟷ detailed leaves the
+    // orientation on 'vertical' both times, and the stamps line is emitted by
+    // the row template, not toggled by CSS — same reasoning as the sidebar's
+    // detail half in applySessionListLayout(). Taller rows also move every
+    // connector anchored to a tab rect.
+    const changed = orientationChanged || previousDetail !== detail;
+    if (orientationChanged) {
       this.updateTabOverflowMode?.();
-      if (!shouldSettleRailWidth) this.fitAddon?.fit();
-      // Tabs and connection lines are geometry-dependent: re-render the strip and
-      // redraw the SVG lines that are aimed at each tab's rect.
-      this._fullRenderSessionTabs?.();
-      this._updateConnectionLinesImmediate?.();
+      if (!settleRailWidth) this.fitAddon?.fit();
     }
+    // applyTabWrapSettings() is the ONE owner of tabs-show-folder and is
+    // rail-aware, so it has to run AFTER the two attributes above — the
+    // applySessionListLayout() call that precedes this one on the settings-save
+    // path ran while data-tab-rail-detail still held the old value. It
+    // re-renders by itself when the folder row appears or disappears, which is
+    // why the render below is skipped in that case rather than doubled.
+    const prevTall = this._tallTabsEnabled;
+    if (changed) this.applyTabWrapSettings?.();
+    if (changed) {
+      // Mirror of applyTabWrapSettings()'s OWN render condition, which is
+      // `prevTallTabs !== undefined && prevTallTabs !== showFolder`: its first
+      // call ever only establishes the baseline and deliberately renders
+      // nothing. Reading an undefined previous value as "it rendered" skips
+      // BOTH renders and leaves the rows stale — reachable whenever this is the
+      // first call, i.e. when the pre-paint script threw and left the
+      // attributes on their fallbacks for applyTabOrientation() to correct.
+      const wrapRendered = prevTall !== undefined && prevTall !== this._tallTabsEnabled;
+      if (!wrapRendered) this._fullRenderSessionTabs?.();
+      this._updateConnectionLinesImmediate?.();
+      this._refreshHomeSessionsIfVisible?.();
+    }
+    // Only detailed rows carry stamps that go stale with no event behind them.
+    // _fullRenderSessionTabs() settles this too, but applyTabOrientation() runs
+    // on paths where nothing re-rendered (boot with the layout already applied).
+    if (this.isRichTabRows?.()) this._startSidebarRichClock?.();
+    else this._stopSidebarRichClock?.();
   },
 
   applyTabWrapSettings() {
@@ -3148,7 +3210,13 @@ Object.assign(CodemanApp.prototype, {
     const twoRows = !sidebar && deviceType === 'desktop'
       ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false)
       : false;
-    const showFolder = sidebar || twoRows;
+    // The DETAILED vertical rail is the third tall-row surface, for the same
+    // reason as the sidebar: it is a docked column with a row per session, and
+    // the stamps line below the name says nothing about WHICH project the
+    // session is in. Read from the applied attribute, which applyTabOrientation()
+    // has already written (app.js calls it before this).
+    const railRich = this.isTabRailRich?.() === true;
+    const showFolder = sidebar || twoRows || railRich;
     const prevTallTabs = this._tallTabsEnabled;
     this._tallTabsEnabled = showFolder;
     const tabsEl = document.getElementById('sessionTabs');
@@ -3420,7 +3488,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'sessionListLayout',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'sessionListLayout',
           'sessionSidebarFontSize',
           'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',

@@ -8,6 +8,7 @@ import vm from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const publicDir = resolve(import.meta.dirname, '../src/web/public');
+const readPublic = (name: string) => readFileSync(resolve(publicDir, name), 'utf8');
 const indexHtml = readFileSync(resolve(publicDir, 'index.html'), 'utf8');
 const stylesCss = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
 const settingsJs = readFileSync(resolve(publicDir, 'settings-ui.js'), 'utf8');
@@ -164,6 +165,7 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
 
   it('keeps resize-observer ownership for pointer drags longer than the watchdog', async () => {
     vi.useFakeTimers();
+    const controller = readPublic('tab-rail-resize.js');
     class FakeCodemanApp {}
     let resizing = true;
     const context = vm.createContext({
@@ -190,6 +192,7 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
   });
 
   it('keeps a viewport-clamped effective width out of the preferred-width control', () => {
+    const controller = readPublic('tab-rail-resize.js');
     class FakeCodemanApp {}
     const values = new Map<string, string>();
     const rootClasses = new Set<string>();
@@ -272,8 +275,8 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
 
   it('routes Settings width changes through the same settled resize coordinator', () => {
     expect(settingsJs).toContain('applyTabOrientation({ settleRailWidth: true })');
-    expect(settingsJs).toContain('this.applyTabRailWidth?.({ settle: shouldSettleRailWidth })');
-    expect(settingsJs).toContain('if (!shouldSettleRailWidth) this.fitAddon?.fit()');
+    expect(settingsJs).toContain('this.applyTabRailWidth?.({ settle: settleRailWidth })');
+    expect(settingsJs).toContain('if (!settleRailWidth) this.fitAddon?.fit()');
   });
 
   it('closes detached rail menus before tab rebuilds and session cleanup', () => {

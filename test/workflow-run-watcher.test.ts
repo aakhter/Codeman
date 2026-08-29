@@ -18,38 +18,21 @@ const SESSION_UUID = '388113c8-cd01-4e80-93a8-3be66ab1519b';
 const RUN_ID = 'wf_test1234-abc';
 
 /**
- * The newest timestamp in the captured fixture below. getRecentRuns() filters on
- * WALL CLOCK, so a fixture with fixed 2026-06-14 timestamps silently ages out of the
- * window and the suite starts failing on a DATE rather than on a change: the
- * `getRecentRunSummaries(100000)` test below (a ~69-day window) went red on its own
- * around 2026-08-23 and was still red when COD-385 triaged the gate.
- *
- * Anchoring the capture to "a minute ago" keeps every internal delta (durations, the
- * ordering between agents) byte-identical while making the run permanently recent.
+ * The fixture's epochs are anchored to "now", never pinned, because the recency
+ * assertions below compare them against `Date.now()`. A frozen epoch plus a fixed
+ * window is a time bomb: the original fixture's newest activity sat at
+ * 2026-06-14T20:06:40Z, and `getRecentRunSummaries(100000)` — that argument is
+ * MINUTES, i.e. 69.4 days — stopped matching it on 2026-08-23T06:46:40Z, turning
+ * CI red on a suite nobody had touched. Offsets from the anchor are preserved
+ * verbatim, so every parsed duration and ordering assertion is unchanged.
  */
-const CAPTURE_NEWEST_AT = 1781467524143;
-const CAPTURE_TIME_SHIFT = Date.now() - CAPTURE_NEWEST_AT - 60_000;
-
-/** Shifts epoch-ms values into the present, leaving durations/counts untouched. */
-function anchorEpochsToNow<T>(value: T): T {
-  if (Array.isArray(value)) return value.map(anchorEpochsToNow) as unknown as T;
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, anchorEpochsToNow(v)])
-    ) as T;
-  }
-  // Only plausible epoch-ms values move; durationMs/token counts are far below this.
-  if (typeof value === 'number' && value > 1_600_000_000_000 && value < 2_000_000_000_000) {
-    return (value + CAPTURE_TIME_SHIFT) as unknown as T;
-  }
-  return value;
-}
+const RUN_ANCHOR = Date.now() - 601_000;
 
 /** A run JSON shaped like a real (killed) run: all three agent states + the bloat fields. */
 function sampleRunJson() {
-  return anchorEpochsToNow({
+  return {
     runId: RUN_ID,
-    timestamp: '2026-06-15T00:00:00.000Z',
+    timestamp: new Date(RUN_ANCHOR).toISOString(),
     taskId: 'task_abc',
     // --- bloat fields that MUST be stripped ---
     script: 'export const meta = {};\n'.repeat(5000), // ~110KB
@@ -63,7 +46,7 @@ function sampleRunJson() {
     workflowName: 'review-open-prs',
     status: 'killed',
     error: 'user stopped the task',
-    startTime: 1781466999000,
+    startTime: RUN_ANCHOR,
     defaultModel: 'claude-opus-4-8[1m]',
     totalTokens: 109703,
     totalToolCalls: 44,
@@ -83,13 +66,13 @@ function sampleRunJson() {
         agentId: 'a6c0e282c3f5ac0bf',
         model: 'claude-opus-4-8[1m]',
         state: 'done',
-        startedAt: 1781467000002,
-        queuedAt: 1781466999962,
+        startedAt: RUN_ANCHOR + 1002,
+        queuedAt: RUN_ANCHOR + 962,
         attempt: 1,
         lastToolName: 'StructuredOutput',
         lastToolSummary: 'Does the profile setting make the allowlist dead config',
         promptPreview: 'You are reviewing a pull request...',
-        lastProgressAt: 1781467524143,
+        lastProgressAt: RUN_ANCHOR + 525_143,
         tokens: 104703,
         toolCalls: 41,
         durationMs: 524140,
@@ -104,12 +87,12 @@ function sampleRunJson() {
         agentId: 'a1234567890abcdef',
         model: 'claude-opus-4-8[1m]',
         state: 'progress',
-        startedAt: 1781467010000,
-        queuedAt: 1781466999970,
+        startedAt: RUN_ANCHOR + 11_000,
+        queuedAt: RUN_ANCHOR + 970,
         attempt: 1,
         lastToolName: 'Read',
         promptPreview: 'Review PR 127...',
-        lastProgressAt: 1781467600000,
+        lastProgressAt: RUN_ANCHOR + 601_000,
         tokens: 5000,
         toolCalls: 3,
       },
@@ -121,12 +104,12 @@ function sampleRunJson() {
         phaseTitle: 'Verify',
         model: 'claude-opus-4-8[1m]',
         state: 'start',
-        queuedAt: 1781466999980,
+        queuedAt: RUN_ANCHOR + 980,
         promptPreview: 'Verify finding x...',
-        lastProgressAt: 1781466999980,
+        lastProgressAt: RUN_ANCHOR + 980,
       },
     ],
-  });
+  };
 }
 
 describe('WorkflowRunWatcher', () => {
