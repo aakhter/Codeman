@@ -250,6 +250,7 @@ const PANE_LIST_SEP = '|';
 
 /** Format string for `tmux list-panes -F`. Keep in sync with {@link parsePaneList}. */
 const PANE_LIST_FORMAT = `#{session_name}${PANE_LIST_SEP}#{pane_pid}${PANE_LIST_SEP}#{pane_dead}`;
+const PANE_CWD_FORMAT = `#{pane_active}${PANE_LIST_SEP}#{session_name}${PANE_LIST_SEP}#{pane_current_path}`;
 
 interface ParsedPane {
   name: string;
@@ -305,6 +306,37 @@ export function parsePaneRecords(output: string): ParsedPane[] {
     if (name && !Number.isNaN(pid)) {
       result.push({ name, pid, dead });
     }
+  }
+  return result;
+}
+
+/**
+ * Parse `tmux list-panes -a -F '#{pane_active}|#{session_name}|#{pane_current_path}'`
+ * into muxName → the ACTIVE pane's current working directory (COD-386).
+ *
+ * ⚠ Field order is load-bearing. A directory name may legitimately contain the
+ * separator, so the path has to be the LAST field and is taken as the whole
+ * remainder rather than split further. `pane_active` leads so the two fixed
+ * fields are both in front of it.
+ *
+ * Only active panes are kept: a split window has several, and "the pane's cwd"
+ * is only a well-defined question for the one the user is looking at. A
+ * relative path is a bare string, so anything that is not absolute is dropped
+ * rather than guessed at.
+ */
+export function parsePaneCurrentPaths(output: string): Map<string, string> {
+  const result = new Map<string, string>();
+  for (const line of output.split('\n')) {
+    if (!line) continue;
+    const sep = line.indexOf(PANE_LIST_SEP);
+    if (sep === -1) continue;
+    if (line.slice(0, sep) !== '1') continue;
+    const rest = line.slice(sep + 1);
+    const sep2 = rest.indexOf(PANE_LIST_SEP);
+    if (sep2 === -1) continue;
+    const name = rest.slice(0, sep2);
+    const path = rest.slice(sep2 + 1);
+    if (name && path.startsWith('/')) result.set(name, path);
   }
   return result;
 }
@@ -3872,6 +3904,28 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * List all panes in a tmux session.
    * Returns structured info for each pane.
    */
+  /**
+   * Every tracked session's live pane cwd, in ONE exec (COD-386).
+   *
+   * Batched deliberately: this runs on an interval, and a per-session
+   * `display-message` would scale the exec count with the tab count for
+   * information that is a single `list-panes -a` away.
+   */
+  async listPaneCurrentPaths(): Promise<Map<string, string>> {
+    if (IS_TEST_MODE) return new Map();
+
+    try {
+      const { stdout } = await execAsync(`${this.tmux()} list-panes -a -F '${PANE_CWD_FORMAT}' 2>/dev/null || true`, {
+        encoding: 'utf-8',
+        timeout: EXEC_TIMEOUT_MS,
+      });
+      return parsePaneCurrentPaths(stdout.trim());
+    } catch (err) {
+      console.error('[TmuxManager] Failed to list pane paths:', getErrorMessage(err));
+      return new Map();
+    }
+  }
+
   async listPanes(muxName: string): Promise<PaneInfo[]> {
     if (IS_TEST_MODE) return [];
     if (!isValidMuxName(muxName)) {

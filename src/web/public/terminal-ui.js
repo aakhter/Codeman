@@ -2315,12 +2315,56 @@ Object.assign(CodemanApp.prototype, {
       return normalizePathParts(candidate, false);
     };
 
+    /**
+     * The directory a RELATIVE path printed in the terminal is relative TO.
+     *
+     * COD-386: `session.workingDir` is recorded once at create time and never
+     * follows a `cd`, so in a shell session where the user moved to a sibling
+     * repo every relative path resolved against the wrong root — the link
+     * rendered underlined and then died with "File not found" from the
+     * workspace-confined file routes. `session.cwd` is the pane's live
+     * `#{pane_current_path}`, published by the server sweep.
+     *
+     * ⚠ Remote and Docker sessions are excluded: their local tmux pane runs the
+     * `ssh`/`docker exec` CLIENT, so its cwd is a host directory that has
+     * nothing to do with where the agent is. An unknown cwd falls back to
+     * workingDir, which is what keeps the historical behavior byte-identical.
+     */
+    const relativeResolutionBase = (workingDir, session) => {
+      if (session?.remote || session?.docker) return workingDir;
+      const cwd = session?.cwd;
+      return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : workingDir;
+    };
+
+    /**
+     * Route a relative candidate: workspace-relative when it lands inside the
+     * workspace, absolute otherwise.
+     *
+     * The absolute form is NOT a widening of the file routes — those stay
+     * workspace-confined. It goes to openExternalPathPreview(), the existing
+     * sanctioned route for an out-of-workspace path, which registers it as an
+     * attachment first and lets the server's realpath + blocklist + extension
+     * allowlist decide. Every extension previewExtensions admits is covered by
+     * SUPPORTED_ATTACHMENT_EXTENSIONS, so this cannot mint a link the
+     * attachment route is guaranteed to refuse.
+     */
+    const resolveRelativeCandidate = (candidate, workingDir, base) => {
+      const normalized = normalizePreviewPath(candidate, workingDir);
+      if (!normalized) return null;
+      if (!base || !base.startsWith('/') || base === workingDir) return { relativePath: normalized };
+      const absolute = normalizePathParts(`${base.replace(/\/+$/, '')}/${normalized}`, true);
+      if (!absolute) return { relativePath: normalized };
+      const withinWorkspace = normalizePreviewPath(absolute, workingDir);
+      return withinWorkspace ? { relativePath: withinWorkspace } : { absolutePath: absolute };
+    };
+
     // Scan once instead of using an ambiguous, backtracking-heavy expression.
     // Quoted/backticked spans are kept intact so workspace paths may contain spaces.
     const findPreviewReferences = (lineText, workingDir, session, markerOffsets = [0]) => {
       const references = [];
       const suppressedRanges = [];
       const blockedPreviewRanges = [];
+      const relativeBase = relativeResolutionBase(workingDir, session);
       const result = () => ({ references, suppressedRanges });
       const suppress = (startIndex, endIndex) => suppressedRanges.push({ startIndex, endIndex });
       const blockPreview = (startIndex, endIndex, options = {}) =>
@@ -2438,6 +2482,12 @@ Object.assign(CodemanApp.prototype, {
         const startIndex = rawStart + startTrim;
         const endIndex = rawStart + endTrim;
         if (isBlockedPreview(text, startIndex, endIndex)) return;
+        if (!text.startsWith('/')) {
+          const target = resolveRelativeCandidate(text, workingDir, relativeBase);
+          if (!target) return;
+          references.push({ text, ...target, startIndex, endIndex });
+          return;
+        }
         const relativePath = normalizePreviewPath(text, workingDir);
         if (!relativePath) return;
         references.push({ text, relativePath, startIndex, endIndex });

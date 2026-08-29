@@ -639,6 +639,10 @@ export class Session extends EventEmitter {
   // calls resetRespawnBreaker(). Defense-in-depth over the COD-115 crash-loop.
   private readonly _ptyExitBreaker = new InteractivePtyExitBreaker();
   private _respawnBlocked = false;
+  // COD-386: the pane's live `#{pane_current_path}`, refreshed by the server's
+  // sweep. Runtime-only in the same sense as _respawnBlocked — serialized by
+  // toState() but never restored by the constructor.
+  private _cwd?: string;
   private readonly _terminalBufferMaxSize: number;
   private readonly _terminalBufferTrimSize: number;
   private readonly _tmuxHistoryLimit: number;
@@ -2058,6 +2062,7 @@ export class Session extends EventEmitter {
       pid: this.pid,
       status: this._status,
       workingDir: this.workingDir,
+      cwd: this._cwd,
       remote: this._remote,
       docker: this._docker,
       owner: this._owner,
@@ -2989,6 +2994,27 @@ export class Session extends EventEmitter {
   /** Whether the interactive-PTY exit circuit breaker is currently tripped (COD-118). */
   get respawnBlocked(): boolean {
     return this._respawnBlocked;
+  }
+
+  /** The pane's live working directory, when the sweep has observed one (COD-386). */
+  get cwd(): string | undefined {
+    return this._cwd;
+  }
+
+  /**
+   * Record the pane's live cwd. Returns whether it CHANGED, so the caller can
+   * broadcast only on a real transition instead of once per sweep tick.
+   *
+   * A remote/docker session is refused outright rather than filtered upstream:
+   * its local pane runs the ssh/docker-exec client, so a cwd read from it names
+   * a host directory the agent was never in, and resolving relative paths there
+   * would be a new wrong answer in place of the old one.
+   */
+  setCwd(cwd: string | undefined): boolean {
+    const next = this._remote || this._docker ? undefined : cwd?.startsWith('/') ? cwd : undefined;
+    if (next === this._cwd) return false;
+    this._cwd = next;
+    return true;
   }
 
   /**

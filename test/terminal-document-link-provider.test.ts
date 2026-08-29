@@ -60,7 +60,14 @@ function loadTerminalUiPrototype() {
 
 function makeHarness(
   lines: FakeLine[] | string,
-  options: { sessionId?: string; workingDir?: string; cols?: number; remote?: object; docker?: object } = {}
+  options: {
+    sessionId?: string;
+    workingDir?: string;
+    cwd?: string;
+    cols?: number;
+    remote?: object;
+    docker?: object;
+  } = {}
 ) {
   const { proto, openSpy } = loadTerminalUiPrototype();
   const sourceLines = typeof lines === 'string' ? [{ text: lines }] : lines;
@@ -123,6 +130,7 @@ function makeHarness(
         originalSessionId,
         {
           workingDir: options.workingDir ?? '/workspace/project',
+          cwd: options.cwd,
           remote: options.remote,
           docker: options.docker,
         },
@@ -934,5 +942,63 @@ describe('COD-288 marker-prefixed absolute paths', () => {
     const start = performance.now();
     provide();
     expect(performance.now() - start).toBeLessThan(500);
+  });
+});
+
+describe('COD-386 relative paths resolve against the pane cwd', () => {
+  it('routes a relative path to the external preview when the pane cd-ed out of the workspace', () => {
+    const { provide, previewSpy, externalPreviewSpy, originalSessionId } = makeHarness(
+      'Open the console and paste the whole of browser_scrapers/reddit_capture.js.',
+      { workingDir: '/mnt/c/projects/smobile', cwd: '/mnt/c/projects/stash-recommender' }
+    );
+
+    const [link] = provide();
+
+    expect(link.text).toBe('browser_scrapers/reddit_capture.js');
+    link.activate(null, link.text);
+    expect(externalPreviewSpy).toHaveBeenCalledWith(
+      '/mnt/c/projects/stash-recommender/browser_scrapers/reddit_capture.js',
+      originalSessionId
+    );
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps the workspace-relative route when the pane cd-ed into a subdirectory', () => {
+    const { provide, previewSpy, externalPreviewSpy, originalSessionId } = makeHarness('See docs/guide.md for setup.', {
+      workingDir: '/workspace/project',
+      cwd: '/workspace/project/packages/api',
+    });
+
+    const [link] = provide();
+
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith('packages/api/docs/guide.md', originalSessionId);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it('resolves against workingDir when no pane cwd is known', () => {
+    const { provide, previewSpy, externalPreviewSpy, originalSessionId } = makeHarness('See docs/guide.md for setup.', {
+      workingDir: '/workspace/project',
+    });
+
+    const [link] = provide();
+
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith('docs/guide.md', originalSessionId);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves a remote session on the workingDir base, since the pane cwd is the ssh client', () => {
+    const { provide, previewSpy, externalPreviewSpy, originalSessionId } = makeHarness('See docs/guide.md for setup.', {
+      workingDir: '/workspace/project',
+      cwd: '/home/aakht',
+      remote: { host: 'nas02' },
+    });
+
+    const [link] = provide();
+
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith('docs/guide.md', originalSessionId);
+    expect(externalPreviewSpy).not.toHaveBeenCalled();
   });
 });

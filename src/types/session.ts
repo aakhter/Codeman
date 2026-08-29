@@ -485,6 +485,23 @@ export interface SessionState {
   status: SessionStatus;
   /** Working directory path */
   workingDir: string;
+  /**
+   * The pane's LIVE working directory (`#{pane_current_path}`), when known.
+   *
+   * `workingDir` is fixed at create time and never follows a `cd`, so in a shell
+   * session it stops describing where the agent actually is. This is what a
+   * relative path printed in the terminal is relative TO (COD-386).
+   *
+   * ⚠ Runtime-derived and refreshed by a server sweep, like `respawnBlocked`:
+   * it is serialized but never restored by the constructor, so a restart starts
+   * blank rather than trusting a stamp from before the process died. Absent for
+   * remote/docker sessions, whose local pane runs the ssh/docker-exec client.
+   *
+   * ⚠ NOT a confinement root. The file routes stay confined to `workingDir`;
+   * this only decides which base a relative path resolves against, and anything
+   * landing outside the workspace goes through the attachment route's own guard.
+   */
+  cwd?: string;
   /** Remote execution metadata, present when this session runs over SSH through local tmux */
   remote?: SessionRemote;
   /** Docker execution metadata, present when this session runs inside a container via local tmux + docker exec */

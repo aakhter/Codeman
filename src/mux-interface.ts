@@ -308,6 +308,14 @@ export interface TerminalMultiplexer extends EventEmitter {
   respawnPane(options: RespawnPaneOptions): Promise<number | null>;
 
   /**
+   * Every session's active-pane working directory, batched into one query
+   * (COD-386). Optional: a multiplexer that cannot report a pane's cwd simply
+   * leaves relative paths resolving against `workingDir`, which is the
+   * historical behaviour.
+   */
+  listPaneCurrentPaths?(): Promise<Map<string, string>>;
+
+  /**
    * Capture a pane's current tmux buffer with ANSI escape codes preserved.
    * Pass `{ fullHistory: true }` to capture the entire scrollback (`-S -`)
    * as linear text instead of just the visible single-screen frame (COD-47).

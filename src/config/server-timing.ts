@@ -41,6 +41,17 @@ export const STATE_UPDATE_DEBOUNCE_INTERVAL = 500;
 /** Sessions list cache TTL — avoids re-serializing on every SSE init (ms) */
 export const SESSIONS_LIST_CACHE_TTL = 1000;
 
+/**
+ * How often to re-read every pane's `#{pane_current_path}` (ms, COD-386).
+ *
+ * One batched `list-panes -a` per tick regardless of session count, so the cost
+ * is flat. 10s is chosen against the gesture it serves: a `cd` is followed by
+ * output, then by a human noticing a path and clicking it, so the window in
+ * which a stale value could mis-route a link is far shorter than the delay
+ * before anyone can act on one.
+ */
+export const PANE_CWD_SWEEP_INTERVAL = 10 * 1000;
+
 // ============================================================================
 // Scheduled Runs
 // ============================================================================

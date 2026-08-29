@@ -352,6 +352,7 @@ function escapeHtmlText(value: string): string {
 import {
   SESSIONS_LIST_CACHE_TTL,
   SCHEDULED_CLEANUP_INTERVAL,
+  PANE_CWD_SWEEP_INTERVAL,
   SCHEDULED_RUN_MAX_AGE,
   SSE_HEARTBEAT_INTERVAL,
   SESSION_LIMIT_WAIT_MS,
@@ -3099,6 +3100,33 @@ export class WebServer extends EventEmitter {
     this.sse.broadcastSessionStateDebounced(sessionId);
   }
 
+  /**
+   * Refresh every session's live pane cwd from one batched tmux query (COD-386).
+   *
+   * A session missing from the sweep keeps its last known value rather than
+   * being cleared: `list-panes` failing (tmux restarting, exec timeout) returns
+   * an empty map, and clearing on that would drop every session back to the
+   * stale-workingDir behaviour this exists to fix. A session whose pane really
+   * is gone is torn down by the pane-liveness path, not by this one.
+   *
+   * Broadcasts only on a real change, so a quiet machine emits nothing.
+   */
+  private async refreshPaneWorkingDirs(): Promise<void> {
+    const paths = (await this.mux.listPaneCurrentPaths?.()) ?? new Map();
+    if (paths.size === 0) return;
+    for (const session of this.sessions.values()) {
+      const muxName = session.muxName;
+      if (!muxName) continue;
+      const cwd = paths.get(muxName);
+      if (cwd === undefined) continue;
+      if (session.setCwd(cwd)) {
+        this.cachedLightState = null;
+        this.cachedSessionsList = null;
+        this.broadcastSessionStateDebounced(session.id);
+      }
+    }
+  }
+
   // ========== Web Push ==========
 
   /** Map SSE event names to push notification payloads */
@@ -3426,6 +3454,16 @@ export class WebServer extends EventEmitter {
       },
       CRON_TICK_INTERVAL,
       { description: 'scheduled jobs due-checker' }
+    );
+
+    // Keep each session's live pane cwd fresh, so a relative path an agent
+    // prints resolves against where the pane ACTUALLY is (COD-386).
+    this.cleanup.setInterval(
+      () => {
+        void this.refreshPaneWorkingDirs();
+      },
+      PANE_CWD_SWEEP_INTERVAL,
+      { description: 'pane cwd sweep' }
     );
 
     // Start SSE client health check timer (prevents memory leaks from dead connections)
