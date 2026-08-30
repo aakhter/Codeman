@@ -13,7 +13,12 @@ import path from 'node:path';
 import { WebServer } from '../src/web/server.js';
 import { TmuxManager } from '../src/tmux-manager.js';
 import { createUser, invalidateUsersCache } from '../src/user-store.js';
-import { canAccessOwned, findSessionOrFail, sessionCapacityState } from '../src/web/route-helpers.js';
+import {
+  canAccessOwned,
+  findSessionOrFail,
+  findSessionUnscopedOrFail,
+  sessionCapacityState,
+} from '../src/web/route-helpers.js';
 
 vi.spyOn(TmuxManager, 'isTmuxAvailable').mockReturnValue(true);
 
@@ -153,6 +158,17 @@ describe('session-scoping helpers (multi-user)', () => {
     expect(() => findSessionOrFail(ctxWith(map), 's1', reqAs('bob', 'user'))).toThrow();
     expect(findSessionOrFail(ctxWith(map), 's1', reqAs('alice', 'user'))).toBeDefined();
     expect(findSessionOrFail(ctxWith(map), 's1', reqAs('root', 'admin'))).toBeDefined();
+  });
+
+  it('findSessionUnscopedOrFail returns a foreign session, and still 404s an unknown id', () => {
+    // COD-298: the explicit escape hatch. It is intentionally NOT ownership-scoped
+    // — that is the whole point of its name — so this pins the behaviour a reader
+    // would otherwise have to infer, and gives the "why is this exported with no
+    // callers" question a concrete answer. If a request is available, the scoped
+    // overload above is the one to use.
+    const map = new Map<string, unknown>([['s1', fakeSession('alice')]]);
+    expect(findSessionUnscopedOrFail(ctxWith(map), 's1')).toBeDefined();
+    expect(() => findSessionUnscopedOrFail(ctxWith(map), 'missing')).toThrow();
   });
 
   it('per-user session cap counts only the owner sessions', () => {

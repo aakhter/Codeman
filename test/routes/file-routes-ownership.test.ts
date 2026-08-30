@@ -280,4 +280,85 @@ describe('file and attachment route session ownership (COD-292)', () => {
       ]);
     });
   });
+  // COD-298: the File Manager WRITE routes (COD-318) never passed `req` to
+  // findSessionOrFail, so ownership scoping simply did not run on them. The
+  // read route beside them (`GET .../files`) does scope, which is what makes
+  // this a third occurrence of the COD-292/COD-294 class rather than a design
+  // choice: in multi-user mode a non-admin could not LIST another user's
+  // workspace but could upload into it, mkdir in it, rename in it and delete
+  // from it. Each case asserts the filesystem too — a 404 that still performed
+  // the write would be the worst possible pass.
+  describe('File Manager write operations (COD-318 routes)', () => {
+    it("POST /files/mkdir hides another user's session and creates nothing", async () => {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/files/mkdir`,
+        headers: { host: 'codeman.test', origin: 'http://codeman.test', 'x-codeman-csrf': '1' },
+        payload: { path: 'intruder-dir' },
+      });
+
+      expectOwnershipNotFound(response, harness.ctx._sessionId);
+      await expect(fs.stat(join(harness.workdir, 'intruder-dir'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it("POST /files/rename hides another user's session and leaves the file untouched", async () => {
+      await fs.writeFile(join(harness.workdir, 'owned.txt'), 'alice only');
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/files/rename`,
+        headers: { host: 'codeman.test', origin: 'http://codeman.test', 'x-codeman-csrf': '1' },
+        payload: { from: 'owned.txt', to: 'stolen.txt' },
+      });
+
+      expectOwnershipNotFound(response, harness.ctx._sessionId);
+      expect(await fs.readFile(join(harness.workdir, 'owned.txt'), 'utf8')).toBe('alice only');
+      await expect(fs.stat(join(harness.workdir, 'stolen.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it("DELETE /files hides another user's session and does not delete the file", async () => {
+      await fs.writeFile(join(harness.workdir, 'keep.txt'), 'alice only');
+
+      const response = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/files?path=keep.txt`,
+        headers: { host: 'codeman.test', origin: 'http://codeman.test', 'x-codeman-csrf': '1' },
+      });
+
+      expectOwnershipNotFound(response, harness.ctx._sessionId);
+      expect(await fs.readFile(join(harness.workdir, 'keep.txt'), 'utf8')).toBe('alice only');
+    });
+
+    it("POST /files/upload hides another user's session and writes nothing", async () => {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/files/upload`,
+        headers: { ...MULTIPART_HEADERS, 'x-codeman-csrf': '1' },
+        payload: uploadBody('intruder.pdf', PDF_BYTES),
+      });
+
+      expectOwnershipNotFound(response, harness.ctx._sessionId);
+      await expect(fs.stat(join(harness.workdir, 'intruder.pdf'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('the same operations still reach the owner and an admin', async () => {
+      // The scoping must not break the legitimate callers, which is the half a
+      // "return 404 for everyone" fix would silently pass.
+      const results: number[] = [];
+      for (const user of [OWNER_USER, ADMIN_USER]) {
+        harness.setRequestUser(user);
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/files/mkdir`,
+          headers: { host: 'codeman.test', origin: 'http://codeman.test', 'x-codeman-csrf': '1' },
+          payload: { path: `dir-${user.username}` },
+        });
+        results.push(response.statusCode);
+      }
+
+      expect(results).toEqual([200, 200]);
+      expect((await fs.stat(join(harness.workdir, `dir-${OWNER_USER.username}`))).isDirectory()).toBe(true);
+      expect((await fs.stat(join(harness.workdir, `dir-${ADMIN_USER.username}`))).isDirectory()).toBe(true);
+    });
+  });
 });
