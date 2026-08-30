@@ -790,6 +790,87 @@ describe('COD-307 accessible rendering and pointer wiring', () => {
   });
 });
 
+describe('COD-335 move-destination order matches the left navigation', () => {
+  // The rail renders named groups in layout order and puts Ungrouped LAST
+  // (`project()` in tab-layout-browser.js pushes a section per group, then the
+  // id-null ungrouped section). The move menu built its own list with
+  // "Move to Ungrouped" hardcoded FIRST, so the same destinations appeared in
+  // two different orders depending on which surface you looked at.
+  function railSectionOrder(app: Record<string, any>): Array<string | null> {
+    return app._projectTabLayout().sections.map((section: { id: string | null }) => section.id);
+  }
+
+  function destinations(app: Record<string, any>, ref: { kind: string; id: string }): string[] {
+    return app
+      ._tabRefMoveActions(ref)
+      .filter((action: { label: string }) => action.label.startsWith('Move to '))
+      .map((action: { label: string }) => action.label);
+  }
+
+  it('lists named groups in rail order with Ungrouped last', () => {
+    const app = makeInteractionApp();
+    app.tabLayout = {
+      version: 9,
+      updatedAt: '2026-08-19T00:00:00.000Z',
+      groups: [
+        { id: 'sp', name: 'SP', refs: [{ kind: 'session', id: 'parent' }] },
+        { id: 'codeman', name: 'codeman', refs: [] },
+        { id: 'ingestion', name: 'ingestion', refs: [] },
+        { id: 'events', name: 'events', refs: [] },
+        { id: 'planning', name: 'planning', refs: [{ kind: 'session', id: 'other' }] },
+      ],
+      ungrouped: [{ kind: 'webview', id: 'web' }],
+    };
+
+    // The rail's own order is the contract; assert against it rather than a
+    // copy of it, so this cannot pass while the two surfaces disagree.
+    expect(railSectionOrder(app)).toEqual(['sp', 'codeman', 'ingestion', 'events', 'planning', null]);
+    expect(destinations(app, { kind: 'session', id: 'parent' })).toEqual([
+      'Move to SP',
+      'Move to codeman',
+      'Move to ingestion',
+      'Move to events',
+      'Move to planning',
+      'Move to Ungrouped',
+    ]);
+  });
+
+  it('reflects a group reorder the next time the menu is built, with no reload', () => {
+    const app = makeInteractionApp();
+    const before = destinations(app, { kind: 'session', id: 'parent' });
+    expect(before).toEqual(['Move to Core <&>', 'Move to Ops', 'Move to Ungrouped']);
+
+    app.tabLayout = window.CodemanTabLayout.applyOperation(app.tabLayout, {
+      type: 'reorderGroup',
+      groupId: 'g2',
+      index: 0,
+    });
+
+    expect(railSectionOrder(app)).toEqual(['g2', 'g1', null]);
+    expect(destinations(app, { kind: 'session', id: 'parent' })).toEqual([
+      'Move to Ops',
+      'Move to Core <&>',
+      'Move to Ungrouped',
+    ]);
+  });
+
+  it('orders identically whether groups are collapsed or expanded', () => {
+    const app = makeInteractionApp();
+    const expanded = destinations(app, { kind: 'session', id: 'parent' });
+    app.collapsedTabGroupIds = new Set(['g1', 'g2']);
+    expect(destinations(app, { kind: 'session', id: 'parent' })).toEqual(expanded);
+  });
+
+  it('keeps Move up / Move down ahead of the destinations', () => {
+    // moveTabRefUp/Down find their entry by label in this same list, so the
+    // reordering must not disturb the relative-move actions.
+    const app = makeInteractionApp();
+    const labels = app._tabRefMoveActions({ kind: 'session', id: 'child' }).map((a: { label: string }) => a.label);
+    expect(labels[0]).toBe('Move up');
+    expect(labels.slice(1).every((label: string) => label.startsWith('Move to '))).toBe(true);
+  });
+});
+
 function makeInteractionApp() {
   (globalThis as any).CSS ||= { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '\\$&') };
   const app = Object.create(CodemanApp.prototype) as Record<string, any>;

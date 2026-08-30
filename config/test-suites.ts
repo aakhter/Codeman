@@ -58,6 +58,7 @@ export const BROWSER_TEST_GLOBS = [
   'test/tab-focus-smart-group.browser.test.ts',
   'test/tab-group-menu.browser.test.ts',
   'test/tab-rail-resize.browser.test.ts',
+  'test/tab-move-destination-order.browser.test.ts',
   'test/terminal-document-link.browser.test.ts',
   'test/terminal-input-performance.browser.test.ts',
   'test/tab-rail-session-search.browser.test.ts',

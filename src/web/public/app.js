@@ -6038,12 +6038,20 @@ class CodemanApp {
       ...(sourceEnd < refs.length
         ? [{ label: 'Move down', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
         : []),
-      { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
+      // COD-335: destination order must match the left navigation, which renders
+      // named groups in layout order and Ungrouped LAST (`project()` pushes a
+      // section per group, then the id-null ungrouped one). Ungrouped used to be
+      // hardcoded first here, so the same destinations read in two different
+      // orders depending on the surface. Derived from `tabLayout` — the same
+      // thing the projection derives the rail from — rather than kept as a second
+      // list sorted to agree, and unaffected by collapse, which changes only what
+      // the rail draws inside a section, never section order.
       ...this.tabLayout.groups.map((group) => ({
         label: `Move to ${group.name}`,
         groupId: group.id,
         index: group.refs.length,
       })),
+      { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
     ];
   }
 
