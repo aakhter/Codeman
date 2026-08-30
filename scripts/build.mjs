@@ -113,6 +113,10 @@ run(
   'npx esbuild dist/web/public/mobile-ime-preview.js --minify --outfile=dist/web/public/mobile-ime-preview.js --allow-overwrite'
 );
 run(
+  'minify terminal-keycode229-recovery.js',
+  'npx esbuild dist/web/public/terminal-keycode229-recovery.js --minify --outfile=dist/web/public/terminal-keycode229-recovery.js --allow-overwrite'
+);
+run(
   'minify i18n.js',
   'npx esbuild dist/web/public/i18n.js --minify --outfile=dist/web/public/i18n.js --allow-overwrite'
 );
@@ -181,6 +185,7 @@ console.log('\n[build] content-hash cache busting');
     'keyboard-accessory.js',
     'input-cjk.js',
     'mobile-ime-preview.js',
+    'terminal-keycode229-recovery.js',
     'sanitize-html.js',
     'tab-layout-browser.js',
     'app.js',

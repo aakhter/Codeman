@@ -616,6 +616,15 @@ Object.assign(CodemanApp.prototype, {
     this._mobileImePreviewPagehideHandler = null;
   },
 
+  _destroyKeyCode229Recovery() {
+    try {
+      this._keyCode229Recovery?.destroy?.();
+    } catch {
+      // Recovery is optional; terminal replacement must continue.
+    }
+    this._keyCode229Recovery = null;
+  },
+
   _initMobileImePreview() {
     this._destroyMobileImePreview();
     let preview = null;
@@ -789,6 +798,7 @@ Object.assign(CodemanApp.prototype, {
 
     const initialFontPolicy = this.getTerminalFontPolicy();
 
+    this._destroyKeyCode229Recovery();
     this._destroyMobileImePreview();
     this.terminal = new Terminal({
       theme: { ...window.codemanCurrentXtermTheme() },
@@ -844,6 +854,11 @@ Object.assign(CodemanApp.prototype, {
     // punctuation; returning false here would stop xterm before it can diff
     // the helper textarea and emit the committed Unicode text.
     this.terminal.attachCustomKeyEventHandler((ev) => {
+      try {
+        this._keyCode229Recovery?.handleKeyEvent?.(ev);
+      } catch {
+        // The fallback must never interfere with xterm's canonical handler.
+      }
       if (ev.isComposing || ev.key === 'Process' || ev.keyCode === 229) return true;
 
       // ── COD-187 history view keys ──
@@ -1850,7 +1865,14 @@ Object.assign(CodemanApp.prototype, {
     // mobile connections.  The overlay + localStorage persistence ensure input
     // survives tab switches and reconnects.
 
-    this.terminal.onData((data) => {
+    const handleTerminalData = (data, { recovered = false } = {}) => {
+      if (!recovered) {
+        try {
+          if (this._keyCode229Recovery?.consumeTerminalData?.(data)) return;
+        } catch {
+          // A broken dedupe guard must fail open to canonical xterm data.
+        }
+      }
       const originalData = data;
       const isImeCommit = this._consumeMobileImeTerminalData(originalData);
       // Mouse SGR reports (tap-to-position) are NOT IME input — they must reach
@@ -2227,7 +2249,17 @@ Object.assign(CodemanApp.prototype, {
         // same bytes. Body in _predictHookOnData (vm-testable).
         this._handleNormalTerminalData(data, { isImeCommit });
       }
-    });
+    };
+
+    try {
+      this._keyCode229Recovery = window.CodemanKeyCode229Recovery?.create?.({
+        textarea: this.terminal.textarea,
+        emitRecovered: (data) => handleTerminalData(data, { recovered: true }),
+      });
+    } catch {
+      this._keyCode229Recovery = null;
+    }
+    this.terminal.onData((data) => handleTerminalData(data));
   },
 
   /**

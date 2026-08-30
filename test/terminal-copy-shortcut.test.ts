@@ -36,8 +36,17 @@ describe('terminal Ctrl+C smart copy', () => {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
     page = await context.newPage();
+    const startupErrors: string[] = [];
+    page.on('pageerror', (error) => startupErrors.push(`pageerror: ${error.message}`));
+    page.on('console', (message) => {
+      if (message.type() === 'error') startupErrors.push(`console: ${message.text()}`);
+    });
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => (window as any).app?.terminal, null, { timeout: 30000 });
+    try {
+      await page.waitForFunction(() => (window as any).app?.terminal, null, { timeout: 30000 });
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\n${startupErrors.join('\n')}`);
+    }
     // The first write after load can be dropped while the app finishes wiring
     // its render pipeline, so poll until one really lands in the buffer.
     await page.waitForFunction(
@@ -216,6 +225,71 @@ describe('terminal Ctrl+C smart copy', () => {
     const res = await outcome();
     expect(res.data.join('')).toContain('SENTINEL'); // pasted text, not ^V
     expect(res.data.join('')).not.toContain('\x16');
+  });
+
+  it('recovers explicit keyCode 229 input once when the helper textarea never mutates', async () => {
+    await setup('KEYCODE-229-RECOVERY', false);
+    const result = await page.evaluate(async () => {
+      const app = (window as any).app;
+      const textarea = document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement;
+      const originalSessionId = app.activeSessionId;
+      const originalLocalEcho = app._localEchoEnabled;
+      const originalSendInput = app._sendInputAsync;
+      const originalPendingInput = app._pendingInput;
+      const originalLastKeystrokeTime = app._lastKeystrokeTime;
+      const sent: string[] = [];
+      const dispatch229 = (key: string) => {
+        for (const type of ['keydown', 'keyup']) {
+          const event = new KeyboardEvent(type, {
+            key,
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+          });
+          Object.defineProperties(event, { keyCode: { value: 229 }, which: { value: 229 } });
+          textarea.dispatchEvent(event);
+        }
+      };
+
+      try {
+        app.activeSessionId = 'cod388-browser-regression';
+        app._localEchoEnabled = false;
+        app._pendingInput = '';
+        app._lastKeystrokeTime = 0;
+        app._sendInputAsync = (_sessionId: string, data: string) => sent.push(data);
+        textarea.focus();
+
+        dispatch229('x');
+        await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+        const afterRecovery = [...sent];
+
+        // A browser that supplies its canonical input late must not duplicate
+        // the character already recovered for this key token.
+        textarea.value = 'x';
+        textarea.dispatchEvent(
+          new InputEvent('input', { data: 'x', inputType: 'insertText', bubbles: true, composed: true })
+        );
+        await new Promise((resolveWait) => setTimeout(resolveWait, 0));
+        const afterLateInput = [...sent];
+
+        dispatch229('Enter');
+        await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+        return { afterRecovery, afterLateInput, final: [...sent] };
+      } finally {
+        app.activeSessionId = originalSessionId;
+        app._localEchoEnabled = originalLocalEcho;
+        app._sendInputAsync = originalSendInput;
+        app._pendingInput = originalPendingInput;
+        app._lastKeystrokeTime = originalLastKeystrokeTime;
+        textarea.value = '';
+      }
+    });
+
+    expect(result).toEqual({
+      afterRecovery: ['x'],
+      afterLateInput: ['x'],
+      final: ['x', '\r'],
+    });
   });
 
   it('forwards full-width punctuation after a Chinese IME composition', async () => {
