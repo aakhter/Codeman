@@ -92,6 +92,7 @@
                 token: candidate.token,
                 data: candidate.data,
                 expiresAt: now() + LATE_INPUT_WINDOW_MS,
+                claimedByInput: false,
               });
               if (recovered.length > MAX_RECOVERED_RECORDS) {
                 recovered.splice(0, recovered.length - MAX_RECOVERED_RECORDS);
@@ -112,10 +113,14 @@
       }
     }
 
-    function onInput() {
+    function onCanonicalInput(event) {
       if (destroyed) return;
       const token = keyToken;
       cancelPending((candidate) => candidate.token === token);
+      const inputData = typeof event?.data === 'string' ? event.data : null;
+      if (inputData === null) return;
+      const matchingRecovery = recovered.find((record) => record.token === token && record.data === inputData);
+      if (matchingRecovery) matchingRecovery.claimedByInput = true;
     }
 
     function resetForCompositionOrFocusLoss() {
@@ -129,13 +134,17 @@
       if (destroyed) return false;
       pruneRecovered();
 
-      const canonical = pending.find((candidate) => candidate.active && candidate.data === data);
+      const canonical = pending.find(
+        (candidate) => candidate.active && candidate.token === keyToken && candidate.data === data
+      );
       if (canonical) {
         removePending(canonical);
         return false;
       }
 
-      const duplicateIndex = recovered.findIndex((record) => record.token === keyToken && record.data === data);
+      const duplicateIndex = recovered.findIndex(
+        (record) => record.token === keyToken && record.data === data && record.claimedByInput
+      );
       if (duplicateIndex === -1) return false;
       recovered.splice(duplicateIndex, 1);
       return true;
@@ -147,14 +156,16 @@
       cancelPending();
       recovered.splice(0);
       try {
-        textarea.removeEventListener('input', onInput, true);
+        textarea.removeEventListener('beforeinput', onCanonicalInput, true);
+        textarea.removeEventListener('input', onCanonicalInput, true);
         textarea.removeEventListener('compositionstart', resetForCompositionOrFocusLoss, true);
         textarea.removeEventListener('blur', resetForCompositionOrFocusLoss, true);
       } catch {}
     }
 
     try {
-      textarea.addEventListener('input', onInput, true);
+      textarea.addEventListener('beforeinput', onCanonicalInput, true);
+      textarea.addEventListener('input', onCanonicalInput, true);
       textarea.addEventListener('compositionstart', resetForCompositionOrFocusLoss, true);
       textarea.addEventListener('blur', resetForCompositionOrFocusLoss, true);
     } catch {

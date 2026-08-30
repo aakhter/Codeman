@@ -265,6 +265,9 @@ describe('terminal Ctrl+C smart copy', () => {
 
         // A browser that supplies its canonical input late must not duplicate
         // the character already recovered for this key token.
+        textarea.dispatchEvent(
+          new InputEvent('beforeinput', { data: 'x', inputType: 'insertText', bubbles: true, composed: true })
+        );
         textarea.value = 'x';
         textarea.dispatchEvent(
           new InputEvent('input', { data: 'x', inputType: 'insertText', bubbles: true, composed: true })

@@ -133,10 +133,30 @@ describe('keyCode 229 terminal input recovery', () => {
     h.flushTimers();
     expect(h.emitted).toEqual(['x']);
 
-    h.textarea.fire('input', { data: 'x' });
+    h.textarea.fire('beforeinput', { data: 'x' });
     h.flushMicrotasks();
     expect(h.controller.consumeTerminalData('x')).toBe(true);
     expect(h.controller.consumeTerminalData('x')).toBe(false);
+  });
+
+  it('does not suppress an unattributed same byte after recovery', () => {
+    const h = harness();
+    h.controller.handleKeyEvent(key());
+    h.flushMicrotasks();
+    h.flushTimers();
+
+    expect(h.controller.consumeTerminalData('x')).toBe(false);
+  });
+
+  it('does not let an immediate ordinary same-character key cancel pending recovery', () => {
+    const h = harness();
+    h.controller.handleKeyEvent(key());
+    h.controller.handleKeyEvent(key({ keyCode: 88 }));
+
+    expect(h.controller.consumeTerminalData('x')).toBe(false);
+    h.flushMicrotasks();
+    h.flushTimers();
+    expect(h.emitted).toEqual(['x']);
   });
 
   it('keeps rapid repeated 229 keys and an ordinary same-character key distinct', () => {

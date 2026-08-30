@@ -76,8 +76,8 @@ one-shot modifiers, local echo, reliable sequencing, and diagnostics.
 ### Late canonical deduplication
 
 After recovery, the controller keeps a short-lived record containing the recovered byte and originating key token. An
-`input` capture listener records which key token owns the synchronous browser input dispatch. If xterm emits the same
-byte during that related input event, the controller consumes it instead of forwarding it a second time.
+`beforeinput` and `input` capture listeners record which key token owns the browser's canonical input dispatch. If
+xterm emits the same byte from that claimed input, the controller consumes it instead of forwarding it a second time.
 
 Canonical data always wins before recovery. Pending candidates are matched before recovered records so rapid repeated
 229 keys remain one byte per key. A newer ordinary keydown changes the current token, preventing its same-character
