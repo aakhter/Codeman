@@ -75,20 +75,22 @@ one-shot modifiers, local echo, reliable sequencing, and diagnostics.
 
 ### Late canonical deduplication
 
-After recovery, the controller keeps a short-lived record containing the recovered byte and originating key token. An
-`beforeinput` and `input` capture listeners record which key token owns the browser's canonical input dispatch. If
+After recovery, the controller keeps a short-lived record containing the recovered byte and originating key record.
+`beforeinput` and `input` capture listeners identify which record owns the browser's canonical input dispatch. If
 xterm emits the same byte from that claimed input, the controller consumes it instead of forwarding it a second time.
 
-Canonical data always wins before recovery. Pending candidates are matched before recovered records so rapid repeated
-229 keys remain one byte per key. A newer ordinary keydown changes the current token, preventing its same-character
-input from being mistaken for a delayed duplicate. Recovery and deduplication records expire promptly and are cleared
-on composition start, blur, destroy, or terminal replacement.
+Canonical data always wins before recovery. A synchronous ordinary key record takes priority over older pending
+recoveries; otherwise the matching pending candidate is resolved independently of newer keydowns. After recovery,
+only an exact record claimed by `beforeinput` or `input` may suppress canonical data. This preserves overlapping 229
+keys, immediate ordinary same-character keys, and delayed canonical input across a newer unrelated keydown. Recovery
+and deduplication records expire promptly and are cleared on composition start, blur, destroy, or terminal replacement.
 
 ### Failure behavior
 
 The controller fails open. Missing globals, listener errors, or scheduling errors leave the existing xterm path active.
 No fallback is attempted without an explicit recoverable `key`. Cleanup never sends data. The module does not mutate
-the xterm textarea or synthesize composition events.
+the xterm textarea or synthesize composition events. A failed recovery callback leaves no deduplication record, so a
+later canonical byte cannot be suppressed after failed delivery.
 
 ## Verification
 
@@ -98,6 +100,8 @@ the xterm textarea or synthesize composition events.
 - Cancel recovery when matching `onData`, input, or composition arrives first.
 - Suppress one delayed matching canonical event from the same token.
 - Preserve rapid repeated 229 keys and an immediate ordinary same-character key.
+- Preserve overlapping different 229 keys, a claimed recovery across a newer ordinary key, and canonical input when
+  the recovery callback throws.
 - Reject composing, `Process`, `Unidentified`, `Dead`, shortcut, modifier, and keyup events.
 - Destroy cancels queued work and removes listeners.
 

@@ -277,7 +277,22 @@ describe('terminal Ctrl+C smart copy', () => {
 
         dispatch229('Enter');
         await new Promise((resolveWait) => setTimeout(resolveWait, 30));
-        return { afterRecovery, afterLateInput, final: [...sent] };
+        const final = [...sent];
+
+        // Two 229 candidates can overlap while the main thread is busy. A
+        // canonical value for the first must resolve that candidate without
+        // cancelling the second candidate's fallback.
+        const overlapStart = sent.length;
+        dispatch229('a');
+        dispatch229('b');
+        const busyUntil = performance.now() + 25;
+        while (performance.now() < busyUntil) {
+          // Deliberately hold the browser task so both xterm/fallback timers
+          // remain queued while canonical input for `a` is prepared.
+        }
+        app.terminal._core.coreService.triggerDataEvent('a', true);
+        await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+        return { afterRecovery, afterLateInput, final, overlap: sent.slice(overlapStart) };
       } finally {
         app.activeSessionId = originalSessionId;
         app._localEchoEnabled = originalLocalEcho;
@@ -292,6 +307,7 @@ describe('terminal Ctrl+C smart copy', () => {
       afterRecovery: ['x'],
       afterLateInput: ['x'],
       final: ['x', '\r'],
+      overlap: ['a', 'b'],
     });
   });
 

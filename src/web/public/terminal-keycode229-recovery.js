@@ -9,8 +9,8 @@
   const LATE_INPUT_WINDOW_MS = 250;
   const MAX_RECOVERED_RECORDS = 32;
 
-  function terminalDataForEvent(event) {
-    if (!event || event.type !== 'keydown' || event.keyCode !== 229 || event.isComposing) return null;
+  function explicitTerminalDataForEvent(event) {
+    if (!event || event.type !== 'keydown' || event.isComposing) return null;
     if (event.ctrlKey || event.altKey || event.metaKey) return null;
     try {
       if (event.getModifierState?.('AltGraph')) return null;
@@ -27,6 +27,11 @@
     return key;
   }
 
+  function terminalDataForEvent(event) {
+    if (event?.keyCode !== 229) return null;
+    return explicitTerminalDataForEvent(event);
+  }
+
   function create(options) {
     const textarea = options?.textarea;
     const emitRecovered = options?.emitRecovered;
@@ -40,7 +45,9 @@
     const now = options.now || (() => global.performance?.now?.() ?? Date.now());
 
     let destroyed = false;
-    let keyToken = 0;
+    let keySequence = 0;
+    let activeKey = null;
+    let beforeInputClaim = null;
     const pending = [];
     const recovered = [];
 
@@ -71,25 +78,39 @@
 
     function handleKeyEvent(event) {
       if (destroyed || event?.type !== 'keydown') return;
-      keyToken += 1;
+      const record = {
+        sequence: ++keySequence,
+        data: explicitTerminalDataForEvent(event),
+        candidate: null,
+      };
+      activeKey = record;
       const data = terminalDataForEvent(event);
-      if (data === null) return;
-
-      const candidate = { token: keyToken, data, active: true, timer: null };
-      pending.push(candidate);
+      const candidate = data === null ? null : { sequence: record.sequence, data, active: true, timer: null };
+      if (candidate) {
+        record.candidate = candidate;
+        pending.push(candidate);
+      }
       try {
         // The custom key handler runs before xterm's CompositionHelper. Queueing
         // our timer from a microtask places it after xterm's own zero-delay
         // textarea diff, while keeping the recovery delay to one browser task.
         enqueueMicrotask(() => {
-          if (destroyed || !candidate.active) return;
+          if (activeKey === record) activeKey = null;
+          if (destroyed || !candidate?.active) return;
           try {
             candidate.timer = setTimer(() => {
               if (destroyed || !candidate.active) return;
               removePending(candidate);
+              try {
+                emitRecovered(candidate.data);
+              } catch {
+                // No dedupe record is retained when delivery fails. A later
+                // canonical xterm value must remain free to pass through.
+                return;
+              }
               pruneRecovered();
               recovered.push({
-                token: candidate.token,
+                sequence: candidate.sequence,
                 data: candidate.data,
                 expiresAt: now() + LATE_INPUT_WINDOW_MS,
                 claimedByInput: false,
@@ -97,35 +118,58 @@
               if (recovered.length > MAX_RECOVERED_RECORDS) {
                 recovered.splice(0, recovered.length - MAX_RECOVERED_RECORDS);
               }
-              try {
-                emitRecovered(candidate.data);
-              } catch {
-                // Recovery is fail-open: never interfere with xterm after an
-                // application callback failure.
-              }
             }, 0);
           } catch {
             removePending(candidate);
           }
         });
       } catch {
-        removePending(candidate);
+        if (activeKey === record) activeKey = null;
+        if (candidate) removePending(candidate);
       }
+    }
+
+    function claimCanonicalInput(data) {
+      if (activeKey?.data === data) {
+        if (activeKey.candidate?.active) removePending(activeKey.candidate);
+        return;
+      }
+      const matchingPending = pending.find((candidate) => candidate.active && candidate.data === data);
+      if (matchingPending) {
+        removePending(matchingPending);
+        return;
+      }
+      const matchingRecovery = recovered.find((record) => !record.claimedByInput && record.data === data);
+      if (matchingRecovery) matchingRecovery.claimedByInput = true;
     }
 
     function onCanonicalInput(event) {
       if (destroyed) return;
-      const token = keyToken;
-      cancelPending((candidate) => candidate.token === token);
       const inputData = typeof event?.data === 'string' ? event.data : null;
       if (inputData === null) return;
-      const matchingRecovery = recovered.find((record) => record.token === token && record.data === inputData);
-      if (matchingRecovery) matchingRecovery.claimedByInput = true;
+      if (event.type === 'input' && beforeInputClaim?.data === inputData) {
+        beforeInputClaim = null;
+        return;
+      }
+      if (event.type === 'beforeinput') {
+        const claim = { data: inputData };
+        beforeInputClaim = claim;
+        try {
+          enqueueMicrotask(() => {
+            if (beforeInputClaim === claim) beforeInputClaim = null;
+          });
+        } catch {
+          beforeInputClaim = null;
+        }
+      }
+      claimCanonicalInput(inputData);
     }
 
     function resetForCompositionOrFocusLoss() {
       if (destroyed) return;
-      keyToken += 1;
+      keySequence += 1;
+      activeKey = null;
+      beforeInputClaim = null;
       cancelPending();
       recovered.splice(0);
     }
@@ -134,17 +178,18 @@
       if (destroyed) return false;
       pruneRecovered();
 
-      const canonical = pending.find(
-        (candidate) => candidate.active && candidate.token === keyToken && candidate.data === data
-      );
+      if (activeKey?.data === data) {
+        if (activeKey.candidate?.active) removePending(activeKey.candidate);
+        return false;
+      }
+
+      const canonical = pending.find((candidate) => candidate.active && candidate.data === data);
       if (canonical) {
         removePending(canonical);
         return false;
       }
 
-      const duplicateIndex = recovered.findIndex(
-        (record) => record.token === keyToken && record.data === data && record.claimedByInput
-      );
+      const duplicateIndex = recovered.findIndex((record) => record.data === data && record.claimedByInput);
       if (duplicateIndex === -1) return false;
       recovered.splice(duplicateIndex, 1);
       return true;
@@ -153,6 +198,8 @@
     function destroy() {
       if (destroyed) return;
       destroyed = true;
+      activeKey = null;
+      beforeInputClaim = null;
       cancelPending();
       recovered.splice(0);
       try {

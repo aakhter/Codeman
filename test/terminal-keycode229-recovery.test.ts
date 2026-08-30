@@ -38,7 +38,7 @@ function key(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function harness() {
+function harness({ emitThrows = false } = {}) {
   const source = readFileSync(new URL('../src/web/public/terminal-keycode229-recovery.js', import.meta.url), 'utf8');
   const exposed: Record<string, any> = {};
   vm.runInNewContext(source, { window: exposed, globalThis: exposed }, { filename: 'terminal-keycode229-recovery.js' });
@@ -51,7 +51,10 @@ function harness() {
   let now = 1_000;
   const controller = exposed.CodemanKeyCode229Recovery.create({
     textarea,
-    emitRecovered: (data: string) => emitted.push(data),
+    emitRecovered: (data: string) => {
+      if (emitThrows) throw new Error('recovery callback failed');
+      emitted.push(data);
+    },
     queueMicrotask: (callback: () => void) => microtasks.push(callback),
     setTimer: (callback: () => void) => {
       const id = ++timerId;
@@ -157,6 +160,39 @@ describe('keyCode 229 terminal input recovery', () => {
     h.flushMicrotasks();
     h.flushTimers();
     expect(h.emitted).toEqual(['x']);
+  });
+
+  it('resolves overlapping eligible candidates independently of the latest keydown', () => {
+    const h = harness();
+    h.controller.handleKeyEvent(key({ key: 'x' }));
+    h.controller.handleKeyEvent(key({ key: 'y' }));
+
+    expect(h.controller.consumeTerminalData('x')).toBe(false);
+    h.flushMicrotasks();
+    h.flushTimers();
+    expect(h.emitted).toEqual(['y']);
+  });
+
+  it('suppresses a claimed recovery even after a newer ordinary keydown', () => {
+    const h = harness();
+    h.controller.handleKeyEvent(key({ key: 'x' }));
+    h.flushMicrotasks();
+    h.flushTimers();
+    h.textarea.fire('beforeinput', { data: 'x' });
+
+    h.controller.handleKeyEvent(key({ key: 'y', keyCode: 89 }));
+    expect(h.controller.consumeTerminalData('x')).toBe(true);
+  });
+
+  it('fails open when the recovery callback throws', () => {
+    const h = harness({ emitThrows: true });
+    h.controller.handleKeyEvent(key());
+    h.flushMicrotasks();
+    h.flushTimers();
+    h.textarea.fire('beforeinput', { data: 'x' });
+
+    expect(h.controller.consumeTerminalData('x')).toBe(false);
+    expect(h.emitted).toEqual([]);
   });
 
   it('keeps rapid repeated 229 keys and an ordinary same-character key distinct', () => {
