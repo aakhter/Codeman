@@ -1,5 +1,12 @@
 # aicodeman
 
+## 1.23.3
+
+### Patch Changes
+
+- 85afdcc: Let the actively used desktop or phone control a shared terminal's size, fit OpenCode into more usable mobile rows without restarting the session, and deliver browser terminal input only after an ownership-capable WebSocket activates. Input queues transiently across reconnects without an HTTP fallback and fails closed when the target session is gone; the HTTP input API remains available to external callers.
+- Recover explicit printable and Enter keyCode 229 terminal input when a browser fails to mutate xterm's helper textarea. Preserve genuine IME composition and suppress only canonically attributed delayed duplicates from the same key token.
+
 ## 1.23.2
 
 ### Patch Changes
@@ -67,6 +74,7 @@
   pressing Escape cleared the input and blurred it, and the blur handler commits —
   so cancelling a rename stored an EMPTY session name and the tab fell back to its
   folder label. Escape now cancels without a request, in every layout.
+
 ## 1.22.5
 
 ### Patch Changes
