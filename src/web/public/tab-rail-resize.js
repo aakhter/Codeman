@@ -322,6 +322,11 @@ Object.assign(CodemanApp.prototype, {
       window.removeEventListener('resize', this._tabRailActionMenuViewport);
       this._tabRailActionMenuViewport = null;
     }
+    // COD-367: the trigger is a menu button, so its state must follow the popup
+    // through EVERY close path — Escape, outside click, viewport resize, session
+    // cleanup and rerender all land here, which is why the sync lives in the
+    // close helper rather than beside each caller.
+    trigger?.setAttribute?.('aria-expanded', 'false');
     this._tabRailActionMenuTrigger = null;
     if (options.restoreFocus) trigger?.focus?.();
   },
@@ -375,6 +380,7 @@ Object.assign(CodemanApp.prototype, {
     menu.style.left = `${Math.max(8, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 8))}px`;
     menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menuRect.height - 8))}px`;
     this._tabRailActionMenuTrigger = trigger;
+    trigger?.setAttribute?.('aria-expanded', 'true');
     this._tabRailActionMenuOutside = (pointerEvent) => {
       if (!menu.contains(pointerEvent.target) && pointerEvent.target !== trigger) this.closeTabRailActionMenu();
     };
@@ -387,11 +393,30 @@ Object.assign(CodemanApp.prototype, {
       if (keyEvent.key === 'Escape') {
         keyEvent.preventDefault();
         this.closeTabRailActionMenu({ restoreFocus: true });
+      } else if (keyEvent.key === 'Tab') {
+        // COD-367: Tab used to walk out of the menu and leave the popup on
+        // screen. Dismiss it and land focus on the TRIGGER rather than letting
+        // the default run — the element it would move from is about to be
+        // removed, which drops focus to <body>. From the trigger the next Tab
+        // continues normally, so nothing is trapped and nothing is lost.
+        keyEvent.preventDefault();
+        this.closeTabRailActionMenu({ restoreFocus: true });
       } else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
         keyEvent.preventDefault();
         const direction = keyEvent.key === 'ArrowDown' ? 1 : -1;
         buttons[(index + direction + buttons.length) % buttons.length]?.focus();
       }
+    });
+    // COD-367: close when focus leaves the menu by any route — not just Tab, but
+    // a click elsewhere or a programmatic focus move. ⚠ `relatedTarget` inside
+    // the menu must be IGNORED: arrow-key navigation fires focusout on every hop
+    // between items, and closing there would make the menu unusable by keyboard,
+    // which is the opposite of this fix. A null relatedTarget (focus leaving the
+    // document) is also left alone, so switching windows does not dismiss it.
+    menu.addEventListener('focusout', (focusEvent) => {
+      const next = focusEvent.relatedTarget;
+      if (!next || menu.contains(next) || next === trigger) return;
+      this.closeTabRailActionMenu();
     });
     menu.querySelector('button')?.focus();
   },

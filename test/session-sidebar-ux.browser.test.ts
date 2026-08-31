@@ -454,4 +454,31 @@ describe('COD-339 sidebar actions and session-name font size in Chromium', () =>
     await page.evaluate(() => window.dispatchEvent(new Event('resize')));
     expect(await page.locator('.tab-rail-action-menu').count()).toBe(0);
   });
+  it('COD-367: exposes menu-button state and dismisses on Tab in a real browser', async () => {
+    const tab = page.locator('.session-tab[data-id="short"]');
+    const trigger = tab.locator('.tab-more');
+
+    // Static state, before any interaction.
+    expect(await trigger.getAttribute('aria-haspopup')).toBe('menu');
+    expect(await trigger.getAttribute('aria-expanded')).toBe('false');
+
+    await trigger.click();
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(1);
+    expect(await trigger.getAttribute('aria-expanded')).toBe('true');
+
+    // A REAL Tab keypress, which is the half a jsdom dispatch cannot prove:
+    // the browser's own focus engine decides where focus goes when the focused
+    // element is removed mid-keystroke.
+    await page.keyboard.press('Tab');
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(0);
+    expect(await trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(await page.evaluate(() => document.activeElement?.classList.contains('tab-more') ?? false)).toBe(true);
+
+    // Escape must still work, and must still hand focus back.
+    await trigger.click();
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(1);
+    await page.keyboard.press('Escape');
+    expect(await page.locator('.tab-rail-action-menu').count()).toBe(0);
+    expect(await trigger.getAttribute('aria-expanded')).toBe('false');
+  });
 });
