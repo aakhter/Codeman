@@ -150,12 +150,19 @@ function createPreviewHarness(
 }
 
 function loadRegisteredOnDataHandler(globals: Record<string, unknown> = {}) {
-  const marker = 'this.terminal.onData((data) => {';
+  // COD-388 extracted the onData body into `handleTerminalData` so the keyCode-229
+  // recovery path can re-enter it (`emitRecovered`), and registration became a
+  // one-line delegate. This used to slice from `this.terminal.onData((data) => {`,
+  // which no longer exists — the whole file then read as an empty handler and
+  // every case here failed with "registration not found" rather than an
+  // assertion. Anchor on the extracted function instead, which is what actually
+  // holds the routing logic under test.
+  const marker = 'const handleTerminalData = (data, { recovered = false } = {}) => {';
   const start = terminalSource.indexOf(marker);
-  if (start < 0) throw new Error('terminal onData registration not found');
+  if (start < 0) throw new Error('terminal handleTerminalData definition not found');
   const bodyStart = start + marker.length;
-  const end = terminalSource.indexOf('\n    });\n  },', bodyStart);
-  if (end < 0) throw new Error('terminal onData callback boundary not found');
+  const end = terminalSource.indexOf('\n    };', bodyStart);
+  if (end < 0) throw new Error('terminal handleTerminalData boundary not found');
   const timers: Array<() => void> = [];
   const context = vm.createContext({
     console,
@@ -178,10 +185,13 @@ function loadRegisteredOnDataHandler(globals: Record<string, unknown> = {}) {
     _crashDiag: { log: vi.fn() },
     ...globals,
   });
-  const handler = vm.runInContext(`(function (data) {${terminalSource.slice(bodyStart, end)}\n})`, context) as (
-    this: Record<string, unknown>,
-    data: string
-  ) => void;
+  // `recovered` is the second parameter COD-388 added; the slice references it,
+  // so the reconstructed function has to declare it or the body throws
+  // ReferenceError before any assertion runs.
+  const handler = vm.runInContext(
+    `(function (data, recovered = false) {${terminalSource.slice(bodyStart, end)}\n})`,
+    context
+  ) as (this: Record<string, unknown>, data: string) => void;
   return { handler, timers, context };
 }
 
