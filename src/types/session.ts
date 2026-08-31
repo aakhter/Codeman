@@ -8,7 +8,7 @@
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
  * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
- * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' (which CLI backend)
+ * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
@@ -73,7 +73,8 @@ export type SessionMode =
   | 'antigravity'
   | 'pi'
   | 'grok'
-  | 'deepseek';
+  | 'deepseek'
+  | 'omp';
 export type SessionCheckpointMode = 'compact' | 'clear' | 'new';
 
 export interface SessionCheckpointState {
@@ -100,7 +101,7 @@ export interface SessionCheckpointState {
 
 export type RemoteCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp'
 >;
 
 /**
@@ -214,7 +215,7 @@ export interface RemoteSessionInfo {
 /** Which CLI backends a Docker case can run (same set as remote). */
 export type DockerCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp'
 >;
 
 /** Container engine. Docker and Podman differ in the uid/userns + host-gateway alias. */
@@ -388,6 +389,16 @@ export interface AntigravityConfig {
   dangerouslySkipPermissions?: boolean;
   /** Resume a previous conversation by ID (passed via --conversation). */
   resumeConversationId?: string;
+}
+
+/** OMP CLI session configuration */
+export interface OmpConfig {
+  /** Model identifier (e.g., "crof/glm-5.2"). Passed via --model. */
+  model?: string;
+  /** Resume a previous conversation (passed via --resume). */
+  resumeSessionId?: string;
+  /** Continue the most recent session in this directory (passed via --continue). */
+  continueSession?: boolean;
 }
 
 /**
@@ -719,6 +730,8 @@ export interface SessionState {
   grokConfig?: GrokConfig;
   /** DeepSeek Harness configuration (only for mode === 'deepseek') */
   deepSeekConfig?: DeepSeekConfig;
+  /** OMP-specific configuration (only for mode === 'omp') */
+  ompConfig?: OmpConfig;
   /** Claude conversation session ID to resume after reboot (set by restore script) */
   resumeSessionId?: string;
   /**

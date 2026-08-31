@@ -3321,9 +3321,11 @@ class CodemanApp {
               ? 'Grok'
               : mode === 'deepseek'
                 ? 'DeepSeek'
-                : mode === 'opencode'
-                  ? 'OpenCode'
-                  : 'Claude';
+                : mode === 'omp'
+                  ? 'OMP'
+                  : mode === 'opencode'
+                    ? 'OpenCode'
+                    : 'Claude';
   }
 
   async toggleResponseViewer() {
@@ -4064,10 +4066,15 @@ class CodemanApp {
       if (!Number.isFinite(n)) return '';
       return `<span class="pu-win"><span class="pu-label">${label}</span><span class="pu-val ${colorClass(n)}">${n}%</span></span>`;
     };
+    // The provider label only earns its space when there is more than one
+    // provider to tell apart: a machine with Claude alone shows bare windows.
+    const hasWindows = (usage) => pct(usage?.fiveHour) !== null || pct(usage?.sevenDay) !== null;
+    const labelled = hasWindows(data) && hasWindows(data.codex);
     const row = (provider, usage) => {
       const windows = [seg('5h', pct(usage?.fiveHour)), seg('7d', pct(usage?.sevenDay))].filter(Boolean);
       if (!windows.length) return '';
-      return `<span class="pu-row"><span class="pu-provider">${provider}</span><span class="pu-windows">${windows.join('<span class="pu-sep">·</span>')}</span></span>`;
+      const label = labelled ? `<span class="pu-provider">${provider}</span>` : '';
+      return `<span class="pu-row">${label}<span class="pu-windows">${windows.join('<span class="pu-sep">·</span>')}</span></span>`;
     };
     const rows = [row('Claude', data), row('Codex', data.codex)].filter(Boolean);
     chip.innerHTML = rows.length ? rows.join('') : '—';
@@ -7706,7 +7713,7 @@ class CodemanApp {
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : mode === 'grok' ? '<span class="tab-mode grok" aria-hidden="true">gk</span>' : mode === 'deepseek' ? '<span class="tab-mode deepseek" aria-hidden="true">ds</span>' : ''}
+              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : mode === 'grok' ? '<span class="tab-mode grok" aria-hidden="true">gk</span>' : mode === 'deepseek' ? '<span class="tab-mode deepseek" aria-hidden="true">ds</span>' : mode === 'omp' ? '<span class="tab-mode omp" aria-hidden="true">om</span>' : ''}
               <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
               ${inlineSessionActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
@@ -9464,7 +9471,9 @@ class CodemanApp {
                   ? 'Kill Tmux & Grok'
                   : session.mode === 'deepseek'
                     ? 'Kill Tmux & DeepSeek'
-                    : 'Kill Tmux & Claude Code';
+                    : session.mode === 'omp'
+                      ? 'Kill Tmux & OMP'
+                      : 'Kill Tmux & Claude Code';
     }
 
     document.getElementById('closeConfirmModal').classList.add('active');

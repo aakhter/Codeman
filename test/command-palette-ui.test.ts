@@ -432,7 +432,7 @@ describe('Session Manager unified list', () => {
     const [historyRecord, , historyOptions] = app._buildHistoryItem.mock.calls[1];
     expect(historyRecord).toMatchObject({ sessionId: 'conv-uuid-1', sizeBytes: 2048, firstPrompt: 'old prompt' });
     historyOptions.onActivate();
-    expect(app.resumeHistorySession).toHaveBeenCalledWith('conv-uuid-1', '/repo/old');
+    expect(app.resumeHistorySession).toHaveBeenCalledWith('conv-uuid-1', '/repo/old', undefined, undefined);
   });
 
   it('surfaces an endpoint error instead of an empty list', async () => {

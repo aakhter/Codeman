@@ -897,7 +897,7 @@ Object.assign(CodemanApp.prototype, {
 
   _buildCommandPaletteNewSessionItem(query = '') {
     const mode = this._getPaletteMode?.() || this.runMode || this._runMode || 'claude';
-    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', grok: 'Grok', deepseek: 'DeepSeek', shell: 'Shell' };
+    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', grok: 'Grok', deepseek: 'DeepSeek', omp: 'OMP', shell: 'Shell' };
     const caseName = this._findCommandPaletteCaseMatch(query) || document.getElementById('quickStartCase')?.value || 'testcase';
     return {
       id: 'new-session',
@@ -1168,7 +1168,9 @@ Object.assign(CodemanApp.prototype, {
             if (isLive) {
               void this.selectSession(s.sessionId);
             } else if (record.workingDir) {
-              void this.resumeHistorySession(s.claudeSessionId || s.sessionId, record.workingDir);
+              // History rows are keyed by the Claude conversation UUID; resumed
+              // sessions carry theirs separately as claudeSessionId.
+              void this.resumeHistorySession(s.claudeSessionId || s.sessionId, record.workingDir, undefined, s.mode);
             }
           },
         });
