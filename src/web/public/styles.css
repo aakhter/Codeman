@@ -12442,6 +12442,15 @@ kbd {
   color: var(--text-muted);
 }
 
+/* COD-387: the resolution base under a failed relative preview. Its own line —
+   the parent has no `white-space: pre-wrap`, so a newline would collapse. */
+.file-preview-body .binary-message-detail {
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  opacity: 0.85;
+  word-break: break-all;
+}
+
 /* Rendered Markdown and plain-text attachment previews share the overlay body.
    Markdown reuses the `.rv-text` prose styling; text keeps monospace with
    preserved whitespace. */

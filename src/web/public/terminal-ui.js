@@ -2361,12 +2361,14 @@ Object.assign(CodemanApp.prototype, {
      * `ssh`/`docker exec` CLIENT, so its cwd is a host directory that has
      * nothing to do with where the agent is. An unknown cwd falls back to
      * workingDir, which is what keeps the historical behavior byte-identical.
+     *
+     * COD-387 moved the implementation to `CodemanFilePaths.relativeResolutionBase`
+     * so the file-preview "not found" message can name the SAME base this resolves
+     * against. Kept as a thin local alias rather than inlined at the call sites,
+     * since the doc comment above is the explanation readers come here for.
      */
-    const relativeResolutionBase = (workingDir, session) => {
-      if (session?.remote || session?.docker) return workingDir;
-      const cwd = session?.cwd;
-      return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : workingDir;
-    };
+    const relativeResolutionBase = (workingDir, session) =>
+      window.CodemanFilePaths.relativeResolutionBase(workingDir, session);
 
     /**
      * Route a relative candidate: workspace-relative when it lands inside the
