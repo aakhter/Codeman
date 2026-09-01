@@ -31,6 +31,8 @@ export interface SessionRecoveryRecord {
   workingDir: string;
   transport: SessionRecoveryTransport;
   nativeResumeId?: string;
+  /** Allowlisted Claude conversation identity used by `claude --resume`. */
+  claudeResumeId?: string;
   status: SessionRecoveryStatus;
   launch: SessionRecoveryLaunch;
   createdAt: number;

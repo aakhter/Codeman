@@ -75,3 +75,4 @@ export * from './sources.js';
 export * from './user.js';
 export * from './webview.js';
 export * from './intent.js';
+export * from './session-recovery.js';

@@ -13,6 +13,9 @@ export interface CreateRecoveryRecordOptions {
   launch?: SessionRecoveryLaunch;
 }
 
+const SAFE_MANUAL_RECOVERY_HINT =
+  'Manual recovery is required. Start a new session from the original working directory.';
+
 /**
  * Creates a recovery record by allowlisting safe session metadata. Runtime data,
  * provider configuration, credentials, environment overrides, and raw diagnostics
@@ -23,9 +26,10 @@ export function createRecoveryRecord(
   options: CreateRecoveryRecordOptions = {}
 ): SessionRecoveryRecord {
   const transport = options.transport ?? (session.docker ? 'docker' : session.remote ? 'remote' : 'local');
-  const launch = options.launch ?? { kind: 'built-in' };
+  const launch = sanitizeRecoveryLaunch(options.launch ?? { kind: 'built-in' });
   const nativeResumeId = session.nativeResumeId ?? undefined;
-  const status = classifyRecoveryStatus(transport, launch, nativeResumeId, session.resumeSessionId);
+  const claudeResumeId = session.resumeSessionId ?? undefined;
+  const status = classifyRecoveryStatus(transport, launch, nativeResumeId, claudeResumeId);
 
   return {
     id: `recovery-${session.id}`,
@@ -35,11 +39,17 @@ export function createRecoveryRecord(
     workingDir: session.workingDir,
     transport,
     ...(nativeResumeId ? { nativeResumeId } : {}),
+    ...(claudeResumeId ? { claudeResumeId } : {}),
     status,
     launch: { ...launch },
     createdAt: session.createdAt,
     ...(session.lastActivityAt !== undefined ? { lastActivityAt: session.lastActivityAt } : {}),
   };
+}
+
+function sanitizeRecoveryLaunch(launch: SessionRecoveryLaunch): SessionRecoveryLaunch {
+  if (launch.kind !== 'manual_required') return { ...launch };
+  return { kind: 'manual_required', hint: SAFE_MANUAL_RECOVERY_HINT };
 }
 
 function classifyRecoveryStatus(
