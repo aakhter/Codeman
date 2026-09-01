@@ -15,6 +15,7 @@ import type { AppState, SessionState, TaskState, RalphSessionState } from '../sr
 
 // We need to import without mocking to test the actual implementation
 import { StateStore, getStore } from '../src/state-store.js';
+import type { SessionRecoveryRecord } from '../src/types/session-recovery.js';
 
 describe('StateStore', () => {
   const testDir = join(tmpdir(), 'codeman-test-' + Date.now());
@@ -138,6 +139,54 @@ describe('StateStore', () => {
       expect(Object.keys(sessions)).toHaveLength(2);
       expect(sessions['session-1']).toBeDefined();
       expect(sessions['session-2']).toBeDefined();
+    });
+  });
+
+  describe('session recovery operations', () => {
+    it('clones recovery records at the StateStore boundary', () => {
+      const store = new StateStore(testFilePath);
+      const record = createMockSessionRecoveryRecord('recovery-1');
+
+      store.setSessionRecoveries([record]);
+      record.status = 'recovered';
+      const recoveries = store.getSessionRecoveries();
+      recoveries[0].status = 'recovered';
+
+      expect(store.getSessionRecoveries()[0].status).toBe('pending');
+    });
+
+    it('upserts, removes, and persists recovery records independently of active sessions', () => {
+      const store = new StateStore(testFilePath);
+      const first = createMockSessionRecoveryRecord('first');
+      const updated = { ...first, status: 'resumable' as const, nativeResumeId: 'rollout-1' };
+
+      store.upsertSessionRecovery(first);
+      store.upsertSessionRecovery(updated);
+      store.upsertSessionRecovery(createMockSessionRecoveryRecord('second'));
+      store.removeSessionRecovery('second');
+      store.flushAll();
+
+      expect(store.getSession('session-first')).toBeNull();
+      expect(store.getSessionRecoveries()).toEqual([updated]);
+      expect(JSON.parse(readFileSync(testFilePath, 'utf-8')).sessionRecoveries).toEqual([updated]);
+      expect(new StateStore(testFilePath).getSessionRecoveries()).toEqual([updated]);
+    });
+
+    it('retains at most 200 terminal records per owner without removing pending records', () => {
+      const store = new StateStore(testFilePath);
+      const terminal = Array.from({ length: 201 }, (_, index) => ({
+        ...createMockSessionRecoveryRecord(`terminal-${index}`),
+        status: 'recovered' as const,
+        createdAt: index,
+      }));
+
+      store.setSessionRecoveries([...terminal, createMockSessionRecoveryRecord('pending')]);
+
+      const recoveries = store.getSessionRecoveries();
+      expect(recoveries).toHaveLength(201);
+      expect(recoveries.filter((record) => record.status === 'recovered')).toHaveLength(200);
+      expect(recoveries.some((record) => record.id === 'terminal-0')).toBe(false);
+      expect(recoveries.some((record) => record.id === 'pending')).toBe(true);
     });
   });
 
@@ -732,6 +781,20 @@ function createMockTaskState(id: string): TaskState {
     completedAt: null,
     output: '',
     error: null,
+  };
+}
+
+function createMockSessionRecoveryRecord(id: string): SessionRecoveryRecord {
+  return {
+    id,
+    sourceSessionId: `session-${id}`,
+    owner: 'alice',
+    mode: 'codex',
+    workingDir: '/tmp/test',
+    transport: 'local',
+    status: 'pending',
+    launch: { kind: 'built-in' },
+    createdAt: Date.now(),
   };
 }
 

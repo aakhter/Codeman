@@ -43,6 +43,7 @@ import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
 import { dataPath, CODEMAN_INSTANCE } from './config/instance.js';
 import { normalizeSessionOrder } from './session-order.js';
 import { validateTabLayout, type TabLayout } from './tab-layout.js';
+import type { SessionRecoveryRecord, SessionRecoveryStatus } from './types/session-recovery.js';
 
 /** Debounce delay for batching state writes (ms) */
 const SAVE_DEBOUNCE_MS = 500;
@@ -73,6 +74,16 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 
 /** How long the circuit breaker stays open before allowing a HALF_OPEN trial write (ms) */
 const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
+const MAX_TERMINAL_SESSION_RECOVERIES_PER_OWNER = 200;
+const TERMINAL_SESSION_RECOVERY_STATUSES: ReadonlySet<SessionRecoveryStatus> = new Set([
+  'manual_required',
+  'unavailable',
+  'recovered',
+]);
+
+function cloneSessionRecoveryRecord(recovery: SessionRecoveryRecord): SessionRecoveryRecord {
+  return { ...recovery, launch: { ...recovery.launch } };
+}
 
 export class StateStore {
   private state: AppState;
@@ -307,6 +318,9 @@ export class StateStore {
     if (this.state.codexCommandProfiles !== undefined) {
       parts.push(`"codexCommandProfiles":${JSON.stringify(this.state.codexCommandProfiles)}`);
     }
+    if (this.state.sessionRecoveries !== undefined) {
+      parts.push(`"sessionRecoveries":${JSON.stringify(this.state.sessionRecoveries)}`);
+    }
     // ⚠️ This function is a hand-written ALLOWLIST, not a serializer over the
     // whole state: a key absent here is silently dropped on every save, however
     // correctly it was set in memory. `orchestrator` was missing, so orchestrator
@@ -525,6 +539,62 @@ export class StateStore {
     this.cachedSessionJsons.delete(id);
     this.dirtySessions.delete(id);
     this.save();
+  }
+
+  /** Returns defensive copies of durable recovery records. */
+  getSessionRecoveries(): SessionRecoveryRecord[] {
+    return (this.state.sessionRecoveries ?? []).map(cloneSessionRecoveryRecord);
+  }
+
+  /** Replaces durable recovery records with cloned, bounded records. */
+  setSessionRecoveries(recoveries: readonly SessionRecoveryRecord[]): void {
+    this.state.sessionRecoveries = this.pruneSessionRecoveries(recoveries);
+    this.save();
+  }
+
+  /** Inserts or replaces one recovery record by its durable record ID. */
+  upsertSessionRecovery(recovery: SessionRecoveryRecord): void {
+    const current = this.state.sessionRecoveries ?? [];
+    const index = current.findIndex((candidate) => candidate.id === recovery.id);
+    const next = [...current];
+    if (index === -1) {
+      next.push(recovery);
+    } else {
+      next[index] = recovery;
+    }
+    this.setSessionRecoveries(next);
+  }
+
+  /** Removes a durable recovery record without affecting any active session. */
+  removeSessionRecovery(id: string): void {
+    const current = this.state.sessionRecoveries ?? [];
+    const next = current.filter((recovery) => recovery.id !== id);
+    if (next.length === current.length) return;
+    this.state.sessionRecoveries = next;
+    this.save();
+  }
+
+  private pruneSessionRecoveries(recoveries: readonly SessionRecoveryRecord[]): SessionRecoveryRecord[] {
+    const cloned = recoveries.map(cloneSessionRecoveryRecord);
+    const terminalByOwner = new Map<string, Array<{ index: number; createdAt: number }>>();
+
+    cloned.forEach((recovery, index) => {
+      if (!TERMINAL_SESSION_RECOVERY_STATUSES.has(recovery.status)) return;
+      const owner = recovery.owner ?? '';
+      const terminal = terminalByOwner.get(owner) ?? [];
+      terminal.push({ index, createdAt: recovery.createdAt });
+      terminalByOwner.set(owner, terminal);
+    });
+
+    const discarded = new Set<number>();
+    for (const terminal of terminalByOwner.values()) {
+      terminal.sort((left, right) => left.createdAt - right.createdAt || left.index - right.index);
+      for (const record of terminal.slice(0, -MAX_TERMINAL_SESSION_RECOVERIES_PER_OWNER)) {
+        discarded.add(record.index);
+      }
+    }
+
+    return cloned.filter((_, index) => !discarded.has(index));
   }
 
   /**

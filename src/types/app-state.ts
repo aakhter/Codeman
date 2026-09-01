@@ -25,6 +25,7 @@ import type { RalphLoopState } from './ralph.js';
 import type { RespawnConfig } from './respawn.js';
 import type { CronJob, CronJobRun } from './cron.js';
 import type { TabLayout } from '../tab-layout.js';
+import type { SessionRecoveryRecord } from './session-recovery.js';
 
 // ========== Global Stats Types ==========
 
@@ -132,6 +133,8 @@ export interface AppState {
   cronJobs?: Record<string, CronJob>;
   /** Scheduled job run history, keyed by run ID. */
   cronJobRuns?: Record<string, CronJobRun>;
+  /** Durable recovery records retained independently from active sessions. */
+  sessionRecoveries?: SessionRecoveryRecord[];
 }
 
 // ========== Default Configuration ==========
