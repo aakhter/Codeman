@@ -1,6 +1,7 @@
 /** Utilities for producing sanitized, durable session recovery records. */
 
 import type { SessionState } from './types/session.js';
+import type { MuxSession } from './mux-interface.js';
 import type {
   SessionRecoveryLaunch,
   SessionRecoveryRecord,
@@ -11,6 +12,13 @@ import type {
 export interface CreateRecoveryRecordOptions {
   transport?: SessionRecoveryTransport;
   launch?: SessionRecoveryLaunch;
+}
+
+/** The small StateStore surface needed while boot reconciliation still has saved state available. */
+export interface RecoverySnapshotStore {
+  getSession(id: string): SessionState | null;
+  getSessionRecoveries(): SessionRecoveryRecord[];
+  upsertSessionRecovery(recovery: SessionRecoveryRecord): void;
 }
 
 const SAFE_MANUAL_RECOVERY_HINT =
@@ -45,6 +53,42 @@ export function createRecoveryRecord(
     createdAt: session.createdAt,
     ...(session.lastActivityAt !== undefined ? { lastActivityAt: session.lastActivityAt } : {}),
   };
+}
+
+/**
+ * Persist recovery candidates for managed mux sessions that disappeared across a reboot.
+ *
+ * This is intentionally metadata-only: it neither attaches nor launches a CLI, connects
+ * remotely, sends input, nor waits for any runtime operation. Callers capture mux metadata
+ * before reconciliation because mux implementations may discard dead entries while reporting
+ * them; this function is invoked only after reconciliation has identified the dead IDs.
+ */
+export function snapshotDeadSessionRecoveries(
+  store: RecoverySnapshotStore,
+  deadSessionIds: readonly string[],
+  muxSessionsBeforeReconcile: ReadonlyMap<string, MuxSession>
+): void {
+  if (deadSessionIds.length === 0) return;
+
+  const existingSourceSessionIds = new Set(store.getSessionRecoveries().map((recovery) => recovery.sourceSessionId));
+  for (const sessionId of deadSessionIds) {
+    // A previous boot has already preserved this candidate (including terminal/recovered
+    // records), so never create another record or regress a recovered record back to pending.
+    if (existingSourceSessionIds.has(sessionId)) continue;
+
+    const savedState = store.getSession(sessionId);
+    if (!savedState) continue;
+
+    const muxSession = muxSessionsBeforeReconcile.get(sessionId);
+    const source = {
+      ...savedState,
+      mode: savedState.mode ?? muxSession?.mode,
+      remote: savedState.remote ?? muxSession?.remote,
+      docker: savedState.docker ?? muxSession?.docker,
+      owner: muxSession?.owner ?? savedState.owner,
+    };
+    store.upsertSessionRecovery(createRecoveryRecord(source));
+  }
 }
 
 /** Returns a fresh launch descriptor that cannot retain caller diagnostics in manual hints. */

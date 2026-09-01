@@ -115,6 +115,7 @@ import { intentStore } from '../intent-store.js';
 import { AI_CHECK_MODEL } from '../config/ai-defaults.js';
 import { approvalInbox } from './approval-inbox.js';
 import { stopDeepSeekWeb } from '../deepseek-web-server.js';
+import { snapshotDeadSessionRecoveries } from '../session-recovery.js';
 import {
   wireRespawnListeners,
   setupTimedRespawn,
@@ -3656,7 +3657,15 @@ export class WebServer extends EventEmitter {
   private async restoreMuxSessions(): Promise<boolean> {
     try {
       // Reconcile mux sessions to find which ones are still alive (also discovers unknown ones)
+      // Reconciliation can remove dead entries, so retain metadata only long enough to
+      // preserve a recovery candidate once it reports which managed IDs disappeared.
+      const muxSessionsBeforeReconcile = new Map(this.mux.getSessions().map((session) => [session.sessionId, session]));
       const { alive, dead, discovered } = await this.mux.reconcileSessions();
+
+      // Must happen before finalizeRestoredState's stale-state cleanup. This is a synchronous
+      // StateStore update over persisted metadata only; it does not launch, attach, or block on
+      // any CLI/SSH/session operation.
+      snapshotDeadSessionRecoveries(this.store, dead, muxSessionsBeforeReconcile);
 
       if (discovered.length > 0) {
         console.log(`[Server] Discovered ${discovered.length} unknown mux session(s)`);
