@@ -47,7 +47,8 @@ export function createRecoveryRecord(
   };
 }
 
-function sanitizeRecoveryLaunch(launch: SessionRecoveryLaunch): SessionRecoveryLaunch {
+/** Returns a fresh launch descriptor that cannot retain caller diagnostics in manual hints. */
+export function sanitizeRecoveryLaunch(launch: SessionRecoveryLaunch): SessionRecoveryLaunch {
   if (launch.kind !== 'manual_required') return { ...launch };
   return { kind: 'manual_required', hint: SAFE_MANUAL_RECOVERY_HINT };
 }

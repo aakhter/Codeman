@@ -188,6 +188,42 @@ describe('StateStore', () => {
       expect(recoveries.some((record) => record.id === 'terminal-0')).toBe(false);
       expect(recoveries.some((record) => record.id === 'pending')).toBe(true);
     });
+
+    it('sanitizes manual recovery hints supplied through set and upsert before persistence', () => {
+      const store = new StateStore(testFilePath);
+      const setHint = 'ssh: host=private.example password=set-secret Permission denied';
+      const upsertHint = 'ssh: host=private.example password=upsert-secret Connection timed out';
+
+      store.setSessionRecoveries([
+        {
+          ...createMockSessionRecoveryRecord('set-manual'),
+          status: 'manual_required',
+          launch: { kind: 'manual_required', hint: setHint },
+        },
+      ]);
+      store.upsertSessionRecovery({
+        ...createMockSessionRecoveryRecord('upsert-manual'),
+        status: 'manual_required',
+        launch: { kind: 'manual_required', hint: upsertHint },
+      });
+      store.flushAll();
+
+      expect(store.getSessionRecoveries().map((record) => record.launch)).toEqual([
+        {
+          kind: 'manual_required',
+          hint: 'Manual recovery is required. Start a new session from the original working directory.',
+        },
+        {
+          kind: 'manual_required',
+          hint: 'Manual recovery is required. Start a new session from the original working directory.',
+        },
+      ]);
+      const serialized = readFileSync(testFilePath, 'utf-8');
+      expect(serialized).not.toContain(setHint);
+      expect(serialized).not.toContain(upsertHint);
+      expect(serialized).not.toContain('set-secret');
+      expect(serialized).not.toContain('upsert-secret');
+    });
   });
 
   describe('case default groups', () => {

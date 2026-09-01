@@ -43,6 +43,7 @@ import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
 import { dataPath, CODEMAN_INSTANCE } from './config/instance.js';
 import { normalizeSessionOrder } from './session-order.js';
 import { validateTabLayout, type TabLayout } from './tab-layout.js';
+import { sanitizeRecoveryLaunch } from './session-recovery.js';
 import type { SessionRecoveryRecord, SessionRecoveryStatus } from './types/session-recovery.js';
 
 /** Debounce delay for batching state writes (ms) */
@@ -82,7 +83,7 @@ const TERMINAL_SESSION_RECOVERY_STATUSES: ReadonlySet<SessionRecoveryStatus> = n
 ]);
 
 function cloneSessionRecoveryRecord(recovery: SessionRecoveryRecord): SessionRecoveryRecord {
-  return { ...recovery, launch: { ...recovery.launch } };
+  return { ...recovery, launch: sanitizeRecoveryLaunch(recovery.launch) };
 }
 
 export class StateStore {
