@@ -43,13 +43,19 @@ function muxSession(id: string): MuxSession {
 describe('server reboot recovery snapshot', () => {
   it('captures a dead session through the server restore path before finalize cleanup removes its saved state', async () => {
     const state = savedSession('dead-server-1');
+    const savedStates = new Map([[state.id, state]]);
     const recoveries: SessionRecoveryRecord[] = [];
     const cleanupSessionsByIds = vi.fn((ids: ReadonlySet<string>) => {
-      const cleaned = ids.has(state.id) ? [{ id: state.id }] : [];
+      const cleaned = [...ids].flatMap((id) => {
+        const saved = savedStates.get(id);
+        if (!saved) return [];
+        savedStates.delete(id);
+        return [{ id, name: saved.name }];
+      });
       return { count: cleaned.length, cleaned };
     });
     const store = {
-      getSession: vi.fn((id: string) => (id === state.id ? state : null)),
+      getSession: vi.fn((id: string) => savedStates.get(id) ?? null),
       getSessionRecoveries: vi.fn(() => recoveries),
       upsertSessionRecovery: vi.fn((recovery: SessionRecoveryRecord) => recoveries.push(recovery)),
       cleanupSessionsByIds,
@@ -85,10 +91,12 @@ describe('server reboot recovery snapshot', () => {
       expect.objectContaining({ sourceSessionId: state.id, transport: 'remote', status: 'reattachable' })
     );
     expect(cleanupSessionsByIds).not.toHaveBeenCalled();
+    expect(store.getSession(state.id)).toEqual(state);
 
     await server.finalizeRestoredState(true);
 
     expect(cleanupSessionsByIds).toHaveBeenCalledWith(new Set([state.id]));
+    expect(store.getSession(state.id)).toBeNull();
     expect(recoveries).toHaveLength(1);
   });
 
