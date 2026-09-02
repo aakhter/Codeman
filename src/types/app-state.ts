@@ -81,6 +81,8 @@ export interface CodexCommandProfile {
   id: string;
   name: string;
   command: string;
+  /** Optional explicit command used to resume this custom Codex launcher. */
+  resumeCommandTemplate?: string;
 }
 
 /**

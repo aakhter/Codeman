@@ -95,6 +95,17 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).toContain('codex --dangerously-bypass-approvals-and-sandbox');
   });
 
+  it('uses the normal Codex builder for a built-in remote recovery launch', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      sessionId: SESSION_ID,
+      remote: baseRemote,
+      codexConfig: { model: 'gpt-5', resumeSessionId: 'rollout_123' },
+    });
+
+    expect(command).toContain('codex --model gpt-5 resume rollout_123');
+  });
+
   it('omits -p when no port is set', () => {
     const command = buildRemoteLaunchCommand({
       mode: 'shell',

@@ -4,7 +4,39 @@ import type { CodexCommandProfile, RemoteCase } from './types.js';
 import type { StateStore } from './state-store.js';
 import { readRemoteCases, writeRemoteCases } from './remote-hosts.js';
 
-export type CodexCommandSelection = { ok: true; command: string | undefined } | { ok: false; error: string };
+export type CodexCommandSelection =
+  | { ok: true; command: string | undefined; resumeCommandTemplate?: string }
+  | { ok: false; error: string };
+
+export type CodexRecoveryStrategy =
+  | { kind: 'built-in' }
+  | { kind: 'template'; command: string }
+  | { kind: 'manual_required' };
+
+const SAFE_CODEX_RESUME_ID = /^[a-zA-Z0-9_-]+$/;
+
+/** Runtime defense for templates loaded from legacy or manually edited state. */
+export function isValidCodexResumeCommandTemplate(template: string): boolean {
+  return (
+    template.length > 0 &&
+    template.length <= 300 &&
+    (template.match(/\{\{resumeId\}\}/g) ?? []).length === 1 &&
+    !template.replace(/\{\{resumeId\}\}/g, '').includes('{{')
+  );
+}
+
+/** Chooses a recovery-safe command without ever modifying an opaque launcher. */
+export function resolveCodexRecoveryStrategy(
+  source: { command?: string; resumeCommandTemplate?: string },
+  resumeId: string
+): CodexRecoveryStrategy {
+  if (!SAFE_CODEX_RESUME_ID.test(resumeId)) return { kind: 'manual_required' };
+  if (source.command === undefined) return { kind: 'built-in' };
+  if (!source.resumeCommandTemplate || !isValidCodexResumeCommandTemplate(source.resumeCommandTemplate)) {
+    return { kind: 'manual_required' };
+  }
+  return { kind: 'template', command: source.resumeCommandTemplate.replace('{{resumeId}}', resumeId) };
+}
 
 type CodexCommandProfileStore = Pick<
   StateStore,
@@ -59,7 +91,11 @@ export function resolveCodexCommandSelection(
   if (remoteCase.codexCommandProfileId !== undefined) {
     const profile = profiles.find((candidate) => candidate.id === remoteCase.codexCommandProfileId);
     if (!profile) return { ok: false, error: 'Saved Codex command profile is unavailable' };
-    return { ok: true, command: profile.command };
+    return {
+      ok: true,
+      command: profile.command,
+      ...(profile.resumeCommandTemplate ? { resumeCommandTemplate: profile.resumeCommandTemplate } : {}),
+    };
   }
 
   if (remoteCase.commands?.codex !== undefined) return { ok: true, command: remoteCase.commands.codex };

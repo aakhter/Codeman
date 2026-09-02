@@ -52,7 +52,12 @@ export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: Con
         .code(409)
         .send(createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'A profile with this name already exists'));
     }
-    const profile: CodexCommandProfile = { id: randomUUID(), name: input.name, command: input.command };
+    const profile: CodexCommandProfile = {
+      id: randomUUID(),
+      name: input.name,
+      command: input.command,
+      ...(input.resumeCommandTemplate ? { resumeCommandTemplate: input.resumeCommandTemplate } : {}),
+    };
     ctx.store.setCodexCommandProfiles(state.owner, [...state.profiles, profile]);
     return { success: true, data: profile };
   });
@@ -77,7 +82,8 @@ export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: Con
     }
     if (
       (input.name === undefined || input.name === current.name) &&
-      (input.command === undefined || input.command === current.command)
+      (input.command === undefined || input.command === current.command) &&
+      (input.resumeCommandTemplate === undefined || input.resumeCommandTemplate === current.resumeCommandTemplate)
     ) {
       return reply.code(400).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Profile update has no effect'));
     }
@@ -99,6 +105,7 @@ export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: Con
       ...current,
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.command !== undefined ? { command: input.command } : {}),
+      ...(input.resumeCommandTemplate !== undefined ? { resumeCommandTemplate: input.resumeCommandTemplate } : {}),
     };
     const profiles = [...state.profiles];
     profiles[index] = updated;

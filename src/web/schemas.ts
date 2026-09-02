@@ -717,11 +717,19 @@ export const RemoteCaseLinkSchema = z.object({
 
 const codexCommandProfileNameSchema = z.string().trim().min(1).max(60);
 const codexCommandProfileCommandSchema = z.string().trim().min(1).max(300);
+const codexResumeCommandTemplateSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(300)
+  .refine((value) => (value.match(/\{\{resumeId\}\}/g) ?? []).length === 1, 'Use {{resumeId}} exactly once')
+  .refine((value) => !value.replace(/\{\{resumeId\}\}/g, '').includes('{{'), 'Unsupported template token');
 
 export const CodexCommandProfileCreateSchema = z
   .object({
     name: codexCommandProfileNameSchema,
     command: codexCommandProfileCommandSchema,
+    resumeCommandTemplate: codexResumeCommandTemplateSchema.optional(),
   })
   .strict();
 
@@ -729,12 +737,16 @@ export const CodexCommandProfileUpdateSchema = z
   .object({
     name: codexCommandProfileNameSchema.optional(),
     command: codexCommandProfileCommandSchema.optional(),
+    resumeCommandTemplate: codexResumeCommandTemplateSchema.optional(),
     confirmReferencedUpdate: z.boolean().optional(),
   })
   .strict()
-  .refine((value) => value.name !== undefined || value.command !== undefined, {
-    message: 'At least one profile field must be provided',
-  });
+  .refine(
+    (value) => value.name !== undefined || value.command !== undefined || value.resumeCommandTemplate !== undefined,
+    {
+      message: 'At least one profile field must be provided',
+    }
+  );
 
 export const CodexCommandProfileParamsSchema = z
   .object({

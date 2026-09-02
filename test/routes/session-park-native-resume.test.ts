@@ -88,6 +88,23 @@ describe('POST /api/sessions/:id/park — native resume id capture (COD-124 Gap 
     expect(harness.ctx._session.park).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves an explicit Codex resume id instead of replacing it through discovery', async () => {
+    harness.ctx._session.mode = 'codex';
+    harness.ctx._session.codexConfig = { resumeSessionId: 'explicit_rollout_id' };
+    writeRolloutFixture('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+      originator: `codeman_${harness.ctx._sessionId}`,
+      cwd: harness.ctx._session.workingDir,
+    });
+
+    const res = await harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/park`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(harness.ctx._session.setNativeResumeId).toHaveBeenCalledWith('explicit_rollout_id');
+  });
+
   it('captures null (and does not throw) when codex mode has no matching rollout file', async () => {
     harness.ctx._session.mode = 'codex';
     // No fixture written — sessions dir is empty.
@@ -182,11 +199,10 @@ describe.skipIf(!nodeSqliteAvailable)(
       db.close();
     }
 
-    it('captures the newest matching session id for the workingDir', async () => {
+    it('captures the sole matching session id for the workingDir', async () => {
       await writeOpencodeDb([
         { id: 'ses_other_dir', directory: '/some/other/dir', timeUpdated: 999 },
-        { id: 'ses_older', directory: harness.ctx._session.workingDir, timeUpdated: 100 },
-        { id: 'ses_newest', directory: harness.ctx._session.workingDir, timeUpdated: 200 },
+        { id: 'ses_only', directory: harness.ctx._session.workingDir, timeUpdated: 100 },
       ]);
 
       const res = await harness.app.inject({
@@ -195,7 +211,22 @@ describe.skipIf(!nodeSqliteAvailable)(
       });
 
       expect(res.statusCode).toBe(200);
-      expect(harness.ctx._session.setNativeResumeId).toHaveBeenCalledWith('ses_newest');
+      expect(harness.ctx._session.setNativeResumeId).toHaveBeenCalledWith('ses_only');
+    });
+
+    it('does not associate a shared working directory with the newest concurrent pane', async () => {
+      await writeOpencodeDb([
+        { id: 'ses_first_pane', directory: harness.ctx._session.workingDir, timeUpdated: 100 },
+        { id: 'ses_second_pane', directory: harness.ctx._session.workingDir, timeUpdated: 200 },
+      ]);
+
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/park`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx._session.setNativeResumeId).toHaveBeenCalledWith(null);
     });
 
     it('captures null when no session row matches the workingDir', async () => {

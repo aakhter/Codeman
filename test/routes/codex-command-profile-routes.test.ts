@@ -91,6 +91,35 @@ describe('Codex command profile routes', () => {
     ).toBe(400);
   });
 
+  it('accepts exactly one {{resumeId}} recovery placeholder and rejects other template tokens', async () => {
+    const valid = await request('alice', 'POST', '/api/codex-command-profiles', {
+      name: 'Recoverable',
+      command: 'exec codex-router start',
+      resumeCommandTemplate: 'exec codex-router resume {{resumeId}}',
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(JSON.parse(valid.body).data).toMatchObject({
+      resumeCommandTemplate: 'exec codex-router resume {{resumeId}}',
+    });
+
+    for (const resumeCommandTemplate of [
+      'exec resume',
+      'exec resume {{resumeId}} {{resumeId}}',
+      'exec resume {{other}} {{resumeId}}',
+      'x'.repeat(301),
+    ]) {
+      expect(
+        (
+          await request('alice', 'POST', '/api/codex-command-profiles', {
+            name: `Invalid ${resumeCommandTemplate.length}`,
+            command: 'exec codex-router start',
+            resumeCommandTemplate,
+          })
+        ).statusCode
+      ).toBe(400);
+    }
+  });
+
   it('requires confirmation to update a referenced command but not an unreferenced field', async () => {
     profiles.alice = [{ id: 'profile-1', name: 'Personal', command: 'codex old' }];
     await writeRemoteCases(dataDir, [

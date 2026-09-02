@@ -2584,10 +2584,14 @@ export function registerSessionRoutes(
     let db: InstanceType<typeof sqliteModule.DatabaseSync> | undefined;
     try {
       db = new sqliteModule.DatabaseSync(dbPath, { readOnly: true });
-      const row = db
-        .prepare('SELECT id FROM session WHERE directory = ? ORDER BY time_updated DESC LIMIT 1;')
-        .get(workingDir) as { id?: unknown } | undefined;
-      const id = row && typeof row.id === 'string' ? row.id : null;
+      // OpenCode's database has no Codeman pane identity. Selecting its newest
+      // row by shared working directory can recover a different concurrent pane,
+      // so capture only the unambiguous single-row case.
+      const rows = db.prepare('SELECT id FROM session WHERE directory = ? LIMIT 2;').all(workingDir) as Array<{
+        id?: unknown;
+      }>;
+      if (rows.length !== 1) return null;
+      const id = typeof rows[0]?.id === 'string' ? rows[0].id : null;
       return id && OPENCODE_SESSION_ID_PATTERN.test(id) ? id : null;
     } catch {
       return null;
@@ -2679,9 +2683,13 @@ export function registerSessionRoutes(
     workingDir: string;
     lastSubmitAt?: number;
     codexConfig?: { resumeSessionId?: string };
+    openCodeConfig?: { continueSession?: string };
   }): Promise<string | null> {
     try {
       if (session.mode === 'codex') {
+        // An explicit caller target is already trustworthy and must out-rank
+        // opportunistic filesystem discovery.
+        if (session.codexConfig?.resumeSessionId) return session.codexConfig.resumeSessionId;
         const rolloutPath = await findActiveCodexFile(session);
         if (!rolloutPath) return null;
         const match = basename(rolloutPath).match(
@@ -2689,7 +2697,12 @@ export function registerSessionRoutes(
         );
         return match ? match[1] : null;
       }
-      if (session.mode === 'opencode') return await findOpencodeSessionId(session.workingDir);
+      if (session.mode === 'opencode') {
+        // Keep an explicitly selected OpenCode session rather than replacing it
+        // with a directory-only database lookup.
+        if (session.openCodeConfig?.continueSession) return session.openCodeConfig.continueSession;
+        return await findOpencodeSessionId(session.workingDir);
+      }
       if (session.mode === 'gemini') return await findGeminiSessionId(session.workingDir);
       if (session.mode === 'antigravity') return await findAgySessionId(session.workingDir);
       return null;

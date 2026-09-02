@@ -726,8 +726,8 @@ export interface SessionState {
    * (COD-124 unit 2, Gap B). Codex: the rollout UUID discovered from the newest
    * matching JSONL rollout file under `~/.codex/sessions/` — threaded back into
    * `codexConfig.resumeSessionId` on resume so `codex resume <id>` restores the
-   * conversation. gemini/opencode/agy/shell: always null — no on-disk resume
-   * mechanism has been wired for those CLIs (best-effort relaunch only).
+   * conversation. OpenCode uses its captured session ID with `--session`.
+   * Discovery fails closed when its shared-directory records are ambiguous.
    */
   nativeResumeId?: string | null;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */

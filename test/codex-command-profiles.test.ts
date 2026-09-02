@@ -5,6 +5,7 @@ import {
   findMatchingCodexProfile,
   getCodexProfileUsage,
   resolveCodexCommandSelection,
+  resolveCodexRecoveryStrategy,
 } from '../src/codex-command-profiles.js';
 
 const profiles = [
@@ -50,10 +51,50 @@ describe('Codex command profile helpers', () => {
       ok: true,
       command: 'exec custom',
     });
+    expect(
+      resolveCodexCommandSelection(
+        { codexCommandProfileId: 'recoverable' },
+        [
+          {
+            id: 'recoverable',
+            name: 'Recoverable',
+            command: 'exec codex-router start',
+            resumeCommandTemplate: 'exec resume {{resumeId}}',
+          },
+        ],
+        'exec host'
+      )
+    ).toEqual({
+      ok: true,
+      command: 'exec codex-router start',
+      resumeCommandTemplate: 'exec resume {{resumeId}}',
+    });
     expect(resolveCodexCommandSelection({}, profiles, 'exec host')).toEqual({ ok: true, command: 'exec host' });
     expect(resolveCodexCommandSelection({ codexCommandProfileId: 'missing' }, profiles, 'exec host')).toEqual({
       ok: false,
       error: 'Saved Codex command profile is unavailable',
     });
+  });
+
+  it('uses a declared recovery template and refuses to rewrite an opaque custom command', () => {
+    expect(
+      resolveCodexRecoveryStrategy(
+        { command: 'exec codex-router start', resumeCommandTemplate: 'exec codex-router resume {{resumeId}}' },
+        'rollout_123'
+      )
+    ).toEqual({ kind: 'template', command: 'exec codex-router resume rollout_123' });
+    expect(resolveCodexRecoveryStrategy({ command: 'exec codex-router start' }, 'rollout_123')).toEqual({
+      kind: 'manual_required',
+    });
+    expect(resolveCodexRecoveryStrategy({}, 'rollout_123')).toEqual({ kind: 'built-in' });
+  });
+
+  it('fails closed for an invalid recovery id even with a declared template', () => {
+    expect(
+      resolveCodexRecoveryStrategy(
+        { command: 'exec codex-router start', resumeCommandTemplate: 'exec codex-router resume {{resumeId}}' },
+        'rollout id; unsafe'
+      )
+    ).toEqual({ kind: 'manual_required' });
   });
 });
