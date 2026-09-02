@@ -22,7 +22,7 @@
 - Modify: `test/terminal-document-link-provider.test.ts:after COD-288 own-line spaced path tests`
 - Test: `test/terminal-document-link-provider.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 const REPORTED =
@@ -40,13 +40,13 @@ it.each(['Path:', 'File:', 'Saved to:'])('links the complete spaced path after %
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `npm test -- test/terminal-document-link-provider.test.ts -t "links the complete spaced path"`
 
 Expected: FAIL because the provider currently returns the whitespace-delimited tail instead of `REPORTED`.
 
-- [ ] **Step 3: Add safe-routing regressions**
+- [x] **Step 3: Add safe-routing regressions**
 
 ```ts
 it('uses external preview for a complete local Path target outside the workspace', () => {
@@ -67,7 +67,7 @@ it('does not link a relative tail from an invalid labeled candidate', () => {
 });
 ```
 
-- [ ] **Step 4: Run the new test group to verify each assertion fails for the missing label rule**
+- [x] **Step 4: Run the new test group to verify each assertion fails for the missing label rule**
 
 Run: `npm test -- test/terminal-document-link-provider.test.ts -t "labeled"`
 
@@ -80,7 +80,7 @@ Expected: FAIL with the complete link absent or the partial tail present.
 - Modify: `src/web/public/terminal-ui.js:after the marker-prefixed-path loop in findPreviewReferences()`
 - Test: `test/terminal-document-link-provider.test.ts`
 
-- [ ] **Step 1: Add the case-insensitive labeled candidate before the own-line and token scans**
+- [x] **Step 1: Add the case-insensitive labeled candidate before the own-line and token scans**
 
 ```js
 const labeledPathMatch = /^\s*(?:path|file|saved to):[ \t]+(\/.*)$/i.exec(lineText);
@@ -105,7 +105,7 @@ if (labeledPathMatch) {
 
 Keep this block before the generic token scanner. Do not alter the accepted labels, extension allowlist, external-attachment route, or remote/Docker policy.
 
-- [ ] **Step 2: Run the focused regression file to verify green**
+- [x] **Step 2: Run the focused regression file to verify green**
 
 Run: `npm test -- test/terminal-document-link-provider.test.ts`
 
