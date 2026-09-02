@@ -2472,6 +2472,32 @@ Object.assign(CodemanApp.prototype, {
         suppress(startIndex, lineText.length);
       }
 
+      // A few CLI formats prefix a complete absolute path with a stable label
+      // rather than placing it on its own line. Treat only the approved labels
+      // as a complete path boundary so spaces cannot make token scanning link a
+      // relative tail from the middle of the path.
+      const labeledPathMatch = /^\s*(?:path|file|saved to):[ \t]+(\/.*)$/i.exec(lineText);
+      if (labeledPathMatch) {
+        const rawCandidate = labeledPathMatch[1];
+        const candidate = trimTrailingPunctuation(rawCandidate);
+        const startIndex = labeledPathMatch[0].length - rawCandidate.length;
+        const endIndex = startIndex + candidate.length;
+
+        if (!isSingleAbsolutePath(candidate)) {
+          suppress(startIndex, lineText.length);
+        } else {
+          blockPreview(startIndex, lineText.length);
+          const relativePath = normalizePreviewPath(candidate, workingDir);
+          if (relativePath) {
+            references.push({ text: candidate, relativePath, startIndex, endIndex });
+          } else if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
+            references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
+          } else {
+            suppress(startIndex, lineText.length);
+          }
+        }
+      }
+
       // COD-237: an unquoted absolute path may legitimately contain spaces (e.g.
       // "OneDrive - Cisco"). When the ENTIRE trimmed line is a single such path that
       // resolves to a previewable in-workspace file, treat it as one reference. This

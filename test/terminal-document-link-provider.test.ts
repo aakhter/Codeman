@@ -774,6 +774,43 @@ describe('COD-288 own-line spaced absolute path outside the workspace links noth
   });
 });
 
+describe('COD-390 labeled absolute paths with spaces', () => {
+  const REPORTED = '/mnt/syncthing/brain/90 Sensitive/cisco/training/smart-switch-training-attendees.xlsx';
+
+  it.each(['Path:', 'File:', 'Saved to:'])('links the complete spaced path after %s', (label) => {
+    const { provide, previewSpy, originalSessionId } = makeHarness(`${label} ${REPORTED}`, {
+      workingDir: '/mnt/syncthing/brain',
+    });
+
+    const [link] = provide();
+    expect(link.text).toBe(REPORTED);
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(
+      '90 Sensitive/cisco/training/smart-switch-training-attendees.xlsx',
+      originalSessionId
+    );
+  });
+
+  it('uses external preview for a complete local Path target outside the workspace', () => {
+    const { provide, externalPreviewSpy, originalSessionId } = makeHarness(`Path: ${REPORTED}`, {
+      workingDir: '/opt/projects/Codeman',
+    });
+
+    const [link] = provide();
+    expect(link.text).toBe(REPORTED);
+    link.activate(null, link.text);
+    expect(externalPreviewSpy).toHaveBeenCalledWith(REPORTED, originalSessionId);
+  });
+
+  it('does not link a relative tail from an invalid labeled candidate', () => {
+    const { provide } = makeHarness('File: /mnt/syncthing/brain/90 Sensitive/../private/report.xlsx', {
+      workingDir: '/mnt/syncthing/brain',
+    });
+
+    expect(provide()).toEqual([]);
+  });
+});
+
 describe('COD-288 marker-prefixed absolute paths', () => {
   const REPORTED =
     '/mnt/c/kb-data/webex-archive/Isovalent and Cisco Unified Edge_265668a5/attachments/cilium-pnet-whitepaper-draft9-5.pdf';
