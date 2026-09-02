@@ -537,6 +537,8 @@ export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): Sessi
     port: host.port,
     remotePath: remoteCase.remotePath,
     commands: remoteCase.commands ?? host.commands,
+    codexCommandProfileId: remoteCase.codexCommandProfileId,
+    codexResumeCommandTemplate: remoteCase.codexResumeCommandTemplate,
     // COD-105 — the COD-104 launch path creates the remote session, so we own it
     // (an explicit kill may propagate a remote kill-session). Discovered+attached
     // sessions go through `toAttachedSessionRemote` with `owned: false`.

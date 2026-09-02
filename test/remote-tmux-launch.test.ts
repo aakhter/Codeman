@@ -106,6 +106,24 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).toContain('codex --model gpt-5 resume rollout_123');
   });
 
+  it('uses a selected profile recovery template through the remote tmux wrapper', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      sessionId: SESSION_ID,
+      remote: {
+        ...baseRemote,
+        commands: { codex: 'exec codex-router start' },
+        codexCommandProfileId: 'recoverable',
+        codexResumeCommandTemplate: 'exec codex-router resume {{resumeId}}',
+      },
+      codexConfig: { resumeSessionId: 'rollout_123' },
+    });
+
+    expect(command).toContain('exec codex-router resume rollout_123');
+    expect(command).not.toContain('exec codex-router start');
+    expect(command).toContain('tmux -L codeman-remote new-session -A');
+  });
+
   it('omits -p when no port is set', () => {
     const command = buildRemoteLaunchCommand({
       mode: 'shell',

@@ -121,6 +121,16 @@ describe('buildDockerLaunchCommand', () => {
     expect(unsafe).toContain('--session-id 1a2b3c4d5e6f');
   });
 
+  it('does not append a resume argument to an opaque custom Codex command', () => {
+    const docker = { ...toSessionDocker(HOST, CASE), commands: { codex: 'exec codex-router start' } };
+    const command = buildDockerLaunchCommand(
+      launchOpts({ mode: 'codex' as SessionMode, docker, resumeSessionId: 'rollout_123' })
+    );
+
+    expect(command).toContain('exec codex-router start');
+    expect(command).not.toContain('exec codex-router start resume rollout_123');
+  });
+
   it('forwards codex/gemini keys NAME-ONLY (no value in argv)', () => {
     const codex = buildDockerLaunchCommand(
       launchOpts({ mode: 'codex' as SessionMode, execEnvNames: ['OPENAI_API_KEY', 'CODEX_API_KEY'] })

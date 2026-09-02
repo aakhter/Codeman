@@ -149,6 +149,8 @@ export interface RemoteCase {
   remotePath: string;
   /** Selected owner-private saved Codex command profile. */
   codexCommandProfileId?: string;
+  /** Runtime-resolved profile template; never accepted from remote-cases.json input. */
+  codexResumeCommandTemplate?: string;
   /** Custom or legacy command overrides. */
   commands?: Partial<Record<RemoteCommandMode, string>>;
 }
@@ -161,6 +163,10 @@ export interface SessionRemote extends RemoteSshOptions {
   port?: number;
   remotePath: string;
   commands?: Partial<Record<RemoteCommandMode, string>>;
+  /** Saved profile provenance needed to resume a custom Codex command safely. */
+  codexCommandProfileId?: string;
+  /** Validated template paired with codexCommandProfileId at launch selection. */
+  codexResumeCommandTemplate?: string;
   /**
    * COD-105 — whether THIS Codeman created the remote tmux session.
    *

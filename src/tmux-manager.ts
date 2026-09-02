@@ -127,6 +127,7 @@ import {
   remoteSshTarget,
   withRemotePathBootstrap,
 } from './remote-hosts.js';
+import { resolveCodexRecoveryStrategy } from './codex-command-profiles.js';
 import {
   decideReconnect,
   advanceBackoff,
@@ -1514,21 +1515,31 @@ export function buildRemoteLaunchCommand(options: {
     if (!jsonContent) return '';
     return `OPENCODE_CONFIG_CONTENT=${shellescape(jsonContent)} `;
   }
-  const modeCommand = override
-    ? override
-    : mode === 'codex'
-      ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
-      : mode === 'opencode'
-        ? remoteLoginShellCommand(
-            `${buildOpenCodeConfigEnvPrefix(openCodeConfig)}${buildOpenCodeCommand(openCodeConfig)}`
-          )
-        : mode === 'gemini'
-          ? remoteLoginShellCommand(buildGeminiCommand(geminiConfig))
-          : mode === 'antigravity'
-            ? remoteLoginShellCommand(buildAntigravityCommand(antigravityConfig))
-            : mode === 'claude'
-              ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-              : defaultRemoteCommandForMode(mode);
+  const codexRecovery =
+    mode === 'codex' && codexConfig?.resumeSessionId
+      ? resolveCodexRecoveryStrategy(
+          { command: override, resumeCommandTemplate: remote.codexResumeCommandTemplate },
+          codexConfig.resumeSessionId
+        )
+      : undefined;
+  const modeCommand =
+    codexRecovery?.kind === 'template'
+      ? codexRecovery.command
+      : override
+        ? override
+        : mode === 'codex'
+          ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
+          : mode === 'opencode'
+            ? remoteLoginShellCommand(
+                `${buildOpenCodeConfigEnvPrefix(openCodeConfig)}${buildOpenCodeCommand(openCodeConfig)}`
+              )
+            : mode === 'gemini'
+              ? remoteLoginShellCommand(buildGeminiCommand(geminiConfig))
+              : mode === 'antigravity'
+                ? remoteLoginShellCommand(buildAntigravityCommand(antigravityConfig))
+                : mode === 'claude'
+                  ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
+                  : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1807,7 +1818,7 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   let modeCommand = docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
-  } else if (resumeSessionId) {
+  } else if (resumeSessionId && !(mode === 'codex' && docker.commands?.codex !== undefined)) {
     modeCommand = appendResumeFlag(modeCommand, mode, resumeSessionId);
   }
   // Run by tmux via /bin/sh -c, so the path is shell-quoted here. `exec` makes the

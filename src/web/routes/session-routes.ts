@@ -187,7 +187,11 @@ function resolveRemoteCodexCommand(
   };
   return {
     ok: true as const,
-    remoteCase: { ...remoteCase, ...(Object.keys(commands).length > 0 ? { commands } : {}) },
+    remoteCase: {
+      ...remoteCase,
+      ...(Object.keys(commands).length > 0 ? { commands } : {}),
+      ...(selection.resumeCommandTemplate ? { codexResumeCommandTemplate: selection.resumeCommandTemplate } : {}),
+    },
   };
 }
 

@@ -56,6 +56,77 @@ describe('createRecoveryRecord', () => {
     expect(createRecoveryRecord(session, { transport: 'docker' }).status).toBe('reattachable');
   });
 
+  it('records a selected remote Codex profile template for recovery instead of its start command', () => {
+    const record = createRecoveryRecord({
+      id: 'remote-template',
+      pid: null,
+      status: 'stopped',
+      workingDir: '/workspace/project',
+      currentTaskId: null,
+      createdAt: 10,
+      mode: 'codex',
+      nativeResumeId: 'rollout_123',
+      remote: {
+        hostId: 'remote',
+        label: 'Remote',
+        host: 'remote.example',
+        username: 'ubuntu',
+        remotePath: '/workspace/project',
+        commands: { codex: 'exec codex-router start' },
+        codexCommandProfileId: 'profile-recoverable',
+        codexResumeCommandTemplate: 'exec codex-router resume {{resumeId}}',
+      },
+    } as SessionState);
+
+    expect(record).toMatchObject({
+      transport: 'remote',
+      status: 'reattachable',
+      launch: { kind: 'template', templateId: 'profile-recoverable' },
+    });
+  });
+
+  it.each([
+    {
+      remote: {
+        hostId: 'remote',
+        label: 'Remote',
+        host: 'remote.example',
+        username: 'ubuntu',
+        remotePath: '/workspace/project',
+        commands: { codex: 'exec codex-router start' },
+      },
+    },
+    {
+      docker: {
+        hostId: 'docker',
+        label: 'Docker',
+        engine: 'docker',
+        image: 'codeman-agent:latest',
+        containerName: 'codeman-case-project',
+        hostWorkspacePath: '/workspace/project',
+        containerWorkdir: '/workspace/project',
+        mountCredentials: false,
+        hooksEnabled: false,
+        resumeOnStart: true,
+        commands: { codex: 'exec codex-router start' },
+      },
+    },
+  ])('marks opaque custom Codex launchers manual_required in the durable recovery record', (transport) => {
+    const record = createRecoveryRecord({
+      id: 'custom-codex',
+      pid: null,
+      status: 'stopped',
+      workingDir: '/workspace/project',
+      currentTaskId: null,
+      createdAt: 10,
+      mode: 'codex',
+      nativeResumeId: 'rollout_123',
+      ...transport,
+    } as SessionState);
+
+    expect(record).toMatchObject({ status: 'manual_required', launch: { kind: 'manual_required' } });
+  });
+
   it('retains the allowlisted Claude conversation ID when only resumeSessionId is available', () => {
     const record = createRecoveryRecord(
       {

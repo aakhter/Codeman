@@ -2,6 +2,7 @@
 
 import type { SessionState } from './types/session.js';
 import type { MuxSession } from './mux-interface.js';
+import { resolveCodexRecoveryStrategy } from './codex-command-profiles.js';
 import type {
   SessionRecoveryLaunch,
   SessionRecoveryRecord,
@@ -34,7 +35,7 @@ export function createRecoveryRecord(
   options: CreateRecoveryRecordOptions = {}
 ): SessionRecoveryRecord {
   const transport = options.transport ?? (session.docker ? 'docker' : session.remote ? 'remote' : 'local');
-  const launch = sanitizeRecoveryLaunch(options.launch ?? { kind: 'built-in' });
+  const launch = sanitizeRecoveryLaunch(options.launch ?? deriveRecoveryLaunch(session));
   const nativeResumeId = session.nativeResumeId ?? undefined;
   const claudeResumeId = session.resumeSessionId ?? undefined;
   const status = classifyRecoveryStatus(transport, launch, nativeResumeId, claudeResumeId);
@@ -53,6 +54,28 @@ export function createRecoveryRecord(
     createdAt: session.createdAt,
     ...(session.lastActivityAt !== undefined ? { lastActivityAt: session.lastActivityAt } : {}),
   };
+}
+
+/**
+ * Custom Codex launch strings are opaque. Only a selected saved profile with a
+ * declared template can be recovered automatically; every other override is a
+ * manual action rather than a string rewrite.
+ */
+function deriveRecoveryLaunch(session: SessionState): SessionRecoveryLaunch {
+  if (session.mode !== 'codex') return { kind: 'built-in' };
+
+  const remote = session.remote;
+  const command = remote?.commands?.codex ?? session.docker?.commands?.codex;
+  if (command === undefined) return { kind: 'built-in' };
+
+  const strategy = resolveCodexRecoveryStrategy(
+    { command, resumeCommandTemplate: remote?.codexResumeCommandTemplate },
+    session.nativeResumeId ?? ''
+  );
+  if (strategy.kind === 'template' && remote?.codexCommandProfileId) {
+    return { kind: 'template', templateId: remote.codexCommandProfileId };
+  }
+  return { kind: 'manual_required', hint: SAFE_MANUAL_RECOVERY_HINT };
 }
 
 /**
