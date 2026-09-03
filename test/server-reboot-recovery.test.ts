@@ -149,12 +149,16 @@ describe('server reboot recovery snapshot', () => {
       mode: 'codex',
       workingDir: '/work/project',
       transport: 'remote',
+      // The durable locator is deliberately minimal: host lookup belongs to the
+      // canonical remote configuration, not the reboot record.
+      remote: { hostId: 'build-host' },
       nativeResumeId: 'rollout-123',
       status: 'reattachable',
       launch: { kind: 'built-in' },
       createdAt: 100,
       lastActivityAt: 200,
     });
+    expect(upsert.mock.calls[0]?.[0].remote).toStrictEqual({ hostId: 'build-host' });
   });
 
   it('does not create or overwrite recovery records when all managed mux sessions survive', () => {

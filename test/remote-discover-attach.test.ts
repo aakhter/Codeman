@@ -22,6 +22,9 @@ const baseRemote: SessionRemote = {
   host: '10.0.0.42',
   username: 'ubuntu',
   remotePath: '/home/ubuntu/work',
+  // This suite exercises discovery attachment; absent ownership means an owned
+  // recovery wrapper, which correctly uses codeman-remote instead.
+  owned: false,
 };
 
 describe('COD-105 parseRemoteSessionList', () => {
@@ -89,6 +92,17 @@ describe('COD-105 buildRemoteAttachCommand', () => {
     expect(command).toContain('ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p');
     // Port/identity/proxy belong to ssh, ahead of the target.
     expect(command).toMatch(/ssh[\s\S]*-p 2222[\s\S]*ubuntu@10\.0\.0\.42/);
+  });
+
+  it('attaches an owned reboot-reconnect target on the owned remote socket', () => {
+    const command = buildRemoteAttachCommand(
+      { ...baseRemote, owned: true, remoteSessionName: 'codeman-ssh-source1' },
+      'codeman-ssh-source1'
+    );
+
+    expect(command).toContain('tmux -L codeman-remote attach -t ');
+    expect(command).toContain('codeman-ssh-source1');
+    expect(command).not.toContain('new-session');
   });
 
   it('shell-escapes the session name so it stays a single token', () => {

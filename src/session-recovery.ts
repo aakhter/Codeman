@@ -52,8 +52,10 @@ export function createRecoveryRecord(
       ? {
           remote: {
             hostId: session.remote.hostId,
-            owned: session.remote.owned,
-            remoteSessionName: session.remote.remoteSessionName,
+            ...(session.remote.owned !== undefined ? { owned: session.remote.owned } : {}),
+            ...(session.remote.remoteSessionName !== undefined
+              ? { remoteSessionName: session.remote.remoteSessionName }
+              : {}),
           },
         }
       : {}),
