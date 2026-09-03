@@ -5,7 +5,7 @@
  * contain only the information needed to decide which recovery action is safe to offer.
  */
 
-import type { SessionMode, SessionRemote, SessionDocker } from './session.js';
+import type { SessionMode } from './session.js';
 
 export type SessionRecoveryTransport = 'local' | 'remote' | 'docker';
 
@@ -22,6 +22,19 @@ export type SessionRecoveryLaunch =
   | { kind: 'template'; templateId: string }
   | { kind: 'manual_required'; hint: string };
 
+/** Durable locator only; credentials, commands and transport overrides stay in canonical config. */
+export interface RecoveryRemoteTarget {
+  hostId: string;
+  owned?: boolean;
+  remoteSessionName?: string;
+}
+
+/** Durable locator only; Docker daemon/command options stay in canonical config. */
+export interface RecoveryDockerTarget {
+  hostId: string;
+  containerName: string;
+}
+
 /** Sanitized, durable evidence for one session that needs explicit recovery. */
 export interface SessionRecoveryRecord {
   id: string;
@@ -30,10 +43,8 @@ export interface SessionRecoveryRecord {
   mode: SessionMode;
   workingDir: string;
   transport: SessionRecoveryTransport;
-  /** Connection metadata retained only for an explicit recovery action. */
-  remote?: SessionRemote;
-  /** Container metadata retained only for an explicit recovery action. */
-  docker?: SessionDocker;
+  remote?: RecoveryRemoteTarget;
+  docker?: RecoveryDockerTarget;
   nativeResumeId?: string;
   /** Allowlisted Claude conversation identity used by `claude --resume`. */
   claudeResumeId?: string;

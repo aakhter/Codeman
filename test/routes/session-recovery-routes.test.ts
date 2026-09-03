@@ -80,7 +80,7 @@ describe('session recovery routes', () => {
 
   it('claims a recovery before awaiting creation so concurrent resumes create only one session', async () => {
     const gate = createDeferred<void>();
-    let records = [{ ...recovery, transport: 'local' as const }];
+    let records = [{ ...recovery, transport: 'local' as const, status: 'resumable' as const }];
     harness.ctx.store.getSessionRecoveries.mockImplementation(() => records);
     harness.ctx.store.upsertSessionRecovery.mockImplementation((next) => {
       records = [next];
@@ -114,11 +114,74 @@ describe('session recovery routes', () => {
 
   it('threads a Docker native resume id through the docker launch resume option', () => {
     expect(
-      recoverySessionConfig({
-        ...recovery,
-        transport: 'docker',
-        docker: { containerName: 'agent', image: 'agent:latest', containerWorkdir: '/workspace' },
-      }).resumeSessionId
+      recoverySessionConfig(
+        {
+          ...recovery,
+          transport: 'docker',
+          docker: { containerName: 'agent', image: 'agent:latest', containerWorkdir: '/workspace' },
+        },
+        undefined,
+        {
+          docker: {
+            hostId: 'docker-1',
+            label: 'Docker',
+            engine: 'docker',
+            image: 'agent:latest',
+            containerName: 'agent',
+            hostWorkspacePath: '/tmp/project',
+            containerWorkdir: '/workspace',
+            network: 'bridge',
+            mountCredentials: false,
+            hooksEnabled: true,
+            resumeOnStart: true,
+          },
+        }
+      ).resumeSessionId
     ).toBe('rollout-1');
+  });
+
+  it('reconnects an owned live remote by attaching its source remote tmux target', () => {
+    expect(
+      recoverySessionConfig(
+        { ...recovery, transport: 'remote', remote: { hostId: 'remote-1', owned: true } },
+        'reconnect',
+        {
+          remote: {
+            hostId: 'remote-1',
+            label: 'Remote',
+            host: 'example.test',
+            username: 'alice',
+            remotePath: '/tmp/project',
+            owned: true,
+          },
+        }
+      ).remote
+    ).toMatchObject({ owned: true, remoteSessionName: 'codeman-ssh-dead-1' });
+  });
+
+  it('does not mutate or launch unavailable and recovered recovery records', async () => {
+    for (const record of [
+      { ...recovery, status: 'unavailable' as const },
+      { ...recovery, status: 'recovered' as const, recoveredSessionId: 'replacement-1' },
+    ]) {
+      harness.ctx.store.getSessionRecoveries.mockReturnValue([record]);
+      const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/refresh' });
+      expect(response.statusCode).toBe(409);
+      expect(harness.ctx.store.upsertSessionRecovery).not.toHaveBeenCalled();
+    }
+  });
+
+  it('lets dismiss cancel an in-progress recovery before it can persist a recovered session id', async () => {
+    const gate = createDeferred<void>();
+    harness.ctx.store.getSessionRecoveries.mockReturnValue([{ ...recovery, transport: 'local', status: 'resumable' }]);
+    harness.ctx.addSession.mockImplementationOnce(async () => gate.promise);
+    const pending = harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
+    await vi.waitFor(() => expect(harness.ctx.addSession).toHaveBeenCalledTimes(1));
+    expect(
+      (await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/dismiss' })).statusCode
+    ).toBe(200);
+    gate.resolve();
+    await pending;
+    expect(harness.ctx.store.upsertSessionRecovery).not.toHaveBeenCalled();
   });
 });

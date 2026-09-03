@@ -1645,7 +1645,8 @@ export function buildRemoteLaunchCommand(options: {
  *   the connection options (a PTY is required for interactive tmux).
  */
 export function buildRemoteAttachCommand(remote: SessionRemote, remoteSessionName: string): string {
-  const tmuxInvocation = withRemotePathBootstrap(`tmux -L codeman attach -t ${shellescape(remoteSessionName)}`);
+  const socket = remote.owned !== false ? REMOTE_TMUX_SOCKET : 'codeman';
+  const tmuxInvocation = withRemotePathBootstrap(`tmux -L ${socket} attach -t ${shellescape(remoteSessionName)}`);
   const [ssh, ...connectionArgs] = buildSshConnectionArgs(remote);
   const sshParts = [ssh, ...connectionArgs, '-t', remoteSshTarget(remote), shellescape(tmuxInvocation)];
   return sshParts.join(' ');
@@ -1688,7 +1689,7 @@ function buildRemoteSessionCommand(
     allowedTools?: string;
   } = {}
 ): string {
-  if (remote.owned === false) {
+  if (remote.owned === false || remote.remoteSessionName) {
     const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId);
     return buildRemoteAttachCommand(remote, target);
   }
@@ -1827,6 +1828,11 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   let modeCommand = docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
+  } else if (resumeSessionId && mode === 'opencode') {
+    // OpenCode has a first-class --session continuation. A custom override is
+    // opaque, so refuse rather than silently starting a fresh conversation.
+    if (docker.commands?.opencode !== undefined) throw new ManualRecoveryRequiredError();
+    modeCommand = buildOpenCodeCommand({ continueSession: resumeSessionId });
   } else if (resumeSessionId && mode === 'codex' && docker.commands?.codex !== undefined) {
     throw new ManualRecoveryRequiredError();
   } else if (resumeSessionId && !(mode === 'codex' && docker.commands?.codex !== undefined)) {

@@ -81,6 +81,24 @@ describe('buildDockerLaunchCommand', () => {
     );
   });
 
+  it('continues a recovered Docker OpenCode native session instead of silently launching fresh', () => {
+    const resumeSessionId = recoverySessionConfig({
+      id: 'recovery-open',
+      sourceSessionId: 'dead-open',
+      mode: 'opencode',
+      workingDir: '/workspace',
+      transport: 'docker',
+      docker: toSessionDocker(HOST, CASE),
+      nativeResumeId: 'open_123',
+      status: 'resumable',
+      launch: { kind: 'built-in' },
+      createdAt: 1,
+    }).resumeSessionId;
+    expect(buildDockerLaunchCommand(launchOpts({ mode: 'opencode', resumeSessionId }))).toContain(
+      'opencode --session open_123'
+    );
+  });
+
   it('image-check precedes ensure precedes start precedes exec', () => {
     const cmd = buildDockerLaunchCommand(launchOpts());
     const iImage = cmd.indexOf('docker image inspect');
