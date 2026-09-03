@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
 import { registerSessionRecoveryRoutes } from '../../src/web/routes/session-recovery-routes.js';
+import { recoverySessionConfig } from '../../src/web/routes/session-recovery-routes.js';
+import { createDeferred } from '../mocks/index.js';
 
 describe('session recovery routes', () => {
   let harness: RouteTestHarness;
@@ -65,5 +67,58 @@ describe('session recovery routes', () => {
     const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
     expect(response.statusCode).toBe(409);
     expect(harness.ctx.addSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses a recovery that has already created a replacement session', async () => {
+    harness.ctx.store.getSessionRecoveries.mockReturnValue([
+      { ...recovery, status: 'recovered', recoveredSessionId: 'replacement-1' },
+    ]);
+    const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
+    expect(response.statusCode).toBe(409);
+    expect(harness.ctx.addSession).not.toHaveBeenCalled();
+  });
+
+  it('claims a recovery before awaiting creation so concurrent resumes create only one session', async () => {
+    const gate = createDeferred<void>();
+    let records = [{ ...recovery, transport: 'local' as const }];
+    harness.ctx.store.getSessionRecoveries.mockImplementation(() => records);
+    harness.ctx.store.upsertSessionRecovery.mockImplementation((next) => {
+      records = [next];
+    });
+    harness.ctx.mux.createSession.mockResolvedValue({
+      sessionId: 'created',
+      muxName: 'codeman-created',
+      pid: 1,
+      createdAt: Date.now(),
+      workingDir: '/tmp/project',
+      mode: 'codex',
+      attached: false,
+    });
+    Object.assign(harness.ctx.mux, { setAttached: vi.fn() });
+    harness.ctx.addSession.mockImplementationOnce(async () => gate.promise);
+
+    const first = harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
+    await vi.waitFor(() => expect(harness.ctx.addSession).toHaveBeenCalledTimes(1));
+    const second = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
+    expect(second.statusCode).toBe(409);
+    expect(harness.ctx.addSession).toHaveBeenCalledTimes(1);
+    gate.resolve();
+    expect((await first).statusCode).toBe(200);
+    expect(harness.ctx.store.upsertSessionRecovery).toHaveBeenCalledTimes(1);
+    expect(records[0].recoveredSessionId).toBeTruthy();
+
+    const sequential = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
+    expect(sequential.statusCode).toBe(409);
+    expect(harness.ctx.addSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('threads a Docker native resume id through the docker launch resume option', () => {
+    expect(
+      recoverySessionConfig({
+        ...recovery,
+        transport: 'docker',
+        docker: { containerName: 'agent', image: 'agent:latest', containerWorkdir: '/workspace' },
+      }).resumeSessionId
+    ).toBe('rollout-1');
   });
 });

@@ -14,6 +14,7 @@ import {
   type DockerLaunchOptions,
 } from '../src/tmux-manager.js';
 import { DEFAULT_AGENT_IMAGE, toSessionDocker, type DockerCreateContext } from '../src/docker-hosts.js';
+import { recoverySessionConfig } from '../src/web/routes/session-recovery-routes.js';
 import type { DockerCase, DockerHost, SessionMode } from '../src/types.js';
 
 // The exact adopt-guard the in-container Codeman would use to discover its own sessions.
@@ -62,6 +63,24 @@ describe('dockerTmuxSessionName', () => {
 });
 
 describe('buildDockerLaunchCommand', () => {
+  it('receives a recovered Docker Codex native id through the launch resume option', () => {
+    const resumeSessionId = recoverySessionConfig({
+      id: 'recovery-1',
+      sourceSessionId: 'dead-1',
+      mode: 'codex',
+      workingDir: '/workspace',
+      transport: 'docker',
+      docker: toSessionDocker(HOST, CASE),
+      nativeResumeId: 'rollout_123',
+      status: 'resumable',
+      launch: { kind: 'built-in' },
+      createdAt: 1,
+    }).resumeSessionId;
+    expect(buildDockerLaunchCommand(launchOpts({ mode: 'codex', resumeSessionId }))).toContain(
+      'exec codex resume rollout_123'
+    );
+  });
+
   it('image-check precedes ensure precedes start precedes exec', () => {
     const cmd = buildDockerLaunchCommand(launchOpts());
     const iImage = cmd.indexOf('docker image inspect');
