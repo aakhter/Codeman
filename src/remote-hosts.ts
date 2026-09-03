@@ -418,7 +418,10 @@ export function buildRemoteRecoveryProbeCommand(
   host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
   target: { owned: boolean; sessionId: string; remoteSessionName?: string }
 ): string {
-  const socket = target.owned && !target.remoteSessionName ? 'codeman-remote' : 'codeman';
+  // Ownership selects the tmux namespace. An owned reboot recovery carries an
+  // explicit *source* name so it can reattach after Codeman creates a new local
+  // wrapper, but that must not move its read-only probe to the public socket.
+  const socket = target.owned ? 'codeman-remote' : 'codeman';
   const name = target.remoteSessionName || remoteTmuxSessionName(target.sessionId);
   return [
     ...buildSshConnectionArgs(host),

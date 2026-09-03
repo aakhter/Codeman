@@ -160,6 +160,48 @@ describe('session recovery routes', () => {
     ).toMatchObject({ owned: true, remoteSessionName: 'codeman-ssh-dead-1' });
   });
 
+  it('reconnects a live owned source through its source target instead of treating it as unavailable', async () => {
+    const remote = {
+      hostId: 'remote-1',
+      label: 'Remote',
+      host: 'example.test',
+      username: 'alice',
+      remotePath: '/tmp/project',
+      owned: true,
+    };
+    harness.ctx.store.getSessionRecoveries.mockReturnValue([
+      { ...recovery, remote: { hostId: 'remote-1', owned: true } },
+    ]);
+    Object.assign(harness.ctx, {
+      resolveRecoveryTransport: vi.fn(async () => ({ remote })),
+      probeRecoveryTarget: vi.fn(async () => true),
+      setAttached: vi.fn(),
+    });
+    harness.ctx.mux.createSession.mockImplementation(async (options) => ({
+      sessionId: options.sessionId,
+      muxName: `codeman-${options.sessionId}`,
+      pid: 1,
+      createdAt: Date.now(),
+      workingDir: options.workingDir,
+      mode: options.mode,
+      attached: false,
+      remote: options.remote,
+    }));
+
+    const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/reconnect' });
+
+    expect(response.statusCode).toBe(200);
+    expect(harness.ctx.probeRecoveryTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceSessionId: 'dead-1' }),
+      remote
+    );
+    expect(harness.ctx.mux.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        remote: expect.objectContaining({ owned: true, remoteSessionName: 'codeman-ssh-dead-1' }),
+      })
+    );
+  });
+
   it('does not mutate or launch unavailable and recovered recovery records', async () => {
     for (const record of [
       { ...recovery, status: 'unavailable' as const },

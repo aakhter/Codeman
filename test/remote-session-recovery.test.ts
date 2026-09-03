@@ -22,4 +22,16 @@ describe('remote recovery probe', () => {
     expect(command).toContain('codeman-discovered');
     expect(command).not.toContain('new-session');
   });
+
+  it('keeps an owned reboot-reconnect source on the private socket even when its name is explicit', () => {
+    const command = buildRemoteRecoveryProbeCommand(host, {
+      owned: true,
+      sessionId: 'local-id',
+      remoteSessionName: 'codeman-ssh-source1',
+    });
+
+    expect(command).toContain('tmux -L codeman-remote has-session -t');
+    expect(command).toContain('codeman-ssh-source1');
+    expect(command).not.toContain('new-session');
+  });
 });
