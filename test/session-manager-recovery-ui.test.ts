@@ -179,4 +179,31 @@ describe('Session Manager Recovery Queue', () => {
       'Start new',
     ]);
   });
+
+  it('lets a user dismiss a recovered record after its replacement session exists', async () => {
+    let recoveryLoads = 0;
+    const recovered = { ...resumableCodex, status: 'recovered', recoveredSessionId: 'replacement-codex' };
+    const { app, elements, fetch, confirm } = loadHarness(async (url, init) => {
+      if (url.startsWith('/api/sessions/unified')) return ok({ success: true, data: { sessions: [] } });
+      if (url === '/api/session-recoveries') return ok({ recoveries: recoveryLoads++ === 0 ? [recovered] : [] });
+      if (url === '/api/session-recoveries/lost-codex/dismiss') {
+        expect(init).toMatchObject({ method: 'POST' });
+        return ok({ dismissed: true });
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+
+    await app._loadSessionManagerList('');
+    const dismiss = elements.sessionRecoveryList.children[0].children.at(-1)!.children[0];
+    expect(dismiss.textContent).toBe('Dismiss');
+    await dismiss.click();
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('/repo/codex'));
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/session-recoveries/lost-codex/dismiss',
+      expect.objectContaining({ method: 'POST' })
+    );
+    expect(app.sessions.has('lost-codex')).toBe(false);
+    expect(app.selectSession).not.toHaveBeenCalled();
+  });
 });

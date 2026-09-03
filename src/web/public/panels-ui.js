@@ -1170,14 +1170,12 @@ Object.assign(CodemanApp.prototype, {
         button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
         actions.appendChild(button);
       }
-      if (record.status !== 'recovered') {
-        const dismiss = document.createElement('button');
-        dismiss.type = 'button';
-        dismiss.className = 'btn-toolbar session-recovery-dismiss';
-        dismiss.textContent = 'Dismiss';
-        dismiss.addEventListener('click', () => this._dismissSessionRecovery(record));
-        actions.appendChild(dismiss);
-      }
+      const dismiss = document.createElement('button');
+      dismiss.type = 'button';
+      dismiss.className = 'btn-toolbar session-recovery-dismiss';
+      dismiss.textContent = 'Dismiss';
+      dismiss.addEventListener('click', () => this._dismissSessionRecovery(record));
+      actions.appendChild(dismiss);
       row.appendChild(actions);
       list.appendChild(row);
     }
