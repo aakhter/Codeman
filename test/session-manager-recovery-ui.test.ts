@@ -130,6 +130,24 @@ describe('Session Manager Recovery Queue', () => {
     expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/api/session-recoveries/lost-codex/reconnect');
   });
 
+  it('keeps unified live and history rows when the recovery queue request rejects', async () => {
+    const { app, elements } = loadHarness(async (url) => {
+      if (url.startsWith('/api/sessions/unified')) {
+        return ok({ success: true, data: { sessions: [{ sessionId: 'live-1', workingDir: '/repo/live' }] } });
+      }
+      if (url === '/api/session-recoveries') throw new Error('recovery network unavailable');
+      throw new Error(`unexpected request ${url}`);
+    });
+
+    await app._loadSessionManagerList('');
+
+    expect(app._buildHistoryItem).toHaveBeenCalledTimes(1);
+    expect(elements.sessionManagerList.children).toHaveLength(1);
+    expect(elements.sessionManagerList.children[0].textContent).not.toBe('Failed to load sessions');
+    expect(elements.sessionRecoveryList.children).toHaveLength(1);
+    expect(elements.sessionRecoveryList.children[0].textContent).toBe('Recovery Queue is unavailable');
+  });
+
   it('confirms the original location, resumes, refreshes, and selects only the returned session', async () => {
     let listLoads = 0;
     const { app, elements, fetch, confirm } = loadHarness(async (url, init) => {

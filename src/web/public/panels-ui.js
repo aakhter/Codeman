@@ -1256,13 +1256,24 @@ Object.assign(CodemanApp.prototype, {
     if (!list) return;
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
-      const [res, recoveryRes] = await Promise.all([fetch(url), fetch('/api/session-recoveries')]);
-      const [data, recoveryData] = await Promise.all([res.json().catch(() => null), recoveryRes.json().catch(() => null)]);
+      const [sessionResult, recoveryResult] = await Promise.allSettled([fetch(url), fetch('/api/session-recoveries')]);
+      if (sessionResult.status === 'rejected') throw sessionResult.reason;
+      const res = sessionResult.value;
+      const data = await res.json().catch(() => null);
       if (recoveryList) {
-        if (recoveryRes.ok && recoveryData?.success !== false) {
-          this._renderSessionRecoveryList(recoveryList, Array.isArray(recoveryData?.recoveries) ? recoveryData.recoveries : []);
+        if (recoveryResult.status === 'fulfilled') {
+          const recoveryRes = recoveryResult.value;
+          const recoveryData = await recoveryRes.json().catch(() => null);
+          if (recoveryRes.ok && recoveryData?.success !== false) {
+            this._renderSessionRecoveryList(
+              recoveryList,
+              Array.isArray(recoveryData?.recoveries) ? recoveryData.recoveries : []
+            );
+          } else {
+            this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
+          }
         } else {
-          this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
+          this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable');
         }
       }
       if (!res.ok || !data || data.success === false || !data.data) {
