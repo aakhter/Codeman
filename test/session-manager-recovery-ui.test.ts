@@ -203,6 +203,8 @@ describe('Session Manager Recovery Queue', () => {
       '/api/session-recoveries/lost-codex/dismiss',
       expect.objectContaining({ method: 'POST' })
     );
+    expect(recoveryLoads).toBe(2);
+    expect(elements.sessionRecoveryList.children).toHaveLength(0);
     expect(app.sessions.has('lost-codex')).toBe(false);
     expect(app.selectSession).not.toHaveBeenCalled();
   });
