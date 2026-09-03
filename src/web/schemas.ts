@@ -254,6 +254,7 @@ const CodexConfigSchema = z
       .optional()
       .transform(() => 'hybrid' as const),
   })
+  .strict()
   .optional();
 
 /** Schema for Gemini CLI-specific configuration */

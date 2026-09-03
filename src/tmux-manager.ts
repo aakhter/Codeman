@@ -137,6 +137,7 @@ import {
   resetReconnectState,
   type RemoteReconnectState,
 } from './remote-reconnect.js';
+import { canUsernameRunPrivilegedCommands } from './user-store.js';
 
 // ============================================================================
 // Timing Constants
@@ -940,6 +941,8 @@ export function buildOpenCodeCommand(config?: OpenCodeConfig): string {
  * stripping destructive terminal sequences before xterm.js sees them.
  */
 export function buildCodexCommand(config?: CodexConfig): string {
+  // COD-392: a resolved local case command is complete and runs as-is.
+  if (config?.baseCommand && config.baseCommand.trim().length > 0) return config.baseCommand;
   const parts = ['codex'];
 
   if (config?.dangerouslyBypassApprovals) {
@@ -2651,6 +2654,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     const local = !remote && !docker;
 
+    // COD-392: resolved local Codex commands are arbitrary owner-authored shell
+    // text on the shared host. Recheck the grant on every launch path so a
+    // revoked permission fails closed instead of respawning the command.
+    if (local && mode === 'codex' && codexConfig?.baseCommand?.trim()) {
+      const owner = options.owner;
+      if (!(await canUsernameRunPrivilegedCommands(owner))) {
+        throw new Error('Custom Codex commands require the can-bypass-permissions grant');
+      }
+    }
+
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
     // live desired state (toggle + proxy health) right before spawn so a down proxy
     // leaves codex on the direct chatgpt.com path.
@@ -2957,6 +2970,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     const local = !remote && !docker;
+
+    // COD-392: see createSession — revoked grants must fail respawn closed too.
+    if (local && mode === 'codex' && codexConfig?.baseCommand?.trim()) {
+      const owner = options.owner;
+      if (!(await canUsernameRunPrivilegedCommands(owner))) {
+        console.error(`[TmuxManager] Refusing to respawn ${muxName}: custom Codex command grant revoked`);
+        return null;
+      }
+    }
 
     // COD-254: Codex routing lives in the shared config.toml patch. Reconcile it
     // before calculating this respawn's snapshot or launching its replacement,

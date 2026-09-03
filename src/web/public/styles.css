@@ -6925,10 +6925,14 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 .remote-codex-profile-controls { display:flex; gap:.375rem; min-width:0; }
 .remote-codex-profile-controls select { min-width:0; flex:1; }
+.case-codex-command-controls { display:flex; gap:.375rem; min-width:0; }
+.case-codex-command-controls select { min-width:0; flex:1; }
 .remote-codex-profile-row input[readonly] { color:var(--text-muted); }
+.case-codex-command-row input[readonly] { color:var(--text-muted); }
 .remote-codex-profile-row #remoteCaseCodexCommandCustom { margin-top:.4rem; }
+.case-codex-command-row [id$='CaseCodexCommandCustom'] { margin-top:.4rem; }
 .codex-command-profile-manager #codexCommandProfileList,.codex-command-profile-manager #codexCommandProfileEditor { display:grid; gap:.4rem; margin-top:.75rem; }
-@media (max-width:430px) { .remote-codex-profile-controls { flex-wrap:wrap; } .remote-codex-profile-controls select,.remote-codex-profile-controls button { flex-basis:100%; width:100%; } }
+@media (max-width:430px) { .remote-codex-profile-controls { flex-wrap:wrap; } .remote-codex-profile-controls select,.remote-codex-profile-controls button { flex-basis:100%; width:100%; } .case-codex-command-controls { flex-wrap:wrap; } .case-codex-command-controls select,.case-codex-command-controls button { flex-basis:100%; width:100%; } }
 
 .remote-host-verify-status {
   min-height: 1.2rem;

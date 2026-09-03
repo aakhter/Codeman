@@ -1072,7 +1072,9 @@ export class Session extends EventEmitter {
       this._openCodeConfig = config.openCodeConfig;
     }
 
-    // Apply Codex configuration
+    // Apply Codex configuration. COD-392 baseCommand is server-resolved and
+    // private: keep it on the in-memory config so respawn reuses the exact
+    // launch text, but never expose it through toState()/toDetailedState().
     if (config.codexConfig) {
       this._codexConfig = config.codexConfig;
     }
@@ -2280,6 +2282,17 @@ export class Session extends EventEmitter {
     };
   }
 
+  /**
+   * Server-only resolved Codex launch command for disk persistence. Never
+   * include this in SessionState serializers or API responses; it can carry
+   * an arbitrary owner-authored command line.
+   */
+  getResolvedCodexCommandForPersist(): string | undefined {
+    if (this.mode !== 'codex') return undefined;
+    const command = this._codexConfig?.baseCommand?.trim();
+    return command ? command : undefined;
+  }
+
   toDetailedState() {
     return {
       ...this.toLightDetailedState(),
@@ -2865,7 +2878,9 @@ export class Session extends EventEmitter {
             claudeMode: this._claudeMode,
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
-            codexConfig: this._codexConfig,
+            codexConfig: this._codexConfig
+              ? (({ baseCommand: _baseCommand, ...publicCodexConfig }) => publicCodexConfig)(this._codexConfig)
+              : undefined,
             geminiConfig: this._geminiConfig,
             antigravityConfig: this._antigravityConfig,
             piConfig: this._piConfig,

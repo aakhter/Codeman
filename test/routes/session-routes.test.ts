@@ -523,6 +523,86 @@ describe('session-routes', () => {
       expect(harness.ctx.addSession).not.toHaveBeenCalled();
     });
 
+    it('uses a saved local Codex command as the complete launch command', async () => {
+      const caseName = 'local-codex-command';
+      const workingDir = join(CASES_DIR, caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'codex --local-exact',
+      });
+      cliAvailability.codex = false;
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.codexConfig?.baseCommand).toBe('codex --local-exact');
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+      } finally {
+        await rm(workingDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails a missing local Codex profile before Session construction', async () => {
+      const caseName = 'local-codex-missing';
+      const workingDir = join(CASES_DIR, caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'profile',
+        profileId: 'deleted-profile',
+      });
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue([]);
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+        expect(JSON.parse(response.body)).toMatchObject({
+          errorCode: ApiErrorCode.OPERATION_FAILED,
+          error: 'Saved Codex command profile is unavailable',
+        });
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      } finally {
+        await rm(workingDir, { recursive: true, force: true });
+      }
+    });
+
+    it('denies a non-granted multi-user local Codex command at launch', async () => {
+      const username = 'localcodexuser';
+      const cleanup = await useRegularUserHarness(username, false);
+      const caseName = 'local-codex-denied';
+      const workingDir = join(resolveCasesDir({ username, role: 'user' }), caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'codex --local-exact',
+      });
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.FORBIDDEN));
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      } finally {
+        await rm(workingDir, { recursive: true, force: true });
+        await cleanup();
+      }
+    });
+
     it('launches a Bob-owned selected profile when an admin creates a remote session', async () => {
       vi.stubEnv('CODEMAN_MULTIUSER', '1');
       await harness.app.close();

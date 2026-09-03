@@ -2923,6 +2923,13 @@
               <label>Description (optional)</label>
               <input type="text" id="newCaseDescription" placeholder="A brief description..." autocomplete="off">
             </div>
+            <div class="form-row case-codex-command-row" data-codex-command-scope="local">
+              <label for="localCaseCodexProfile">Codex command</label>
+              <div class="case-codex-command-controls"><select id="localCaseCodexProfile" onchange="app.onCaseCodexProfileChanged(false, 'local')" disabled><option value="default">Default</option></select><button type="button" class="btn-toolbar btn-sm" id="manageLocalCodexCommandProfiles" onclick="app.openCodexCommandProfileManager()">Manage</button></div>
+              <input type="text" id="localCaseCodexProfilePreview" readonly aria-label="Selected Codex command preview">
+              <div id="localCaseCodexCommandCustom" class="hidden"><label for="localCaseCodexCommandCustomInput">Custom command</label><input type="text" id="localCaseCodexCommandCustomInput" oninput="app.onCaseCodexProfileChanged(true, 'local')" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+              <span class="form-hint">Runs the saved command exactly as shown, with no extra Codeman flags. Applies to local cases only.</span>
+            </div>
             <div class="form-row docker-quick-row">
               <label class="checkbox-row"><input type="checkbox" id="newCaseDocker"> 🐳 Run in an isolated Docker container</label>
               <span class="form-hint">Runs this case in a hardened, isolated container. The base image is built automatically on first use. Docker/Podman must be installed.</span>
@@ -3011,6 +3018,13 @@
               </select>
               <span class="form-hint">Which CLI to point the Run button at once the clone finishes. Changeable any time from the Run dropdown.</span>
             </div>
+            <div class="form-row case-codex-command-row" data-codex-command-scope="local">
+              <label for="cloneCaseCodexProfile">Codex command</label>
+              <div class="case-codex-command-controls"><select id="cloneCaseCodexProfile" onchange="app.onCaseCodexProfileChanged(false, 'clone')" disabled><option value="default">Default</option></select><button type="button" class="btn-toolbar btn-sm" id="manageCloneCodexCommandProfiles" onclick="app.openCodexCommandProfileManager()">Manage</button></div>
+              <input type="text" id="cloneCaseCodexProfilePreview" readonly aria-label="Selected Codex command preview">
+              <div id="cloneCaseCodexCommandCustom" class="hidden"><label for="cloneCaseCodexCommandCustomInput">Custom command</label><input type="text" id="cloneCaseCodexCommandCustomInput" oninput="app.onCaseCodexProfileChanged(true, 'clone')" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+              <span class="form-hint">Runs the saved command exactly as shown, with no extra Codeman flags. Applies to local cases only.</span>
+            </div>
             <details class="advanced-options">
               <summary><svg class="set-adv-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Clone options</span></summary>
               <div class="advanced-options-content">
@@ -3045,6 +3059,13 @@
               </div>
               <span class="form-hint">Choose an existing folder from this computer or enter its absolute path</span>
             </div>
+            <div class="form-row case-codex-command-row" data-codex-command-scope="local">
+              <label for="linkCaseCodexProfile">Codex command</label>
+              <div class="case-codex-command-controls"><select id="linkCaseCodexProfile" onchange="app.onCaseCodexProfileChanged(false, 'link')" disabled><option value="default">Default</option></select><button type="button" class="btn-toolbar btn-sm" id="manageLinkCodexCommandProfiles" onclick="app.openCodexCommandProfileManager()">Manage</button></div>
+              <input type="text" id="linkCaseCodexProfilePreview" readonly aria-label="Selected Codex command preview">
+              <div id="linkCaseCodexCommandCustom" class="hidden"><label for="linkCaseCodexCommandCustomInput">Custom command</label><input type="text" id="linkCaseCodexCommandCustomInput" oninput="app.onCaseCodexProfileChanged(true, 'link')" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+              <span class="form-hint">Runs the saved command exactly as shown, with no extra Codeman flags. Applies to local cases only.</span>
+            </div>
           </div>
           <!-- Remote Tab -->
           <div class="set-section hidden" id="case-remote">
@@ -3077,12 +3098,12 @@
               </div>
               <span class="form-hint">Absolute path on the remote host. Codeman will not create or delete it.</span>
             </div>
-            <div class="form-row remote-codex-profile-row">
+            <div class="form-row remote-codex-profile-row case-codex-command-row" data-codex-command-scope="remote">
               <label for="remoteCaseCodexProfile">Codex command</label>
-              <div class="remote-codex-profile-controls"><select id="remoteCaseCodexProfile" onchange="app.onRemoteCaseCodexProfileChanged()" disabled><option value="default">Default</option></select><button type="button" class="btn-toolbar btn-sm" id="manageCodexCommandProfiles" onclick="app.openCodexCommandProfileManager()">Manage</button></div>
+              <div class="remote-codex-profile-controls case-codex-command-controls"><select id="remoteCaseCodexProfile" onchange="app.onCaseCodexProfileChanged(false, 'remote')" disabled><option value="default">Default</option></select><button type="button" class="btn-toolbar btn-sm" id="manageCodexCommandProfiles" onclick="app.openCodexCommandProfileManager()">Manage</button></div>
               <input type="text" id="remoteCaseCodexProfilePreview" readonly aria-label="Selected Codex command preview">
-              <div id="remoteCaseCodexCommandCustom" class="hidden"><label for="remoteCaseCodexCommandCustomInput">Custom command</label><input type="text" id="remoteCaseCodexCommandCustomInput" oninput="app.onRemoteCaseCodexProfileChanged(true)" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-              <span class="form-hint">Use a saved command, the host default, or a case-specific custom command.</span>
+              <div id="remoteCaseCodexCommandCustom" class="hidden"><label for="remoteCaseCodexCommandCustomInput">Custom command</label><input type="text" id="remoteCaseCodexCommandCustomInput" oninput="app.onCaseCodexProfileChanged(true, 'remote')" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+              <span class="form-hint">Runs the saved command exactly as shown, with no extra Codeman flags. Applies to this remote case only.</span>
             </div>
             <!-- COD-105 — discover + attach existing remote tmux sessions this Codeman didn't create. -->
             <details class="advanced-options" id="remoteDiscoverSection">

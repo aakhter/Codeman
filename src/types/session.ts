@@ -369,6 +369,11 @@ export interface CodexConfig {
   animations?: boolean;
   /** Browser rendering strategy for Codex sessions. Hybrid TUI is the only supported mode. */
   renderMode?: CodexRenderMode;
+  /**
+   * Server-resolved complete Codex launch command (COD-392). Never accepted
+   * from HTTP input; Zod strips unknown keys, so the browser cannot inject it.
+   */
+  baseCommand?: string;
 }
 
 /** Gemini CLI session configuration */
