@@ -10,6 +10,7 @@ import {
   buildDockerStopCommand,
   buildDockerRemoveCommand,
   dockerTmuxSessionName,
+  ManualRecoveryRequiredError,
   type DockerLaunchOptions,
 } from '../src/tmux-manager.js';
 import { DEFAULT_AGENT_IMAGE, toSessionDocker, type DockerCreateContext } from '../src/docker-hosts.js';
@@ -123,12 +124,9 @@ describe('buildDockerLaunchCommand', () => {
 
   it('does not append a resume argument to an opaque custom Codex command', () => {
     const docker = { ...toSessionDocker(HOST, CASE), commands: { codex: 'exec codex-router start' } };
-    const command = buildDockerLaunchCommand(
-      launchOpts({ mode: 'codex' as SessionMode, docker, resumeSessionId: 'rollout_123' })
-    );
-
-    expect(command).toContain('exec codex-router start');
-    expect(command).not.toContain('exec codex-router start resume rollout_123');
+    expect(() =>
+      buildDockerLaunchCommand(launchOpts({ mode: 'codex' as SessionMode, docker, resumeSessionId: 'rollout_123' }))
+    ).toThrow(ManualRecoveryRequiredError);
   });
 
   it('forwards codex/gemini keys NAME-ONLY (no value in argv)', () => {

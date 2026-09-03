@@ -149,6 +149,40 @@ describe('Codex command profile routes', () => {
     expect(profiles.alice[0].command).toBe('codex new');
   });
 
+  it('requires confirmation to update a referenced recovery template', async () => {
+    profiles.alice = [
+      {
+        id: 'profile-template',
+        name: 'Recoverable',
+        command: 'exec codex-router start',
+        resumeCommandTemplate: 'exec codex-router resume {{resumeId}}',
+      },
+    ];
+    await writeRemoteCases(dataDir, [
+      {
+        name: 'Case Template',
+        type: 'remote',
+        owner: 'alice',
+        hostId: 'host',
+        remotePath: '/template',
+        codexCommandProfileId: 'profile-template',
+      },
+    ]);
+
+    const blocked = await request('alice', 'PUT', '/api/codex-command-profiles/profile-template', {
+      resumeCommandTemplate: 'exec codex-router recover {{resumeId}}',
+    });
+    expect(blocked.statusCode).toBe(400);
+    expect(JSON.parse(blocked.body)).toMatchObject({ requiresConfirmation: true, usage: ['Case Template'] });
+
+    const confirmed = await request('alice', 'PUT', '/api/codex-command-profiles/profile-template', {
+      resumeCommandTemplate: 'exec codex-router recover {{resumeId}}',
+      confirmReferencedUpdate: true,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(profiles.alice[0].resumeCommandTemplate).toBe('exec codex-router recover {{resumeId}}');
+  });
+
   it('rejects a normalized update that makes no effective change without writing', async () => {
     profiles.alice = [{ id: 'profile-1', name: 'Personal', command: 'codex old' }];
 

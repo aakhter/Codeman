@@ -240,6 +240,14 @@ const SAFE_PANE_TARGET_PATTERN = /^(%\d+|\d+|active)$/;
 /** Bare Codex skill token that opens the interactive picker before submission. */
 const CODEX_SKILL_INVOCATION_PATTERN = /^\$[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
+/** A recovery launch was deliberately refused rather than starting an opaque command fresh. */
+export class ManualRecoveryRequiredError extends Error {
+  constructor() {
+    super('Manual recovery is required for this custom Codex command');
+    this.name = 'ManualRecoveryRequiredError';
+  }
+}
+
 /** Dedicated tmux socket for new Codeman-owned sessions (instance-scoped:
  *  `codeman` for prod, `codeman-beta` on the beta branch). */
 const DEFAULT_CODEMAN_TMUX_SOCKET = DEFAULT_TMUX_SOCKET;
@@ -1522,6 +1530,7 @@ export function buildRemoteLaunchCommand(options: {
           codexConfig.resumeSessionId
         )
       : undefined;
+  if (codexRecovery?.kind === 'manual_required') throw new ManualRecoveryRequiredError();
   const modeCommand =
     codexRecovery?.kind === 'template'
       ? codexRecovery.command
@@ -1818,6 +1827,8 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   let modeCommand = docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
+  } else if (resumeSessionId && mode === 'codex' && docker.commands?.codex !== undefined) {
+    throw new ManualRecoveryRequiredError();
   } else if (resumeSessionId && !(mode === 'codex' && docker.commands?.codex !== undefined)) {
     modeCommand = appendResumeFlag(modeCommand, mode, resumeSessionId);
   }

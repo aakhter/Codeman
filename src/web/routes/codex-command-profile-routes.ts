@@ -88,9 +88,10 @@ export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: Con
       return reply.code(400).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Profile update has no effect'));
     }
     const usage = getCodexProfileUsage(state.cases, id);
+    const recoveryTemplateChanged =
+      input.resumeCommandTemplate !== undefined && input.resumeCommandTemplate !== current.resumeCommandTemplate;
     if (
-      input.command !== undefined &&
-      input.command !== current.command &&
+      ((input.command !== undefined && input.command !== current.command) || recoveryTemplateChanged) &&
       usage.length > 0 &&
       !input.confirmReferencedUpdate
     ) {

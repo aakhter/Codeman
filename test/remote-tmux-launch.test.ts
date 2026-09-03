@@ -12,7 +12,7 @@
 import { execFileSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
 import { REMOTE_PATH_BOOTSTRAP, REMOTE_LOGIN_SHELL_RESOLVE } from '../src/remote-hosts.js';
-import { buildRemoteLaunchCommand } from '../src/tmux-manager.js';
+import { buildRemoteLaunchCommand, ManualRecoveryRequiredError } from '../src/tmux-manager.js';
 import type { SessionRemote } from '../src/types.js';
 
 const baseRemote: SessionRemote = {
@@ -123,6 +123,28 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).not.toContain('exec codex-router start');
     expect(command).toContain('tmux -L codeman-remote new-session -A');
   });
+
+  it.each([
+    { label: 'missing template', template: undefined, resumeId: 'rollout_123' },
+    { label: 'invalid template', template: 'exec router {{other}}', resumeId: 'rollout_123' },
+    { label: 'unsafe id', template: 'exec router resume {{resumeId}}', resumeId: 'rollout id; unsafe' },
+  ])(
+    'blocks opaque remote Codex recovery with a $label instead of launching its start command',
+    ({ template, resumeId }) => {
+      expect(() =>
+        buildRemoteLaunchCommand({
+          mode: 'codex',
+          sessionId: SESSION_ID,
+          remote: {
+            ...baseRemote,
+            commands: { codex: 'exec codex-router start' },
+            ...(template ? { codexResumeCommandTemplate: template } : {}),
+          },
+          codexConfig: { resumeSessionId: resumeId },
+        })
+      ).toThrow(ManualRecoveryRequiredError);
+    }
+  );
 
   it('omits -p when no port is set', () => {
     const command = buildRemoteLaunchCommand({
