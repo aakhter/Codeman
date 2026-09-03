@@ -18,6 +18,12 @@ const RecoveryIdSchema = z
   .max(200)
   .regex(/^[A-Za-z0-9._-]+$/);
 type RecoveryContext = ConfigPort & EventPort & SessionPort & { mux: ConstructorParameters<typeof Session>[0]['mux'] };
+type RecoveryTestSeams = {
+  probeRecoveryTarget?: (record: SessionRecoveryRecord, remote: SessionRemote) => Promise<boolean>;
+  resolveRecoveryTransport?: (
+    record: SessionRecoveryRecord
+  ) => Promise<{ remote?: SessionRemote; docker?: SessionDocker }>;
+};
 /** Process-local claim fence: route handlers share an event loop, so add-before-await is atomic. */
 const activeRecoveryActions = new Set<string>();
 /** Tombstones make dismissal win races with an action already past its initial lookup. */
@@ -103,6 +109,11 @@ async function remoteIsLive(record: SessionRecoveryRecord, remote: SessionRemote
 }
 
 export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: RecoveryContext): void {
+  const seams = ctx as RecoveryContext & RecoveryTestSeams;
+  const resolveTransport = (record: SessionRecoveryRecord) =>
+    seams.resolveRecoveryTransport?.(record) ?? resolveRecoveryTransport(record);
+  const probe = (record: SessionRecoveryRecord, remote: SessionRemote) =>
+    seams.probeRecoveryTarget?.(record, remote) ?? remoteIsLive(record, remote);
   app.get('/api/session-recoveries', async (req) => ({
     recoveries: ctx.store.getSessionRecoveries().filter((record) => canAccessOwned(getAuthUser(req), record.owner)),
   }));
@@ -129,12 +140,12 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
         if (!['pending', 'reattachable', 'resumable'].includes(record.status)) {
           return reply.code(409).send(conflict('Recovery cannot be refreshed in its current state'));
         }
-        const transport = await resolveRecoveryTransport(record);
+        const transport = await resolveTransport(record);
         if (isRecoveryDismissed(record.id))
           return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
         if (record.transport === 'remote' && !transport.remote)
           return reply.code(409).send(conflict('Remote recovery configuration is unavailable'));
-        const live = transport.remote ? await remoteIsLive(record, transport.remote) : false;
+        const live = transport.remote ? await probe(record, transport.remote) : false;
         if (isRecoveryDismissed(record.id))
           return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
         const next = {
@@ -165,12 +176,12 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
       try {
         if (record.launch.kind === 'manual_required') return reply.code(409).send(conflict(record.launch.hint));
         if (record.transport === 'remote') {
-          const transport = await resolveRecoveryTransport(record);
+          const transport = await resolveTransport(record);
           if (!transport.remote) return reply.code(409).send(conflict('Remote recovery configuration is unavailable'));
           if (action === 'resume' && transport.remote.owned === false) {
             return reply.code(409).send(conflict('Discovered remote sessions are attach-only and cannot be resumed'));
           }
-          const live = await remoteIsLive(record, transport.remote);
+          const live = await probe(record, transport.remote);
           if (action === 'reconnect' && !live)
             return reply.code(409).send(conflict('Remote tmux session is no longer live'));
           if (action === 'resume' && live)
@@ -179,7 +190,7 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
           return reply.code(409).send(conflict('Reconnect is available only for a live remote tmux session'));
         }
 
-        const transport = await resolveRecoveryTransport(record);
+        const transport = await resolveTransport(record);
         if (
           (record.transport === 'remote' && !transport.remote) ||
           (record.transport === 'docker' && !transport.docker)

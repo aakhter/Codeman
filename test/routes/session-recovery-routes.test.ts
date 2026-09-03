@@ -191,4 +191,48 @@ describe('session recovery routes', () => {
     expect(recoveryCleanupKillsMux({ ...recovery, transport: 'remote', status: 'resumable' }, 'resume')).toBe(true);
     expect(recoveryCleanupKillsMux({ ...recovery, transport: 'docker', status: 'resumable' }, 'resume')).toBe(true);
   });
+
+  it('does not resurrect a dismissed recovery when its held refresh probe resolves', async () => {
+    const gate = createDeferred<boolean>();
+    harness.ctx.store.getSessionRecoveries.mockReturnValue([
+      { ...recovery, id: 'recovery-refresh', remote: { hostId: 'r1', owned: true } },
+    ]);
+    Object.assign(harness.ctx, {
+      resolveRecoveryTransport: vi.fn(async () => ({
+        remote: { hostId: 'r1', label: 'R', host: 'h', username: 'u', remotePath: '/tmp/project', owned: true },
+      })),
+      probeRecoveryTarget: vi.fn(async () => gate.promise),
+    });
+    const refresh = harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-refresh/refresh' });
+    await vi.waitFor(() => expect(harness.ctx.probeRecoveryTarget).toHaveBeenCalled());
+    await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-refresh/dismiss' });
+    gate.resolve(true);
+    expect((await refresh).statusCode).toBe(409);
+    expect(harness.ctx.store.upsertSessionRecovery).not.toHaveBeenCalled();
+  });
+
+  it('uses dedicated wrapper cleanup for a dismissed owned remote reconnect', async () => {
+    const gate = createDeferred<void>();
+    harness.ctx.store.getSessionRecoveries.mockReturnValue([
+      { ...recovery, id: 'recovery-reconnect', remote: { hostId: 'r1', owned: true } },
+    ]);
+    Object.assign(harness.ctx, {
+      resolveRecoveryTransport: vi.fn(async () => ({
+        remote: { hostId: 'r1', label: 'R', host: 'h', username: 'u', remotePath: '/tmp/project', owned: true },
+      })),
+      probeRecoveryTarget: vi.fn(async () => true),
+      cleanupRecoveryReconnectWrapper: vi.fn(async () => {}),
+    });
+    harness.ctx.addSession.mockImplementationOnce(async () => gate.promise);
+    const reconnect = harness.app.inject({
+      method: 'POST',
+      url: '/api/session-recoveries/recovery-reconnect/reconnect',
+    });
+    await vi.waitFor(() => expect(harness.ctx.addSession).toHaveBeenCalledTimes(1));
+    await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-reconnect/dismiss' });
+    gate.resolve();
+    expect((await reconnect).statusCode).toBe(409);
+    expect(harness.ctx.cleanupRecoveryReconnectWrapper).toHaveBeenCalledTimes(1);
+    expect(harness.ctx.cleanupSession).not.toHaveBeenCalled();
+  });
 });
