@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
 import { registerSessionRecoveryRoutes } from '../../src/web/routes/session-recovery-routes.js';
 import { recoverySessionConfig } from '../../src/web/routes/session-recovery-routes.js';
+import { recoveryCleanupKillsMux } from '../../src/web/routes/session-recovery-routes.js';
 import { createDeferred } from '../mocks/index.js';
 
 describe('session recovery routes', () => {
@@ -183,5 +184,11 @@ describe('session recovery routes', () => {
     gate.resolve();
     await pending;
     expect(harness.ctx.store.upsertSessionRecovery).not.toHaveBeenCalled();
+  });
+
+  it('detaches a dismissed in-flight remote reconnect without killing its source tmux session', () => {
+    expect(recoveryCleanupKillsMux({ ...recovery, transport: 'remote' }, 'reconnect')).toBe(false);
+    expect(recoveryCleanupKillsMux({ ...recovery, transport: 'remote', status: 'resumable' }, 'resume')).toBe(true);
+    expect(recoveryCleanupKillsMux({ ...recovery, transport: 'docker', status: 'resumable' }, 'resume')).toBe(true);
   });
 });

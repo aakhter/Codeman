@@ -60,6 +60,11 @@ export function recoverySessionConfig(
   };
 }
 
+/** A reconnect is only an SSH/tmux client wrapper around an already-live source. */
+export function recoveryCleanupKillsMux(record: SessionRecoveryRecord, action: 'reconnect' | 'resume'): boolean {
+  return !(record.transport === 'remote' && action === 'reconnect');
+}
+
 async function resolveRecoveryTransport(
   record: SessionRecoveryRecord
 ): Promise<{ remote?: SessionRemote; docker?: SessionDocker }> {
@@ -130,6 +135,8 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
         if (record.transport === 'remote' && !transport.remote)
           return reply.code(409).send(conflict('Remote recovery configuration is unavailable'));
         const live = transport.remote ? await remoteIsLive(record, transport.remote) : false;
+        if (isRecoveryDismissed(record.id))
+          return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
         const next = {
           ...record,
           status:
@@ -193,12 +200,12 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
           await ctx.setupSessionListeners(session);
           ctx.persistSessionStateNow(session);
           if (isRecoveryDismissed(record.id)) {
-            await ctx.cleanupSession(session.id, true, 'recovery dismissed');
+            await ctx.cleanupSession(session.id, recoveryCleanupKillsMux(record, action), 'recovery dismissed');
             return reply.code(409).send(conflict('Recovery was dismissed before launch'));
           }
           await session.startInteractive();
           if (isRecoveryDismissed(record.id)) {
-            await ctx.cleanupSession(session.id, true, 'recovery dismissed');
+            await ctx.cleanupSession(session.id, recoveryCleanupKillsMux(record, action), 'recovery dismissed');
             return reply.code(409).send(conflict('Recovery was dismissed while the action was in progress'));
           }
           const next = { ...record, status: 'recovered' as const, recoveredSessionId: session.id };
