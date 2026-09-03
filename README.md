@@ -46,7 +46,7 @@ The installer asks before every system change, and re-running the same line upda
 - **Truly phone-friendly** - a [touch-optimized terminal](#mobile-optimized-web-ui) with instant local echo, QR login, swipe navigation, and push notifications
 - **Runs while you sleep** - [idle detection + respawn cycling](#respawn-controller) and auto-resume when a subscription limit resets, for 24+ hour unattended runs
 - **See your agents think** - [live floating windows](#live-agent-visualization) for every subagent and teammate, with real-time transcripts
-- **Nothing gets lost** - tmux persistence across restarts and network drops, exactly-once input delivery, full-scrollback replay
+- **Resilient sessions** - tmux persistence across server restarts and network drops, exactly-once input delivery, full-scrollback replay, plus explicit reboot recovery when a safe conversation identity exists
 - **Self-hosted and private** - loopback-only by default, MIT licensed, no telemetry, runs entirely on your machine
 
 <p align="center">
@@ -376,9 +376,32 @@ Beyond single-session respawn, the **Orchestrator** turns a high-level goal into
 
 Run **20 parallel sessions** with full visibility — real-time xterm.js terminals at 60fps, per-session token and cost tracking, tab-based navigation, and one-click management.
 
-### Persistent Sessions
+### Persistent Sessions and Host-Reboot Recovery
 
-Every session runs inside **tmux** — sessions survive server restarts, network drops, and machine sleep. Auto-recovery on startup with dual redundancy. Ghost session discovery finds orphaned tmux sessions. Managed sessions are environment-tagged so the agent won't kill its own session.
+Every session runs inside **tmux** — sessions survive Codeman server restarts, browser/network
+drops, and machine sleep. Ghost session discovery finds orphaned tmux sessions. Managed sessions
+are environment-tagged so the agent won't kill its own session.
+
+A machine reboot is a different boundary: it terminates the local tmux server, its panes, and
+their scrollback. Startup never auto-restarts an agent after that outage. Instead, Session
+Manager shows an owner-scoped **Recovery Queue** only for saved sessions with a safe recovery
+path, and every action confirms the original local, remote, or Docker location before changing
+anything:
+
+- **Reconnect** attaches a new local wrapper to the exact still-live remote tmux session. It
+  never starts a second remote agent; discovered remote sessions remain attach-only.
+- **Resume** uses a recorded native ID in a new pane: Claude conversation IDs (`claude --resume`),
+  Codex rollout IDs (`codex resume`), and OpenCode session IDs (`opencode --session`). Docker
+  resumes only through its configured case and launcher.
+- Missing/unsafe identity offers **Start new** rather than a guessed continuation. Opaque custom
+  Codex commands offer only a sanitized manual-recovery hint unless their saved profile declares
+  a validated resume-command template.
+
+Recovery records retain only durable session, case, and host references; they exclude credentials,
+environment overrides, raw SSH errors, and arbitrary command strings. There is no boot-time,
+bulk, or automatic resume. A successful action creates one replacement session linked to the
+interrupted record; merge, deployment, service restart, and live reboot exercises remain separate
+operational steps.
 
 ### Session Manager & Command Palette
 

@@ -110,6 +110,36 @@ Conversation history is a separate question: Claude transcripts live in `~/.clau
 conversation can be resumed even after the tmux session is gone. That is what the welcome
 screen's **Resume Conversation** list offers.
 
+### After a host reboot: Recovery Queue
+
+A Codeman **server restart** is not a host reboot: if the local `tmux -L codeman` server is
+still running, Codeman reconciles and reattaches its existing panes as usual. A host reboot
+ends that local tmux server, including its panes and scrollback. On the next startup Codeman
+does **not** start agents or recreate those panes. Instead, it preserves a small, owner-scoped
+recovery record and shows eligible rows in the Session Manager's **Recovery Queue**.
+
+Recovery is deliberately selective and always requires a confirmation of the original location:
+
+- A live remote tmux session can be **Reconnected** using its original remote identity. This
+  attaches a new local wrapper to that exact remote tmux session; it does not launch another
+  remote agent. Discovered remote sessions remain attach-only.
+- A safe, recorded native conversation identity can be **Resumed** in a new pane. Codeman uses
+  Claude's conversation ID (`claude --resume`), a Codex rollout ID (`codex resume`), or an
+  OpenCode session ID (`opencode --session`) through the applicable local, remote, or Docker
+  launcher. An absent or unsafe identity is never guessed.
+- Docker recovery continues through the configured Docker case. A usable native identity can
+  resume its agent; otherwise the queue offers a safe new-session path rather than silently
+  launching a fresh conversation.
+- An opaque custom Codex command is **Manual recovery required**. Codeman provides only a
+  sanitized, copyable hint. It never appends a resume ID to, rewrites, or executes an arbitrary
+  custom command. A custom Codex profile can be resumed only when it has an explicit validated
+  resume-command template.
+
+Recovery records contain durable identifiers and case/host references, not credentials, raw SSH
+errors, environment overrides, or command strings. Completing, dismissing, or failing a recovery
+does not turn the old session into a live one. Recovery Queue actions create at most one new
+replacement pane and never bulk- or auto-resume work after an outage.
+
 ## State on disk
 
 Everything Codeman knows lives under `~/.codeman/`:
