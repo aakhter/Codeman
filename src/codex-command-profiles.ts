@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import type { CodexCommandProfile, RemoteCase } from './types.js';
+import type { CaseCodexCommandSelection, CodexCommandProfile, RemoteCase } from './types.js';
 import type { StateStore } from './state-store.js';
 import { readRemoteCases, writeRemoteCases } from './remote-hosts.js';
 
@@ -64,6 +64,23 @@ export function resolveCodexCommandSelection(
 
   if (remoteCase.commands?.codex !== undefined) return { ok: true, command: remoteCase.commands.codex };
   return { ok: true, command: hostCommand };
+}
+
+/**
+ * Resolves an owner-scoped local/linked-local case selection to the exact
+ * command to execute. Undefined selection means stock `codex`; profiles are
+ * resolved against the case owner's library and never re-read after launch.
+ */
+export function resolveLocalCaseCodexCommand(
+  selection: CaseCodexCommandSelection | undefined,
+  profiles: readonly CodexCommandProfile[]
+): CodexCommandSelection {
+  if (!selection) return { ok: true, command: undefined };
+  if (selection.kind === 'custom') return { ok: true, command: selection.command };
+
+  const profile = profiles.find((candidate) => candidate.id === selection.profileId);
+  if (!profile) return { ok: false, error: 'Saved Codex command profile is unavailable' };
+  return { ok: true, command: profile.command };
 }
 
 /**

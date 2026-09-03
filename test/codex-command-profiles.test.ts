@@ -5,6 +5,7 @@ import {
   findMatchingCodexProfile,
   getCodexProfileUsage,
   resolveCodexCommandSelection,
+  resolveLocalCaseCodexCommand,
 } from '../src/codex-command-profiles.js';
 
 const profiles = [
@@ -52,6 +53,22 @@ describe('Codex command profile helpers', () => {
     });
     expect(resolveCodexCommandSelection({}, profiles, 'exec host')).toEqual({ ok: true, command: 'exec host' });
     expect(resolveCodexCommandSelection({ codexCommandProfileId: 'missing' }, profiles, 'exec host')).toEqual({
+      ok: false,
+      error: 'Saved Codex command profile is unavailable',
+    });
+  });
+
+  it('resolves local case selections including owned profiles and exact custom commands', () => {
+    expect(resolveLocalCaseCodexCommand(undefined, profiles)).toEqual({ ok: true, command: undefined });
+    expect(resolveLocalCaseCodexCommand({ kind: 'profile', profileId: 'personal' }, profiles)).toEqual({
+      ok: true,
+      command: 'exec codx personal',
+    });
+    expect(resolveLocalCaseCodexCommand({ kind: 'custom', command: 'codex --yolo' }, profiles)).toEqual({
+      ok: true,
+      command: 'codex --yolo',
+    });
+    expect(resolveLocalCaseCodexCommand({ kind: 'profile', profileId: 'missing' }, profiles)).toEqual({
       ok: false,
       error: 'Saved Codex command profile is unavailable',
     });

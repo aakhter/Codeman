@@ -82,6 +82,9 @@ export interface CodexCommandProfile {
   command: string;
 }
 
+/** Owner-scoped Codex command choice for a local/linked-local case. */
+export type CaseCodexCommandSelection = { kind: 'profile'; profileId: string } | { kind: 'custom'; command: string };
+
 /**
  * Application configuration
  */
@@ -128,6 +131,8 @@ export interface AppState {
   caseDefaultGroups?: Record<string, Record<string, string | null>>;
   /** Owner-private reusable Codex command profiles. */
   codexCommandProfiles?: Record<string, CodexCommandProfile[]>;
+  /** Owner-and-case scoped Codex command selection for local/linked-local cases. Absence means default. */
+  caseCodexCommandSelections?: Record<string, Record<string, CaseCodexCommandSelection>>;
   /** Cron-style scheduled jobs, keyed by job ID. */
   cronJobs?: Record<string, CronJob>;
   /** Scheduled job run history, keyed by run ID. */

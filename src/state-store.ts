@@ -37,6 +37,7 @@ import {
   createInitialGlobalStats,
   TokenStats,
   TokenUsageEntry,
+  type CaseCodexCommandSelection,
   type CodexCommandProfile,
 } from './types.js';
 import { Debouncer, MAX_SESSION_TOKENS } from './utils/index.js';
@@ -306,6 +307,9 @@ export class StateStore {
     }
     if (this.state.codexCommandProfiles !== undefined) {
       parts.push(`"codexCommandProfiles":${JSON.stringify(this.state.codexCommandProfiles)}`);
+    }
+    if (this.state.caseCodexCommandSelections !== undefined) {
+      parts.push(`"caseCodexCommandSelections":${JSON.stringify(this.state.caseCodexCommandSelections)}`);
     }
     // ⚠️ This function is a hand-written ALLOWLIST, not a serializer over the
     // whole state: a key absent here is silently dropped on every save, however
@@ -801,6 +805,63 @@ export class StateStore {
   setCodexCommandProfiles(owner: string, profiles: CodexCommandProfile[]): void {
     const clonedProfiles = profiles.map((profile) => ({ ...profile }));
     this.state.codexCommandProfiles = { ...(this.state.codexCommandProfiles ?? {}), [owner]: clonedProfiles };
+    this.save();
+  }
+
+  /** Returns a cloned owner-and-case scoped Codex command selection, or undefined for default. */
+  getCaseCodexCommandSelection(owner: string, caseName: string): CaseCodexCommandSelection | undefined {
+    const selections = this.state.caseCodexCommandSelections;
+    if (!selections || !Object.hasOwn(selections, owner)) return undefined;
+
+    const ownerSelections = selections[owner];
+    return Object.hasOwn(ownerSelections, caseName) ? { ...ownerSelections[caseName] } : undefined;
+  }
+
+  /**
+   * Persists a local case Codex command selection. A default selection is
+   * represented by absence: passing undefined removes the entry.
+   */
+  setCaseCodexCommandSelection(
+    owner: string,
+    caseName: string,
+    selection: CaseCodexCommandSelection | undefined
+  ): void {
+    const selections = this.state.caseCodexCommandSelections;
+    const ownerSelections = { ...(selections && Object.hasOwn(selections, owner) ? selections[owner] : {}) };
+    if (selection === undefined) delete ownerSelections[caseName];
+    else ownerSelections[caseName] = { ...selection };
+
+    this.state.caseCodexCommandSelections = {
+      ...(selections ?? {}),
+      [owner]: ownerSelections,
+    };
+    this.save();
+  }
+
+  /** Moves an owner's local Codex command selection when its case is renamed. */
+  renameCaseCodexCommandSelection(owner: string, fromCase: string, toCase: string): void {
+    const current = this.getCaseCodexCommandSelection(owner, fromCase);
+    if (current === undefined || fromCase === toCase) return;
+
+    const selections = this.state.caseCodexCommandSelections;
+    const ownerSelections = { ...(selections && Object.hasOwn(selections, owner) ? selections[owner] : {}) };
+    delete ownerSelections[fromCase];
+    ownerSelections[toCase] = current;
+    this.state.caseCodexCommandSelections = { ...(selections ?? {}), [owner]: ownerSelections };
+    this.save();
+  }
+
+  /** Removes an owner's local Codex command selection when its case is deleted. */
+  deleteCaseCodexCommandSelection(owner: string, caseName: string): void {
+    const selections = this.state.caseCodexCommandSelections;
+    if (!selections || !Object.hasOwn(selections, owner)) return;
+
+    const ownerSelections = selections[owner];
+    if (!Object.hasOwn(ownerSelections, caseName)) return;
+
+    const nextOwnerSelections = { ...ownerSelections };
+    delete nextOwnerSelections[caseName];
+    this.state.caseCodexCommandSelections = { ...selections, [owner]: nextOwnerSelections };
     this.save();
   }
 
