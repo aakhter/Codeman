@@ -810,11 +810,18 @@ export class StateStore {
 
   /** Returns a cloned owner-and-case scoped Codex command selection, or undefined for default. */
   getCaseCodexCommandSelection(owner: string, caseName: string): CaseCodexCommandSelection | undefined {
-    const selections = this.state.caseCodexCommandSelections;
-    if (!selections || !Object.hasOwn(selections, owner)) return undefined;
-
-    const ownerSelections = selections[owner];
+    const ownerSelections = this.getCaseCodexCommandSelections(owner);
     return Object.hasOwn(ownerSelections, caseName) ? { ...ownerSelections[caseName] } : undefined;
+  }
+
+  /** Returns cloned local case Codex command selections for an owner. */
+  getCaseCodexCommandSelections(owner: string): Record<string, CaseCodexCommandSelection> {
+    const selections = this.state.caseCodexCommandSelections;
+    if (!selections || !Object.hasOwn(selections, owner)) return {};
+
+    return Object.fromEntries(
+      Object.entries(selections[owner]).map(([caseName, selection]) => [caseName, { ...selection }])
+    );
   }
 
   /**

@@ -154,6 +154,11 @@ export function createErrorResponse(code: ApiErrorCode, details?: string): ApiRe
 /**
  * Information about a case folder
  */
+export type CaseCodexCommandSelectionMetadata =
+  | { kind: 'default' }
+  | { kind: 'custom'; commandPreview: string }
+  | { kind: 'profile'; profileId: string; name?: string; commandPreview?: string };
+
 export interface CaseInfo {
   /** Case name */
   name: string;
@@ -165,6 +170,8 @@ export interface CaseInfo {
   location?: 'local' | 'linked-local' | 'remote' | 'docker';
   /** Whether this is a linked local folder */
   linked?: boolean;
+  /** Persisted/default/custom Codex command choice for local/linked-local/remote cases. */
+  codexCommandSelection?: CaseCodexCommandSelectionMetadata;
   /** Remote case metadata for display and session creation */
   remote?: {
     hostId: string;
@@ -173,10 +180,7 @@ export interface CaseInfo {
     path: string;
     commands?: Record<string, string>;
     /** The persisted/default/custom Codex command choice, safe for this viewer. */
-    codexCommandSelection?:
-      | { kind: 'default' }
-      | { kind: 'custom'; commandPreview: string }
-      | { kind: 'profile'; profileId: string; name?: string; commandPreview?: string };
+    codexCommandSelection?: CaseCodexCommandSelectionMetadata;
   };
   /** Docker case metadata for display and session creation */
   docker?: {

@@ -595,6 +595,14 @@ export const StatusTelemetrySchema = z.object({
 
 // ========== Case Routes ==========
 
+export const CodexCommandSelectionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('default') }),
+  z.object({ kind: z.literal('profile'), profileId: z.string().min(1).max(100) }),
+  z.object({ kind: z.literal('custom'), command: z.string().trim().min(1).max(300) }),
+]);
+
+const LocalCaseCodexCommandSelectionSchema = CodexCommandSelectionSchema.optional();
+
 /**
  * Schema for POST /api/cases
  * Creates a new case folder.
@@ -604,6 +612,7 @@ export const CreateCaseSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
   description: z.string().max(1000).optional(),
+  codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
 });
 
 /**
@@ -624,6 +633,7 @@ export const CloneCaseSchema = z.object({
   /** `--depth 1`. */
   shallow: z.boolean().optional(),
   description: z.string().max(1000).optional(),
+  codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
 });
 
 /** Schema for POST /api/cases/clone-preflight — ask the remote what it has, clone nothing. */
@@ -721,12 +731,6 @@ const remoteWorkspacePathSchema = z
   .max(2000)
   .regex(/^\//, 'Remote path must be absolute')
   .refine((path) => !/[\0\r\n]/.test(path), 'Remote path must not contain NUL, CR, or LF');
-
-export const CodexCommandSelectionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('default') }),
-  z.object({ kind: z.literal('profile'), profileId: z.string().min(1).max(100) }),
-  z.object({ kind: z.literal('custom'), command: z.string().trim().min(1).max(300) }),
-]);
 
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
@@ -1664,6 +1668,7 @@ export const CronJobEnabledSchema = z.object({ enabled: z.boolean() });
 export const LinkCaseSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
   path: safePathSchema,
+  codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
 });
 
 /** PUT /api/cases/order */

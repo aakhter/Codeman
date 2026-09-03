@@ -226,6 +226,20 @@ describe('StateStore', () => {
   });
 
   describe('Local case Codex command selections (COD-392)', () => {
+    it('returns empty selections for unknown owners and clones selections at the boundary', () => {
+      const store = new StateStore(testFilePath);
+      expect(store.getCaseCodexCommandSelections('nobody')).toEqual({});
+
+      store.setCaseCodexCommandSelection('alice', 'case-a', { kind: 'custom', command: 'codex a' });
+      const selections = store.getCaseCodexCommandSelections('alice');
+      selections['case-a'] = { kind: 'custom', command: 'mutated' } as never;
+
+      expect(store.getCaseCodexCommandSelection('alice', 'case-a')).toEqual({
+        kind: 'custom',
+        command: 'codex a',
+      });
+    });
+
     it('isolates selections by owner, clears on default, and survives restart', () => {
       const store = new StateStore(testFilePath);
 

@@ -28,18 +28,34 @@ async function ownerState(ctx: ConfigPort, owner: string | undefined) {
   const migrated = await migrateLegacyRemoteCaseCodexCommands(getDataDir(), key, ctx.store, {
     allowOwnerlessSingleUser: !isMultiUserMode(),
   });
+  const localSelections = ctx.store.getCaseCodexCommandSelections(key);
+  const localCaseNames = Object.entries(localSelections)
+    .filter(([, selection]) => selection.kind === 'profile')
+    .map(([caseName, selection]) => ({
+      caseName,
+      profileId: selection.kind === 'profile' ? selection.profileId : '',
+    }));
   return {
     owner: key,
     profiles: migrated.profiles,
     cases: migrated.cases.filter((remoteCase) => remoteCase.owner === owner),
+    localSelections: localCaseNames,
   };
 }
 
 export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: ConfigPort): void {
+  const profileUsage = (state: Awaited<ReturnType<typeof ownerState>>, profileId: string): string[] => {
+    const remoteUsage = getCodexProfileUsage(state.cases, profileId);
+    const localUsage = state.localSelections
+      .filter((entry) => entry.profileId === profileId)
+      .map((entry) => entry.caseName);
+    return [...new Set([...remoteUsage, ...localUsage])].sort((left, right) => left.localeCompare(right));
+  };
+
   app.get('/api/codex-command-profiles', async (req) => {
     const state = await ownerState(ctx, ownerFor(req));
     const profiles = state.profiles
-      .map((profile) => ({ ...profile, usage: getCodexProfileUsage(state.cases, profile.id) }))
+      .map((profile) => ({ ...profile, usage: profileUsage(state, profile.id) }))
       .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'accent' }));
     return { success: true, data: { profiles } };
   });
@@ -81,7 +97,7 @@ export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: Con
     ) {
       return reply.code(400).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Profile update has no effect'));
     }
-    const usage = getCodexProfileUsage(state.cases, id);
+    const usage = profileUsage(state, id);
     if (
       input.command !== undefined &&
       input.command !== current.command &&
@@ -112,11 +128,11 @@ export function registerCodexCommandProfileRoutes(app: FastifyInstance, ctx: Con
     if (!state.profiles.some((profile) => profile.id === id)) {
       return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Codex command profile not found'));
     }
-    const usage = getCodexProfileUsage(state.cases, id);
+    const usage = profileUsage(state, id);
     if (usage.length > 0) {
       return reply
         .code(409)
-        .send({ ...createErrorResponse(ApiErrorCode.CONFLICT, 'Profile is still used by remote cases'), usage });
+        .send({ ...createErrorResponse(ApiErrorCode.CONFLICT, 'Profile is still used by cases'), usage });
     }
     ctx.store.setCodexCommandProfiles(
       state.owner,
