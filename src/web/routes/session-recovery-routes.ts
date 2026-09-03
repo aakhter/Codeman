@@ -200,12 +200,14 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
           await ctx.setupSessionListeners(session);
           ctx.persistSessionStateNow(session);
           if (isRecoveryDismissed(record.id)) {
-            await ctx.cleanupSession(session.id, recoveryCleanupKillsMux(record, action), 'recovery dismissed');
+            if (!recoveryCleanupKillsMux(record, action)) await ctx.cleanupRecoveryReconnectWrapper(session.id);
+            else await ctx.cleanupSession(session.id, true, 'recovery dismissed');
             return reply.code(409).send(conflict('Recovery was dismissed before launch'));
           }
           await session.startInteractive();
           if (isRecoveryDismissed(record.id)) {
-            await ctx.cleanupSession(session.id, recoveryCleanupKillsMux(record, action), 'recovery dismissed');
+            if (!recoveryCleanupKillsMux(record, action)) await ctx.cleanupRecoveryReconnectWrapper(session.id);
+            else await ctx.cleanupSession(session.id, true, 'recovery dismissed');
             return reply.code(409).send(conflict('Recovery was dismissed while the action was in progress'));
           }
           const next = { ...record, status: 'recovered' as const, recoveredSessionId: session.id };

@@ -3380,6 +3380,22 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     return true;
   }
 
+  /** Remove this Codeman's local SSH/tmux wrapper without touching the remote durable session. */
+  async detachRemoteWrapper(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    this.guardRemoteReconnect(sessionId);
+    if (!IS_TEST_MODE) {
+      await execAsync(`${this.tmux()} kill-session -t ${shellescape(session.muxName)} 2>/dev/null`, {
+        timeout: EXEC_TIMEOUT_MS,
+      }).catch(() => {});
+    }
+    this.sessions.delete(sessionId);
+    this.clearRemoteReconnectState(sessionId);
+    this.emit('sessionKilled', { sessionId });
+    return true;
+  }
+
   getSessions(): MuxSession[] {
     return Array.from(this.sessions.values());
   }

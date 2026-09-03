@@ -15,6 +15,7 @@ export interface SessionPort {
   readonly sessions: ReadonlyMap<string, Session>;
   addSession(session: Session, options?: SessionCreationOptions): Promise<TabLayoutSnapshot>;
   cleanupSession(sessionId: string, killMux?: boolean, reason?: string): Promise<void>;
+  cleanupRecoveryReconnectWrapper(sessionId: string): Promise<void>;
   setupSessionListeners(session: Session): Promise<void>;
   persistSessionState(session: Session): void;
   persistSessionStateNow(session: Session): void;

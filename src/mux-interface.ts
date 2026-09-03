@@ -201,6 +201,8 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Uses a multi-strategy approach (children → process group → mux kill → SIGKILL).
    */
   killSession(sessionId: string): Promise<boolean>;
+  /** Kill only this host's wrapper pane; never send a remote tmux kill. */
+  detachRemoteWrapper?(sessionId: string): Promise<boolean>;
 
   /** Clean up resources (stop stats collection, etc.) */
   destroy(): void;

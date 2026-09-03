@@ -1354,6 +1354,11 @@ export class WebServer extends EventEmitter {
       addSession: this.registerSessionWithLayout.bind(this),
       tabLayouts: this.tabLayouts,
       cleanupSession: this.cleanupSession.bind(this),
+      cleanupRecoveryReconnectWrapper: async (sessionId: string) => {
+        await this.mux.detachRemoteWrapper?.(sessionId);
+        await this._doCleanupSession(sessionId, false, 'recovery reconnect dismissed');
+        this.store.demoteOrRemoveSession(sessionId);
+      },
       setupSessionListeners: this.setupSessionListeners.bind(this),
       persistSessionState: this.persistSessionState.bind(this),
       persistSessionStateNow: this._persistSessionStateNow.bind(this),
