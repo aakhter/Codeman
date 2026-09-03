@@ -3216,6 +3216,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       this.invalidateWindowResize(session.muxName);
       this.sessions.delete(sessionId);
       this.clearRemoteReconnectState(sessionId);
+      this.saveSessions();
       this.emit('sessionKilled', { sessionId });
       return true;
     }
@@ -3392,6 +3393,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
     this.sessions.delete(sessionId);
     this.clearRemoteReconnectState(sessionId);
+    this.saveSessions();
     this.emit('sessionKilled', { sessionId });
     return true;
   }
