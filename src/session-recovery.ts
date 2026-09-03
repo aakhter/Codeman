@@ -47,6 +47,8 @@ export function createRecoveryRecord(
     mode: session.mode ?? 'shell',
     workingDir: session.workingDir,
     transport,
+    ...(session.remote ? { remote: { ...session.remote } } : {}),
+    ...(session.docker ? { docker: { ...session.docker } } : {}),
     ...(nativeResumeId ? { nativeResumeId } : {}),
     ...(claudeResumeId ? { claudeResumeId } : {}),
     status,

@@ -5,6 +5,7 @@ import { join, posix as posixPath } from 'node:path';
 import { homedir } from 'node:os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { remoteTmuxSessionName } from './tmux-manager.js';
 import type {
   RemoteCase,
   RemoteCommandMode,
@@ -410,6 +411,34 @@ export function buildRemoteListSessionsCommand(
     'tmux -L codeman list-sessions -F "#{session_name}\\t#{session_attached}\\t#{session_created}\\t#{session_windows}" 2>/dev/null';
   parts.push(remoteSshTarget(host), shellescape(withRemotePathBootstrap(remoteCmd)));
   return parts.join(' ');
+}
+
+/** Build a bounded, read-only tmux existence probe for an explicit recovery action. */
+export function buildRemoteRecoveryProbeCommand(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
+  target: { owned: boolean; sessionId: string; remoteSessionName?: string }
+): string {
+  const socket = target.owned && !target.remoteSessionName ? 'codeman-remote' : 'codeman';
+  const name = target.remoteSessionName || remoteTmuxSessionName(target.sessionId);
+  return [
+    ...buildSshConnectionArgs(host),
+    remoteSshTarget(host),
+    shellescape(withRemotePathBootstrap(`tmux -L ${socket} has-session -t ${shellescape(name)}`)),
+  ].join(' ');
+}
+
+/** Read-only, bounded probe. It never creates a remote tmux server or pane. */
+export async function probeRemoteRecoveryTarget(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
+  target: { owned: boolean; sessionId: string; remoteSessionName?: string }
+): Promise<boolean> {
+  if (process.env.VITEST) return false;
+  try {
+    await execAsync(buildRemoteRecoveryProbeCommand(host, target), { timeout: 15_000, maxBuffer: 1024 * 1024 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface RemoteDirectoryEntry {

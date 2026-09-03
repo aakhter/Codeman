@@ -5,7 +5,7 @@
  * contain only the information needed to decide which recovery action is safe to offer.
  */
 
-import type { SessionMode } from './session.js';
+import type { SessionMode, SessionRemote, SessionDocker } from './session.js';
 
 export type SessionRecoveryTransport = 'local' | 'remote' | 'docker';
 
@@ -30,6 +30,10 @@ export interface SessionRecoveryRecord {
   mode: SessionMode;
   workingDir: string;
   transport: SessionRecoveryTransport;
+  /** Connection metadata retained only for an explicit recovery action. */
+  remote?: SessionRemote;
+  /** Container metadata retained only for an explicit recovery action. */
+  docker?: SessionDocker;
   nativeResumeId?: string;
   /** Allowlisted Claude conversation identity used by `claude --resume`. */
   claudeResumeId?: string;

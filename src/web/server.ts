@@ -335,6 +335,7 @@ import {
   registerVoiceRoutes,
   registerWebviewRoutes,
   registerTabLayoutRoutes,
+  registerSessionRecoveryRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { registerCodexCommandProfileRoutes } from './routes/codex-command-profile-routes.js';
@@ -1770,6 +1771,7 @@ export class WebServer extends EventEmitter {
     registerCaseRoutes(this.app, ctx);
     registerCodexCommandProfileRoutes(this.app, ctx);
     registerSessionRoutes(this.app, ctx);
+    registerSessionRecoveryRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);
     registerPlanRoutes(this.app, ctx);
