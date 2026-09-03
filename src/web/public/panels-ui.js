@@ -1112,14 +1112,161 @@ Object.assign(CodemanApp.prototype, {
     list.appendChild(line);
   },
 
+  _setSessionRecoveryMessage(list, message) {
+    list.replaceChildren();
+    if (!message) return;
+    const line = document.createElement('p');
+    line.className = 'session-recovery-empty';
+    line.textContent = message;
+    list.appendChild(line);
+  },
+
+  _recoveryActionFor(record) {
+    switch (record.status) {
+      case 'reattachable':
+        return { label: 'Reconnect', action: 'reconnect' };
+      case 'resumable':
+        return { label: 'Resume', action: 'resume' };
+      case 'manual_required':
+        return { label: 'Copy hint', action: 'copy' };
+      case 'unavailable':
+        return { label: 'Start new', action: 'start' };
+      case 'pending':
+        return { label: 'Refresh', action: 'refresh' };
+      default:
+        return null;
+    }
+  },
+
+  _renderSessionRecoveryList(list, records) {
+    list.replaceChildren();
+    if (!records.length) return;
+    for (const record of records) {
+      const row = document.createElement('article');
+      row.className = 'session-recovery-row';
+      row.dataset.recoveryId = record.id;
+
+      const details = document.createElement('div');
+      details.className = 'session-recovery-details';
+      const title = document.createElement('strong');
+      title.textContent = record.name || record.sourceSessionId || 'Interrupted session';
+      const location = document.createElement('span');
+      location.className = 'session-recovery-location';
+      location.textContent = `${record.transport || 'local'} · ${record.workingDir || 'Unknown location'}`;
+      const status = document.createElement('span');
+      status.className = 'session-recovery-status';
+      status.textContent = String(record.status || 'pending').replace(/_/g, ' ');
+      details.append(title, location, status);
+      row.appendChild(details);
+
+      const actions = document.createElement('div');
+      actions.className = 'session-recovery-actions';
+      const primary = this._recoveryActionFor(record);
+      if (primary) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn-toolbar';
+        button.textContent = primary.label;
+        button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
+        actions.appendChild(button);
+      }
+      if (record.status !== 'recovered') {
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'btn-toolbar session-recovery-dismiss';
+        dismiss.textContent = 'Dismiss';
+        dismiss.addEventListener('click', () => this._dismissSessionRecovery(record));
+        actions.appendChild(dismiss);
+      }
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+  },
+
+  _confirmSessionRecovery(record, verb) {
+    const transport = record.transport === 'remote' ? 'remote' : record.transport === 'docker' ? 'Docker' : 'local';
+    return confirm(`${verb} the original ${transport} session at:\n\n${record.workingDir || 'Unknown location'}\n\nContinue?`);
+  },
+
+  async _dismissSessionRecovery(record) {
+    if (!this._confirmSessionRecovery(record, 'Dismiss recovery for')) return;
+    try {
+      const res = await fetch(`/api/session-recoveries/${encodeURIComponent(record.id)}/dismiss`, { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.success === false) throw new Error(data?.error || 'Could not dismiss recovery');
+      await this._loadSessionManagerList(this._sessionManagerQuery || '');
+    } catch (err) {
+      this.showToast?.(err.message || 'Could not dismiss recovery', 'error');
+    }
+  },
+
+  async _startNewSessionFromRecovery(record) {
+    if (!this._confirmSessionRecovery(record, 'Start a new session in')) return;
+    if (record.transport !== 'local') {
+      this.showToast?.('Choose the original configured remote or Docker case to start a new session safely.', 'info');
+      return;
+    }
+    try {
+      const created = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workingDir: record.workingDir, mode: record.mode }),
+      });
+      const data = await created.json().catch(() => null);
+      const session = data?.data?.session || data?.session;
+      if (!created.ok || data?.success === false || !session?.id) throw new Error(data?.error || 'Could not start a new session');
+      const started = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/interactive`, { method: 'POST' });
+      if (!started.ok) throw new Error('Could not start the new session');
+      await this._loadSessionManagerList(this._sessionManagerQuery || '');
+      await this.selectSession(session.id);
+    } catch (err) {
+      this.showToast?.(err.message || 'Could not start a new session', 'error');
+    }
+  },
+
+  async _runSessionRecoveryAction(record, action) {
+    if (action === 'copy') {
+      const hint = record.launch?.hint || 'Manual recovery is required. Start a new session from the original working directory.';
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard is unavailable');
+        await navigator.clipboard.writeText(hint);
+        this.showToast?.('Recovery hint copied', 'success');
+      } catch {
+        this.showToast?.(hint, 'info');
+      }
+      return;
+    }
+    if (action === 'start') return this._startNewSessionFromRecovery(record);
+    if (!this._confirmSessionRecovery(record, action === 'reconnect' ? 'Reconnect to' : action === 'refresh' ? 'Refresh' : 'Resume'))
+      return;
+    try {
+      const res = await fetch(`/api/session-recoveries/${encodeURIComponent(record.id)}/${action}`, { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.success === false) throw new Error(data?.error || `Could not ${action} recovery`);
+      await this._loadSessionManagerList(this._sessionManagerQuery || '');
+      const sessionId = data?.data?.session?.id || data?.session?.id;
+      if (sessionId) await this.selectSession(sessionId);
+    } catch (err) {
+      this.showToast?.(err.message || `Could not ${action} recovery`, 'error');
+    }
+  },
+
   async _loadSessionManagerList(q = '') {
     this._sessionManagerQuery = q;
     const list = document.getElementById('sessionManagerList');
+    const recoveryList = document.getElementById('sessionRecoveryList');
     if (!list) return;
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
-      const res = await fetch(url);
-      const data = await res.json().catch(() => null);
+      const [res, recoveryRes] = await Promise.all([fetch(url), fetch('/api/session-recoveries')]);
+      const [data, recoveryData] = await Promise.all([res.json().catch(() => null), recoveryRes.json().catch(() => null)]);
+      if (recoveryList) {
+        if (recoveryRes.ok && recoveryData?.success !== false) {
+          this._renderSessionRecoveryList(recoveryList, Array.isArray(recoveryData?.recoveries) ? recoveryData.recoveries : []);
+        } else {
+          this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
+        }
+      }
       if (!res.ok || !data || data.success === false || !data.data) {
         this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
         return;

@@ -378,6 +378,9 @@ describe('Session Manager unified list', () => {
   it('maps unified fields to history records and routes clicks by liveness', async () => {
     const { app, elements } = loadPaletteHarness({
       fetch: async (url: string) => {
+        if (url === '/api/session-recoveries') {
+          return { ok: true, status: 200, json: async () => ({ recoveries: [] }) };
+        }
         expect(url).toBe('/api/sessions/unified?limit=200&q=api');
         return {
           ok: true,

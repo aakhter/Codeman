@@ -3628,6 +3628,13 @@
         </div>
         <div class="modal-body">
           <input type="search" id="sessionManagerSearch" class="search-input" placeholder="Search sessions by name, prompt, or path&hellip;" autocomplete="off" maxlength="200">
+          <section class="session-recovery-queue" aria-labelledby="sessionRecoveryTitle">
+            <div class="session-recovery-heading">
+              <h4 id="sessionRecoveryTitle">Recovery Queue</h4>
+              <span>Sessions interrupted by a host reboot</span>
+            </div>
+            <div id="sessionRecoveryList" class="session-recovery-list" aria-live="polite"></div>
+          </section>
           <div id="sessionManagerList" class="session-manager-list"></div>
         </div>
       </div>
