@@ -9,6 +9,7 @@ import type {
   SessionRecoveryStatus,
   SessionRecoveryTransport,
 } from './types/session-recovery.js';
+import { clearRecoveryDismissal } from './session-recovery-fence.js';
 
 export interface CreateRecoveryRecordOptions {
   transport?: SessionRecoveryTransport;
@@ -122,7 +123,9 @@ export function snapshotDeadSessionRecoveries(
       docker: savedState.docker ?? muxSession?.docker,
       owner: muxSession?.owner ?? savedState.owner,
     };
-    store.upsertSessionRecovery(createRecoveryRecord(source));
+    const recovery = createRecoveryRecord(source);
+    clearRecoveryDismissal(recovery.id);
+    store.upsertSessionRecovery(recovery);
   }
 }
 
@@ -139,7 +142,8 @@ function classifyRecoveryStatus(
   claudeResumeId: string | undefined
 ): SessionRecoveryStatus {
   if (launch.kind === 'manual_required') return 'manual_required';
-  if (transport === 'remote' || transport === 'docker') return 'reattachable';
+  if (transport === 'remote') return 'reattachable';
+  if (transport === 'docker') return nativeResumeId || claudeResumeId ? 'resumable' : 'unavailable';
   if (nativeResumeId || claudeResumeId) return 'resumable';
   return 'unavailable';
 }

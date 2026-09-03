@@ -40,7 +40,7 @@ describe('createRecoveryRecord', () => {
     expect(JSON.stringify(record)).not.toContain('secret');
   });
 
-  it('prefers reattachment for remote and Docker sessions', () => {
+  it('keeps remote reattachment distinct from Docker resume capability', () => {
     const session = {
       id: 'remote-codex',
       pid: null,
@@ -53,7 +53,10 @@ describe('createRecoveryRecord', () => {
     } as SessionState;
 
     expect(createRecoveryRecord(session, { transport: 'remote' }).status).toBe('reattachable');
-    expect(createRecoveryRecord(session, { transport: 'docker' }).status).toBe('reattachable');
+    expect(createRecoveryRecord(session, { transport: 'docker' }).status).toBe('unavailable');
+    expect(createRecoveryRecord({ ...session, nativeResumeId: 'rollout_123' }, { transport: 'docker' }).status).toBe(
+      'resumable'
+    );
   });
 
   it('records a selected remote Codex profile template for recovery instead of its start command', () => {

@@ -10,6 +10,7 @@ import { ApiErrorCode, createErrorResponse, type SessionDocker, type SessionRemo
 import type { SessionRecoveryRecord } from '../../types/session-recovery.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
+import { dismissRecovery, isRecoveryDismissed } from '../../session-recovery-fence.js';
 
 const RecoveryIdSchema = z
   .string()
@@ -20,7 +21,6 @@ type RecoveryContext = ConfigPort & EventPort & SessionPort & { mux: Constructor
 /** Process-local claim fence: route handlers share an event loop, so add-before-await is atomic. */
 const activeRecoveryActions = new Set<string>();
 /** Tombstones make dismissal win races with an action already past its initial lookup. */
-const dismissedRecoveryActions = new Set<string>();
 
 function findRecovery(
   ctx: RecoveryContext,
@@ -71,14 +71,18 @@ async function resolveRecoveryTransport(
       return { remote: toAttachedSessionRemote(host, record.remote.remoteSessionName, record.workingDir) };
     }
     const remoteCase = (await readRemoteCases(configDir)).find(
-      (item) => item.hostId === record.remote?.hostId && item.remotePath === record.workingDir
+      (item) =>
+        item.hostId === record.remote?.hostId && item.remotePath === record.workingDir && item.owner === record.owner
     );
     return remoteCase ? { remote: toSessionRemote(host, remoteCase) } : {};
   }
   if (record.transport === 'docker' && record.docker) {
     const host = (await readDockerHosts(configDir)).find((item) => item.id === record.docker?.hostId);
     const dockerCase = (await readDockerCases(configDir)).find(
-      (item) => item.hostId === record.docker?.hostId && item.hostWorkspacePath === record.workingDir
+      (item) =>
+        item.hostId === record.docker?.hostId &&
+        item.hostWorkspacePath === record.workingDir &&
+        item.owner === record.owner
     );
     return host && dockerCase ? { docker: toSessionDocker(host, dockerCase) } : {};
   }
@@ -107,11 +111,11 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
       if (!record) return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Recovery not found'));
 
       if (action === 'dismiss') {
-        dismissedRecoveryActions.add(record.id);
+        dismissRecovery(record.id);
         ctx.store.removeSessionRecovery(record.id);
         return { dismissed: true };
       }
-      if (dismissedRecoveryActions.has(record.id))
+      if (isRecoveryDismissed(record.id))
         return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Recovery not found'));
       if (record.status === 'recovered' || record.recoveredSessionId) {
         return reply.code(409).send(conflict('Recovery has already created a replacement session'));
@@ -121,6 +125,8 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
           return reply.code(409).send(conflict('Recovery cannot be refreshed in its current state'));
         }
         const transport = await resolveRecoveryTransport(record);
+        if (isRecoveryDismissed(record.id))
+          return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
         if (record.transport === 'remote' && !transport.remote)
           return reply.code(409).send(conflict('Remote recovery configuration is unavailable'));
         const live = transport.remote ? await remoteIsLive(record, transport.remote) : false;
@@ -181,12 +187,18 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
           ...recoverySessionConfig(record, action, transport),
         });
         try {
+          if (isRecoveryDismissed(record.id))
+            return reply.code(409).send(conflict('Recovery was dismissed before launch'));
           await ctx.addSession(session);
           await ctx.setupSessionListeners(session);
           ctx.persistSessionStateNow(session);
+          if (isRecoveryDismissed(record.id)) {
+            await ctx.cleanupSession(session.id, true, 'recovery dismissed');
+            return reply.code(409).send(conflict('Recovery was dismissed before launch'));
+          }
           await session.startInteractive();
-          if (dismissedRecoveryActions.has(record.id)) {
-            await ctx.cleanupSession(session.id, false, 'recovery dismissed');
+          if (isRecoveryDismissed(record.id)) {
+            await ctx.cleanupSession(session.id, true, 'recovery dismissed');
             return reply.code(409).send(conflict('Recovery was dismissed while the action was in progress'));
           }
           const next = { ...record, status: 'recovered' as const, recoveredSessionId: session.id };
