@@ -214,6 +214,25 @@ describe('case-routes', () => {
       expect(body.data).toEqual([]);
     });
 
+    it('includes local Codex command selections in the case list', async () => {
+      mockedReaddir.mockResolvedValue([{ name: 'local-case', isDirectory: () => true }] as never);
+      mockedExistsSync.mockReturnValue(true);
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'codex --local',
+      });
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue([]);
+
+      const res = await harness.app.inject({ method: 'GET', url: '/api/cases' });
+      expect(JSON.parse(res.body).data).toContainEqual(
+        expect.objectContaining({
+          name: 'local-case',
+          location: 'local',
+          codexCommandSelection: { kind: 'custom', commandPreview: 'codex --local' },
+        })
+      );
+    });
+
     it('returns cases from CASES_DIR', async () => {
       mockedReaddir.mockResolvedValue([
         { name: 'my-case', isDirectory: () => true },
@@ -613,9 +632,89 @@ describe('case-routes', () => {
       expect(mockedWriteFile).not.toHaveBeenCalled();
     });
 
+    it('persists a custom Codex command through local case rename and delete', async () => {
+      mockedReaddir.mockRejectedValue(new Error('ENOENT'));
+      // existsSync/mkdir/rename/rm are mocked: track case directories created by
+      // the route so create requires absence and rename/delete require presence.
+      const existingPaths = new Set<string>();
+      mockedExistsSync.mockImplementation((path) => {
+        const value = String(path);
+        if (value === '/projects/old-app' || value === '/projects/new-app') return true;
+        return existingPaths.has(value);
+      });
+      mockedMkdirSync.mockImplementation(((path?: unknown) => {
+        if (typeof path === 'string') {
+          existingPaths.add(path);
+          for (const entry of [...existingPaths]) {
+            if (path.startsWith(`${entry}/`)) existingPaths.add(path);
+          }
+        }
+        return undefined;
+      }) as never);
+      mockedRename.mockImplementation((async (from: unknown, to: unknown) => {
+        existingPaths.delete(String(from));
+        existingPaths.add(String(to));
+      }) as never);
+      const mockedRm = vi.mocked(fs.rm);
+      mockedRm.mockImplementation((async (path: unknown) => {
+        existingPaths.delete(String(path));
+      }) as never);
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue(undefined);
+
+      const create = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases',
+        payload: { name: 'local-old', codexCommandSelection: { kind: 'custom', command: 'codex --local' } },
+      });
+      expect(create.statusCode).toBe(200);
+      expect(harness.ctx.store.setCaseCodexCommandSelection).toHaveBeenCalledWith('@single', 'local-old', {
+        kind: 'custom',
+        command: 'codex --local',
+      });
+
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'codex --local',
+      });
+      const rename = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/local-old',
+        payload: { name: 'local-new' },
+      });
+      expect(rename.statusCode).toBe(200);
+      expect(harness.ctx.store.renameCaseCodexCommandSelection).toHaveBeenCalledWith(
+        '@single',
+        'local-old',
+        'local-new'
+      );
+      expect(JSON.parse(rename.body).data.case).toMatchObject({
+        location: 'local',
+        codexCommandSelection: { kind: 'custom', commandPreview: 'codex --local' },
+      });
+
+      const deleted = await harness.app.inject({ method: 'DELETE', url: '/api/cases/local-new' });
+      expect(deleted.statusCode).toBe(200);
+      expect(harness.ctx.store.deleteCaseCodexCommandSelection).toHaveBeenCalledWith('@single', 'local-new');
+    });
+
+    it('rejects an unavailable local Codex profile before creating the case', async () => {
+      mockedReaddir.mockRejectedValue(new Error('ENOENT'));
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue([]);
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/cases',
+        payload: { name: 'local-bad', codexCommandSelection: { kind: 'profile', profileId: 'missing' } },
+      });
+
+      expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+      expect(JSON.parse(response.body)).toMatchObject({ error: 'Saved Codex command profile is unavailable' });
+      expect(mockedMkdirSync).not.toHaveBeenCalled();
+      expect(harness.ctx.store.setCaseCodexCommandSelection).not.toHaveBeenCalled();
+    });
+
     it('deletes remote case metadata only', async () => {
       setupRemoteConfigStore();
-
       await harness.app.inject({
         method: 'POST',
         url: '/api/remote-hosts',

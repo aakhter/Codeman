@@ -2361,12 +2361,14 @@ Object.assign(CodemanApp.prototype, {
      * `ssh`/`docker exec` CLIENT, so its cwd is a host directory that has
      * nothing to do with where the agent is. An unknown cwd falls back to
      * workingDir, which is what keeps the historical behavior byte-identical.
+     *
+     * COD-387 moved the implementation to `CodemanFilePaths.relativeResolutionBase`
+     * so the file-preview "not found" message can name the SAME base this resolves
+     * against. Kept as a thin local alias rather than inlined at the call sites,
+     * since the doc comment above is the explanation readers come here for.
      */
-    const relativeResolutionBase = (workingDir, session) => {
-      if (session?.remote || session?.docker) return workingDir;
-      const cwd = session?.cwd;
-      return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : workingDir;
-    };
+    const relativeResolutionBase = (workingDir, session) =>
+      window.CodemanFilePaths.relativeResolutionBase(workingDir, session);
 
     /**
      * Route a relative candidate: workspace-relative when it lands inside the
@@ -2468,6 +2470,32 @@ Object.assign(CodemanApp.prototype, {
         // A syntactically complete marker path that cannot use the external
         // attachment resolver must not fall through to a host-path legacy link.
         suppress(startIndex, lineText.length);
+      }
+
+      // A few CLI formats prefix a complete absolute path with a stable label
+      // rather than placing it on its own line. Treat only the approved labels
+      // as a complete path boundary so spaces cannot make token scanning link a
+      // relative tail from the middle of the path.
+      const labeledPathMatch = /^\s*(?:path|file|saved to):[ \t]+(\/.*)$/i.exec(lineText);
+      if (labeledPathMatch) {
+        const rawCandidate = labeledPathMatch[1];
+        const candidate = trimTrailingPunctuation(rawCandidate);
+        const startIndex = labeledPathMatch[0].length - rawCandidate.length;
+        const endIndex = startIndex + candidate.length;
+
+        if (!isSingleAbsolutePath(candidate)) {
+          suppress(startIndex, lineText.length);
+        } else {
+          blockPreview(startIndex, lineText.length);
+          const relativePath = normalizePreviewPath(candidate, workingDir);
+          if (relativePath) {
+            references.push({ text: candidate, relativePath, startIndex, endIndex });
+          } else if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
+            references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
+          } else {
+            suppress(startIndex, lineText.length);
+          }
+        }
       }
 
       // COD-237: an unquoted absolute path may legitimately contain spaces (e.g.
@@ -3636,7 +3664,7 @@ Object.assign(CodemanApp.prototype, {
           if (isLive && this.sessions.has(s.sessionId)) {
             this.selectSession(s.sessionId);
           } else {
-            this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name);
+            this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name, s.mode);
           }
         })
     );
@@ -3926,7 +3954,7 @@ Object.assign(CodemanApp.prototype, {
           } else {
             // Resume by the Claude conversation UUID when present (resumed sessions
             // carry theirs separately from their Codeman id).
-            this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name);
+            this.resumeHistorySession(s.claudeSessionId || s.sessionId, s.workingDir || '', s.name, s.mode);
           }
           this.closeSessionManager?.();
           closeMenu();
@@ -4581,7 +4609,7 @@ Object.assign(CodemanApp.prototype, {
     return `w${startNumber}-${dirName}`;
   },
 
-  async resumeHistorySession(sessionId, workingDir, existingName) {
+  async resumeHistorySession(sessionId, workingDir, existingName, mode) {
     // Close the run mode menu if open
     document.getElementById('runModeMenu')?.classList.remove('active');
     // Close folder history modal if open
@@ -4602,13 +4630,45 @@ Object.assign(CodemanApp.prototype, {
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
       const effort = this.getEffortSetting(globalSettings);
+      // `resumeSessionId` is a Claude conversation UUID (server reads it from
+      // ~/.claude/projects); an external-CLI row has no such thing, so sending
+      // it there gets silently ignored while the OMITTED `mode` field defaults
+      // the create to plain claude — reproducing whatever conversation THAT
+      // uuid happens to collide with instead of the row's own backend. Row mode
+      // wins here. Codeman has no cross-restart PTY-reattach outside server
+      // boot, so "resume" for a non-claude row means relaunching the CLI's own
+      // continue-most-recent flag (opencode/pi/grok/omp --continue, deepseek
+      // resumeSession) in the same directory — real conversation continuity,
+      // just not the literal old process.
+      const effectiveMode = mode || 'claude';
+      const modeConfigKey = {
+        opencode: 'openCodeConfig',
+        pi: 'piConfig',
+        grok: 'grokConfig',
+        omp: 'ompConfig',
+      }[effectiveMode];
+      // codex/gemini/antigravity have no wired continuation here yet (their
+      // configs use an exact conversation id, not a "continue most recent"
+      // flag, and the row's own `sessionId` is not verified to carry that
+      // id for these three modes) — `continuesSomething` below is what keeps
+      // their row from being retired for a resume that didn't actually
+      // continue anything.
+      const modeConfig =
+        modeConfigKey
+          ? { [modeConfigKey]: { continueSession: true } }
+          : effectiveMode === 'deepseek'
+            ? { deepSeekConfig: { resumeSession: true } }
+            : {};
+      const continuesSomething = Boolean(modeConfigKey) || effectiveMode === 'deepseek';
       const createRes = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workingDir,
           name,
-          resumeSessionId: sessionId,
+          mode: effectiveMode,
+          ...(effectiveMode === 'claude' ? { resumeSessionId: sessionId } : {}),
+          ...modeConfig,
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           ...(effort ? { effort } : {}),
           ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
@@ -4621,6 +4681,21 @@ Object.assign(CodemanApp.prototype, {
 
       // Start interactive
       await fetch(`/api/sessions/${newSessionId}/interactive`, { method: 'POST' });
+
+      // Retire the row being resumed: a non-claude "resume" is really a brand
+      // new Codeman session pointed at the same directory (there is no id to
+      // reattach to), so without this every resume leaves the old row behind
+      // as a duplicate — click it 3 times, see the same name 3 times. Claude
+      // rows are left alone: `sessionId` there is a claudeSessionId, which
+      // usually has no live/persisted Codeman session of its own to delete.
+      // Gated on `continuesSomething`: for codex/gemini/antigravity (no
+      // continuation wired above), this is really a FRESH session with no
+      // relation to the old row's conversation, so retiring it would discard
+      // the old conversation with no recovery — worse than the duplicate row
+      // this guard exists to prevent for the modes that DO continue.
+      if (effectiveMode !== 'claude' && continuesSomething && sessionId !== newSessionId) {
+        fetch(`/api/sessions/${sessionId}?killMux=true`, { method: 'DELETE' }).catch(() => {});
+      }
 
       this.terminal.writeln(`\x1b[90m Session ${name} ready\x1b[0m`);
       await this.selectSession(newSessionId);

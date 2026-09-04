@@ -95,7 +95,14 @@ describe('COD-187 live-mirror structural guards', () => {
   });
 
   it('typing exits history before flowing to the PTY (onData hook)', () => {
-    const start = termUi.indexOf('this.terminal.onData((data) => {');
+    // COD-388 extracted the onData body into `handleTerminalData` (registration
+    // is now a one-line delegate), so the old anchor matched nothing and the
+    // slice was the empty string — which `toContain` reports as a missing guard
+    // rather than as a missing anchor. Anchor on the extracted function, and
+    // assert the anchor itself so a future rename fails loudly instead of
+    // silently passing an empty slice.
+    const start = termUi.indexOf('const handleTerminalData = (data');
+    expect(start, 'handleTerminalData definition must exist').toBeGreaterThanOrEqual(0);
     const body = termUi.slice(start, start + 1200);
     expect(body).toContain("this._viewMode === 'history'");
     expect(body).toContain('_exitHistoryView');

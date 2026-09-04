@@ -196,6 +196,15 @@ describe('TmuxManager (unit)', () => {
       expect(buildCodexCommand({ animations: true })).toBe('codex --config tui.animations=true');
       expect(buildCodexCommand()).toBe('codex');
     });
+
+    it('runs a resolved local case command exactly as saved', () => {
+      expect(buildCodexCommand({ baseCommand: 'codex --local-exact --model o3' })).toBe(
+        'codex --local-exact --model o3'
+      );
+      expect(
+        buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: { baseCommand: 'codex --local-exact' } })
+      ).toBe('codex --local-exact');
+    });
   });
 
   describe('remote launch command builder', () => {

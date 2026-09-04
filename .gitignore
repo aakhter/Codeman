@@ -8,6 +8,9 @@ opencode.jsonc
 skills-lock.json
 CLAUDE.local.md
 
+
+# In-session decision scratchpad (context-survival mechanism, not a deliverable)
+DECISIONS.md
 # Written by install.sh into end-user clones when setup finishes
 .install-complete
 

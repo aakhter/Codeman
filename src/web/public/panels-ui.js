@@ -897,7 +897,7 @@ Object.assign(CodemanApp.prototype, {
 
   _buildCommandPaletteNewSessionItem(query = '') {
     const mode = this._getPaletteMode?.() || this.runMode || this._runMode || 'claude';
-    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', grok: 'Grok', deepseek: 'DeepSeek', shell: 'Shell' };
+    const labels = { claude: 'Claude', opencode: 'OpenCode', codex: 'Codex', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi', grok: 'Grok', deepseek: 'DeepSeek', omp: 'OMP', shell: 'Shell' };
     const caseName = this._findCommandPaletteCaseMatch(query) || document.getElementById('quickStartCase')?.value || 'testcase';
     return {
       id: 'new-session',
@@ -1324,7 +1324,9 @@ Object.assign(CodemanApp.prototype, {
             if (isLive) {
               void this.selectSession(s.sessionId);
             } else if (record.workingDir) {
-              void this.resumeHistorySession(s.claudeSessionId || s.sessionId, record.workingDir);
+              // History rows are keyed by the Claude conversation UUID; resumed
+              // sessions carry theirs separately as claudeSessionId.
+              void this.resumeHistorySession(s.claudeSessionId || s.sessionId, record.workingDir, undefined, s.mode);
             }
           },
         });
@@ -4806,8 +4808,40 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       if (this.filePreviewState !== previewState) return;
       console.error('Failed to preview file:', err);
-      bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}</div>`;
+      const searchedIn = this._filePreviewSearchedInBase(filePath, sessionId, attachmentId);
+      // `.binary-message` has no `white-space: pre-wrap`, so a "\n" here would
+      // collapse into a run-on line. The base is escaped; only the markup is ours.
+      const detail = searchedIn
+        ? `<div class="binary-message-detail">Searched in: ${escapeHtml(searchedIn)}</div>`
+        : '';
+      bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(err.message)}${detail}</div>`;
     }
+  },
+
+  /**
+   * COD-387: name the directory a failed RELATIVE preview was resolved against.
+   *
+   * COD-386 removed the common cause of a wrong base but not the invisibility of a
+   * remaining one — remote/Docker panes deliberately refuse a pane cwd, a session's
+   * cwd may not be known yet, and a file can simply be missing. "File not found"
+   * with no directory is correct and useless at the same time, which is what made
+   * the original report hard to write.
+   *
+   * Returns '' unless naming a base is both possible and meaningful:
+   * - an ABSOLUTE path was not resolved against anything, so naming one would be
+   *   actively misleading;
+   * - an attachment is addressed by id, not by a path relative to a workspace;
+   * - an unknown session has no base to name.
+   *
+   * The base comes from the SAME helper the terminal link provider resolves with
+   * (`CodemanFilePaths.relativeResolutionBase`), so this message cannot drift into
+   * naming a directory the link never used.
+   */
+  _filePreviewSearchedInBase(filePath, sessionId, attachmentId) {
+    if (attachmentId || typeof filePath !== 'string' || filePath.startsWith('/')) return null;
+    const session = this.sessions?.get?.(sessionId);
+    if (!session) return null;
+    return window.CodemanFilePaths?.relativeResolutionBase?.(session.workingDir, session) || null;
   },
 
   /** Clear any approved external URL and keep the header action inert. */

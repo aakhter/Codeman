@@ -1462,6 +1462,31 @@ function terminalLogicalLine(buffer, row, cols, maxRows) {
 
 if (typeof window !== 'undefined') {
   window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
-  window.CodemanFilePaths = { absoluteFilePathPattern, previewsInFileViewer, FILE_PREVIEW_EXTENSIONS };
+  /**
+   * The directory a RELATIVE path is resolved against for a session.
+   *
+   * COD-386 established the rule: `session.workingDir` is recorded once at create
+   * time and never follows a `cd`, so `session.cwd` (the pane's live
+   * `#{pane_current_path}`, published by the server sweep) is the real base.
+   * Remote and Docker sessions are EXCLUDED — their local pane runs the
+   * ssh/docker-exec CLIENT, whose cwd names a host directory the agent was never
+   * in — and an unknown cwd falls back to workingDir.
+   *
+   * COD-387 hoisted it here from a local const in terminal-ui.js: the file-preview
+   * "not found" message has to name the SAME base the link resolved against, and a
+   * second copy of this policy would be a bug waiting to disagree with the first.
+   */
+  function relativeResolutionBase(workingDir, session) {
+    if (session?.remote || session?.docker) return workingDir;
+    const cwd = session?.cwd;
+    return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : workingDir;
+  }
+
+  window.CodemanFilePaths = {
+    absoluteFilePathPattern,
+    previewsInFileViewer,
+    FILE_PREVIEW_EXTENSIONS,
+    relativeResolutionBase,
+  };
   window.CodemanTerminalLines = { terminalLogicalLine };
 }

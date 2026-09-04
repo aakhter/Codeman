@@ -349,7 +349,8 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   .session-tab .tab-mode.gemini,
   .session-tab .tab-mode.antigravity,
   .session-tab .tab-mode.pi,
-  .session-tab .tab-mode.grok
+  .session-tab .tab-mode.grok,
+  .session-tab .tab-mode.omp
 ) {
   color: var(--accent-d);
 }
@@ -3088,6 +3089,10 @@ body.solo-mode .btn-lifecycle-log {
   background: rgba(34, 211, 238, 0.2);
   color: #22d3ee;
 }
+.session-tab .tab-mode.omp {
+  background: rgba(129, 140, 248, 0.2);
+  color: #818cf8;
+}
 
 .session-tab .tab-mode.pi {
   background: rgba(244, 114, 182, 0.2);
@@ -4489,6 +4494,22 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: #fff1f7;
   transform: translateY(-1px);
 }
+/* OMP: indigo identity, matching .btn-toolbar.btn-run.mode-omp and
+   .run-mode-dot.omp so the welcome action reads as the same backend. */
+.welcome-btn-omp {
+  background: linear-gradient(135deg, #1e1b4b 0%, #4f46e5 55%, #6366f1 100%);
+  border-color: rgba(129, 140, 248, 0.4);
+  color: #e0e7ff;
+  box-shadow: 0 2px 8px rgba(129, 140, 248, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.welcome-btn-omp:hover {
+  background: linear-gradient(135deg, #312e81 0%, #6366f1 55%, #818cf8 100%);
+  box-shadow: 0 4px 20px rgba(129, 140, 248, 0.3), 0 0 40px rgba(79, 70, 229, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(165, 180, 252, 0.5);
+  color: #eef2ff;
+  transform: translateY(-1px);
+}
 
 /* Grok (xAI): monochrome charcoal identity, matching .btn-toolbar.btn-run.mode-grok
    and .run-mode-dot.grok so the welcome action reads as the same backend. */
@@ -5653,6 +5674,21 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   border-color: rgba(249, 168, 212, 0.6);
   color: #fff1f7;
 }
+/* OMP mode colors */
+.btn-toolbar.btn-run.mode-omp,
+.btn-toolbar.btn-run-gear.mode-omp {
+  background: linear-gradient(135deg, #312e81 0%, #4f46e5 55%, #6366f1 100%);
+  border-color: rgba(129, 140, 248, 0.5);
+  color: #e0e7ff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.btn-toolbar.btn-run.mode-omp:hover,
+.btn-toolbar.btn-run-gear.mode-omp:hover {
+  background: linear-gradient(135deg, #3730a3 0%, #6366f1 55%, #818cf8 100%);
+  box-shadow: 0 0 12px rgba(129, 140, 248, 0.35), 0 2px 8px rgba(79, 70, 229, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(165, 180, 252, 0.6);
+  color: #eef2ff;
+}
 
 /* Grok mode colors. Same cascade note as pi above: this base-sheet pair only
    renders on the `og` skin — the nested `html:not([data-skin="og"])` block
@@ -5777,6 +5813,7 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 .run-mode-dot.pi { background: #f472b6; }
 .run-mode-dot.grok { background: #a1a1aa; }
 .run-mode-dot.deepseek { background: #4d6bfe; }
+.run-mode-dot.omp { background: #818cf8; }
 .run-mode-dot.shell { background: #94a3b8; }
 
 /* Phone-only Enter button (see index.html). Hidden by default at every width;
@@ -6888,10 +6925,14 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 .remote-codex-profile-controls { display:flex; gap:.375rem; min-width:0; }
 .remote-codex-profile-controls select { min-width:0; flex:1; }
+.case-codex-command-controls { display:flex; gap:.375rem; min-width:0; }
+.case-codex-command-controls select { min-width:0; flex:1; }
 .remote-codex-profile-row input[readonly] { color:var(--text-muted); }
+.case-codex-command-row input[readonly] { color:var(--text-muted); }
 .remote-codex-profile-row #remoteCaseCodexCommandCustom { margin-top:.4rem; }
+.case-codex-command-row [id$='CaseCodexCommandCustom'] { margin-top:.4rem; }
 .codex-command-profile-manager #codexCommandProfileList,.codex-command-profile-manager #codexCommandProfileEditor { display:grid; gap:.4rem; margin-top:.75rem; }
-@media (max-width:430px) { .remote-codex-profile-controls { flex-wrap:wrap; } .remote-codex-profile-controls select,.remote-codex-profile-controls button { flex-basis:100%; width:100%; } }
+@media (max-width:430px) { .remote-codex-profile-controls { flex-wrap:wrap; } .remote-codex-profile-controls select,.remote-codex-profile-controls button { flex-basis:100%; width:100%; } .case-codex-command-controls { flex-wrap:wrap; } .case-codex-command-controls select,.case-codex-command-controls button { flex-basis:100%; width:100%; } }
 
 .remote-host-verify-status {
   min-height: 1.2rem;
@@ -12503,6 +12544,15 @@ kbd {
   padding: 2rem;
   text-align: center;
   color: var(--text-muted);
+}
+
+/* COD-387: the resolution base under a failed relative preview. Its own line —
+   the parent has no `white-space: pre-wrap`, so a newline would collapse. */
+.file-preview-body .binary-message-detail {
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  opacity: 0.85;
+  word-break: break-all;
 }
 
 /* Rendered Markdown and plain-text attachment previews share the overlay body.

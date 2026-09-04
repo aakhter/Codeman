@@ -305,6 +305,7 @@ import type { ScheduledRun } from './ports/index.js';
 import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
 import { isMultiUserMode } from '../config/multiuser.js';
 import { bootstrapInitialAdmin, hasUsers, resolveClaudeModeForUsername } from '../user-store.js';
+import { canUsernameRunPrivilegedCommands } from '../user-store.js';
 import { installRouteErrorHandler } from './route-error-handler.js';
 import { isExplicitlyEnabled, isLoopbackBindHost, buildHostPolicy, type HostPolicy } from './network-auth-policy.js';
 import {
@@ -1905,6 +1906,7 @@ export class WebServer extends EventEmitter {
     const base = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
     const codexProviderIdentity = session.getCodexProviderIdentityForPersist();
+    const resolvedCodexCommand = session.getResolvedCodexCommandForPersist();
     // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
     // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
@@ -1912,6 +1914,7 @@ export class WebServer extends EventEmitter {
       ...base,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
       ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
+      ...(resolvedCodexCommand ? { __resolvedCodexCommand: resolvedCodexCommand } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
     } as SessionState;
     const controller = this.respawnControllers.get(session.id);
@@ -2219,6 +2222,7 @@ export class WebServer extends EventEmitter {
         { isPiAvailable },
         { isGrokAvailable },
         { isDeepSeekRunnable, isDeepSeekAvailable },
+        { isOmpAvailable },
         { isCloudflaredAvailable },
         { isGitAvailable },
       ] = await Promise.all([
@@ -2230,6 +2234,7 @@ export class WebServer extends EventEmitter {
         import('../utils/pi-cli-resolver.js'),
         import('../utils/grok-cli-resolver.js'),
         import('../utils/deepseek-cli-resolver.js'),
+        import('../utils/omp-cli-resolver.js'),
         import('../utils/cloudflared-resolver.js'),
         import('../git-clone.js'),
       ]);
@@ -2248,6 +2253,7 @@ export class WebServer extends EventEmitter {
         // profile is offered the fix rather than a greyed-out entry.
         deepseek: isDeepSeekRunnable(),
         deepseekBinary: isDeepSeekAvailable(),
+        omp: isOmpAvailable(),
         cloudflared: isCloudflaredAvailable(),
         // Not a run mode: the Add Case → Clone tab is an offer this box cannot
         // keep without git (issue #236), same reasoning as cloudflared above.
@@ -3740,6 +3746,25 @@ export class WebServer extends EventEmitter {
             const savedAttachmentHistory =
               (savedState as { __attachmentHistory?: SessionAttachmentHistoryItem[] })?.__attachmentHistory ??
               savedState?.attachmentHistory;
+            // COD-392: a resolved local Codex command round-trips privately on
+            // disk only. Recheck the grant at recovery so revocation detaches
+            // rather than re-exposes the session through Codeman.
+            const savedResolvedCodexCommand = (savedState as { __resolvedCodexCommand?: unknown })
+              ?.__resolvedCodexCommand;
+            let recoveredCodexConfig = muxSession.mode === 'codex' ? savedState?.codexConfig : undefined;
+            if (
+              muxSession.mode === 'codex' &&
+              typeof savedResolvedCodexCommand === 'string' &&
+              savedResolvedCodexCommand.trim().length > 0
+            ) {
+              if (!(await canUsernameRunPrivilegedCommands(recoveredOwner))) {
+                console.warn(
+                  `[Server] Skipping recovery of codex session ${muxSession.sessionId}: custom command grant revoked`
+                );
+                continue;
+              }
+              recoveredCodexConfig = { ...(recoveredCodexConfig ?? {}), baseCommand: savedResolvedCodexCommand };
+            }
             const session = new Session({
               id: muxSession.sessionId, // Preserve the original session ID
               workingDir: muxSession.workingDir,
@@ -3758,12 +3783,13 @@ export class WebServer extends EventEmitter {
               claudeMode: recoveryClaudeMode.claudeMode,
               allowedTools: recoveryClaudeMode.allowedTools,
               openCodeConfig: muxSession.mode === 'opencode' ? savedState?.openCodeConfig : undefined,
-              codexConfig: muxSession.mode === 'codex' ? savedState?.codexConfig : undefined,
+              codexConfig: recoveredCodexConfig,
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
               piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
               grokConfig: muxSession.mode === 'grok' ? savedState?.grokConfig : undefined,
               deepSeekConfig: muxSession.mode === 'deepseek' ? savedState?.deepSeekConfig : undefined,
+              ompConfig: muxSession.mode === 'omp' ? savedState?.ompConfig : undefined,
               envOverrides: {
                 ...savedEnvOverrides,
                 ...codexProviderRecovery.environment,

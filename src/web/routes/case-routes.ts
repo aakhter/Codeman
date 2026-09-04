@@ -57,7 +57,8 @@ import {
 } from '../route-helpers.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
-import type { AuthUser } from '../../types.js';
+import { canUsernameRunPrivilegedCommands } from '../../user-store.js';
+import type { AuthUser, CaseCodexCommandSelectionMetadata } from '../../types.js';
 import { SseEvent } from '../sse-events.js';
 import type { EventPort, ConfigPort, SessionPort, TabLayoutPort } from '../ports/index.js';
 import type { FastifyRequest } from 'fastify';
@@ -341,6 +342,29 @@ export function registerCaseRoutes(
   app: FastifyInstance,
   ctx: EventPort & ConfigPort & SessionPort & TabLayoutPort
 ): void {
+  const localSelectionMetadata = (
+    owner: string | undefined,
+    viewer: string | undefined,
+    caseName: string
+  ): CaseCodexCommandSelectionMetadata => {
+    const selection = ctx.store.getCaseCodexCommandSelection(codexProfileOwner(owner), caseName);
+    if (!selection) return { kind: 'default' as const };
+    if (selection.kind === 'custom')
+      return { kind: 'custom' as const, commandPreview: selection.command.slice(0, 120) };
+    if (owner !== viewer) return { kind: 'profile' as const, profileId: selection.profileId };
+    const profile = ctx.store
+      .getCodexCommandProfiles(codexProfileOwner(viewer))
+      .find((candidate) => candidate.id === selection.profileId);
+    return profile
+      ? {
+          kind: 'profile' as const,
+          profileId: profile.id,
+          name: profile.name,
+          commandPreview: profile.command.slice(0, 120),
+        }
+      : { kind: 'profile' as const, profileId: selection.profileId };
+  };
+
   const selectionMetadata = (
     remoteCase: { codexCommandProfileId?: string; commands?: Record<string, string> },
     owner: string | undefined,
@@ -405,6 +429,57 @@ export function registerCaseRoutes(
     };
   };
 
+  const validateLocalCodexSelection = async (
+    selection:
+      | { kind: 'default' }
+      | { kind: 'profile'; profileId: string }
+      | { kind: 'custom'; command: string }
+      | undefined,
+    owner: string | undefined
+  ): Promise<{ ok: true } | { ok: false; error: string; errorCode: ApiErrorCode }> => {
+    if (!selection || selection.kind === 'default') return { ok: true };
+    if (selection.kind === 'profile') {
+      const profiles = ctx.store.getCodexCommandProfiles(codexProfileOwner(owner));
+      if (!profiles.some((profile) => profile.id === selection.profileId)) {
+        return {
+          ok: false,
+          error: 'Saved Codex command profile is unavailable',
+          errorCode: ApiErrorCode.OPERATION_FAILED,
+        };
+      }
+    }
+    if (isMultiUserMode() && !(await canUsernameRunPrivilegedCommands(owner))) {
+      return {
+        ok: false,
+        error: 'Custom Codex commands require the can-bypass-permissions grant',
+        errorCode: ApiErrorCode.FORBIDDEN,
+      };
+    }
+    return { ok: true };
+  };
+
+  const persistLocalCodexSelection = (
+    selection:
+      | { kind: 'default' }
+      | { kind: 'profile'; profileId: string }
+      | { kind: 'custom'; command: string }
+      | undefined,
+    owner: string | undefined,
+    caseName: string
+  ): void => {
+    if (!selection || selection.kind === 'default') {
+      ctx.store.deleteCaseCodexCommandSelection(codexProfileOwner(owner), caseName);
+      return;
+    }
+    ctx.store.setCaseCodexCommandSelection(
+      codexProfileOwner(owner),
+      caseName,
+      selection.kind === 'profile'
+        ? { kind: 'profile', profileId: selection.profileId }
+        : { kind: 'custom', command: selection.command }
+    );
+  };
+
   async function resolveAccessibleCase(req: FastifyRequest, name: string): Promise<CaseInfo | null> {
     const user = getAuthUser(req);
     const remoteCase = (await readRemoteCases(CODEMAN_CONFIG_DIR)).find(
@@ -459,6 +534,8 @@ export function registerCaseRoutes(
       path: casePath,
       hasClaudeMd: existsSync(join(casePath, 'CLAUDE.md')),
       ...(linked && { linked: true }),
+      location: linked ? ('linked-local' as const) : ('local' as const),
+      codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), name),
     };
   }
 
@@ -500,6 +577,7 @@ export function registerCaseRoutes(
             path: join(listBase, e.name),
             hasClaudeMd: existsSync(join(listBase, e.name, 'CLAUDE.md')),
             location: 'local',
+            codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), e.name),
           });
         }
       }
@@ -519,6 +597,7 @@ export function registerCaseRoutes(
             hasClaudeMd: existsSync(join(path, 'CLAUDE.md')),
             linked: true,
             location: 'linked-local',
+            codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), name),
           });
         }
       }
@@ -537,6 +616,7 @@ export function registerCaseRoutes(
         path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
         hasClaudeMd: false,
         location: 'remote',
+        codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, ownerFor(req)),
         remote: {
           hostId: host.id,
           host: host.host,
@@ -600,7 +680,7 @@ export function registerCaseRoutes(
   });
 
   app.post('/api/cases', async (req): Promise<ApiResponse<{ case: { name: string; path: string } }>> => {
-    const { name, description } = parseBody(CreateCaseSchema, req.body);
+    const { name, description, codexCommandSelection } = parseBody(CreateCaseSchema, req.body);
 
     const casePath = validatePathWithinBase(name, resolveCasesDir(getAuthUser(req)));
     if (!casePath) {
@@ -610,6 +690,9 @@ export function registerCaseRoutes(
     if (existsSync(casePath)) {
       return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Case already exists');
     }
+
+    const localSelection = await validateLocalCodexSelection(codexCommandSelection, ownerFor(req));
+    if (!localSelection.ok) return createErrorResponse(localSelection.errorCode, localSelection.error);
 
     try {
       mkdirSync(casePath, { recursive: true });
@@ -622,6 +705,7 @@ export function registerCaseRoutes(
 
       // Write .claude/settings.local.json with hooks for desktop notifications
       await writeHooksConfig(casePath);
+      persistLocalCodexSelection(codexCommandSelection, ownerFor(req), name);
 
       ctx.broadcast(SseEvent.CaseCreated, { name, path: casePath });
 
@@ -701,7 +785,10 @@ export function registerCaseRoutes(
         warnings: string[];
       }>
     > => {
-      const { name, repository, ref, shallow, description } = parseBody(CloneCaseSchema, req.body);
+      const { name, repository, ref, shallow, description, codexCommandSelection } = parseBody(
+        CloneCaseSchema,
+        req.body
+      );
       const user = getAuthUser(req);
 
       const parsed = parseGitRepositoryUrl(repository);
@@ -738,6 +825,9 @@ export function registerCaseRoutes(
       ) {
         return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Case already exists');
       }
+
+      const localSelection = await validateLocalCodexSelection(codexCommandSelection, ownerFor(req));
+      if (!localSelection.ok) return createErrorResponse(localSelection.errorCode, localSelection.error);
 
       // git creates the leaf, not necessarily the case space above it.
       try {
@@ -809,6 +899,7 @@ export function registerCaseRoutes(
       }
 
       ctx.broadcast(SseEvent.CaseCreated, { name, path: casePath });
+      persistLocalCodexSelection(codexCommandSelection, ownerFor(req), name);
       return {
         success: true,
         data: {
@@ -1428,7 +1519,11 @@ export function registerCaseRoutes(
     // admin-only in multi-user mode (mirrors host CRUD + the admin-only GET listing).
     const denied = adminOnly(req, reply);
     if (denied) return denied;
-    const { name, path: folderPath } = parseBody(LinkCaseSchema, req.body, 'Invalid request body');
+    const {
+      name,
+      path: folderPath,
+      codexCommandSelection,
+    } = parseBody(LinkCaseSchema, req.body, 'Invalid request body');
 
     // Expand ~ to home directory
     const expandedPath = folderPath.startsWith('~') ? join(homedir(), folderPath.slice(1)) : folderPath;
@@ -1455,6 +1550,9 @@ export function registerCaseRoutes(
       );
     }
 
+    const localSelection = await validateLocalCodexSelection(codexCommandSelection, ownerFor(req));
+    if (!localSelection.ok) return createErrorResponse(localSelection.errorCode, localSelection.error);
+
     // Save the linked case
     linkedCases[name] = expandedPath;
     try {
@@ -1463,6 +1561,7 @@ export function registerCaseRoutes(
         mkdirSync(codemanDir, { recursive: true });
       }
       await fs.writeFile(LINKED_CASES_FILE, JSON.stringify(linkedCases, null, 2));
+      persistLocalCodexSelection(codexCommandSelection, ownerFor(req), name);
       ctx.broadcast(SseEvent.CaseLinked, { name, path: expandedPath });
       return { success: true, data: { case: { name, path: expandedPath } } };
     } catch (err) {
@@ -1497,6 +1596,9 @@ export function registerCaseRoutes(
     const persistDefaultGroupUpdate = () => {
       ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
       if (update.defaultGroupId !== undefined) ctx.store.setCaseDefaultGroup(owner, nextName, update.defaultGroupId);
+    };
+    const persistLocalSelectionUpdate = () => {
+      ctx.store.renameCaseCodexCommandSelection(codexProfileOwner(ownerFor(req)), originalName, nextName);
     };
 
     const linkedCases = await readLinkedCases();
@@ -1608,6 +1710,8 @@ export function registerCaseRoutes(
     }
 
     if (linkedCases[originalName] && (!isMultiUserMode() || isAdmin(req))) {
+      const localSelection = await validateLocalCodexSelection(update.codexCommandSelection, ownerFor(req));
+      if (!localSelection.ok) return createErrorResponse(localSelection.errorCode, localSelection.error);
       const nextPath = update.path ?? linkedCases[originalName];
       if (!existsSync(nextPath)) {
         return createErrorResponse(ApiErrorCode.NOT_FOUND, `Folder not found: ${nextPath}`);
@@ -1615,12 +1719,17 @@ export function registerCaseRoutes(
       delete linkedCases[originalName];
       linkedCases[nextName] = nextPath;
       await fs.writeFile(LINKED_CASES_FILE, JSON.stringify(linkedCases, null, 2));
+      persistLocalSelectionUpdate();
+      if (update.codexCommandSelection !== undefined) {
+        persistLocalCodexSelection(update.codexCommandSelection, ownerFor(req), nextName);
+      }
       const caseInfo: CaseInfo = {
         name: nextName,
         path: nextPath,
         hasClaudeMd: existsSync(join(nextPath, 'CLAUDE.md')),
         linked: true,
         location: 'linked-local',
+        codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), nextName),
       };
       persistDefaultGroupUpdate();
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: nextPath, type: 'updated' });
@@ -1634,15 +1743,22 @@ export function registerCaseRoutes(
     if (update.path) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Managed case paths cannot be changed');
     }
+    const localSelection = await validateLocalCodexSelection(update.codexCommandSelection, ownerFor(req));
+    if (!localSelection.ok) return createErrorResponse(localSelection.errorCode, localSelection.error);
     const nextPath = join(casesDir, nextName);
     if (nextName !== originalName) {
       await fs.rename(currentPath, nextPath);
+    }
+    persistLocalSelectionUpdate();
+    if (update.codexCommandSelection !== undefined) {
+      persistLocalCodexSelection(update.codexCommandSelection, ownerFor(req), nextName);
     }
     const caseInfo: CaseInfo = {
       name: nextName,
       path: nextPath,
       hasClaudeMd: existsSync(join(nextPath, 'CLAUDE.md')),
       location: 'local',
+      codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), nextName),
     };
     persistDefaultGroupUpdate();
     ctx.broadcast(SseEvent.CaseCreated, { name: nextName, path: nextPath, type: 'updated' });
@@ -1709,6 +1825,7 @@ export function registerCaseRoutes(
       try {
         await fs.writeFile(LINKED_CASES_FILE, JSON.stringify(linkedCases, null, 2));
         ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
+        ctx.store.deleteCaseCodexCommandSelection(codexProfileOwner(ownerFor(req)), name);
         ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'unlinked' });
         return { success: true, data: { name } };
       } catch (err) {
@@ -1725,6 +1842,7 @@ export function registerCaseRoutes(
     try {
       await fs.rm(casePath, { recursive: true, force: true });
       ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
+      ctx.store.deleteCaseCodexCommandSelection(codexProfileOwner(ownerFor(req)), name);
       ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'deleted' });
       return { success: true, data: { name } };
     } catch (err) {

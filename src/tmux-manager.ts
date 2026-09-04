@@ -66,6 +66,7 @@ import {
   type PiConfig,
   type GrokConfig,
   type DeepSeekConfig,
+  type OmpConfig,
   type SessionRemote,
   type SessionDocker,
   type DockerCommandMode,
@@ -105,6 +106,8 @@ import {
   resolveDeepSeekDir,
   getDeepSeekNotFoundMessage,
   resolveDefaultDeepSeekProfile,
+  getOmpNotFoundMessage,
+  resolveOmpDir,
   resolveLocalShell,
   loginShellArgs,
   assertNever,
@@ -135,6 +138,7 @@ import {
   resetReconnectState,
   type RemoteReconnectState,
 } from './remote-reconnect.js';
+import { canUsernameRunPrivilegedCommands } from './user-store.js';
 
 // ============================================================================
 // Timing Constants
@@ -946,6 +950,8 @@ export function buildOpenCodeCommand(config?: OpenCodeConfig): string {
  * stripping destructive terminal sequences before xterm.js sees them.
  */
 export function buildCodexCommand(config?: CodexConfig): string {
+  // COD-392: a resolved local case command is complete and runs as-is.
+  if (config?.baseCommand && config.baseCommand.trim().length > 0) return config.baseCommand;
   const parts = ['codex'];
 
   if (config?.dangerouslyBypassApprovals) {
@@ -1174,6 +1180,34 @@ function buildDeepSeekCommand(config?: DeepSeekConfig): string {
 }
 
 /**
+ * Build the OMP CLI command with appropriate flags.
+ *
+ * omp reads its model routing and hooks from ~/.omp (agent dir), so no
+ * trust/permission flags are needed: the CLI's own config governs. The only
+ * CLI flags passed are the per-session overrides Codeman knows about.
+ */
+function buildOmpCommand(config?: OmpConfig): string {
+  const parts = ['omp'];
+
+  if (config?.model) {
+    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
+    if (safeModel) parts.push('--model', safeModel);
+  }
+
+  // --resume and --continue conflict; a valid explicit session id wins,
+  // mirroring the sibling builders (grok/pi/opencode).
+  const safeId =
+    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
+  if (safeId) {
+    parts.push('--resume', safeId);
+  } else if (config?.continueSession) {
+    parts.push('--continue');
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
@@ -1218,6 +1252,7 @@ export function buildSpawnCommand(options: {
   piConfig?: PiConfig;
   grokConfig?: GrokConfig;
   deepSeekConfig?: DeepSeekConfig;
+  ompConfig?: OmpConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
   /** Codeman session name, passed to claude as `--name` (version-gated, sanitized; local spawns only). */
@@ -1273,6 +1308,9 @@ export function buildSpawnCommand(options: {
   if (options.mode === 'deepseek') {
     return buildDeepSeekCommand(options.deepSeekConfig);
   }
+  if (options.mode === 'omp') {
+    return buildOmpCommand(options.ompConfig);
+  }
   // #208: NOT the literal '$SHELL'. This string is embedded in the `bash -c "…"`
   // argument of the respawn-pane line, which execSync runs through `/bin/sh -c`,
   // so a `$SHELL` here is expanded by the SERVER process's shell against the
@@ -1301,6 +1339,7 @@ function isAgentCliMode(mode: SessionMode): boolean {
     case 'pi':
     case 'grok':
     case 'deepseek':
+    case 'omp':
       return true;
     case 'shell':
       return false;
@@ -1328,6 +1367,8 @@ export function cliNotFoundMessage(mode: SessionMode): string {
       return getGrokNotFoundMessage();
     case 'deepseek':
       return getDeepSeekNotFoundMessage();
+    case 'omp':
+      return getOmpNotFoundMessage();
     case 'shell':
       throw new Error('No external CLI error exists for shell mode');
     default:
@@ -1722,7 +1763,6 @@ function buildRemoteSessionCommand(
  * adopts/resizes/respawns our session (same defence as the remote socket).
  */
 const DOCKER_TMUX_SOCKET = 'codeman-docker';
-
 /**
  * Deterministic, reattach-stable in-container tmux session name. Derived from the
  * same stable field the local muxName uses (first 8 chars of the sessionId), so a
@@ -1757,6 +1797,7 @@ function appendResumeFlag(modeCommand: string, mode: SessionMode, resumeId: stri
     case 'grok':
       return `${modeCommand} --resume ${resumeId}`;
     case 'deepseek':
+    case 'omp':
       return `${modeCommand} --resume ${resumeId}`;
     default:
       return modeCommand; // shell / opencode: no resume
@@ -2359,6 +2400,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       mode === 'gemini' ||
       mode === 'antigravity' ||
       mode === 'pi' ||
+      mode === 'grok' ||
+      mode === 'deepseek' ||
+      mode === 'omp' ||
+      // Downstream-only (COD-75): the user's truecolor toggle, which is what
+      // opts CLAUDE back into 24-bit. Upstream has only the per-mode list, so
+      // this is a union — dropping either side loses a real behaviour.
       truecolorEnabled
         ? 'export COLORTERM=truecolor'
         : 'unset COLORTERM';
@@ -2373,7 +2420,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       mode === 'antigravity' ||
       mode === 'pi' ||
       mode === 'grok' ||
-      mode === 'deepseek'
+      mode === 'deepseek' ||
+      mode === 'omp'
         ? ['unset NO_COLOR']
         : []),
       // Stamp each Codex pane with a unique originator so the response-viewer
@@ -2475,6 +2523,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
     if (mode === 'deepseek') {
       const dir = resolveDeepSeekDir();
+      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
+    }
+    if (mode === 'omp') {
+      const dir = resolveOmpDir();
       return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
     }
     return { pathExport: '', dir: null };
@@ -2587,6 +2639,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       piConfig,
       grokConfig,
       deepSeekConfig,
+      ompConfig,
       resumeSessionId,
       envOverrides,
       effort,
@@ -2629,6 +2682,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     const local = !remote && !docker;
 
+    // COD-392: resolved local Codex commands are arbitrary owner-authored shell
+    // text on the shared host. Recheck the grant on every launch path so a
+    // revoked permission fails closed instead of respawning the command.
+    if (local && mode === 'codex' && codexConfig?.baseCommand?.trim()) {
+      const owner = options.owner;
+      if (!(await canUsernameRunPrivilegedCommands(owner))) {
+        throw new Error('Custom Codex commands require the can-bypass-permissions grant');
+      }
+    }
+
     // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
     // live desired state (toggle + proxy health) right before spawn so a down proxy
     // leaves codex on the direct chatgpt.com path.
@@ -2643,7 +2706,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           ? await resolveHeadroomRouted('codex')
           : undefined
       : undefined;
-
     try {
       const fullCmd = selectLaunchCommand({
         local: () => {
@@ -2665,6 +2727,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             piConfig,
             grokConfig,
             deepSeekConfig,
+            ompConfig,
             resumeSessionId,
             effort,
             sessionName: name,
@@ -2910,6 +2973,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       piConfig,
       grokConfig,
       deepSeekConfig,
+      ompConfig,
       resumeSessionId,
       envOverrides,
       effort,
@@ -2934,6 +2998,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
 
     const local = !remote && !docker;
+
+    // COD-392: see createSession — revoked grants must fail respawn closed too.
+    if (local && mode === 'codex' && codexConfig?.baseCommand?.trim()) {
+      const owner = options.owner;
+      if (!(await canUsernameRunPrivilegedCommands(owner))) {
+        console.error(`[TmuxManager] Refusing to respawn ${muxName}: custom Codex command grant revoked`);
+        return null;
+      }
+    }
 
     // COD-254: Codex routing lives in the shared config.toml patch. Reconcile it
     // before calculating this respawn's snapshot or launching its replacement,
@@ -2967,6 +3040,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           piConfig,
           grokConfig,
           deepSeekConfig,
+          ompConfig,
           resumeSessionId,
           effort,
           sessionName: name,

@@ -11,6 +11,7 @@ import { writeRemoteCases } from '../../src/remote-hosts.js';
 describe('Codex command profile routes', () => {
   let app: FastifyInstance;
   let profiles: Record<string, Array<{ id: string; name: string; command: string }>>;
+  let localCommandSelections: Record<string, Record<string, { kind: 'profile'; profileId: string }>>;
   let dataDir: string;
   let profileWrites: number;
 
@@ -19,6 +20,7 @@ describe('Codex command profile routes', () => {
     dataDir = await mkdtemp(join(tmpdir(), 'codex-profile-routes-'));
     process.env.CODEMAN_DATA_DIR = dataDir;
     profiles = {};
+    localCommandSelections = {};
     profileWrites = 0;
     app = Fastify({ logger: false });
     app.addHook('onRequest', async (req) => {
@@ -36,6 +38,7 @@ describe('Codex command profile routes', () => {
         profileWrites++;
       }
     );
+    ctx.store.getCaseCodexCommandSelections.mockImplementation((owner: string) => localCommandSelections[owner] ?? {});
     registerCodexCommandProfileRoutes(app, ctx as never);
     installRouteErrorHandler(app);
     await app.ready();
@@ -200,6 +203,7 @@ describe('Codex command profile routes', () => {
     profiles.alice = [
       { id: 'used', name: 'Used', command: 'codex used' },
       { id: 'unused', name: 'Unused', command: 'codex unused' },
+      { id: 'local-only', name: 'Local', command: 'codex local' },
     ];
     await writeRemoteCases(dataDir, [
       {
@@ -221,7 +225,22 @@ describe('Codex command profile routes', () => {
     ]);
     const blocked = await request('alice', 'DELETE', '/api/codex-command-profiles/used');
     expect(blocked.statusCode).toBe(409);
-    expect(JSON.parse(blocked.body)).toMatchObject({ usage: ['case lower', 'Case upper'] });
+    expect(JSON.parse(blocked.body)).toMatchObject({
+      error: 'Profile is still used by cases',
+      usage: ['case lower', 'Case upper'],
+    });
     expect((await request('alice', 'DELETE', '/api/codex-command-profiles/unused')).statusCode).toBe(200);
+  });
+
+  it('blocks deletion when a local case references the profile', async () => {
+    profiles.alice = [{ id: 'local-profile', name: 'Local', command: 'codex local' }];
+    localCommandSelections.alice = { 'local-case': { kind: 'profile', profileId: 'local-profile' } };
+
+    const blocked = await request('alice', 'DELETE', '/api/codex-command-profiles/local-profile');
+    expect(blocked.statusCode).toBe(409);
+    expect(JSON.parse(blocked.body)).toMatchObject({
+      error: 'Profile is still used by cases',
+      usage: ['local-case'],
+    });
   });
 });

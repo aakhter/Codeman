@@ -442,6 +442,9 @@ Object.assign(CodemanApp.prototype, {
       if (mode === 'antigravity') {
         return await this.runAntigravity(options);
       }
+      if (mode === 'omp') {
+        return await this.runOmp();
+      }
       if (mode === 'pi') {
         return await this.runPi(options);
       }
@@ -515,7 +518,7 @@ Object.assign(CodemanApp.prototype, {
    * run modes like the rest, and neither `agy` nor `pi` is likely to be installed.
    */
   _refreshRunModeAvailability(menu) {
-    for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek']) {
+    for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp']) {
       const btn = menu.querySelector(`.run-mode-option[data-mode="${mode}"]`);
       if (btn) btn.style.display = this.isCliAvailable(mode) ? 'flex' : 'none';
     }
@@ -730,7 +733,7 @@ Object.assign(CodemanApp.prototype, {
         btn.append(...parts);
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
-          this.resumeHistorySession(s.sessionId, s.workingDir, s.name);
+          this.resumeHistorySession(s.sessionId, s.workingDir, s.name, s.mode);
         });
         container.appendChild(btn);
       }
@@ -751,7 +754,7 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'pi' ? 'Run PI' : mode === 'grok' ? 'Run GK' : mode === 'deepseek' ? 'Run DS' : mode === 'shell' ? 'Run SH' : 'Run';
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'pi' ? 'Run PI' : mode === 'grok' ? 'Run GK' : mode === 'deepseek' ? 'Run DS' : mode === 'omp' ? 'Run OMP' : mode === 'shell' ? 'Run SH' : 'Run';
     }
   },
 
@@ -1536,6 +1539,64 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  async runOmp() {
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // Remote/docker cases run omp on the OTHER side — skip the local status probe
+    // and the local-only config below (quick-start rejects them for remote cases).
+    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
+
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting OMP session in ${caseName}...`);
+    this.terminal.focus();
+
+    try {
+      if (!isRemote) {
+        const statusRes = await fetch('/api/omp/status');
+        const status = (await statusRes.json()).data;
+        if (!status.available) {
+          this._reportSessionLaunchError(
+            ownsLaunchTerminal,
+            'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh'
+          );
+          return;
+        }
+      }
+
+      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'omp',
+          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          ...(isRemote ? {} : {
+            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          }),
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to start OMP');
+      // Same layout arguments as every other run mode: upstream's runOmp was
+      // written without the downstream tab-layout plumbing, so an omp session
+      // would have been created without its group placement.
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
+
+      if (data.data.sessionId) {
+        await this.selectSession(data.data.sessionId);
+      }
+
+      this.terminal.focus();
+    } catch (err) {
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
+    }
+  },
+
   /**
    * Launch a Grok Build (xAI `grok`) session.
    *
@@ -1756,7 +1817,8 @@ Object.assign(CodemanApp.prototype, {
       session.mode === 'antigravity' ||
       session.mode === 'pi' ||
       session.mode === 'grok' ||
-      session.mode === 'deepseek';
+      session.mode === 'deepseek' ||
+      session.mode === 'omp';
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -1793,7 +1855,8 @@ Object.assign(CodemanApp.prototype, {
       session.mode === 'antigravity' ||
       session.mode === 'pi' ||
       session.mode === 'grok' ||
-      session.mode === 'deepseek';
+      session.mode === 'deepseek' ||
+      session.mode === 'omp';
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isExternalCli ? 'none' : ''; });
 
@@ -2841,6 +2904,9 @@ Object.assign(CodemanApp.prototype, {
       'remoteCaseName',
       'remoteCasePath',
       'remoteCaseCodexCommandCustomInput',
+      'localCaseCodexCommandCustomInput',
+      'cloneCaseCodexCommandCustomInput',
+      'linkCaseCodexCommandCustomInput',
       'remoteHostId',
       'remoteHostAddress',
       'remoteHostUsername',
@@ -2854,10 +2920,23 @@ Object.assign(CodemanApp.prototype, {
       const el = document.getElementById(id);
       if (el) el.value = '';
     });
-    this._remoteCaseCodexCommandConfirmedSelection = 'default';
-    const codexProfile = document.getElementById('remoteCaseCodexProfile');
-    if (codexProfile) codexProfile.value = 'default';
-    this.onRemoteCaseCodexProfileChanged(true);
+    this._caseCodexCommandSelections = {
+      local: 'default',
+      clone: 'default',
+      link: 'default',
+      remote: 'default',
+    };
+    this._codexCommandProfilesRequestToken = (this._codexCommandProfilesRequestToken || 0) + 1;
+    for (const selectId of [
+      'localCaseCodexProfile',
+      'cloneCaseCodexProfile',
+      'linkCaseCodexProfile',
+      'remoteCaseCodexProfile',
+    ]) {
+      const select = document.getElementById(selectId);
+      if (select) select.value = 'default';
+    }
+    this.onCaseCodexProfileChanged(true);
     const remoteHostId = document.getElementById('remoteHostId');
     if (remoteHostId) remoteHostId.disabled = false;
     const remoteHostSavedSelect = document.getElementById('remoteHostSavedSelect');
@@ -2960,10 +3039,12 @@ Object.assign(CodemanApp.prototype, {
       document.getElementById('linkCaseName').focus();
     } else if (tabName === 'case-remote') {
       void this.loadRemoteHostsForCaseModal(document.getElementById('remoteHostSavedSelect')?.value || '');
-      void this.loadCodexCommandProfiles();
+      void this.loadCodexCommandProfiles(this._selectionValueForScope('remote'));
       document.getElementById('remoteCaseName').focus();
     } else if (tabName === 'case-docker') {
       document.getElementById('dockerCaseName').focus();
+    } else if (tabName === 'case-link' || tabName === 'case-clone' || tabName === 'case-create') {
+      void this.loadCodexCommandProfiles(this._selectionValueForScope(this._currentCaseCodexScope()));
     }
   },
 
@@ -3025,9 +3106,10 @@ Object.assign(CodemanApp.prototype, {
     // a session inside it. Optional expandable settings override the defaults.
     const inDocker = document.getElementById('newCaseDocker')?.checked;
     const endpoint = inDocker ? '/api/cases/docker-quickcreate' : '/api/cases';
+    const localSelection = this._readCaseCodexCommandFromForm('local');
     const payload = inDocker
       ? { name, description, ...this._collectDockerQuickSettings() }
-      : { name, description };
+      : { name, description, ...localSelection };
 
     try {
       const res = await fetch(endpoint, {
@@ -3124,7 +3206,7 @@ Object.assign(CodemanApp.prototype, {
       const res = await fetch('/api/cases/link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, path })
+        body: JSON.stringify({ name, path, ...this._readCaseCodexCommandFromForm('link') })
       });
 
       const data = await res.json();
@@ -3339,7 +3421,13 @@ Object.assign(CodemanApp.prototype, {
         headers: { 'Content-Type': 'application/json' },
         // Zod `.optional()` rejects an explicit null, and JSON.stringify keeps one
         // on the wire — omit the empty fields instead of sending null.
-        body: JSON.stringify({ name, repository: url, ...(ref ? { ref } : {}), ...(shallow ? { shallow: true } : {}) }),
+        body: JSON.stringify({
+          name,
+          repository: url,
+          ...(ref ? { ref } : {}),
+          ...(shallow ? { shallow: true } : {}),
+          ...this._readCaseCodexCommandFromForm('clone'),
+        }),
       });
       const data = await res.json();
       if (!data.success) {
@@ -3395,7 +3483,7 @@ Object.assign(CodemanApp.prototype, {
       || document.getElementById('remoteHostSavedSelect')?.value.trim();
     const host = document.getElementById('remoteHostAddress').value.trim();
     const username = document.getElementById('remoteHostUsername').value.trim();
-    const codexSelection = this._readRemoteCaseCommandsFromForm();
+    const codexSelection = this._readCaseCodexCommandFromForm('remote');
     // COD-107 — port + advanced SSH connection options.
     const portRaw = document.getElementById('remoteHostPort').value.trim();
     const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
@@ -4007,15 +4095,181 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _readRemoteCaseCommandsFromForm() {
-    const value = document.getElementById('remoteCaseCodexProfile')?.value || 'default';
+    return this._readCaseCodexCommandFromForm('remote');
+  },
+
+  _caseCodexFormIds(scope) {
+    if (scope === 'local') {
+      return {
+        select: 'localCaseCodexProfile',
+        preview: 'localCaseCodexProfilePreview',
+        customWrap: 'localCaseCodexCommandCustom',
+        customInput: 'localCaseCodexCommandCustomInput',
+      };
+    }
+    if (scope === 'clone') {
+      return {
+        select: 'cloneCaseCodexProfile',
+        preview: 'cloneCaseCodexProfilePreview',
+        customWrap: 'cloneCaseCodexCommandCustom',
+        customInput: 'cloneCaseCodexCommandCustomInput',
+      };
+    }
+    if (scope === 'link') {
+      return {
+        select: 'linkCaseCodexProfile',
+        preview: 'linkCaseCodexProfilePreview',
+        customWrap: 'linkCaseCodexCommandCustom',
+        customInput: 'linkCaseCodexCommandCustomInput',
+      };
+    }
+    return {
+      select: 'remoteCaseCodexProfile',
+      preview: 'remoteCaseCodexProfilePreview',
+      customWrap: 'remoteCaseCodexCommandCustom',
+      customInput: 'remoteCaseCodexCommandCustomInput',
+    };
+  },
+
+  _caseCodexScopeForInput(element) {
+    const row = element?.closest?.('[data-codex-command-scope]');
+    const scope = row?.dataset?.codexCommandScope;
+    if (scope === 'local') return 'local';
+    if (scope === 'clone') return 'clone';
+    if (scope === 'link') return 'link';
+    return 'remote';
+  },
+
+  _currentCaseCodexScope() {
+    if (this.caseEditOriginalName) {
+      if (this.caseEditOriginalLocation === 'linked-local') return 'link';
+      if (this.caseEditOriginalLocation === 'remote') return 'remote';
+      return 'local';
+    }
+    if (this.caseModalTab === 'case-link') return 'link';
+    if (this.caseModalTab === 'case-clone') return 'clone';
+    if (this.caseModalTab === 'case-remote') return 'remote';
+    return 'local';
+  },
+
+  _selectionValueForScope(scope) {
+    const selections = this._caseCodexCommandSelections || {};
+    if (scope === 'local') return selections.local || 'default';
+    if (scope === 'clone') return selections.clone || 'default';
+    if (scope === 'link') return selections.link || 'default';
+    return selections.remote || 'default';
+  },
+
+  _storeSelectionForScope(scope, value) {
+    this._caseCodexCommandSelections = {
+      local: this._selectionValueForScope('local'),
+      clone: this._selectionValueForScope('clone'),
+      link: this._selectionValueForScope('link'),
+      remote: this._selectionValueForScope('remote'),
+    };
+    if (scope === 'local') this._caseCodexCommandSelections.local = value;
+    else if (scope === 'clone') this._caseCodexCommandSelections.clone = value;
+    else if (scope === 'link') this._caseCodexCommandSelections.link = value;
+    else this._caseCodexCommandSelections.remote = value;
+  },
+
+  _readCaseCodexCommandFromForm(scope = 'remote') {
+    const ids = this._caseCodexFormIds(scope);
+    const value = document.getElementById(ids.select)?.value || 'default';
     if (value.startsWith('profile:')) return { codexCommandSelection: { kind: 'profile', profileId: value.slice(8) } };
-    if (value === 'custom') { const command = document.getElementById('remoteCaseCodexCommandCustomInput')?.value.trim() || ''; return { codexCommandSelection: command ? { kind: 'custom', command } : { kind: 'default' } }; }
+    if (value === 'custom') { const command = document.getElementById(ids.customInput)?.value.trim() || ''; return { codexCommandSelection: command ? { kind: 'custom', command } : { kind: 'default' } }; }
     return { codexCommandSelection: { kind: 'default' } };
   },
 
-  _renderCodexCommandProfiles(selection = 'default') { const select = document.getElementById('remoteCaseCodexProfile'); if (!select) return; select.replaceChildren(new Option('Default', 'default')); for (const p of (this._codexCommandProfiles || []).slice().sort((a, b) => a.name.localeCompare(b.name))) select.add(new Option(p.name, `profile:${p.id}`)); select.add(new Option('Custom', 'custom')); select.value = [...select.options].some(o => o.value === selection) ? selection : 'default'; this.onRemoteCaseCodexProfileChanged(true); },
-  async loadCodexCommandProfiles(selection) { const select = document.getElementById('remoteCaseCodexProfile'); const manage = document.getElementById('manageCodexCommandProfiles'); const token = (this._codexCommandProfilesRequestToken || 0) + 1; this._codexCommandProfilesRequestToken = token; if (select) select.disabled = true; if (manage) manage.disabled = true; try { const res = await fetch('/api/codex-command-profiles'); const data = await res.json(); if (!res.ok || !data.success) throw new Error(data.error || 'Could not load Codex command profiles'); if (token !== this._codexCommandProfilesRequestToken) return; this._codexCommandProfiles = data.data?.profiles || []; this._renderCodexCommandProfiles(selection || this._remoteCaseCodexCommandConfirmedSelection || 'default'); this._remoteCaseCodexCommandConfirmedSelection = select?.value || 'default'; if (select) select.disabled = false; } catch (err) { if (token !== this._codexCommandProfilesRequestToken) return; this._renderCodexCommandProfiles(this._remoteCaseCodexCommandConfirmedSelection || 'default'); if (select) select.disabled = true; this.showToast(err.message || 'Could not load Codex command profiles', 'error'); } finally { if (token === this._codexCommandProfilesRequestToken && manage) manage.disabled = false; } },
-  onRemoteCaseCodexProfileChanged(silent = false) { const select = document.getElementById('remoteCaseCodexProfile'); if (!select) return; const profile = (this._codexCommandProfiles || []).find(p => `profile:${p.id}` === select.value); document.getElementById('remoteCaseCodexCommandCustom')?.classList.toggle('hidden', select.value !== 'custom'); const preview = document.getElementById('remoteCaseCodexProfilePreview'); if (preview) preview.value = profile?.command || (select.value === 'custom' ? document.getElementById('remoteCaseCodexCommandCustomInput')?.value || '' : ''); if (!silent) this._remoteCaseCodexCommandConfirmedSelection = select.value; },
+  _selectionTokenForApi(selection) {
+    if (!selection || selection.kind === 'default') return 'default';
+    if (selection.kind === 'custom') return 'custom';
+    return `profile:${selection.profileId}`;
+  },
+
+  _caseCodexCustomCommandForEdit(selection) {
+    if (selection?.kind !== 'custom') return '';
+    return selection.commandPreview || '';
+  },
+
+  _renderCaseCodexCommandProfiles(scope, selection = 'default') {
+    const ids = this._caseCodexFormIds(scope);
+    const select = document.getElementById(ids.select);
+    if (!select) return;
+    select.replaceChildren(new Option('Default', 'default'));
+    for (const p of (this._codexCommandProfiles || []).slice().sort((a, b) => a.name.localeCompare(b.name))) select.add(new Option(p.name, `profile:${p.id}`));
+    select.add(new Option('Custom', 'custom'));
+    select.value = [...select.options].some(o => o.value === selection) ? selection : 'default';
+    this._storeSelectionForScope(scope, select.value);
+    this.onCaseCodexProfileChanged(true);
+  },
+
+  _renderCodexCommandProfiles(selection = 'default') {
+    for (const scope of ['local', 'clone', 'link', 'remote']) {
+      this._renderCaseCodexCommandProfiles(scope, scope === 'remote' ? selection : this._selectionValueForScope(scope));
+    }
+  },
+  async loadCodexCommandProfiles(selection) {
+    const scopes = ['local', 'clone', 'link', 'remote'];
+    const selects = scopes
+      .map((scope) => ({ scope, select: document.getElementById(this._caseCodexFormIds(scope).select) }))
+      .filter((entry) => entry.select);
+    const manageButtons = ['manageLocalCodexCommandProfiles', 'manageCloneCodexCommandProfiles', 'manageLinkCodexCommandProfiles', 'manageCodexCommandProfiles']
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+    const token = (this._codexCommandProfilesRequestToken || 0) + 1;
+    this._codexCommandProfilesRequestToken = token;
+    for (const { select } of selects) select.disabled = true;
+    for (const manage of manageButtons) manage.disabled = true;
+    try {
+      const res = await fetch('/api/codex-command-profiles');
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Could not load Codex command profiles');
+      if (token !== this._codexCommandProfilesRequestToken) return;
+      this._codexCommandProfiles = data.data?.profiles || [];
+      const requested = selection || this._selectionValueForScope('remote') || 'default';
+      for (const { scope } of selects) {
+        this._renderCaseCodexCommandProfiles(scope, scope === 'remote' ? requested : this._selectionValueForScope(scope));
+      }
+      for (const { scope, select } of selects) this._storeSelectionForScope(scope, select.value || 'default');
+      for (const { select } of selects) select.disabled = false;
+    } catch (err) {
+      if (token !== this._codexCommandProfilesRequestToken) return;
+      for (const { scope } of selects) this._renderCaseCodexCommandProfiles(scope, this._selectionValueForScope(scope));
+      for (const { select } of selects) select.disabled = true;
+      this.showToast(err.message || 'Could not load Codex command profiles', 'error');
+    } finally {
+      if (token === this._codexCommandProfilesRequestToken) for (const manage of manageButtons) manage.disabled = false;
+    }
+  },
+  onRemoteCaseCodexProfileChanged(silent = false) { return this.onCaseCodexProfileChanged(silent, 'remote'); },
+  onCaseCodexProfileChanged(silent = false, scopeOverride) {
+    const scope = scopeOverride || this._currentCaseCodexScope();
+    const ids = this._caseCodexFormIds(scope);
+    const select = document.getElementById(ids.select);
+    if (!select) return;
+    this._storeSelectionForScope(scope, select.value);
+    const profile = (this._codexCommandProfiles || []).find(p => `profile:${p.id}` === select.value);
+    document.getElementById(ids.customWrap)?.classList.toggle('hidden', select.value !== 'custom');
+    const preview = document.getElementById(ids.preview);
+    if (preview) preview.value = profile?.command || (select.value === 'custom' ? document.getElementById(ids.customInput)?.value || '' : '');
+    if (!silent) {
+      for (const entry of ['local', 'clone', 'link', 'remote']) {
+        if (entry === scope) continue;
+        const itemIds = this._caseCodexFormIds(entry);
+        const itemSelect = document.getElementById(itemIds.select);
+        if (!itemSelect) continue;
+        const expected = this._selectionValueForScope(entry);
+        if (itemSelect.value !== expected && [...itemSelect.options].some(o => o.value === expected)) {
+          itemSelect.value = expected;
+        }
+        const itemProfile = (this._codexCommandProfiles || []).find(p => `profile:${p.id}` === itemSelect.value);
+        document.getElementById(itemIds.customWrap)?.classList.toggle('hidden', itemSelect.value !== 'custom');
+        const itemPreview = document.getElementById(itemIds.preview);
+        if (itemPreview) itemPreview.value = itemProfile?.command || (itemSelect.value === 'custom' ? document.getElementById(itemIds.customInput)?.value || '' : '');
+      }
+    }
+  },
   async openCodexCommandProfileManager() { const modal = document.getElementById('codexCommandProfileManager'); if (!modal) return; if (this._codexCommandProfileManagerKeydown) modal.removeEventListener('keydown', this._codexCommandProfileManagerKeydown); this._codexCommandProfileManagerReturnFocus = document.activeElement; modal.classList.add('active'); this._codexCommandProfileManagerKeydown = (event) => { if (event.key === 'Escape') { event.preventDefault(); this.closeCodexCommandProfileManager(); return; } if (event.key !== 'Tab') return; const focusable = [...modal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')].filter(element => !element.closest('.hidden')); if (!focusable.length) return; const current = focusable.indexOf(document.activeElement); if (event.shiftKey && current <= 0) { event.preventDefault(); focusable[focusable.length - 1].focus(); } else if (!event.shiftKey && current === focusable.length - 1) { event.preventDefault(); focusable[0].focus(); } }; modal.addEventListener('keydown', this._codexCommandProfileManagerKeydown); document.getElementById('codexCommandProfileNew')?.focus(); await this.loadCodexCommandProfiles(); if (!modal.classList.contains('active')) return; this.renderCodexCommandProfileManager(); },
   closeCodexCommandProfileManager() { const modal = document.getElementById('codexCommandProfileManager'); if (!modal) return; if (this._codexCommandProfileManagerKeydown) modal.removeEventListener('keydown', this._codexCommandProfileManagerKeydown); this._codexCommandProfileManagerKeydown = null; modal.classList.remove('active'); if (this._codexCommandProfileManagerReturnFocus) { this._codexCommandProfileManagerReturnFocus.disabled = false; this._codexCommandProfileManagerReturnFocus.focus?.(); } this._codexCommandProfileManagerReturnFocus = null; },
   renderCodexCommandProfileManager() { const list = document.getElementById('codexCommandProfileList'); if (!list) return; list.replaceChildren(); for (const p of this._codexCommandProfiles || []) { const row = document.createElement('button'); row.type = 'button'; row.className = 'btn-toolbar'; row.textContent = `${p.name}${p.usage?.length ? ` — used by ${p.usage.join(', ')}` : ''}`; row.onclick = () => this.editCodexCommandProfile(p.id); list.append(row); } },
@@ -4162,8 +4416,11 @@ Object.assign(CodemanApp.prototype, {
       const remote = caseInfo.remote || {};
       document.getElementById('remoteCaseName').value = caseInfo.name || '';
       document.getElementById('remoteCasePath').value = remote.path || '';
-      const selection = remote.codexCommandSelection;
+      const selection = caseInfo.codexCommandSelection || remote.codexCommandSelection;
       document.getElementById('remoteCaseCodexCommandCustomInput').value = selection?.kind === 'custom' ? remote.commands?.codex || '' : '';
+      this._storeSelectionForScope('local', 'default');
+      this._storeSelectionForScope('clone', 'default');
+      this._storeSelectionForScope('link', 'default');
       await this.loadCodexCommandProfiles(selection?.kind === 'profile' ? `profile:${selection.profileId}` : selection?.kind === 'custom' ? 'custom' : 'default');
       document.getElementById('remoteHostId').value = remote.hostId || '';
       document.getElementById('remoteHostId').disabled = true;
@@ -4197,10 +4454,21 @@ Object.assign(CodemanApp.prototype, {
     } else if (this.caseEditOriginalLocation === 'linked-local' || caseInfo.linked) {
       document.getElementById('linkCaseName').value = caseInfo.name || '';
       document.getElementById('linkCasePath').value = caseInfo.path || '';
+      document.getElementById('linkCaseCodexCommandCustomInput').value =
+        this._caseCodexCustomCommandForEdit(caseInfo.codexCommandSelection);
+      this._storeSelectionForScope(
+        'link',
+        this._selectionTokenForApi(caseInfo.codexCommandSelection)
+      );
+      void this.loadCodexCommandProfiles(this._selectionValueForScope('remote'));
       this.switchCaseModalTab('case-link');
     } else {
       document.getElementById('newCaseName').value = caseInfo.name || '';
       document.getElementById('newCaseDescription').value = '';
+      document.getElementById('localCaseCodexCommandCustomInput').value =
+        this._caseCodexCustomCommandForEdit(caseInfo.codexCommandSelection);
+      this._storeSelectionForScope('local', this._selectionTokenForApi(caseInfo.codexCommandSelection));
+      void this.loadCodexCommandProfiles(this._selectionValueForScope('remote'));
       this.switchCaseModalTab('case-create');
     }
 
@@ -4277,7 +4545,7 @@ Object.assign(CodemanApp.prototype, {
         const hostId = this.caseEditOriginalHostId || document.getElementById('remoteHostId').value.trim();
         const host = document.getElementById('remoteHostAddress').value.trim();
         const username = document.getElementById('remoteHostUsername').value.trim();
-        const codexSelection = this._readRemoteCaseCommandsFromForm();
+        const codexSelection = this._readCaseCodexCommandFromForm('remote');
         const portRaw = document.getElementById('remoteHostPort').value.trim();
 
         if (!nextName || !remotePath || !hostId || !host || !username) {
@@ -4325,7 +4593,7 @@ Object.assign(CodemanApp.prototype, {
           this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
           return;
         }
-        updatePayload = { name: nextName, path };
+        updatePayload = { name: nextName, path, ...this._readCaseCodexCommandFromForm('link') };
       } else {
         nextName = document.getElementById('newCaseName').value.trim();
         if (!nextName) {
@@ -4336,7 +4604,7 @@ Object.assign(CodemanApp.prototype, {
           this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
           return;
         }
-        updatePayload = { name: nextName };
+        updatePayload = { name: nextName, ...this._readCaseCodexCommandFromForm('local') };
       }
 
       const defaultGroupId = this._caseEditDefaultGroupId();
@@ -4610,7 +4878,20 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     // Keep in sync with SessionMode (src/types/session.ts). A mode missing from
     // this allowlist silently downgrades to 'claude' — that's how 'shell' used to
     // reset on every reload via the server-sync path (this.runMode = serverValue).
-    const VALID_RUN_MODES = ['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek'];
+    // Upstream's inline chain omits 'shell' for exactly that reason, so the
+    // allowlist form is kept and 'omp' added to it.
+    const VALID_RUN_MODES = [
+      'claude',
+      'shell',
+      'opencode',
+      'codex',
+      'gemini',
+      'antigravity',
+      'pi',
+      'grok',
+      'deepseek',
+      'omp',
+    ];
     this._runMode = VALID_RUN_MODES.includes(mode) ? mode : 'claude';
   },
 });

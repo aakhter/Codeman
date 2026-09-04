@@ -310,6 +310,77 @@ describe('StateStore', () => {
     });
   });
 
+  describe('Local case Codex command selections (COD-392)', () => {
+    it('returns empty selections for unknown owners and clones selections at the boundary', () => {
+      const store = new StateStore(testFilePath);
+      expect(store.getCaseCodexCommandSelections('nobody')).toEqual({});
+
+      store.setCaseCodexCommandSelection('alice', 'case-a', { kind: 'custom', command: 'codex a' });
+      const selections = store.getCaseCodexCommandSelections('alice');
+      selections['case-a'] = { kind: 'custom', command: 'mutated' } as never;
+
+      expect(store.getCaseCodexCommandSelection('alice', 'case-a')).toEqual({
+        kind: 'custom',
+        command: 'codex a',
+      });
+    });
+
+    it('isolates selections by owner, clears on default, and survives restart', () => {
+      const store = new StateStore(testFilePath);
+
+      expect(store.getCaseCodexCommandSelection('alice', 'case-a')).toBeUndefined();
+
+      store.setCaseCodexCommandSelection('alice', 'case-a', { kind: 'profile', profileId: 'p1' });
+      store.setCaseCodexCommandSelection('bob', 'case-a', {
+        kind: 'custom',
+        command: 'codex --profile bob',
+      });
+
+      expect(store.getCaseCodexCommandSelection('alice', 'case-a')).toEqual({
+        kind: 'profile',
+        profileId: 'p1',
+      });
+
+      store.setCaseCodexCommandSelection('alice', 'case-a', undefined);
+      expect(store.getCaseCodexCommandSelection('alice', 'case-a')).toBeUndefined();
+      expect(store.getCaseCodexCommandSelection('bob', 'case-a')).toEqual({
+        kind: 'custom',
+        command: 'codex --profile bob',
+      });
+
+      store.setCaseCodexCommandSelection('alice', 'case-b', { kind: 'custom', command: 'codex --yolo' });
+      store.flushAll();
+
+      const persisted = JSON.parse(readFileSync(testFilePath, 'utf-8')).caseCodexCommandSelections;
+      expect(persisted.alice['case-b']).toEqual({ kind: 'custom', command: 'codex --yolo' });
+      expect(new StateStore(testFilePath).getCaseCodexCommandSelection('alice', 'case-b')).toEqual({
+        kind: 'custom',
+        command: 'codex --yolo',
+      });
+    });
+
+    it('renames and deletes selections including prototype-collision keys', () => {
+      const store = new StateStore(testFilePath);
+      store.setCaseCodexCommandSelection('alice', 'old-case', { kind: 'custom', command: 'codex a' });
+
+      store.renameCaseCodexCommandSelection('alice', 'old-case', 'new-case');
+      expect(store.getCaseCodexCommandSelection('alice', 'old-case')).toBeUndefined();
+      expect(store.getCaseCodexCommandSelection('alice', 'new-case')).toEqual({
+        kind: 'custom',
+        command: 'codex a',
+      });
+
+      store.deleteCaseCodexCommandSelection('alice', 'new-case');
+      expect(store.getCaseCodexCommandSelection('alice', 'new-case')).toBeUndefined();
+
+      store.setCaseCodexCommandSelection('__proto__', 'constructor', { kind: 'custom', command: 'codex x' });
+      expect(store.getCaseCodexCommandSelection('__proto__', 'constructor')).toEqual({
+        kind: 'custom',
+        command: 'codex x',
+      });
+    });
+  });
+
   describe('demoteOrRemoveSession and pinned cleanup (COD-142)', () => {
     it('should preserve a pinned session as a stopped record on kill', () => {
       const store = new StateStore(testFilePath);

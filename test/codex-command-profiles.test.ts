@@ -6,6 +6,7 @@ import {
   getCodexProfileUsage,
   resolveCodexCommandSelection,
   resolveCodexRecoveryStrategy,
+  resolveLocalCaseCodexCommand,
 } from '../src/codex-command-profiles.js';
 
 const profiles = [
@@ -96,5 +97,21 @@ describe('Codex command profile helpers', () => {
         'rollout id; unsafe'
       )
     ).toEqual({ kind: 'manual_required' });
+  });
+
+  it('resolves local case selections including owned profiles and exact custom commands', () => {
+    expect(resolveLocalCaseCodexCommand(undefined, profiles)).toEqual({ ok: true, command: undefined });
+    expect(resolveLocalCaseCodexCommand({ kind: 'profile', profileId: 'personal' }, profiles)).toEqual({
+      ok: true,
+      command: 'exec codx personal',
+    });
+    expect(resolveLocalCaseCodexCommand({ kind: 'custom', command: 'codex --yolo' }, profiles)).toEqual({
+      ok: true,
+      command: 'codex --yolo',
+    });
+    expect(resolveLocalCaseCodexCommand({ kind: 'profile', profileId: 'missing' }, profiles)).toEqual({
+      ok: false,
+      error: 'Saved Codex command profile is unavailable',
+    });
   });
 });

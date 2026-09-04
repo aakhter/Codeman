@@ -523,6 +523,86 @@ describe('session-routes', () => {
       expect(harness.ctx.addSession).not.toHaveBeenCalled();
     });
 
+    it('uses a saved local Codex command as the complete launch command', async () => {
+      const caseName = 'local-codex-command';
+      const workingDir = join(CASES_DIR, caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'codex --local-exact',
+      });
+      cliAvailability.codex = false;
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const created = harness.ctx.addSession.mock.calls.at(-1)?.[0] as Session;
+        expect(created.codexConfig?.baseCommand).toBe('codex --local-exact');
+        expect(harness.ctx.addSession).toHaveBeenCalledWith(expect.any(Session), { caseName });
+      } finally {
+        await rm(workingDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails a missing local Codex profile before Session construction', async () => {
+      const caseName = 'local-codex-missing';
+      const workingDir = join(CASES_DIR, caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'profile',
+        profileId: 'deleted-profile',
+      });
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue([]);
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+        expect(JSON.parse(response.body)).toMatchObject({
+          errorCode: ApiErrorCode.OPERATION_FAILED,
+          error: 'Saved Codex command profile is unavailable',
+        });
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      } finally {
+        await rm(workingDir, { recursive: true, force: true });
+      }
+    });
+
+    it('denies a non-granted multi-user local Codex command at launch', async () => {
+      const username = 'localcodexuser';
+      const cleanup = await useRegularUserHarness(username, false);
+      const caseName = 'local-codex-denied';
+      const workingDir = join(resolveCasesDir({ username, role: 'user' }), caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'codex --local-exact',
+      });
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.FORBIDDEN));
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      } finally {
+        await rm(workingDir, { recursive: true, force: true });
+        await cleanup();
+      }
+    });
+
     it('launches a Bob-owned selected profile when an admin creates a remote session', async () => {
       vi.stubEnv('CODEMAN_MULTIUSER', '1');
       await harness.app.close();
@@ -1170,6 +1250,36 @@ and effort involved in moving workloads.
       expect(res.statusCode).toBe(404);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
+    });
+
+    it('removes a persisted-only session (not live) via the state store, without touching cleanupSession', async () => {
+      vi.mocked(harness.ctx.store.getSession).mockReturnValueOnce({
+        id: 'ghost-session',
+        owner: undefined,
+      } as never);
+      const res = await harness.app.inject({
+        method: 'DELETE',
+        url: '/api/sessions/ghost-session',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(harness.ctx.store.demoteOrRemoveSession).toHaveBeenCalledWith('ghost-session');
+      expect(harness.ctx.cleanupSession).not.toHaveBeenCalled();
+      // Ark0N/Codeman#353 review: the persisted-only branch used to demote/remove
+      // with no broadcast, so other open tabs kept showing the retired row until
+      // their next unrelated fetch.
+      expect(harness.ctx.broadcast).toHaveBeenCalledWith('session:deleted', { id: 'ghost-session' });
+    });
+
+    it('404s a persisted-only session id the state store does not recognize either', async () => {
+      vi.mocked(harness.ctx.store.getSession).mockReturnValueOnce(null);
+      const res = await harness.app.inject({
+        method: 'DELETE',
+        url: '/api/sessions/truly-nonexistent',
+      });
+      expect(res.statusCode).toBe(404);
+      expect(harness.ctx.store.demoteOrRemoveSession).not.toHaveBeenCalled();
     });
   });
 

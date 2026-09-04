@@ -21,6 +21,13 @@ function remoteMarkup() {
     html.match(/<div class="set-section hidden" id="case-remote">([\s\S]*?)<\/div>\s*<!-- Docker Tab -->/)?.[0] ?? ''
   );
 }
+function localSelectorsMarkup() {
+  const sections = html.split('<div class="form-row case-codex-command-row"');
+  const pick = (id: string) => sections.find((section) => section.includes(`id="${id}"`)) ?? '';
+  return ['localCaseCodexProfile', 'cloneCaseCodexProfile', 'linkCaseCodexProfile']
+    .map((id) => `<div class="form-row case-codex-command-row"${pick(id)}`)
+    .join('');
+}
 function managerMarkup() {
   return html.match(/<div class="modal" id="codexCommandProfileManager">([\s\S]*?)<\/div>\s*<!--/)?.[0] ?? '';
 }
@@ -114,6 +121,48 @@ describe('COD-351 Codex command profiles in Chromium', () => {
     expect(await page.evaluate(() => (window as any).app._readRemoteCaseCommandsFromForm())).toEqual({
       codexCommandSelection: { kind: 'profile', profileId: 'p-work' },
     });
+  });
+  it('keeps independent local, link, clone, and remote selections with exact-command previews', async () => {
+    await page.setContent(
+      `<!doctype html><head><base href="http://codeman.test/"><style>${css}</style></head><body>${remoteMarkup()}${localSelectorsMarkup()}${managerMarkup()}</body>`
+    );
+    await page.addScriptTag({
+      content: `class CodemanApp {}\n${ui}\nwindow.app = Object.create(CodemanApp.prototype);`,
+    });
+    await page.evaluate(() => {
+      (window as any).__toasts = [];
+      (window as any).app.showToast = (message: string, type: string) =>
+        (window as any).__toasts.push({ message, type });
+    });
+    await page.evaluate(() => (window as any).app.loadCodexCommandProfiles());
+    expect(await page.locator('#localCaseCodexProfile option').allTextContents()).toEqual([
+      'Default',
+      'Unused',
+      'Work',
+      'Custom',
+    ]);
+    expect(await page.locator('#linkCaseCodexProfile option').allTextContents()).toEqual([
+      'Default',
+      'Unused',
+      'Work',
+      'Custom',
+    ]);
+    await page.selectOption('#localCaseCodexProfile', 'profile:p-work');
+    await page.evaluate(() => (window as any).app.onCaseCodexProfileChanged(false, 'local'));
+    await page.selectOption('#linkCaseCodexProfile', 'custom');
+    await page.evaluate(() => (window as any).app.onCaseCodexProfileChanged(false, 'link'));
+    await page.locator('#linkCaseCodexCommandCustomInput').fill('codex --linked-exact');
+    await page.evaluate(() => (window as any).app.onCaseCodexProfileChanged(true, 'link'));
+    expect(await page.locator('#localCaseCodexProfilePreview').inputValue()).toBe('codex --profile work');
+    expect(await page.locator('#linkCaseCodexProfilePreview').inputValue()).toBe('codex --linked-exact');
+    expect(await page.evaluate(() => (window as any).app._readCaseCodexCommandFromForm('local'))).toEqual({
+      codexCommandSelection: { kind: 'profile', profileId: 'p-work' },
+    });
+    expect(await page.evaluate(() => (window as any).app._readCaseCodexCommandFromForm('link'))).toEqual({
+      codexCommandSelection: { kind: 'custom', command: 'codex --linked-exact' },
+    });
+    expect(await page.locator('#case-docker .case-codex-command-row').count()).toBe(0);
+    expect(await page.locator('#case-manage .case-codex-command-row').count()).toBe(0);
   });
   it('confirms referenced updates, surfaces usage/delete conflicts, and deletes unused profiles', async () => {
     await page.evaluate(() => (window as any).app.openCodexCommandProfileManager());

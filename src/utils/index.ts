@@ -78,3 +78,4 @@ export {
   profileExists,
 } from './deepseek-cli-resolver.js';
 export type { DeepSeekProfile, DeepSeekProfileKind } from './deepseek-cli-resolver.js';
+export { resolveOmpDir, isOmpAvailable, getOmpNotFoundMessage, getOmpCliVersion } from './omp-cli-resolver.js';

@@ -141,6 +141,7 @@ const ALLOWED_ENV_PREFIXES = [
   // 34-provider-key problem in a new shape, and the answer is the same one.
   'DSH_',
   'DEEPSEEK_',
+  'OMP_',
 ];
 
 /**
@@ -180,7 +181,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_*, PI_*, GROK_*, XAI_*, DSH_*, DEEPSEEK_* keys and CLAUDE_CONFIG_DIR are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_*, PI_*, GROK_*, XAI_*, DSH_*, DEEPSEEK_*, OMP_* keys and CLAUDE_CONFIG_DIR are allowed.',
     }
   );
 
@@ -253,6 +254,7 @@ const CodexConfigSchema = z
       .optional()
       .transform(() => 'hybrid' as const),
   })
+  .strict()
   .optional();
 
 /** Schema for Gemini CLI-specific configuration */
@@ -343,6 +345,25 @@ const GrokConfigSchema = z
       .max(100)
       .regex(/^[a-zA-Z0-9._-]+$/)
       .optional(),
+  })
+  .optional();
+
+/**
+ * Schema for OMP CLI-specific configuration.
+ */
+const OmpConfigSchema = z
+  .object({
+    model: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._\-/]+$/)
+      .optional(),
+    resumeSessionId: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._-]+$/)
+      .optional(),
+    continueSession: z.boolean().optional(),
   })
   .optional();
 
@@ -445,7 +466,9 @@ export const CreateSessionSchema = z.object({
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format')
     .optional(),
   workingDir: safePathSchema.optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek']).optional(),
+  mode: z
+    .enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'])
+    .optional(),
   name: z.string().max(100).optional(),
   tabGroupId: z.string().min(1).max(100).optional(),
   /** Session that spawned this one — see parentSessionIdSchema. */
@@ -464,6 +487,7 @@ export const CreateSessionSchema = z.object({
   piConfig: PiConfigSchema,
   grokConfig: GrokConfigSchema,
   deepSeekConfig: DeepSeekConfigSchema,
+  ompConfig: OmpConfigSchema,
   /** Resume a previous Claude conversation by its session ID (used for reboot recovery) */
   resumeSessionId: z
     .string()
@@ -572,6 +596,14 @@ export const StatusTelemetrySchema = z.object({
 
 // ========== Case Routes ==========
 
+export const CodexCommandSelectionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('default') }),
+  z.object({ kind: z.literal('profile'), profileId: z.string().min(1).max(100) }),
+  z.object({ kind: z.literal('custom'), command: z.string().trim().min(1).max(300) }),
+]);
+
+const LocalCaseCodexCommandSelectionSchema = CodexCommandSelectionSchema.optional();
+
 /**
  * Schema for POST /api/cases
  * Creates a new case folder.
@@ -581,6 +613,7 @@ export const CreateCaseSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
   description: z.string().max(1000).optional(),
+  codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
 });
 
 /**
@@ -601,6 +634,7 @@ export const CloneCaseSchema = z.object({
   /** `--depth 1`. */
   shallow: z.boolean().optional(),
   description: z.string().max(1000).optional(),
+  codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
 });
 
 /** Schema for POST /api/cases/clone-preflight — ask the remote what it has, clone nothing. */
@@ -698,12 +732,6 @@ const remoteWorkspacePathSchema = z
   .max(2000)
   .regex(/^\//, 'Remote path must be absolute')
   .refine((path) => !/[\0\r\n]/.test(path), 'Remote path must not contain NUL, CR, or LF');
-
-export const CodexCommandSelectionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('default') }),
-  z.object({ kind: z.literal('profile'), profileId: z.string().min(1).max(100) }),
-  z.object({ kind: z.literal('custom'), command: z.string().trim().min(1).max(300) }),
-]);
 
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
@@ -986,7 +1014,9 @@ export const QuickStartSchema = z.object({
    *  a real host dir, so the settings file crosses the bind mount); rejected for
    *  remote cases (the file would be written on the WRONG machine). */
   modelOverride: z.string().max(50).optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek']).optional(),
+  mode: z
+    .enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'])
+    .optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
@@ -994,6 +1024,7 @@ export const QuickStartSchema = z.object({
   piConfig: PiConfigSchema,
   grokConfig: GrokConfigSchema,
   deepSeekConfig: DeepSeekConfigSchema,
+  ompConfig: OmpConfigSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
@@ -1590,7 +1621,7 @@ const noNewlines = (v: string) => !/[\r\n]/.test(v);
 /** Shared field shape for creating/updating a scheduled job. */
 const CronJobBaseSchema = z.object({
   name: z.string().min(1).max(200),
-  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek']),
+  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp']),
   workingDir: safePathSchema,
   launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
   promptMode: z.enum(['inline_text', 'prompt_file_path']),
@@ -1650,6 +1681,7 @@ export const CronJobEnabledSchema = z.object({ enabled: z.boolean() });
 export const LinkCaseSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
   path: safePathSchema,
+  codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
 });
 
 /** PUT /api/cases/order */
