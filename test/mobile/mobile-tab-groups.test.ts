@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Browser, BrowserContext } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import type { WebServer } from '../../src/web/server.js';
 import { getBrowser } from './helpers/browser.js';
 import { PORTS } from './helpers/constants.js';
@@ -7,6 +7,42 @@ import { createTestServer, stopTestServer } from './helpers/server.js';
 
 const PORT = PORTS.MOBILE_TAB_GROUPS;
 const BASE_URL = `http://localhost:${PORT}`;
+
+async function seedGroupedSheet(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const app = window.app as any;
+    window.localStorage.removeItem('codeman:mobile-tab-groups-collapsed');
+    window.localStorage.removeItem('codeman:mobile-focus-group-collapsed');
+    for (const id of ['focus-a', 'alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1']) {
+      app.sessions.set(id, { id, name: id, status: 'idle', mode: 'claude', workingDir: '/tmp/Codeman' });
+    }
+    app.sessionOrder = ['alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1', 'focus-a'];
+    app.activeSessionId = 'alpha-1';
+    app.tabAlerts.set('ungrouped-1', 'action');
+    app.tabLayout = {
+      version: 0,
+      updatedAt: '2026-09-04T00:00:00.000Z',
+      groups: [
+        {
+          id: 'g-alpha',
+          name: 'Alpha',
+          refs: [
+            { kind: 'session', id: 'alpha-1' },
+            { kind: 'session', id: 'alpha-2' },
+          ],
+        },
+        { id: 'g-beta', name: 'Beta', refs: [{ kind: 'session', id: 'beta-1' }] },
+      ],
+      ungrouped: [
+        { kind: 'session', id: 'focus-a', focus: true },
+        { kind: 'session', id: 'ungrouped-1' },
+      ],
+    };
+    window.MobileTabSheet._q = '';
+    window.MobileTabSheet._filter = 'all';
+    window.MobileTabSheet.render();
+  });
+}
 
 describe('Mobile grouped session sheet collapse state', () => {
   let browser: Browser;
@@ -112,5 +148,43 @@ describe('Mobile grouped session sheet collapse state', () => {
       return window.MobileTabSheet._mobileFocusCollapsed();
     });
     expect(focusOff).toBe(false);
+  });
+
+  it('uses exact sidebar group and member order without urgency sorting', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    const order = await page.evaluate(() =>
+      [...document.querySelectorAll('#mobileTabList .sheet-row')].map((row) => row.getAttribute('data-session-id'))
+    );
+
+    expect(order).toEqual(['focus-a', 'alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1']);
+  });
+
+  it('renders Focus, named groups, and Ungrouped headers', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    const headers = await page.evaluate(() =>
+      [...document.querySelectorAll('#mobileTabList .sheet-group-name')].map((node) => node.textContent?.trim())
+    );
+
+    expect(headers).toEqual(['Focus', 'Alpha', 'Beta', 'Ungrouped']);
   });
 });

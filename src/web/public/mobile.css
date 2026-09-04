@@ -4083,6 +4083,13 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab .tab-close {
 .sheet-chip{flex-shrink:0;padding:5px 10px;border-radius:20px;font-size:.7rem;background:#0a0a0a;border:1px solid #2b333f;color:#98a2b1;cursor:pointer}
 .sheet-chip.active{background:#38b6f0;color:#04223a;border-color:#38b6f0;font-weight:600}
 .mobile-tab-sheet .sheet-list{flex:1;overflow-y:auto;padding:0 8px 8px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.sheet-group{padding:2px 0 6px}
+.sheet-group-header{display:flex;align-items:center;gap:8px;padding:10px 8px 4px;color:#f3f6fa}
+.sheet-group-toggle{width:28px;height:28px;display:grid;place-items:center;border-radius:6px;color:#98a2b1;background:transparent;border:none;cursor:pointer}
+.sheet-group-toggle .chev{display:inline-block;transition:transform .2s}
+.sheet-group-toggle[aria-expanded="false"] .chev{transform:rotate(-90deg)}
+.sheet-group-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.sheet-group-count{font-size:.68rem;color:#98a2b1}
 .sheet-row{display:flex;align-items:center;gap:8px;padding:10px 8px;border-radius:8px;cursor:pointer}
 .sheet-row:hover{background:#202833}
 .sheet-row.active{background:rgba(34,197,94,.12);border:1px solid rgba(0,255,102,.3)}

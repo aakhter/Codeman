@@ -73,6 +73,103 @@ const MobileTabSheet = {
     this.render();
     return this._mobileFocusCollapsed() === shouldCollapse;
   },
+  _mobileProjection(collapsedGroupIds, focusCollapsed) {
+    const app = window.app;
+    if (!app || typeof window.CodemanTabLayout?.project !== 'function') return null;
+    const sessions = app.sessions;
+    const liveSessionIds = sessions && typeof sessions.keys === 'function' ? [...sessions.keys()] : [];
+    const cids = Array.isArray(collapsedGroupIds) ? collapsedGroupIds : this._mobileCollapsedGroupIds();
+    const fcol = typeof focusCollapsed === 'boolean' ? focusCollapsed : this._mobileFocusCollapsed();
+    try {
+      return window.CodemanTabLayout.project(app.tabLayout || { version: 0, groups: [], ungrouped: [] }, {
+        liveSessionIds,
+        legacySessionOrder: Array.isArray(app.sessionOrder) ? app.sessionOrder : liveSessionIds,
+        openWebviewIds: [],
+        collapsedGroupIds: cids,
+        activeSessionId: app.activeSessionId,
+        activeWebviewId: null,
+        orientation: 'vertical',
+        focusCollapsed: fcol,
+      });
+    } catch (_error) {
+      return null;
+    }
+  },
+  _mobileFallbackSections() {
+    const app = window.app;
+    const order = Array.isArray(app?.sessionOrder) ? app.sessionOrder : [];
+    const sessions = app?.sessions;
+    const refs = order
+      .filter((id) => {
+        try {
+          return sessions?.has?.(id) === true;
+        } catch {
+          return false;
+        }
+      })
+      .map((id) => ({ kind: 'session', id }));
+    return [
+      {
+        id: null,
+        name: '',
+        refs,
+        refIndices: refs.map((_, index) => index),
+        count: refs.length,
+        collapsed: false,
+      },
+    ];
+  },
+  _classifySession(id, session) {
+    const tabAlerts = window.app.tabAlerts;
+    const pendingHooks = window.app.pendingHooks;
+    const alert = tabAlerts?.get(id);
+    const hooks = pendingHooks?.get(id);
+    if (alert === 'action' || hooks?.has('permission_prompt') || hooks?.has('elicitation_dialog')) {
+      return { status: 'action', alert };
+    }
+    if (alert === 'idle' || hooks?.has('idle_prompt')) return { status: 'idle', alert };
+    if (session.status === 'busy' || session.isWorking) return { status: 'busy', alert };
+    return { status: 'idle', alert };
+  },
+  _matchesMobileFilters(item) {
+    if (this._filter === 'needs' && item.status !== 'action') return false;
+    if (this._filter === 'working' && item.status !== 'busy') return false;
+    if (this._filter === 'idle' && item.status !== 'idle') return false;
+    const q = (this._q || '').toLowerCase();
+    if (!q) return true;
+    return (
+      item.session.name?.toLowerCase().includes(q) ||
+      item.id.toLowerCase().includes(q) ||
+      (item.session.mode || '').toLowerCase().includes(q)
+    );
+  },
+  _mobileSheetRow(item, activeId) {
+    const isActive = item.id === activeId;
+    const dotClass =
+      item.status === 'busy'
+        ? 'busy'
+        : item.status === 'action'
+          ? 'action'
+          : item.status === 'idle' && item.alert === 'idle'
+            ? 'idle'
+            : '';
+    const mode = item.session.mode || 'claude';
+    const name = item.session.name || item.id.slice(0, 8);
+    const branch = name.includes('-') ? name.split('-').slice(1).join('-') : '';
+    return `<div class="sheet-row ${isActive ? 'active' : ''}" data-session-id="${item.id}" onclick="MobileTabSheet.activate('${item.id}')">
+        <span class="dot ${dotClass}"></span>
+        <div class="row-info"><div class="row-name">${name}</div><div class="row-meta">${branch || mode} · ${mode}</div></div>
+        <span class="badge ${mode}">${mode.slice(0, 2)}</span>
+        ${item.status === 'action' ? '<span class="row-needs">● needs</span>' : ''}
+        ${item.status === 'busy' ? '<span class="row-working">● working</span>' : ''}
+        <button class="row-close" onclick="event.stopPropagation();MobileTabSheet.closeTab('${item.id}')" aria-label="Close">×</button>
+      </div>`;
+  },
+  _mobileEscapeAttr(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;');
+  },
   init() {
     // Always create elements — _isEnabled gates visibility, not existence (debug on desktop + ensures iPhone race never hides pill)
     this._createElements();
@@ -253,7 +350,26 @@ const MobileTabSheet = {
       pill = document.getElementById('mobileTabPill');
       if (!pill) return;
     }
-    const n = window.app?.sessionOrder?.length || 0;
+    const order = window.app?.sessionOrder || [];
+    let n = order.length;
+    try {
+      const sessions = window.app?.sessions;
+      if (sessions && typeof sessions.has === 'function') {
+        const liveCount = order.filter((id) => {
+          try {
+            return sessions.has(id);
+          } catch {
+            return false;
+          }
+        }).length;
+        // Use the live-session count when the sessions map knows about ordered
+        // ids (or is non-empty); otherwise fall back to raw order length so
+        // fixtures that only set sessionOrder still show the pill.
+        if (liveCount > 0 || (typeof sessions.size === 'number' && sessions.size > 0)) n = liveCount;
+      }
+    } catch {
+      n = order.length;
+    }
     const isMobile = this._isEnabled();
     const showPill = isMobile && n >= 1;
     const hideStrip = isMobile;
@@ -311,81 +427,90 @@ const MobileTabSheet = {
     const countEl = document.querySelector('#mobileTabSheet .sheet-count');
     const footEl = document.querySelector('#mobileTabSheet .sheet-footer-count');
     if (!listEl || !window.app) return;
-    const order = window.app.sessionOrder || [];
-    const sessions = window.app.sessions;
-    const tabAlerts = window.app.tabAlerts;
-    const pendingHooks = window.app.pendingHooks;
-    let items = order
-      .map((id) => {
-        const s = sessions.get(id);
-        if (!s) return null;
-        const alert = tabAlerts?.get(id);
-        const hooks = pendingHooks?.get(id);
-        let status = 'idle';
-        if (alert === 'action' || hooks?.has('permission_prompt') || hooks?.has('elicitation_dialog'))
-          status = 'action';
-        else if (alert === 'idle' || hooks?.has('idle_prompt')) status = 'idle';
-        else if (s.status === 'busy' || s.isWorking) status = 'busy';
-        else status = 'idle';
-        // busy green pulsing is separate from idle yellow
-        return { id, session: s, status, alert };
-      })
-      .filter(Boolean);
+    const app = window.app;
+    const sessions = app.sessions;
+    const activeId = app.activeSessionId;
+    const filtering = this._filter !== 'all' || (this._q || '').length > 0;
+    // Filtered matches temporarily ignore mobile collapse without saving state.
+    const projection = filtering ? this._mobileProjection([], false) : this._mobileProjection();
+    const editable = projection !== null;
+    const focusCollapsed = filtering ? false : this._mobileFocusCollapsed();
+    const collapsedIds = filtering ? [] : this._mobileCollapsedGroupIds();
+    const sections = editable ? projection.sections : this._mobileFallbackSections();
+    const focusIds = editable && !focusCollapsed ? (projection.focusRefs || []).map((ref) => ref.id) : [];
 
-    // filter
-    const q = this._q;
-    items = items.filter((it) => {
-      if (this._filter === 'needs' && it.status !== 'action') return false;
-      if (this._filter === 'working' && it.status !== 'busy') return false;
-      if (this._filter === 'idle' && it.status !== 'idle') return false;
-      if (
-        q &&
-        !it.session.name?.toLowerCase().includes(q) &&
-        !it.id.toLowerCase().includes(q) &&
-        !(it.session.mode || '').toLowerCase().includes(q)
-      )
-        return false;
-      return true;
-    });
+    const itemFor = (id) => {
+      let session = null;
+      try {
+        session = sessions?.get?.(id) ?? null;
+      } catch {
+        session = null;
+      }
+      if (!session) return null;
+      const { status, alert } = this._classifySession(id, session);
+      const item = { id, session, status, alert };
+      if (!this._matchesMobileFilters(item)) return null;
+      return item;
+    };
 
-    // sort: needs first, then working, then active, then rest (keep order for rest)
-    const activeId = window.app.activeSessionId;
-    items.sort((a, b) => {
-      const rank = (s) => (s.status === 'action' ? 0 : s.status === 'busy' ? 1 : s.id === activeId ? 2 : 3);
-      return rank(a) - rank(b);
-    });
+    const focusItems = focusIds.map(itemFor).filter(Boolean);
+    const renderedFocus = focusItems;
+    // Focus renders as a single shortcut section; sessions shown there are not
+    // duplicated in their group section.
+    const focusRenderedIds = new Set(renderedFocus.map((item) => item.id));
+    const renderedGroups = [];
+    for (const section of sections) {
+      const refs = Array.isArray(section?.refs) ? section.refs : [];
+      const items = refs
+        .filter((ref) => ref && ref.kind === 'session' && !focusRenderedIds.has(ref.id))
+        .map((ref) => itemFor(ref.id))
+        .filter(Boolean);
+      if (items.length === 0) continue;
+      renderedGroups.push({ section, items });
+    }
+    const renderedCount = renderedFocus.length + renderedGroups.reduce((sum, g) => sum + g.items.length, 0);
+    const totalLive = (() => {
+      try {
+        return sessions && typeof sessions.keys === 'function' ? [...sessions.keys()].length : 0;
+      } catch {
+        return 0;
+      }
+    })();
 
-    if (countEl) countEl.textContent = items.length + ' / ' + order.length;
-    if (footEl) footEl.textContent = items.length + ' tabs';
-    if (items.length === 0) {
+    if (countEl) countEl.textContent = renderedCount + ' / ' + totalLive;
+    if (footEl) footEl.textContent = renderedCount + ' tabs';
+    const updateCountEl = document.querySelector('#mobileTabPill .pill-count');
+    if (updateCountEl) updateCountEl.textContent = String(totalLive);
+    if (renderedCount === 0) {
       listEl.innerHTML = `<div style="padding:28px;text-align:center;color:#98a2b1;font-size:.85rem">No tabs match<br><small>Try All or clear search</small></div>`;
       return;
     }
-    listEl.innerHTML = items
-      .map((it) => {
-        const s = it.session;
-        const isActive = it.id === activeId;
-        const dotClass =
-          it.status === 'busy'
-            ? 'busy'
-            : it.status === 'action'
-              ? 'action'
-              : it.status === 'idle' && it.alert === 'idle'
-                ? 'idle'
-                : '';
-        const mode = s.mode || 'claude';
-        const name = s.name || it.id.slice(0, 8);
-        const branch = name.includes('-') ? name.split('-').slice(1).join('-') : '';
-        return `<div class="sheet-row ${isActive ? 'active' : ''}" onclick="MobileTabSheet.activate('${it.id}')">
-        <span class="dot ${dotClass}"></span>
-        <div class="row-info"><div class="row-name">${name}</div><div class="row-meta">${branch || mode} · ${mode}</div></div>
-        <span class="badge ${mode}">${mode.slice(0, 2)}</span>
-        ${it.status === 'action' ? '<span class="row-needs">● needs</span>' : ''}
-        ${it.status === 'busy' ? '<span class="row-working">● working</span>' : ''}
-        <button class="row-close" onclick="event.stopPropagation();MobileTabSheet.closeTab('${it.id}')" aria-label="Close">×</button>
-      </div>`;
-      })
-      .join('');
+
+    const html = [];
+    if (renderedFocus.length > 0) {
+      html.push(
+        `<div class="sheet-group" data-sheet-focus-group>` +
+          `<div class="sheet-group-header"><button type="button" class="sheet-group-toggle" aria-label="Collapse Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="MobileTabSheet.toggleMobileFocusCollapsed()"><span class="chev">▾</span></button>` +
+          `<span class="sheet-group-name">Focus</span><span class="sheet-group-count">${renderedFocus.length}</span></div>` +
+          renderedFocus.map((item) => this._mobileSheetRow(item, activeId)).join('') +
+          `</div>`
+      );
+    }
+    for (const { section, items } of renderedGroups) {
+      const isUngrouped = section.id === null || section.id === undefined;
+      const label = isUngrouped ? 'Ungrouped' : section.name || 'Ungrouped';
+      const isCollapsed = !filtering && !isUngrouped && collapsedIds.includes(section.id);
+      const toggleAttr = isUngrouped
+        ? ''
+        : `<button type="button" class="sheet-group-toggle" aria-label="${isCollapsed ? 'Expand' : 'Collapse'} ${label}" aria-expanded="${isCollapsed ? 'false' : 'true'}" data-sheet-group-header="${this._mobileEscapeAttr(section.id)}" onclick="MobileTabSheet.toggleMobileGroupCollapsed(this.dataset.sheetGroupHeader)"><span class="chev">▾</span></button>`;
+      html.push(
+        `<div class="sheet-group" data-sheet-group-id="${this._mobileEscapeAttr(section.id ?? '')}">` +
+          `<div class="sheet-group-header">${toggleAttr}<span class="sheet-group-name">${label}</span><span class="sheet-group-count">${section.count ?? items.length}</span></div>` +
+          (isCollapsed ? '' : items.map((item) => this._mobileSheetRow(item, activeId)).join('')) +
+          `</div>`
+      );
+    }
+    listEl.innerHTML = html.join('');
   },
   activate(id) {
     try {
