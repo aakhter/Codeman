@@ -81,7 +81,7 @@ const MobileTabSheet = {
     const cids = Array.isArray(collapsedGroupIds) ? collapsedGroupIds : this._mobileCollapsedGroupIds();
     const fcol = typeof focusCollapsed === 'boolean' ? focusCollapsed : this._mobileFocusCollapsed();
     try {
-      return window.CodemanTabLayout.project(app.tabLayout || { version: 0, groups: [], ungrouped: [] }, {
+      const projection = window.CodemanTabLayout.project(app.tabLayout || { version: 0, groups: [], ungrouped: [] }, {
         liveSessionIds,
         legacySessionOrder: Array.isArray(app.sessionOrder) ? app.sessionOrder : liveSessionIds,
         openWebviewIds: [],
@@ -91,6 +91,26 @@ const MobileTabSheet = {
         orientation: 'vertical',
         focusCollapsed: fcol,
       });
+      // While filtering, narrow the projection to matching sessions — same
+      // shape as the desktop rail's search path (filterSessionProjection).
+      if (
+        (this._filter !== 'all' || (this._q || '').length > 0) &&
+        typeof window.CodemanTabLayout?.filterSessionProjection === 'function'
+      ) {
+        const matchingSessionIds = liveSessionIds.filter((id) => {
+          let session = null;
+          try {
+            session = sessions?.get?.(id) ?? null;
+          } catch {
+            return false;
+          }
+          if (!session) return false;
+          const { status, alert } = this._classifySession(id, session);
+          return this._matchesMobileFilters({ id, session, status, alert });
+        });
+        return window.CodemanTabLayout.filterSessionProjection(projection, matchingSessionIds);
+      }
+      return projection;
     } catch (_error) {
       return null;
     }
@@ -438,6 +458,7 @@ const MobileTabSheet = {
     const collapsedIds = filtering ? [] : this._mobileCollapsedGroupIds();
     const sections = editable ? projection.sections : this._mobileFallbackSections();
     const focusIds = editable && !focusCollapsed ? (projection.focusRefs || []).map((ref) => ref.id) : [];
+    const focusRefsVisible = focusIds.length > 0;
 
     const itemFor = (id) => {
       let session = null;
@@ -454,9 +475,10 @@ const MobileTabSheet = {
     };
 
     const focusItems = focusIds.map(itemFor).filter(Boolean);
-    const renderedFocus = focusItems;
     // Focus renders as a single shortcut section; sessions shown there are not
-    // duplicated in their group section.
+    // duplicated in their group section. Note: focusIds is already [] when the
+    // Focus group is collapsed, so renderedFocus is [] in that case.
+    const renderedFocus = focusItems;
     const focusRenderedIds = new Set(renderedFocus.map((item) => item.id));
     const renderedGroups = [];
     for (const section of sections) {
@@ -503,10 +525,23 @@ const MobileTabSheet = {
       const toggleAttr = isUngrouped
         ? ''
         : `<button type="button" class="sheet-group-toggle" aria-label="${isCollapsed ? 'Expand' : 'Collapse'} ${label}" aria-expanded="${isCollapsed ? 'false' : 'true'}" data-sheet-group-header="${this._mobileEscapeAttr(section.id)}" onclick="MobileTabSheet.toggleMobileGroupCollapsed(this.dataset.sheetGroupHeader)"><span class="chev">▾</span></button>`;
+      // Focus sessions render in the Focus shortcut section, never duplicated
+      // inside group sections. When Focus is collapsed there is no Focus
+      // section, so a Focus session reappears in its group instead of
+      // vanishing. Only the Ungrouped group section can hold Focus sessions
+      // in the current layout; named groups never do.
+      const visibleItems = isUngrouped ? items.filter((item) => !item.session?.focus) : items;
+      // A Focus-collapsed session reappears in its group section, so it must
+      // not be dropped by the Focus-dedup filter above. When Focus is
+      // collapsed there is no Focus section, so nothing is duplicated.
+      const focusDupes = !isUngrouped ? [] : items.filter((item) => item.session?.focus);
+      const restoredFocus = !isUngrouped || focusRefsVisible ? [] : focusDupes;
+      if (visibleItems.length === 0 && restoredFocus.length === 0 && (isUngrouped ? !filtering : true)) continue;
+      const shownItems = [...visibleItems, ...restoredFocus];
       html.push(
         `<div class="sheet-group" data-sheet-group-id="${this._mobileEscapeAttr(section.id ?? '')}">` +
-          `<div class="sheet-group-header">${toggleAttr}<span class="sheet-group-name">${label}</span><span class="sheet-group-count">${section.count ?? items.length}</span></div>` +
-          (isCollapsed ? '' : items.map((item) => this._mobileSheetRow(item, activeId)).join('')) +
+          `<div class="sheet-group-header">${toggleAttr}<span class="sheet-group-name">${label}</span><span class="sheet-group-count">${section.count ?? shownItems.length}</span></div>` +
+          (isCollapsed ? '' : shownItems.map((item) => this._mobileSheetRow(item, activeId)).join('')) +
           `</div>`
       );
     }

@@ -11,6 +11,8 @@ const BASE_URL = `http://localhost:${PORT}`;
 async function seedGroupedSheet(page: Page): Promise<void> {
   await page.evaluate(() => {
     const app = window.app as any;
+    // Reset filter + collapse state so tests are isolated: collapse toggles
+    // from other tests persist in localStorage, and _q/_filter leak in memory.
     window.localStorage.removeItem('codeman:mobile-tab-groups-collapsed');
     window.localStorage.removeItem('codeman:mobile-focus-group-collapsed');
     for (const id of ['focus-a', 'alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1']) {
@@ -186,5 +188,175 @@ describe('Mobile grouped session sheet collapse state', () => {
     );
 
     expect(headers).toEqual(['Focus', 'Alpha', 'Beta', 'Ungrouped']);
+  });
+
+  it('filters within groups while preserving order and revealing matches', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    await page.evaluate(() => {
+      window.MobileTabSheet.toggleMobileGroupCollapsed('g-beta', true);
+      window.MobileTabSheet._q = 'beta';
+      window.MobileTabSheet._filter = 'all';
+      window.MobileTabSheet.render();
+    });
+
+    const headers = await page.evaluate(() =>
+      [...document.querySelectorAll('#mobileTabList .sheet-group-name')].map((node) => node.textContent?.trim())
+    );
+    const rows = await page.evaluate(() =>
+      [...document.querySelectorAll('#mobileTabList .sheet-row')].map((row) => row.getAttribute('data-session-id'))
+    );
+
+    expect(headers).toEqual(['Beta']);
+    expect(rows).toEqual(['beta-1']);
+
+    await page.evaluate(() => {
+      window.MobileTabSheet._q = '';
+      window.MobileTabSheet._filter = 'all';
+      window.MobileTabSheet.render();
+    });
+  });
+
+  it('counts only rendered live sessions when sessionOrder contains stale IDs', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    const counts = await page.evaluate(() => {
+      window.app.sessionOrder = [...window.app.sessionOrder, 'missing-session'];
+      window.MobileTabSheet.updatePill();
+      window.MobileTabSheet.render();
+      return {
+        header: document.querySelector('#mobileTabSheet .sheet-count')?.textContent,
+        footer: document.querySelector('#mobileTabSheet .sheet-footer-count')?.textContent,
+        pill: document.querySelector('#mobileTabPill .pill-count')?.textContent,
+      };
+    });
+
+    expect(counts).toEqual({ header: '5 / 5', footer: '5 tabs', pill: '5' });
+  });
+
+  it('activates and closes sessions from grouped rows', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    // Stub closeSession so closeTab() actually removes the session from app state
+    // without firing DELETE requests or tmux kills. selectSession is real: the
+    // seeded sessions exist in app.sessions, so activation asserts a real change.
+    await page.evaluate(() => {
+      const app = window.app as any;
+      app.closeSession = async (sessionId: string) => {
+        app.sessions.delete(sessionId);
+        app.sessionOrder = app.sessionOrder.filter((id: string) => id !== sessionId);
+        if (app.activeSessionId === sessionId) {
+          app.activeSessionId = app.sessionOrder[0] ?? null;
+        }
+        window.MobileTabSheet.render();
+      };
+    });
+
+    await page.evaluate(() => window.MobileTabSheet.activate('beta-1'));
+    await expect.poll(() => page.evaluate(() => window.app.activeSessionId), { timeout: 15000 }).toBe('beta-1');
+
+    // Seeded sessions carry no pid, so selectSession's re-attach fetch 404s in
+    // the test server — keep activation's real activeSessionId assertion, then
+    // return to a pre-close live session before closing so no network can
+    // interfere with the close path.
+    await page.evaluate(() => window.MobileTabSheet.activate('alpha-1'));
+    await expect.poll(() => page.evaluate(() => window.app.activeSessionId), { timeout: 15000 }).toBe('alpha-1');
+
+    await page.evaluate(() => {
+      window.MobileTabSheet.toggleMobileGroupCollapsed('g-alpha', true);
+      window.MobileTabSheet.toggle(true);
+      window.MobileTabSheet.closeTab('beta-1');
+    });
+    await expect
+      .poll(() => page.evaluate(() => document.querySelector('#mobileTabList [data-session-id="beta-1"]') === null), {
+        timeout: 5000,
+      })
+      .toBe(true);
+    const collapsed = await page.evaluate(() => window.MobileTabSheet._mobileCollapsedGroupIds());
+    expect(collapsed).toEqual(['g-alpha']);
+  });
+
+  it('falls back to one Ungrouped section when tab layout is unavailable', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    // Fresh page load (no seedGroupedSheet dependency): the fallback derives
+    // rows from sessionOrder alone, so seed minimal session state directly.
+    // Isolates this test from sessions removed by earlier tests in this file.
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+
+    const saved = await page.evaluate(() => {
+      const app = window.app as any;
+      window.localStorage.removeItem('codeman:mobile-tab-groups-collapsed');
+      window.localStorage.removeItem('codeman:mobile-focus-group-collapsed');
+      for (const id of ['focus-a', 'alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1']) {
+        app.sessions.set(id, { id, name: id, status: 'idle', mode: 'claude', workingDir: '/tmp/Codeman' });
+      }
+      app.sessionOrder = ['alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1', 'focus-a'];
+      app.activeSessionId = 'alpha-1';
+      window.MobileTabSheet._q = '';
+      window.MobileTabSheet._filter = 'all';
+      const savedLayout = (window as any).CodemanTabLayout;
+      (window.app as any).tabLayout = null;
+      (window as any).CodemanTabLayout = undefined;
+      window.MobileTabSheet._q = '';
+      window.MobileTabSheet._filter = 'all';
+      window.MobileTabSheet.render();
+      return {
+        saved: typeof savedLayout?.project === 'function',
+        headers: [...document.querySelectorAll('#mobileTabList .sheet-group-name')].map((node) =>
+          node.textContent?.trim()
+        ),
+        rows: [...document.querySelectorAll('#mobileTabList .sheet-row')].map((row) =>
+          row.getAttribute('data-session-id')
+        ),
+      };
+    });
+
+    // Restore the layout helper for any later tests in this file.
+    await page.evaluate(() => {
+      window.location.reload();
+    });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+
+    expect(saved.saved).toBe(true);
+    expect(saved.headers).toEqual(['Ungrouped']);
+    // Fallback derives row order from sessionOrder (session state), not from
+    // the layout: the fixture puts focus-a last in sessionOrder, while the
+    // projection renders the Focus shortcut section first.
+    expect(saved.rows).toEqual(['alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1', 'focus-a']);
+    expect(saved.rows).toEqual(['alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1', 'focus-a']);
   });
 });
