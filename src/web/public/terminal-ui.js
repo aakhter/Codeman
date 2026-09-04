@@ -2433,67 +2433,149 @@ Object.assign(CodemanApp.prototype, {
         return true;
       };
 
-      // COD-288 follow-up: numbered and bulleted list items are the one safe
-      // embedded form for an unquoted path with spaces. Reserve the full path
-      // range even when it is rejected so later token/log scanners cannot
-      // manufacture a misleading relative tail from it.
+      const isSingleRelativePath = (candidate) => {
+        // Marker and labeled surfaces use this same gate, so keep the line to a
+        // short spine: same rejection grammar as isSingleAbsolutePath, minus the
+        // absolute root, plus a mandatory slash and a mandatory space — a spaced
+        // relative path is the only form that cannot survive token scanning.
+        if (
+          !candidate ||
+          candidate.startsWith('/') ||
+          candidate.length > 1000 ||
+          /[\x00-\x1f\\"'`]/.test(candidate) ||
+          candidate.includes('://') ||
+          / (?:—|–|→|=>|->) /.test(candidate)
+        )
+          return false;
+        const normalized = normalizePathParts(candidate, false);
+        if (!normalized || normalized !== candidate || !previewExtensions.has(extensionOf(candidate))) return false;
+
+        const chunks = candidate.split(/[ \t]+/);
+        if (chunks.length < 2) return false;
+        for (const chunk of chunks.slice(0, -1)) {
+          const trimmed = chunk.replace(/^[([{]+/, '').replace(/[.,;:!?\])}]+$/, '');
+          if (/\.[a-z0-9]{1,10}$/i.test(trimmed)) return false;
+        }
+        return candidate.includes('/');
+      };
+
+      // Numbered and bulleted list items are the one safe embedded form for an
+      // unquoted path with spaces. Reserve the full path range even when it is
+      // rejected so later token/log scanners cannot manufacture a misleading
+      // relative tail from it.
       let foundMarker = false;
+      const markerRelativePaths = [];
       for (const markerOffset of markerOffsets) {
-        const markerMatch = /^(\s*(?:\d+[.)]|[-*•])[ \t]+)(\/.*)$/.exec(lineText.slice(markerOffset));
+        const markerMatch = /^(\s*(?:\d+[.)]|[-*•])[ \t]+)(.+)$/.exec(lineText.slice(markerOffset));
         if (!markerMatch) continue;
         foundMarker = true;
         const rawCandidate = markerMatch[2];
         const candidate = trimTrailingPunctuation(rawCandidate);
         const startIndex = markerOffset + markerMatch[1].length;
         const endIndex = startIndex + candidate.length;
-        if (!isSingleAbsolutePath(candidate)) {
-          const leadingToken = candidate.split(/[ \t]+/, 1)[0];
-          blockPreview(startIndex, lineText.length, {
-            allowAbsolute: true,
-            allowRelative: /^\/\S+\.[a-z0-9]{1,10}$/i.test(leadingToken),
-          });
+        if (candidate.startsWith('/')) {
+          if (!isSingleAbsolutePath(candidate)) {
+            const leadingToken = candidate.split(/[ \t]+/, 1)[0];
+            blockPreview(startIndex, lineText.length, {
+              allowAbsolute: true,
+              allowRelative: /^\/\S+\.[a-z0-9]{1,10}$/i.test(leadingToken),
+            });
+            continue;
+          }
+          blockPreview(startIndex, lineText.length);
+
+          const relativePath = normalizePreviewPath(candidate, workingDir);
+          if (relativePath) {
+            references.push({ text: candidate, relativePath, startIndex, endIndex });
+            continue;
+          }
+
+          if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
+            references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
+            continue;
+          }
+
+          // A syntactically complete marker path that cannot use the external
+          // attachment resolver must not fall through to a host-path legacy link.
+          suppress(startIndex, lineText.length);
+          continue;
+        }
+
+        const relativeBase = relativeResolutionBase(workingDir, session);
+        if (!isSingleRelativePath(candidate)) {
+          suppress(startIndex, endIndex);
           continue;
         }
         blockPreview(startIndex, lineText.length);
-
-        const relativePath = normalizePreviewPath(candidate, workingDir);
-        if (relativePath) {
-          references.push({ text: candidate, relativePath, startIndex, endIndex });
-          continue;
+        const target = resolveRelativeCandidate(candidate, workingDir, relativeBase);
+        if (target) {
+          references.push({ text: candidate, ...target, startIndex, endIndex });
+          markerRelativePaths.push({ startIndex, endIndex });
+        } else if (
+          !session?.remote &&
+          !session?.docker &&
+          attachmentExtensions.has(extensionOf(candidate)) &&
+          relativeBase &&
+          relativeBase.startsWith('/')
+        ) {
+          const absolute = normalizePathParts(`${relativeBase.replace(/\/+$/, '')}/${candidate}`, true);
+          if (absolute) references.push({ text: candidate, absolutePath: absolute, startIndex, endIndex });
+        } else {
+          suppress(startIndex, endIndex);
         }
-
-        if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
-          references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
-          continue;
-        }
-
-        // A syntactically complete marker path that cannot use the external
-        // attachment resolver must not fall through to a host-path legacy link.
-        suppress(startIndex, lineText.length);
       }
 
-      // A few CLI formats prefix a complete absolute path with a stable label
-      // rather than placing it on its own line. Treat only the approved labels
-      // as a complete path boundary so spaces cannot make token scanning link a
-      // relative tail from the middle of the path.
-      const labeledPathMatch = /^\s*(?:path|file|saved to):[ \t]+(\/.*)$/i.exec(lineText);
+      // A few CLI formats prefix a complete path with a stable label rather
+      // than placing it on its own line. Treat only the approved labels as a
+      // complete path boundary so spaces cannot make token scanning link a
+      // relative tail from the middle of the path. Labeled relative paths join
+      // the same allowlist the marker scanner uses — see isSingleRelativePath
+      // above — so either surface links the whole candidate or nothing.
+      const labeledPathMatch = /^\s*(?:path|file|saved to):[ \t]+(.+)$/i.exec(lineText);
       if (labeledPathMatch) {
         const rawCandidate = labeledPathMatch[1];
         const candidate = trimTrailingPunctuation(rawCandidate);
         const startIndex = labeledPathMatch[0].length - rawCandidate.length;
         const endIndex = startIndex + candidate.length;
+        const relativeBase = relativeResolutionBase(workingDir, session);
 
-        if (!isSingleAbsolutePath(candidate)) {
-          suppress(startIndex, lineText.length);
+        if (candidate.startsWith('/')) {
+          if (!isSingleAbsolutePath(candidate)) {
+            suppress(startIndex, lineText.length);
+          } else {
+            blockPreview(startIndex, lineText.length);
+            const relativePath = normalizePreviewPath(candidate, workingDir);
+            if (relativePath) {
+              references.push({ text: candidate, relativePath, startIndex, endIndex });
+            } else if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
+              references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
+            } else {
+              suppress(startIndex, lineText.length);
+            }
+          }
+        } else if (!isSingleRelativePath(candidate)) {
+          suppress(startIndex, endIndex);
         } else {
           blockPreview(startIndex, lineText.length);
-          const relativePath = normalizePreviewPath(candidate, workingDir);
-          if (relativePath) {
-            references.push({ text: candidate, relativePath, startIndex, endIndex });
-          } else if (!session?.remote && !session?.docker && attachmentExtensions.has(extensionOf(candidate))) {
-            references.push({ text: candidate, absolutePath: candidate, startIndex, endIndex });
+          const target = resolveRelativeCandidate(candidate, workingDir, relativeBase);
+          if (target) {
+            references.push({ text: candidate, ...target, startIndex, endIndex });
+            markerRelativePaths.push({ startIndex, endIndex });
+          } else if (
+            !session?.remote &&
+            !session?.docker &&
+            attachmentExtensions.has(extensionOf(candidate)) &&
+            relativeBase &&
+            relativeBase.startsWith('/')
+          ) {
+            const absolute = normalizePathParts(`${relativeBase.replace(/\/+$/, '')}/${candidate}`, true);
+            if (absolute) {
+              references.push({ text: candidate, absolutePath: absolute, startIndex, endIndex });
+            } else {
+              suppress(startIndex, endIndex);
+            }
           } else {
-            suppress(startIndex, lineText.length);
+            suppress(startIndex, endIndex);
           }
         }
       }
@@ -2533,6 +2615,8 @@ Object.assign(CodemanApp.prototype, {
 
       const isHardDelimiter = (char) => !char || /[\s\x00-\x1f<>|;&]/.test(char);
       const isTokenDelimiter = (char) => isHardDelimiter(char) || char === '"' || char === "'" || char === '`';
+      const isWithinMarkerRelativePath = (startIndex, endIndex) =>
+        markerRelativePaths.some((range) => startIndex >= range.startIndex && endIndex <= range.endIndex);
       const addCandidate = (raw, rawStart) => {
         let startTrim = 0;
         let endTrim = raw.length;
@@ -2542,6 +2626,7 @@ Object.assign(CodemanApp.prototype, {
         const startIndex = rawStart + startTrim;
         const endIndex = rawStart + endTrim;
         if (isBlockedPreview(text, startIndex, endIndex)) return;
+        if (isWithinMarkerRelativePath(startIndex, endIndex)) return;
         if (!text.startsWith('/')) {
           const target = resolveRelativeCandidate(text, workingDir, relativeBase);
           if (!target) return;

@@ -811,6 +811,58 @@ describe('COD-390 labeled absolute paths with spaces', () => {
   });
 });
 
+describe('COD-390 labeled spaced relative paths', () => {
+  const RELATIVE = '03 Attachments/Whiteglove Build SIPOC Design/Whiteglove-Build-SIPOC.pptx';
+
+  it.each(['Path:', 'File:', 'Saved to:'])('links the complete spaced relative path after %s', (label) => {
+    const { provide, previewSpy, originalSessionId } = makeHarness(`${label} ${RELATIVE}`, {
+      workingDir: '/workspace/project',
+    });
+
+    const [link] = provide();
+    expect(link.text).toBe(RELATIVE);
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(RELATIVE, originalSessionId);
+  });
+
+  it('links the complete spaced bullet relative path', () => {
+    const relative = '03 Attachments/Whiteglove Build SIPOC Design/Whiteglove-Build-SIPOC.pptx';
+    const { provide, previewSpy, originalSessionId } = makeHarness(`- ${relative}`, {
+      workingDir: '/workspace/project',
+    });
+
+    const [link] = provide();
+    expect(link.text).toBe(relative);
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
+  });
+
+  it('routes a bullet relative path through the pane cwd when it left the workspace', () => {
+    const relative = '03 Attachments/Whiteglove Build SIPOC Design/Whiteglove-Build-SIPOC.pptx';
+    const { provide, externalPreviewSpy, previewSpy, originalSessionId } = makeHarness(`- ${relative}`, {
+      workingDir: '/workspace/project',
+      cwd: '/mnt/c/projects/stash-recommender',
+    });
+
+    const [link] = provide();
+    expect(link.text).toBe(relative);
+    link.activate(null, link.text);
+    expect(externalPreviewSpy).toHaveBeenCalledWith(
+      '/mnt/c/projects/stash-recommender/03 Attachments/Whiteglove Build SIPOC Design/Whiteglove-Build-SIPOC.pptx',
+      originalSessionId
+    );
+    expect(previewSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not link a relative tail from an invalid labeled relative candidate', () => {
+    const { provide } = makeHarness('File: 03 Attachments/../private/report.xlsx', {
+      workingDir: '/workspace/project',
+    });
+
+    expect(provide()).toEqual([]);
+  });
+});
+
 describe('COD-288 marker-prefixed absolute paths', () => {
   const REPORTED =
     '/mnt/c/kb-data/webex-archive/Isovalent and Cisco Unified Edge_265668a5/attachments/cilium-pnet-whitepaper-draft9-5.pdf';
