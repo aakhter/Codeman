@@ -457,7 +457,7 @@ const MobileTabSheet = {
     const focusCollapsed = filtering ? false : this._mobileFocusCollapsed();
     const collapsedIds = filtering ? [] : this._mobileCollapsedGroupIds();
     const sections = editable ? projection.sections : this._mobileFallbackSections();
-    const focusIds = editable && !focusCollapsed ? (projection.focusRefs || []).map((ref) => ref.id) : [];
+    const allFocusIds = editable ? (projection.focusRefs || []).map((ref) => ref.id) : [];
 
     const itemFor = (id) => {
       let session = null;
@@ -473,13 +473,14 @@ const MobileTabSheet = {
       return item;
     };
 
-    const focusItems = focusIds.map(itemFor).filter(Boolean);
+    const focusHeaderItems = allFocusIds.map(itemFor).filter(Boolean);
+    const renderedFocus = focusCollapsed ? [] : focusHeaderItems;
     // Focus renders as a shortcut section AND sessions remain in their
     // canonical group/Ungrouped section (desktop-rail parity). Focus
     // membership is driven purely off projection focusRefs — never off
-    // item.session.focus. When Focus is collapsed, focusIds is already [],
-    // so there is no Focus section and sessions show only canonically.
-    const renderedFocus = focusItems;
+    // item.session.focus. When Focus is collapsed, only the header renders
+    // (zero rows) so the section stays expandable, mirroring collapsed
+    // named groups.
     const renderedGroups = [];
     for (const section of sections) {
       const refs = Array.isArray(section?.refs) ? section.refs : [];
@@ -509,12 +510,12 @@ const MobileTabSheet = {
     }
 
     const html = [];
-    if (renderedFocus.length > 0) {
+    if (focusHeaderItems.length > 0) {
       html.push(
         `<div class="sheet-group" data-sheet-focus-group>` +
-          `<div class="sheet-group-header"><button type="button" class="sheet-group-toggle" aria-label="Collapse Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="MobileTabSheet.toggleMobileFocusCollapsed()"><span class="chev">▾</span></button>` +
-          `<span class="sheet-group-name">Focus</span><span class="sheet-group-count">${renderedFocus.length}</span></div>` +
-          renderedFocus.map((item) => this._mobileSheetRow(item, activeId)).join('') +
+          `<div class="sheet-group-header"><button type="button" class="sheet-group-toggle" aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="MobileTabSheet.toggleMobileFocusCollapsed()"><span class="chev">▾</span></button>` +
+          `<span class="sheet-group-name">Focus</span><span class="sheet-group-count">${focusHeaderItems.length}</span></div>` +
+          (focusCollapsed ? '' : renderedFocus.map((item) => this._mobileSheetRow(item, activeId)).join('')) +
           `</div>`
       );
     }

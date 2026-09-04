@@ -256,6 +256,60 @@ describe('Mobile grouped session sheet collapse state', () => {
     expect(headers).toEqual(['Focus', 'Alpha', 'Beta', 'Ungrouped']);
   });
 
+  it('keeps the collapsed Focus header expandable with zero rows', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    // Collapse Focus: header must stay rendered with zero rows underneath.
+    await page.evaluate(() => window.MobileTabSheet.toggleMobileFocusCollapsed(true));
+    const collapsed = await page.evaluate(() => {
+      const focusGroup = document.querySelector('#mobileTabList [data-sheet-focus-group]');
+      const toggle = focusGroup?.querySelector('.sheet-group-toggle');
+      return {
+        header: focusGroup?.querySelector('.sheet-group-name')?.textContent?.trim(),
+        count: focusGroup?.querySelector('.sheet-group-count')?.textContent?.trim(),
+        rows: [...(focusGroup?.querySelectorAll('.sheet-row') ?? [])].map((row) => row.getAttribute('data-session-id')),
+        ariaExpanded: toggle?.getAttribute('aria-expanded'),
+        ariaLabel: toggle?.getAttribute('aria-label'),
+        focusCollapsed: window.MobileTabSheet._mobileFocusCollapsed(),
+      };
+    });
+    expect(collapsed.header).toBe('Focus');
+    expect(collapsed.count).toBe('1');
+    expect(collapsed.rows).toEqual([]);
+    expect(collapsed.ariaExpanded).toBe('false');
+    expect(collapsed.ariaLabel).toBe('Expand Focus');
+    expect(collapsed.focusCollapsed).toBe(true);
+
+    // Expand again via the header toggle button: the focus row returns.
+    await page.evaluate(() => {
+      document
+        .querySelector('#mobileTabList [data-sheet-focus-group] .sheet-group-toggle')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const expanded = await page.evaluate(() => {
+      const focusGroup = document.querySelector('#mobileTabList [data-sheet-focus-group]');
+      return {
+        rows: [...(focusGroup?.querySelectorAll('.sheet-row') ?? [])].map((row) => row.getAttribute('data-session-id')),
+        focusCollapsed: window.MobileTabSheet._mobileFocusCollapsed(),
+      };
+    });
+    expect(expanded.rows).toEqual(['focus-a']);
+    expect(expanded.focusCollapsed).toBe(false);
+
+    // Reset collapsed state so later tests start expanded (seedGroupedSheet on
+    // the next page load also clears localStorage, this is belt-and-braces).
+    await page.evaluate(() => window.MobileTabSheet.toggleMobileFocusCollapsed(false));
+  });
+
   it('filters within groups while preserving order and revealing matches', async () => {
     const context = await browser.newContext({
       viewport: { width: 440, height: 900 },
