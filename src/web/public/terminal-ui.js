@@ -5496,7 +5496,26 @@ Object.assign(CodemanApp.prototype, {
     } catch {
       // A broken visual state reader must never affect terminal output.
     }
-    const noteAuthoritativeOutput = () => {
+    const writtenTerminal = this.terminal;
+    const writtenSessionId = this.activeSessionId;
+    const writtenSelectGeneration = this._selectGeneration;
+    const shouldStickToBottom = this._wasAtBottomBeforeWrite;
+    const afterTerminalWrite = () => {
+      // xterm writes parse asynchronously, then schedule their render. Restore
+      // the sticky viewport on the following frame so the new rows exist before
+      // scrolling; doing it either before this callback or inside it can leave
+      // the viewport on the echoed command instead of live output.
+      requestAnimationFrame(() => {
+        if (
+          shouldStickToBottom &&
+          !this._hasRecentUserScrollUp() &&
+          this.terminal === writtenTerminal &&
+          this.activeSessionId === writtenSessionId &&
+          this._selectGeneration === writtenSelectGeneration
+        ) {
+          this.terminal.scrollToBottom();
+        }
+      });
       const fallback = authoritativeFallback;
       if (!fallback) return;
       try {
@@ -5516,10 +5535,10 @@ Object.assign(CodemanApp.prototype, {
     };
 
     if (_joinedLen <= MAX_FRAME_BYTES) {
-      this.terminal.write(joined, noteAuthoritativeOutput);
+      this.terminal.write(joined, afterTerminalWrite);
     } else {
       // Write first chunk now, defer rest to next frame
-      this.terminal.write(joined.slice(0, MAX_FRAME_BYTES), noteAuthoritativeOutput);
+      this.terminal.write(joined.slice(0, MAX_FRAME_BYTES), afterTerminalWrite);
       for (const entry of deferredEntries) {
         this._queuePendingTerminalWrite(entry.data, entry.epoch);
       }
@@ -5539,14 +5558,6 @@ Object.assign(CodemanApp.prototype, {
       console.warn(
         `[CRASH-DIAG] flushPendingWrites: ${_dt.toFixed(0)}ms, ${(bytesThisFrame / 1024).toFixed(0)}KB written${deferred ? ', rest deferred' : ''} (total ${(_joinedLen / 1024).toFixed(0)}KB)`
       );
-
-    // Sticky scroll: if user was at bottom, keep them there after new output.
-    // Give manual scroll-up gestures a short grace window so high-frequency
-    // Codex status ticks do not snap the viewport back while the user is
-    // trying to inspect earlier output.
-    if (this._wasAtBottomBeforeWrite && !this._hasRecentUserScrollUp()) {
-      this.terminal.scrollToBottom();
-    }
 
     // Re-position local echo overlay after terminal writes — Ink redraws can
     // move the ❯ prompt to a different row, making the overlay invisible.

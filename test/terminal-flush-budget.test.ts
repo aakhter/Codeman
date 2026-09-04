@@ -5,13 +5,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 function loadTerminalUiHarness(mode: string) {
   const CodemanApp = function CodemanApp(this: any) {};
+  const animationFrames: Array<() => void> = [];
   const context = vm.createContext({
     window: {},
     CodemanApp,
     console: { warn: vi.fn(), log: vi.fn() },
     _crashDiag: { log: vi.fn() },
     performance: { now: () => 0 },
-    requestAnimationFrame: (_fn: () => void) => 1,
+    requestAnimationFrame: (fn: () => void) => {
+      animationFrames.push(fn);
+      return animationFrames.length;
+    },
     setTimeout: (_fn: () => void) => 1,
     Blob: function Blob() {},
     URL: {
@@ -43,7 +47,13 @@ function loadTerminalUiHarness(mode: string) {
     scrollToLine: () => {},
   };
 
-  return { app, writes };
+  return {
+    app,
+    writes,
+    runAnimationFrames: () => {
+      while (animationFrames.length > 0) animationFrames.shift()?.();
+    },
+  };
 }
 
 describe('terminal flush budget', () => {
@@ -219,6 +229,81 @@ describe('terminal flush budget', () => {
     app.pendingWrites.push('\x1b[55;1H\x1b[2m• Working (6s)');
 
     app.flushPendingWrites();
+
+    expect(scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('waits for xterm parsing before restoring a live shell viewport to bottom', () => {
+    const { app, runAnimationFrames } = loadTerminalUiHarness('shell');
+    const scrollToBottom = vi.fn();
+    let parsed: (() => void) | undefined;
+    app.terminal = {
+      write: vi.fn((_data: string, callback?: () => void) => {
+        parsed = callback;
+      }),
+      scrollToBottom,
+      scrollToLine: vi.fn(),
+    };
+    app._wasAtBottomBeforeWrite = true;
+    app._lastUserScrollUpAt = Number.NEGATIVE_INFINITY;
+    app.pendingWrites.push('SMOKE_SHELL_DONE');
+
+    app.flushPendingWrites();
+
+    expect(scrollToBottom).not.toHaveBeenCalled();
+    expect(parsed).toBeTypeOf('function');
+
+    parsed?.();
+
+    expect(scrollToBottom).not.toHaveBeenCalled();
+    runAnimationFrames();
+
+    expect(scrollToBottom).toHaveBeenCalledOnce();
+  });
+
+  it('does not snap a live shell back down when the user scrolls up while xterm parses', () => {
+    const { app, runAnimationFrames } = loadTerminalUiHarness('shell');
+    const scrollToBottom = vi.fn();
+    let parsed: (() => void) | undefined;
+    app.terminal = {
+      write: vi.fn((_data: string, callback?: () => void) => {
+        parsed = callback;
+      }),
+      scrollToBottom,
+      scrollToLine: vi.fn(),
+    };
+    app._wasAtBottomBeforeWrite = true;
+    app._lastUserScrollUpAt = Number.NEGATIVE_INFINITY;
+    app.pendingWrites.push('SMOKE_SHELL_DONE');
+
+    app.flushPendingWrites();
+    app._lastUserScrollUpAt = 0;
+    parsed?.();
+    runAnimationFrames();
+
+    expect(scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('ignores a parsed terminal write from an earlier session selection', () => {
+    const { app, runAnimationFrames } = loadTerminalUiHarness('shell');
+    const scrollToBottom = vi.fn();
+    let parsed: (() => void) | undefined;
+    app.terminal = {
+      write: vi.fn((_data: string, callback?: () => void) => {
+        parsed = callback;
+      }),
+      scrollToBottom,
+      scrollToLine: vi.fn(),
+    };
+    app._selectGeneration = 4;
+    app._wasAtBottomBeforeWrite = true;
+    app._lastUserScrollUpAt = Number.NEGATIVE_INFINITY;
+    app.pendingWrites.push('SMOKE_SHELL_DONE');
+
+    app.flushPendingWrites();
+    app._selectGeneration = 6;
+    parsed?.();
+    runAnimationFrames();
 
     expect(scrollToBottom).not.toHaveBeenCalled();
   });

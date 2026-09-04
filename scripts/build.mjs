@@ -38,7 +38,7 @@ run('gesture assets', 'node scripts/fetch-gesture-assets.mjs');
 // Rebuild the gesture overlay bundle from its vendored source (packages/gesture-control)
 // into src/web/public/gesture/gesture-codeman.js, so prod always reflects current source.
 run('gesture bundle', 'node scripts/build-gesture-bundle.mjs');
-run('copy web assets', 'cp -r src/web/public dist/web/');
+run('copy web assets', 'cp -r src/web/public/. dist/web/public/');
 run('copy template', 'cp src/templates/case-template.md dist/templates/');
 
 // 3. Vendor xterm bundles (xterm.js 6.x — @xterm scoped packages)
