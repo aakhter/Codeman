@@ -33,18 +33,46 @@ describe('Mobile grouped session sheet collapse state', () => {
 
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await page.waitForFunction(() => typeof window.MobileTabSheet?._mobileCollapsedGroupIds === 'function');
 
     const rows = await page.evaluate(() => {
       window.localStorage.removeItem('codeman:mobile-tab-groups-collapsed');
       window.localStorage.removeItem('codeman:mobile-focus-group-collapsed');
-      window.MobileTabSheet.render();
-      return {
+      const initial = {
         mobileCollapsed: window.MobileTabSheet._mobileCollapsedGroupIds(),
+        focusCollapsed: window.MobileTabSheet._mobileFocusCollapsed(),
         desktopCollapsed: [...window.app.collapsedTabGroupIds],
       };
+      window.localStorage.setItem('codeman:mobile-tab-groups-collapsed', JSON.stringify(['g1', 'g1', '', 42]));
+      const seeded = {
+        mobileCollapsed: window.MobileTabSheet._mobileCollapsedGroupIds(),
+      };
+      window.localStorage.setItem('codeman:mobile-focus-group-collapsed', 'true');
+      const seededFocus = {
+        focusCollapsed: window.MobileTabSheet._mobileFocusCollapsed(),
+      };
+      window.localStorage.setItem('codeman:mobile-tab-groups-collapsed', 'not-json');
+      const corruptJson = {
+        mobileCollapsed: window.MobileTabSheet._mobileCollapsedGroupIds(),
+      };
+      window.localStorage.setItem('codeman:mobile-tab-groups-collapsed', '{"x":1}');
+      const corruptShape = {
+        mobileCollapsed: window.MobileTabSheet._mobileCollapsedGroupIds(),
+      };
+      window.localStorage.setItem('codeman:mobile-focus-group-collapsed', 'maybe');
+      const corruptFocus = {
+        focusCollapsed: window.MobileTabSheet._mobileFocusCollapsed(),
+      };
+      return { initial, seeded, seededFocus, corruptJson, corruptShape, corruptFocus };
     });
 
-    expect(rows.mobileCollapsed).toEqual([]);
-    expect(rows.desktopCollapsed).toEqual([]);
+    expect(rows.initial.mobileCollapsed).toEqual([]);
+    expect(rows.initial.focusCollapsed).toBe(false);
+    expect(rows.initial.desktopCollapsed).toEqual([]);
+    expect(rows.seeded.mobileCollapsed).toEqual(['g1']);
+    expect(rows.seededFocus.focusCollapsed).toBe(true);
+    expect(rows.corruptJson.mobileCollapsed).toEqual([]);
+    expect(rows.corruptShape.mobileCollapsed).toEqual([]);
+    expect(rows.corruptFocus.focusCollapsed).toBe(false);
   });
 });

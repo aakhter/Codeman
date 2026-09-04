@@ -8,12 +8,12 @@
 const MOBILE_COLLAPSED_STORAGE_KEY = 'codeman:mobile-tab-groups-collapsed';
 const MOBILE_FOCUS_COLLAPSED_STORAGE_KEY = 'codeman:mobile-focus-group-collapsed';
 
-function readMobileCollapsedSet() {
+function readMobileCollapsedSet(storage = window.localStorage) {
   try {
-    const raw = window.localStorage.getItem(MOBILE_COLLAPSED_STORAGE_KEY);
+    const raw = storage.getItem(MOBILE_COLLAPSED_STORAGE_KEY);
     if (raw === null) return { ids: [], ok: true };
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return { ids: [], ok: false };
+    if (!Array.isArray(parsed)) throw new Error('Invalid mobile collapsed tab groups');
     return {
       ids: [...new Set(parsed.filter((id) => typeof id === 'string' && id.length > 0))],
       ok: true,
@@ -23,12 +23,12 @@ function readMobileCollapsedSet() {
   }
 }
 
-function readMobileFocusCollapsed() {
+function readMobileFocusCollapsed(storage = window.localStorage) {
   try {
-    const raw = window.localStorage.getItem(MOBILE_FOCUS_COLLAPSED_STORAGE_KEY);
+    const raw = storage.getItem(MOBILE_FOCUS_COLLAPSED_STORAGE_KEY);
     if (raw === null || raw === 'false') return { collapsed: false, ok: true };
     if (raw === 'true') return { collapsed: true, ok: true };
-    return { collapsed: false, ok: false };
+    throw new Error('Invalid mobile Focus collapse state');
   } catch (_error) {
     return { collapsed: false, ok: false };
   }
@@ -38,9 +38,11 @@ const MobileTabSheet = {
   _filter: 'all',
   _q: '',
   _mobileCollapsedGroupIds() {
+    // Corrupt/unavailable storage reads as "nothing collapsed" (all expanded); corruption cleanup is deferred to toggle/projection tasks.
     return readMobileCollapsedSet().ids;
   },
   _mobileFocusCollapsed() {
+    // Corrupt/unavailable storage reads as "nothing collapsed" (all expanded); corruption cleanup is deferred to toggle/projection tasks.
     return readMobileFocusCollapsed().collapsed;
   },
   init() {
