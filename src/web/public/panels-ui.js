@@ -1265,9 +1265,10 @@ Object.assign(CodemanApp.prototype, {
           const recoveryRes = recoveryResult.value;
           const recoveryData = await recoveryRes.json().catch(() => null);
           if (recoveryRes.ok && recoveryData?.success !== false) {
+            const recoveries = recoveryData?.data?.recoveries ?? recoveryData?.recoveries;
             this._renderSessionRecoveryList(
               recoveryList,
-              Array.isArray(recoveryData?.recoveries) ? recoveryData.recoveries : []
+              Array.isArray(recoveries) ? recoveries : []
             );
           } else {
             this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');

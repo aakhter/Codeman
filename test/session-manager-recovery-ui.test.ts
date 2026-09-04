@@ -116,6 +116,23 @@ describe('Session Manager Recovery Queue', () => {
     expect(app.sessions.has('lost-codex')).toBe(false);
   });
 
+  it('renders recovery records from the session-recoveries success envelope', async () => {
+    const { app, elements } = loadHarness(async (url) => {
+      if (url.startsWith('/api/sessions/unified')) {
+        return ok({ success: true, data: { sessions: [] } });
+      }
+      if (url === '/api/session-recoveries') {
+        return ok({ success: true, data: { recoveries: [resumableCodex] } });
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+
+    await app._loadSessionManagerList('');
+
+    expect(elements.sessionRecoveryList.children).toHaveLength(1);
+    expect(elements.sessionRecoveryList.children[0].dataset.recoveryId).toBe('lost-codex');
+  });
+
   it('does not recover merely by opening the manager', async () => {
     const { app, fetch } = loadHarness(async (url) => {
       if (url === '/api/cases') return ok({ data: [] });

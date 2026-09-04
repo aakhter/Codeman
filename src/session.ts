@@ -252,6 +252,11 @@ const WIRE_ACTIVITY_SETTLE_MS = 15_000;
 /** Graceful shutdown delay when stopping session (100ms) */
 const GRACEFUL_SHUTDOWN_DELAY_MS = 100;
 
+/** SIGKILL can race a process or its process group exiting after SIGTERM. */
+function isNoSuchProcessError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ESRCH';
+}
+
 // Filter out terminal focus escape sequences (focus in/out reports)
 // ^[[I (focus in), ^[[O (focus out), and the enable/disable sequences
 // eslint-disable-next-line no-control-regex
@@ -4878,7 +4883,9 @@ export class Session extends EventEmitter {
             process.kill(pid, 'SIGKILL');
           }
         } catch (err) {
-          console.warn('[Session] Failed to send SIGKILL to process (already terminated):', err);
+          if (!isNoSuchProcessError(err)) {
+            console.warn('[Session] Failed to send SIGKILL to process (already terminated):', err);
+          }
         }
 
         // Also try to kill any child processes in the process group
@@ -4887,7 +4894,9 @@ export class Session extends EventEmitter {
             process.kill(-pid, 'SIGKILL');
           }
         } catch (err) {
-          console.warn('[Session] Failed to send SIGKILL to process group (may not exist):', err);
+          if (!isNoSuchProcessError(err)) {
+            console.warn('[Session] Failed to send SIGKILL to process group (may not exist):', err);
+          }
         }
       } else {
         // Server shutdown: just detach — the process lives on inside tmux
