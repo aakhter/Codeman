@@ -5736,7 +5736,7 @@ Object.assign(CodemanApp.prototype, {
    * @param {number} chunkSize - Size of each chunk (default 32KB)
    * @returns {Promise<{parsedAt: number, bufferLength: number, completed: boolean}>} Parse marker snapshot
    */
-  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner) {
+  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner, finishOptions) {
     // Generation counter: if a newer chunkedTerminalWrite starts (tab switch),
     // older writes abort instead of continuing to push stale data into the terminal.
     const writeGen = ++this._chunkedWriteGen;
@@ -5749,7 +5749,7 @@ Object.assign(CodemanApp.prototype, {
         completed,
       });
       if (!buffer || buffer.length === 0) {
-        this._finishBufferLoad(bufferLoadOwner);
+        this._finishBufferLoad(bufferLoadOwner, finishOptions);
         resolve(parseSnapshot());
         return;
       }
@@ -5763,7 +5763,7 @@ Object.assign(CodemanApp.prototype, {
         this.terminal.write(cleanBuffer, () => resolve(parseSnapshot()));
         // The write is now ordered in xterm's queue. Release live output before
         // parsing completes; subsequent writes stay behind it without being lost.
-        this._finishBufferLoad(bufferLoadOwner);
+        this._finishBufferLoad(bufferLoadOwner, finishOptions);
         return;
       }
 
@@ -5794,7 +5794,7 @@ Object.assign(CodemanApp.prototype, {
             );
             resolve(result);
           });
-          this._finishBufferLoad(bufferLoadOwner);
+          this._finishBufferLoad(bufferLoadOwner, finishOptions);
           return;
         }
 
@@ -5830,11 +5830,18 @@ Object.assign(CodemanApp.prototype, {
    * After unblocking, new SSE/WS events deliver subsequent output normally.
    *
    * @param {string} [owner] Load token from `_beginBufferLoad`; a stale owner is a no-op.
-   * @param {{ flushQueued?: boolean }} [opts] When `flushQueued` is true, replay any queued events.
+   * @param {{ flushQueued?: boolean, onDiscardedQueued?: (count: number) => void }} [opts]
+   * When `flushQueued` is true, replay any queued events. Otherwise report a
+   * nonempty discarded queue so the caller can safely fetch canonical state.
    */
   _beginBufferLoad(owner) {
     if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
     const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    // chunkedTerminalWrite re-enters this helper with selectSession's same
+    // owner. Keep output that arrived between the outer gate and the chunked
+    // writer; replacing the queue here would make it invisible to the
+    // post-load canonical refresh safeguard.
+    if (this._isLoadingBuffer && this._bufferLoadOwner === loadOwner) return loadOwner;
     this._bufferLoadOwner = loadOwner;
     this._isLoadingBuffer = true;
     this._loadBufferQueue = [];
@@ -5860,6 +5867,8 @@ Object.assign(CodemanApp.prototype, {
         if (acceptedOutputEpoch === undefined) this.batchTerminalWrite(queued[index]);
         else this.batchTerminalWrite(queued[index], acceptedOutputEpoch);
       }
+    } else if (queued && queued.length) {
+      opts?.onDiscardedQueued?.(queued.length);
     }
     return true;
   },

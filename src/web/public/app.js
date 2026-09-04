@@ -8939,6 +8939,10 @@ class CodemanApp {
     // Without this, SSE events arriving during the fetch() gap compete with
     // the buffer write, causing 70KB+ single-frame flushes that stall WebGL.
     // chunkedTerminalWrite also sets this, but we need it before the fetch too.
+    let discardedLiveOutputDuringLoad = false;
+    const discardOptions = {
+      onDiscardedQueued: () => { discardedLiveOutputDuringLoad = true; },
+    };
     const bufferLoadOwner = this._beginBufferLoad(selectGen);
     // COD-144: track whether the load painted nothing (empty fetch + no cache).
     // For that just-created-session case we flush (not discard) queued SSE events.
@@ -9046,7 +9050,8 @@ class CodemanApp {
         const { parsedAt: cacheParsedAt } = await this.chunkedTerminalWrite(
           cachedBuffer,
           TERMINAL_CHUNK_SIZE,
-          bufferLoadOwner
+          bufferLoadOwner,
+          discardOptions
         );
         cacheResetAndParseMs = cacheParsedAt - cacheReplayStartedAt;
         if (this._isStaleSelect(selectGen)) {
@@ -9146,7 +9151,8 @@ class CodemanApp {
           const { parsedAt: freshParsedAt } = await this.chunkedTerminalWrite(
             data.terminalBuffer,
             TERMINAL_CHUNK_SIZE,
-            bufferLoadOwner
+            bufferLoadOwner,
+            discardOptions
           );
           freshResetAndParseMs = freshParsedAt - replayStartedAt;
           if (this._isStaleSelect(selectGen)) {
@@ -9206,7 +9212,7 @@ class CodemanApp {
       // COD-144: when the load painted nothing, FLUSH the queued events instead of
       // discarding — a new session's prompt arrives only as a queued SSE event.
       if (this._isLoadingBuffer) {
-        this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty });
+        this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty, ...discardOptions });
       }
       // Drop the guard so user input clears state normally
       this._restoringFlushedState = false;
@@ -9307,6 +9313,9 @@ class CodemanApp {
       terminalLoadTiming.selectDoneMs = selectDoneMs;
       this._recordTerminalLoadTiming(terminalLoadTiming);
       this._clearTerminalLoadState(sessionId, selectGen);
+      if (discardedLiveOutputDuringLoad && this.activeSessionId === sessionId && selectGen === this._selectGeneration) {
+        this._onSessionNeedsRefresh({ id: sessionId });
+      }
       this._scheduleTerminalRepaint();
       // COD-284b: tab-switch / multi-reload tear — second fit+refresh after buffer paint
       requestAnimationFrame(() => {

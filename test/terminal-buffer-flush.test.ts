@@ -59,7 +59,10 @@ type BufferLoadApp = {
   _loadBufferQueue: string[] | null;
   batchTerminalWrite: (data: string) => void;
   _beginBufferLoad: (owner?: string) => string;
-  _finishBufferLoad: (owner?: string, opts?: { flushQueued?: boolean }) => boolean;
+  _finishBufferLoad: (
+    owner?: string,
+    opts?: { flushQueued?: boolean; onDiscardedQueued?: (count: number) => void }
+  ) => boolean;
 };
 
 /**
@@ -103,6 +106,34 @@ describe('buffer-load flush (COD-144)', () => {
     expect(app._loadBufferQueue).toBeNull();
     // Queued events were NOT replayed.
     expect(app.batchTerminalWrite).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  it('reports discarded nonempty live output without replaying it', () => {
+    const { app, writes } = makeApp();
+    const owner = app._beginBufferLoad('load-stale-snapshot');
+    const discarded = vi.fn();
+    pushWhileLoading(app, 'post-fetch-output-a');
+    pushWhileLoading(app, 'post-fetch-output-b');
+
+    const ok = app._finishBufferLoad(owner, { onDiscardedQueued: discarded });
+
+    expect(ok).toBe(true);
+    expect(discarded).toHaveBeenCalledOnce();
+    expect(discarded).toHaveBeenCalledWith(2);
+    expect(writes).toEqual([]);
+  });
+
+  it('preserves queued live output across a nested begin for the same load owner', () => {
+    const { app, writes } = makeApp();
+    const owner = app._beginBufferLoad('nested-owner');
+    const discarded = vi.fn();
+    pushWhileLoading(app, 'arrived-before-chunked-write');
+
+    expect(app._beginBufferLoad(owner)).toBe(owner);
+    expect(app._loadBufferQueue).toEqual(['arrived-before-chunked-write']);
+    expect(app._finishBufferLoad(owner, { onDiscardedQueued: discarded })).toBe(true);
+    expect(discarded).toHaveBeenCalledWith(1);
     expect(writes).toEqual([]);
   });
 
@@ -168,5 +199,15 @@ describe('buffer-load flush (COD-144)', () => {
     expect(app._loadBufferQueue).toBeNull();
     expect(app.batchTerminalWrite).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
+  });
+
+  it('selectSession schedules one guarded canonical refresh after discarding live output from a nonempty load', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8').replace(/\s+/g, ' ');
+    expect(source).toContain('let discardedLiveOutputDuringLoad = false;');
+    expect(source).toContain('onDiscardedQueued: () => { discardedLiveOutputDuringLoad = true; }');
+    expect(source).toContain(
+      'if (discardedLiveOutputDuringLoad && this.activeSessionId === sessionId && selectGen === this._selectGeneration)'
+    );
+    expect(source).toContain('this._onSessionNeedsRefresh({ id: sessionId });');
   });
 });

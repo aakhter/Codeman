@@ -250,12 +250,14 @@ describe('Codex tab resize behavior', () => {
     expect(staleHelper).toContain('this._finishBufferLoad(selectGen)');
     expect(loadStart).toBeGreaterThan(-1);
     expect(selectBlockFlat).toContain(
-      'this.chunkedTerminalWrite( cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner )'
+      'this.chunkedTerminalWrite( cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner, discardOptions )'
     );
     expect(selectBlockFlat).toContain(
-      'this.chunkedTerminalWrite( data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner )'
+      'this.chunkedTerminalWrite( data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner, discardOptions )'
     );
-    expect(selectBlockFlat).toContain('this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty })');
+    expect(selectBlockFlat).toContain(
+      'this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty, ...discardOptions })'
+    );
     expect(catchBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
     expect(selectBlock).not.toContain('this._finishBufferLoad()');
     expect(catchBlock).not.toContain('this._finishBufferLoad()');
