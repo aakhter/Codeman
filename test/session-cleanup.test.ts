@@ -37,6 +37,89 @@ describe('working-frame poll cleanup', () => {
   });
 });
 
+describe('session stop SIGKILL cleanup', () => {
+  function setPty(session: Session, pid: number) {
+    (session as unknown as { ptyProcess: { pid: number; kill: () => void } }).ptyProcess = {
+      pid,
+      kill: vi.fn(),
+    };
+  }
+
+  function esrch() {
+    return Object.assign(new Error('no such process'), { code: 'ESRCH' });
+  }
+
+  it('does not warn when the direct SIGKILL target has already exited', async () => {
+    const pid = 45_001;
+    const session = new Session({ id: 'direct-esrch', workingDir: '/tmp', mode: 'shell' });
+    setPty(session, pid);
+    const kill = vi.spyOn(process, 'kill').mockImplementation(((target: number) => {
+      if (target === pid) throw esrch();
+      return true;
+    }) as typeof process.kill);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await session.stop();
+
+      expect(kill).toHaveBeenCalledWith(pid, 'SIGKILL');
+      expect(kill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when the SIGKILL process group has already exited', async () => {
+    const pid = 45_002;
+    const session = new Session({ id: 'group-esrch', workingDir: '/tmp', mode: 'shell' });
+    setPty(session, pid);
+    const kill = vi.spyOn(process, 'kill').mockImplementation(((target: number) => {
+      if (target === -pid) throw esrch();
+      return true;
+    }) as typeof process.kill);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await session.stop();
+
+      expect(kill).toHaveBeenCalledWith(pid, 'SIGKILL');
+      expect(kill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['process', 45_003],
+    ['process group', -45_004],
+  ])('keeps warnings for other SIGKILL failures from the %s', async (_targetLabel, failingTarget) => {
+    const pid = Math.abs(failingTarget);
+    const session = new Session({ id: `kill-error-${pid}`, workingDir: '/tmp', mode: 'shell' });
+    setPty(session, pid);
+    const error = Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(((target: number) => {
+      if (target === failingTarget) throw error;
+      return true;
+    }) as typeof process.kill);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await session.stop();
+
+      expect(kill).toHaveBeenCalledWith(pid, 'SIGKILL');
+      expect(kill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      expect(warn).toHaveBeenCalledWith(expect.any(String), error);
+    } finally {
+      kill.mockRestore();
+      warn.mockRestore();
+    }
+  });
+});
+
 /**
  * Session Cleanup Tests
  *
