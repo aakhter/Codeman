@@ -168,7 +168,73 @@ describe('Mobile grouped session sheet collapse state', () => {
       [...document.querySelectorAll('#mobileTabList .sheet-row')].map((row) => row.getAttribute('data-session-id'))
     );
 
-    expect(order).toEqual(['focus-a', 'alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1']);
+    expect(order).toEqual(['focus-a', 'alpha-1', 'alpha-2', 'beta-1', 'focus-a', 'ungrouped-1']);
+  });
+
+  it('duplicates Focus sessions in their canonical group section', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    // focus-a is canonically first in Ungrouped: it renders once as the Focus
+    // shortcut and again in its canonical Ungrouped position.
+    const counts = await page.evaluate(() => {
+      const groups = [...document.querySelectorAll('#mobileTabList .sheet-group')].map((group) => ({
+        name: group.querySelector('.sheet-group-name')?.textContent?.trim(),
+        count: group.querySelector('.sheet-group-count')?.textContent?.trim(),
+      }));
+      return groups;
+    });
+
+    expect(counts).toEqual([
+      { name: 'Focus', count: '1' },
+      { name: 'Alpha', count: '2' },
+      { name: 'Beta', count: '1' },
+      { name: 'Ungrouped', count: '2' },
+    ]);
+  });
+
+  it('uses rendered live counts for group headers when layout refs contain stale IDs', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    // Beta holds one live session (beta-1); append a stale ref (in layout but
+    // not in app.sessions). The header must show 1 and the stale ID no row.
+    const result = await page.evaluate(() => {
+      const app = window.app as any;
+      const beta = app.tabLayout.groups.find((group: any) => group.id === 'g-beta');
+      beta.refs.push({ kind: 'session', id: 'stale-beta' });
+      window.MobileTabSheet.render();
+      const betaGroup = [...document.querySelectorAll('#mobileTabList .sheet-group')].find(
+        (group) => group.querySelector('.sheet-group-name')?.textContent?.trim() === 'Beta'
+      );
+      return {
+        betaCount: betaGroup?.querySelector('.sheet-group-count')?.textContent?.trim(),
+        staleRow: document.querySelector('#mobileTabList [data-session-id="stale-beta"]') !== null,
+        betaRows: [...(betaGroup?.querySelectorAll('.sheet-row') ?? [])].map((row) =>
+          row.getAttribute('data-session-id')
+        ),
+      };
+    });
+
+    expect(result.betaCount).toBe('1');
+    expect(result.staleRow).toBe(false);
+    expect(result.betaRows).toEqual(['beta-1']);
   });
 
   it('renders Focus, named groups, and Ungrouped headers', async () => {
@@ -249,7 +315,9 @@ describe('Mobile grouped session sheet collapse state', () => {
       };
     });
 
-    expect(counts).toEqual({ header: '5 / 5', footer: '5 tabs', pill: '5' });
+    // focus-a duplicates: once as the Focus shortcut, once canonically in
+    // Ungrouped (its canonical position is first in Ungrouped refs).
+    expect(counts).toEqual({ header: '6 / 5', footer: '6 tabs', pill: '5' });
   });
 
   it('activates and closes sessions from grouped rows', async () => {
@@ -356,7 +424,6 @@ describe('Mobile grouped session sheet collapse state', () => {
     // Fallback derives row order from sessionOrder (session state), not from
     // the layout: the fixture puts focus-a last in sessionOrder, while the
     // projection renders the Focus shortcut section first.
-    expect(saved.rows).toEqual(['alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1', 'focus-a']);
     expect(saved.rows).toEqual(['alpha-1', 'alpha-2', 'beta-1', 'ungrouped-1', 'focus-a']);
   });
 });
