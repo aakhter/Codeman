@@ -45,6 +45,34 @@ const MobileTabSheet = {
     // Corrupt/unavailable storage reads as "nothing collapsed" (all expanded); corruption cleanup is deferred to toggle/projection tasks.
     return readMobileFocusCollapsed().collapsed;
   },
+  _saveMobileCollapsedGroupIds(ids) {
+    const unique = [...new Set(ids.filter((id) => typeof id === 'string' && id.length > 0))];
+    try {
+      window.localStorage.setItem(MOBILE_COLLAPSED_STORAGE_KEY, JSON.stringify(unique));
+    } catch (_error) {
+      this._mobileCollapseStorageFailed = true;
+    }
+    return unique;
+  },
+  toggleMobileGroupCollapsed(groupId, forceCollapsed) {
+    const next = new Set(this._mobileCollapsedGroupIds());
+    const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
+    if (shouldCollapse) next.add(groupId);
+    else next.delete(groupId);
+    this._saveMobileCollapsedGroupIds([...next]);
+    this.render();
+    return this._mobileCollapsedGroupIds().includes(groupId) === shouldCollapse;
+  },
+  toggleMobileFocusCollapsed(forceCollapsed) {
+    const shouldCollapse = forceCollapsed === undefined ? !this._mobileFocusCollapsed() : forceCollapsed === true;
+    try {
+      window.localStorage.setItem(MOBILE_FOCUS_COLLAPSED_STORAGE_KEY, shouldCollapse ? 'true' : 'false');
+    } catch (_error) {
+      this._mobileCollapseStorageFailed = true;
+    }
+    this.render();
+    return this._mobileFocusCollapsed() === shouldCollapse;
+  },
   init() {
     // Always create elements — _isEnabled gates visibility, not existence (debug on desktop + ensures iPhone race never hides pill)
     this._createElements();

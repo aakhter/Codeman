@@ -75,4 +75,42 @@ describe('Mobile grouped session sheet collapse state', () => {
     expect(rows.corruptShape.mobileCollapsed).toEqual([]);
     expect(rows.corruptFocus.focusCollapsed).toBe(false);
   });
+
+  it('toggles mobile groups without changing desktop collapse state', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await page.waitForFunction(() => typeof window.MobileTabSheet?.toggleMobileGroupCollapsed === 'function');
+
+    const result = await page.evaluate(() => {
+      window.localStorage.removeItem('codeman:mobile-tab-groups-collapsed');
+      window.localStorage.removeItem('codeman:mobile-focus-group-collapsed');
+      window.MobileTabSheet.toggleMobileGroupCollapsed('group-b');
+      return {
+        mobileCollapsed: window.MobileTabSheet._mobileCollapsedGroupIds(),
+        desktopCollapsed: [...window.app.collapsedTabGroupIds],
+      };
+    });
+
+    expect(result.mobileCollapsed).toEqual(['group-b']);
+    expect(result.desktopCollapsed).toEqual([]);
+
+    const focusOn = await page.evaluate(() => {
+      window.MobileTabSheet.toggleMobileFocusCollapsed();
+      return window.MobileTabSheet._mobileFocusCollapsed();
+    });
+    expect(focusOn).toBe(true);
+
+    const focusOff = await page.evaluate(() => {
+      window.MobileTabSheet.toggleMobileFocusCollapsed();
+      return window.MobileTabSheet._mobileFocusCollapsed();
+    });
+    expect(focusOff).toBe(false);
+  });
 });
