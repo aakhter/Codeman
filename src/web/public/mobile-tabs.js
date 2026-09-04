@@ -73,23 +73,24 @@ const MobileTabSheet = {
     this.render();
     return this._mobileFocusCollapsed() === shouldCollapse;
   },
-  _mobileProjection(collapsedGroupIds, focusCollapsed) {
+  _mobileProjection() {
     const app = window.app;
     if (!app || typeof window.CodemanTabLayout?.project !== 'function') return null;
     const sessions = app.sessions;
     const liveSessionIds = sessions && typeof sessions.keys === 'function' ? [...sessions.keys()] : [];
-    const cids = Array.isArray(collapsedGroupIds) ? collapsedGroupIds : this._mobileCollapsedGroupIds();
-    const fcol = typeof focusCollapsed === 'boolean' ? focusCollapsed : this._mobileFocusCollapsed();
     try {
       const projection = window.CodemanTabLayout.project(app.tabLayout || { version: 0, groups: [], ungrouped: [] }, {
         liveSessionIds,
         legacySessionOrder: Array.isArray(app.sessionOrder) ? app.sessionOrder : liveSessionIds,
         openWebviewIds: [],
-        collapsedGroupIds: cids,
+        // The sheet owns its collapse rendering. Passing the mobile state to
+        // the shared projection removes hidden refs, which also removes the
+        // section header when no member is selected.
+        collapsedGroupIds: [],
         activeSessionId: app.activeSessionId,
         activeWebviewId: null,
         orientation: 'vertical',
-        focusCollapsed: fcol,
+        focusCollapsed: false,
       });
       // While filtering, narrow the projection to matching sessions — same
       // shape as the desktop rail's search path (filterSessionProjection).
@@ -452,7 +453,7 @@ const MobileTabSheet = {
     const activeId = app.activeSessionId;
     const filtering = this._filter !== 'all' || (this._q || '').length > 0;
     // Filtered matches temporarily ignore mobile collapse without saving state.
-    const projection = filtering ? this._mobileProjection([], false) : this._mobileProjection();
+    const projection = this._mobileProjection();
     const editable = projection !== null;
     const focusCollapsed = filtering ? false : this._mobileFocusCollapsed();
     const collapsedIds = filtering ? [] : this._mobileCollapsedGroupIds();
@@ -489,9 +490,13 @@ const MobileTabSheet = {
         .map((ref) => itemFor(ref.id))
         .filter(Boolean);
       if (items.length === 0) continue;
-      renderedGroups.push({ section, items });
+      const isUngrouped = section.id === null || section.id === undefined;
+      const isCollapsed = !filtering && !isUngrouped && collapsedIds.includes(section.id);
+      renderedGroups.push({ section, items, isCollapsed });
     }
-    const renderedCount = renderedFocus.length + renderedGroups.reduce((sum, g) => sum + g.items.length, 0);
+    const renderedCount =
+      renderedFocus.length +
+      renderedGroups.reduce((sum, group) => sum + (group.isCollapsed ? 0 : group.items.length), 0);
     const totalLive = (() => {
       try {
         return sessions && typeof sessions.keys === 'function' ? [...sessions.keys()].length : 0;
@@ -519,10 +524,9 @@ const MobileTabSheet = {
           `</div>`
       );
     }
-    for (const { section, items } of renderedGroups) {
+    for (const { section, items, isCollapsed } of renderedGroups) {
       const isUngrouped = section.id === null || section.id === undefined;
       const label = isUngrouped ? 'Ungrouped' : section.name || 'Ungrouped';
-      const isCollapsed = !filtering && !isUngrouped && collapsedIds.includes(section.id);
       const toggleAttr = isUngrouped
         ? ''
         : `<button type="button" class="sheet-group-toggle" aria-label="${isCollapsed ? 'Expand' : 'Collapse'} ${label}" aria-expanded="${isCollapsed ? 'false' : 'true'}" data-sheet-group-header="${this._mobileEscapeAttr(section.id)}" onclick="MobileTabSheet.toggleMobileGroupCollapsed(this.dataset.sheetGroupHeader)"><span class="chev">▾</span></button>`;
