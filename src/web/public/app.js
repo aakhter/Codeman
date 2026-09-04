@@ -4265,6 +4265,14 @@ class CodemanApp {
     void this._onSessionNeedsRefresh({ id: sessionId });
   }
 
+  // Release the terminal-load UI gate before checking the transport handoff.
+  // Both successful snapshot replays and failed fetches must take this path:
+  // a live WS may have opened while the canonical fetch was still in flight.
+  _releaseTerminalLoadAndReconcile(sessionId, selectGen) {
+    this._clearTerminalLoadState(sessionId, selectGen);
+    this._flushTransportActivationReconcile(sessionId, selectGen);
+  }
+
   /**
    * Open a WebSocket for terminal I/O on the given session.
    * Browser terminal input requires this ownership-capable bidirectional
@@ -9347,8 +9355,7 @@ class CodemanApp {
       const selectDoneMs = performance.now() - _selStart;
       terminalLoadTiming.selectDoneMs = selectDoneMs;
       this._recordTerminalLoadTiming(terminalLoadTiming);
-      this._clearTerminalLoadState(sessionId, selectGen);
-      this._flushTransportActivationReconcile(sessionId, selectGen);
+      this._releaseTerminalLoadAndReconcile(sessionId, selectGen);
       if (discardedLiveOutputDuringLoad && this.activeSessionId === sessionId && selectGen === this._selectGeneration) {
         this._onSessionNeedsRefresh({ id: sessionId });
       }
@@ -9365,6 +9372,7 @@ class CodemanApp {
       if (this._isLoadingBuffer) this._finishBufferLoad(bufferLoadOwner);
       this._restoringFlushedState = false;
       this._setTerminalLoadState(sessionId, selectGen, 'failed');
+      this._releaseTerminalLoadAndReconcile(sessionId, selectGen);
       console.error('Failed to load session terminal:', err);
     }
   }

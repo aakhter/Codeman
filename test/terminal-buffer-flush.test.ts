@@ -220,4 +220,47 @@ describe('buffer-load flush (COD-144)', () => {
     expect(source).toContain('this._transportActivationReconcile = null;');
     expect(source).toContain('void this._onSessionNeedsRefresh({ id: sessionId });');
   });
+
+  it('releases a WS-ready reconcile after a failed snapshot load, but never for a stale selection', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const start = source.indexOf('  _queueTransportActivationReconcile(sessionId, selectGen) {');
+    const end = source.indexOf('\n\n  /**\n   * Open a WebSocket', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const methodSource = source
+      .slice(start, end)
+      .replace(/^  /gm, '')
+      .replace(/\n\n(?=\/\/|_)/g, ',\n');
+    const methods = new Function(`return ({${methodSource}});`)() as Record<string, Function>;
+    const refresh = vi.fn();
+    const app = {
+      _selectGeneration: 7,
+      activeSessionId: 'active',
+      _isLoadingBuffer: true,
+      _transportActivationReconcile: null as { sessionId: string; selectGen: number; wsReady: boolean } | null,
+      _clearTerminalLoadState: vi.fn(function (this: { _isLoadingBuffer: boolean }) {
+        this._isLoadingBuffer = false;
+      }),
+      _onSessionNeedsRefresh: refresh,
+      _queueTransportActivationReconcile: methods._queueTransportActivationReconcile,
+      _markTransportActivationReady: methods._markTransportActivationReady,
+      _flushTransportActivationReconcile: methods._flushTransportActivationReconcile,
+      _releaseTerminalLoadAndReconcile: methods._releaseTerminalLoadAndReconcile,
+    };
+
+    app._queueTransportActivationReconcile('active', 7);
+    app._markTransportActivationReady('active');
+    expect(refresh).not.toHaveBeenCalled(); // WS opened, but snapshot load still owns the terminal.
+
+    app._releaseTerminalLoadAndReconcile('active', 7); // fetch failure completion path
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith({ id: 'active' });
+
+    app._queueTransportActivationReconcile('active', 7);
+    app._isLoadingBuffer = true;
+    app._markTransportActivationReady('active');
+    app._selectGeneration = 8; // user chose another tab before the failed fetch completed
+    app._releaseTerminalLoadAndReconcile('active', 7);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
 });
