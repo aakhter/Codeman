@@ -310,6 +310,47 @@ describe('Mobile grouped session sheet collapse state', () => {
     await page.evaluate(() => window.MobileTabSheet.toggleMobileFocusCollapsed(false));
   });
 
+  it('keeps a collapsed named-group header when its live sessions are not selected', async () => {
+    const context = await browser.newContext({
+      viewport: { width: 440, height: 900 },
+      hasTouch: true,
+    });
+    contexts.push(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && window.MobileTabSheet);
+    await seedGroupedSheet(page);
+
+    const collapsed = await page.evaluate(() => {
+      window.app.activeSessionId = 'beta-1';
+      window.MobileTabSheet.toggleMobileGroupCollapsed('g-alpha', true);
+      const group = document.querySelector('#mobileTabList [data-sheet-group-id="g-alpha"]');
+      const toggle = group?.querySelector('.sheet-group-toggle');
+      return {
+        header: group?.querySelector('.sheet-group-name')?.textContent?.trim(),
+        count: group?.querySelector('.sheet-group-count')?.textContent?.trim(),
+        rows: [...(group?.querySelectorAll('.sheet-row') ?? [])].map((row) => row.getAttribute('data-session-id')),
+        ariaExpanded: toggle?.getAttribute('aria-expanded'),
+        ariaLabel: toggle?.getAttribute('aria-label'),
+        sheetCount: document.querySelector('#mobileTabSheet .sheet-count')?.textContent,
+        footerCount: document.querySelector('#mobileTabSheet .sheet-footer-count')?.textContent,
+      };
+    });
+
+    expect(collapsed).toEqual({
+      header: 'Alpha',
+      count: '2',
+      rows: [],
+      ariaExpanded: 'false',
+      ariaLabel: 'Expand Alpha',
+      sheetCount: '4 / 5',
+      footerCount: '4 tabs',
+    });
+
+    await page.evaluate(() => window.MobileTabSheet.toggleMobileGroupCollapsed('g-alpha', false));
+  });
+
   it('filters within groups while preserving order and revealing matches', async () => {
     const context = await browser.newContext({
       viewport: { width: 440, height: 900 },
