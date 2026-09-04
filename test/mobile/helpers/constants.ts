@@ -11,6 +11,7 @@ export const PORTS = {
   HEADER_BUTTONS: 3208,
   OPENCODE_E2E: 3209,
   MOBILE_TAB_PILL: 3210,
+  MOBILE_TAB_GROUPS: 3211,
 } as const;
 
 // CSS Selectors
