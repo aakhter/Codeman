@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.24.2
+
+### Patch Changes
+
+- Mobile session switcher now mirrors the vertical rail group order: Focus shortcuts, named groups, then Ungrouped with exact manual member order instead of a flat urgency-sorted list. Mobile groups collapse independently with mobile-only persisted state, search and status filters preserve group order, and counts reflect rendered live sessions.
+
 ## 1.24.1
 
 ### Patch Changes
