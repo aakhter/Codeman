@@ -4232,6 +4232,39 @@ class CodemanApp {
     return controller.isCurrentTransportActivated?.(sessionId) === true;
   }
 
+  // A selection fetches its canonical terminal snapshot before the replacement
+  // WS listener is necessarily attached. Output produced in that handoff gap
+  // remains in tmux but is not delivered to this browser. Reconcile once the
+  // matching transport is live, but defer until selectSession has released its
+  // buffer-load gate so the refresh cannot be dropped as a competing rewrite.
+  _queueTransportActivationReconcile(sessionId, selectGen) {
+    this._transportActivationReconcile = { sessionId, selectGen, wsReady: false };
+  }
+
+  _markTransportActivationReady(sessionId) {
+    const pending = this._transportActivationReconcile;
+    if (!pending || pending.sessionId !== sessionId || pending.selectGen !== this._selectGeneration) return;
+    pending.wsReady = true;
+    this._flushTransportActivationReconcile(sessionId, pending.selectGen);
+  }
+
+  _flushTransportActivationReconcile(sessionId, selectGen) {
+    const pending = this._transportActivationReconcile;
+    if (
+      !pending ||
+      !pending.wsReady ||
+      pending.sessionId !== sessionId ||
+      pending.selectGen !== selectGen ||
+      selectGen !== this._selectGeneration ||
+      this.activeSessionId !== sessionId
+    ) {
+      return;
+    }
+    if (this._isLoadingBuffer) return;
+    this._transportActivationReconcile = null;
+    void this._onSessionNeedsRefresh({ id: sessionId });
+  }
+
   /**
    * Open a WebSocket for terminal I/O on the given session.
    * Browser terminal input requires this ownership-capable bidirectional
@@ -4267,6 +4300,7 @@ class CodemanApp {
       if (this._ws === ws) {
         this._wsReady = true;
         this._wsState = 'connected';
+        this._markTransportActivationReady(sessionId);
         // COD-182: a RECONNECT (attempts > 0) means the server or link dropped
         // mid-session — the reattach/redraw churn in that window leaves stale
         // rows in TUI tabs (e.g. duplicated composer placeholder after a
@@ -8826,6 +8860,7 @@ class CodemanApp {
     // rare race where server doesn't know our clientId yet, the next
     // selectSession or reconnect catches up.
     this._updateSseSubscription(sessionId);
+    this._queueTransportActivationReconcile(sessionId, selectGen);
     // Open WebSocket as soon as the active session is known. It does not
     // depend on terminal buffer loading, and opening it early keeps normal
     // typing on the ordered WS path instead of briefly accumulating offline.
@@ -9313,6 +9348,7 @@ class CodemanApp {
       terminalLoadTiming.selectDoneMs = selectDoneMs;
       this._recordTerminalLoadTiming(terminalLoadTiming);
       this._clearTerminalLoadState(sessionId, selectGen);
+      this._flushTransportActivationReconcile(sessionId, selectGen);
       if (discardedLiveOutputDuringLoad && this.activeSessionId === sessionId && selectGen === this._selectGeneration) {
         this._onSessionNeedsRefresh({ id: sessionId });
       }

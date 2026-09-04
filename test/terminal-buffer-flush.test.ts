@@ -210,4 +210,14 @@ describe('buffer-load flush (COD-144)', () => {
     );
     expect(source).toContain('this._onSessionNeedsRefresh({ id: sessionId });');
   });
+
+  it('reconciles the capture-to-first-WS-output gap once the matching selection load has cleared', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8').replace(/\s+/g, ' ');
+    expect(source).toContain('_queueTransportActivationReconcile(sessionId, selectGen);');
+    expect(source).toContain('_markTransportActivationReady(sessionId);');
+    expect(source).toContain('pending.sessionId !== sessionId || pending.selectGen !== this._selectGeneration');
+    expect(source).toContain('if (this._isLoadingBuffer) return;');
+    expect(source).toContain('this._transportActivationReconcile = null;');
+    expect(source).toContain('void this._onSessionNeedsRefresh({ id: sessionId });');
+  });
 });
