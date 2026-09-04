@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.24.1
+
+### Patch Changes
+
+- Fix terminal file links truncating spaced relative paths to a tail segment. Bullet/marker and labeled (Path:, File:, Saved to:) relative paths with spaces now link the complete path through existing workspace/cwd/external preview routing; unsafe (..) candidates stay unlinked.
+
 ## 1.24.0
 
 ### Minor Changes
