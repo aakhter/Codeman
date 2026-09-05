@@ -2433,7 +2433,7 @@ Object.assign(CodemanApp.prototype, {
         return true;
       };
 
-      const isSingleRelativePath = (candidate) => {
+      const isSingleRelativePath = (candidate, allowUnspaced = false) => {
         // Marker and labeled surfaces use this same gate, so keep the line to a
         // short spine: same rejection grammar as isSingleAbsolutePath, minus the
         // absolute root, plus a mandatory slash and a mandatory space — a spaced
@@ -2451,7 +2451,7 @@ Object.assign(CodemanApp.prototype, {
         if (!normalized || normalized !== candidate || !previewExtensions.has(extensionOf(candidate))) return false;
 
         const chunks = candidate.split(/[ \t]+/);
-        if (chunks.length < 2) return false;
+        if (chunks.length < 2 && !allowUnspaced) return false;
         for (const chunk of chunks.slice(0, -1)) {
           const trimmed = chunk.replace(/^[([{]+/, '').replace(/[.,;:!?\])}]+$/, '');
           if (/\.[a-z0-9]{1,10}$/i.test(trimmed)) return false;
@@ -2470,8 +2470,17 @@ Object.assign(CodemanApp.prototype, {
         if (!markerMatch) continue;
         foundMarker = true;
         const rawCandidate = markerMatch[2];
-        const candidate = trimTrailingPunctuation(rawCandidate);
-        const startIndex = markerOffset + markerMatch[1].length;
+        const rawStartIndex = markerOffset + markerMatch[1].length;
+        if (!rawCandidate.startsWith('/') && /^.+:[ \t]+\/.+$/.test(rawCandidate)) {
+          suppress(rawStartIndex, rawStartIndex + rawCandidate.length);
+          continue;
+        }
+        // A response bullet may name an artifact before its relative path
+        // (`• Wrote the design: docs/design.md`). The path is the final
+        // colon-delimited suffix, not the surrounding prose.
+        const descriptionPathMatch = !rawCandidate.startsWith('/') && /^.+:[ \t]+([^/].+)$/.exec(rawCandidate);
+        const candidate = trimTrailingPunctuation(descriptionPathMatch ? descriptionPathMatch[1] : rawCandidate);
+        const startIndex = rawStartIndex + (descriptionPathMatch ? descriptionPathMatch[0].length - descriptionPathMatch[1].length : 0);
         const endIndex = startIndex + candidate.length;
         if (candidate.startsWith('/')) {
           if (!isSingleAbsolutePath(candidate)) {
@@ -2502,11 +2511,11 @@ Object.assign(CodemanApp.prototype, {
         }
 
         const relativeBase = relativeResolutionBase(workingDir, session);
-        if (!isSingleRelativePath(candidate)) {
-          suppress(startIndex, endIndex);
+        if (!isSingleRelativePath(candidate, Boolean(descriptionPathMatch))) {
+          suppress(rawStartIndex, rawStartIndex + rawCandidate.length);
           continue;
         }
-        blockPreview(startIndex, lineText.length);
+        blockPreview(rawStartIndex, lineText.length);
         const target = resolveRelativeCandidate(candidate, workingDir, relativeBase);
         if (target) {
           references.push({ text: candidate, ...target, startIndex, endIndex });

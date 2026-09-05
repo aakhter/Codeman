@@ -837,6 +837,36 @@ describe('COD-390 labeled spaced relative paths', () => {
     expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
   });
 
+  it('links only the relative suffix after a bulleted description', () => {
+    const relative =
+      '.worktrees/jira-NZBDAV-1151-deferral-normalization/docs/superpowers/specs/2026-09-05-health-deferral-normalization-design.md';
+    const { provide, previewSpy, originalSessionId } = makeHarness(
+      `• Design committed in the isolated worktree: ${relative}`,
+      { workingDir: '/opt/projects/nzbdav' }
+    );
+
+    const [link] = provide();
+    expect(link.text).toBe(relative);
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
+  });
+
+  it('does not promote an absolute suffix from a bulleted description', () => {
+    const { provide } = makeHarness('• Design committed in the isolated worktree: /etc/private/design.md', {
+      workingDir: '/opt/projects/nzbdav',
+    });
+
+    expect(provide()).toEqual([]);
+  });
+
+  it('does not link an unsafe unspaced relative suffix from a bulleted description', () => {
+    const { provide } = makeHarness('• Design committed in the isolated worktree: docs/`private`.md', {
+      workingDir: '/opt/projects/nzbdav',
+    });
+
+    expect(provide()).toEqual([]);
+  });
+
   it('routes a bullet relative path through the pane cwd when it left the workspace', () => {
     const relative = '03 Attachments/Whiteglove Build SIPOC Design/Whiteglove-Build-SIPOC.pptx';
     const { provide, externalPreviewSpy, previewSpy, originalSessionId } = makeHarness(`- ${relative}`, {
