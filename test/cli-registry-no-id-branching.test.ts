@@ -71,7 +71,7 @@ const EXEMPT_FILES = new Set(
  * Specific surviving branches, each with the reason it is not a capability.
  * Keyed `<relative path>::<the matched expression>`.
  */
-const PRE_REGISTRY = 'downstream pre-registry code; conversion tracked, see the baseline note below';
+const PRE_REGISTRY = 'downstream pre-registry code; conversion tracked in COD-416';
 
 const ALLOWED_BRANCHES: Record<string, string> = {
   // ── DOWNSTREAM PRE-REGISTRY BASELINE ────────────────────────────────────────────────
@@ -80,6 +80,12 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // here rather than skipping the whole guard so that it stays LIVE: a branch added from
   // now on is not in this list and still fails the build. Delete entries as they convert;
   // the stale-entry test below makes that mandatory rather than optional.
+  //
+  // Tracked in COD-416, which also records the triage rule: each key becomes either registry
+  // DATA (a capability / named profile) or an ALLOWED_BRANCHES entry with its own reason —
+  // never a silent deletion. ⚠️ COD-212 must survive the tmux-manager conversion: upstream's
+  // generic env helpers are sync, and adopting them as-is reverts a measured 5.08s
+  // /api/status freeze during session create.
   // config/headroom-routing.ts
   "config/headroom-routing.ts::mode !== 'claude'": PRE_REGISTRY,
   "config/headroom-routing.ts::mode === 'claude'": PRE_REGISTRY,
