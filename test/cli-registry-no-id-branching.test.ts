@@ -71,7 +71,84 @@ const EXEMPT_FILES = new Set(
  * Specific surviving branches, each with the reason it is not a capability.
  * Keyed `<relative path>::<the matched expression>`.
  */
+const PRE_REGISTRY = 'downstream pre-registry code; conversion tracked, see the baseline note below';
+
 const ALLOWED_BRANCHES: Record<string, string> = {
+  // ── DOWNSTREAM PRE-REGISTRY BASELINE ────────────────────────────────────────────────
+  // These branches predate the CLI registry arriving downstream (upstream v1.24.7 merge).
+  // They are NOT approved designs — they are a snapshot of the conversion still owed, kept
+  // here rather than skipping the whole guard so that it stays LIVE: a branch added from
+  // now on is not in this list and still fails the build. Delete entries as they convert;
+  // the stale-entry test below makes that mandatory rather than optional.
+  // config/headroom-routing.ts
+  "config/headroom-routing.ts::mode !== 'claude'": PRE_REGISTRY,
+  "config/headroom-routing.ts::mode === 'claude'": PRE_REGISTRY,
+  "config/headroom-routing.ts::mode === 'codex'": PRE_REGISTRY,
+  // hooks-config.ts
+  "hooks-config.ts::mode !== 'claude'": PRE_REGISTRY,
+  // session-agent-activity-coordinator.ts
+  "session-agent-activity-coordinator.ts::mode === 'claude'": PRE_REGISTRY,
+  // session-recovery.ts
+  "session-recovery.ts::mode !== 'codex'": PRE_REGISTRY,
+  // session.ts
+  "session.ts::mode !== 'claude'": PRE_REGISTRY,
+  "session.ts::mode !== 'codex'": PRE_REGISTRY,
+  "session.ts::mode === 'antigravity'": PRE_REGISTRY,
+  "session.ts::mode === 'claude'": PRE_REGISTRY,
+  "session.ts::mode === 'codex'": PRE_REGISTRY,
+  "session.ts::mode === 'gemini'": PRE_REGISTRY,
+  "session.ts::mode === 'opencode'": PRE_REGISTRY,
+  "session.ts::mode === 'shell'": PRE_REGISTRY,
+  // tmux-manager.ts
+  "tmux-manager.ts::case 'antigravity':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'claude':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'codex':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'deepseek':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'gemini':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'grok':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'omp':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'opencode':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'pi':": PRE_REGISTRY,
+  "tmux-manager.ts::case 'shell':": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'antigravity'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'codex'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'deepseek'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'gemini'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'grok'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'omp'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'opencode'": PRE_REGISTRY,
+  "tmux-manager.ts::mode === 'pi'": PRE_REGISTRY,
+  // web/routes/file-routes.ts
+  "web/routes/file-routes.ts::mode !== 'codex'": PRE_REGISTRY,
+  // web/routes/ralph-routes.ts
+  "web/routes/ralph-routes.ts::mode === 'codex'": PRE_REGISTRY,
+  "web/routes/ralph-routes.ts::mode === 'gemini'": PRE_REGISTRY,
+  "web/routes/ralph-routes.ts::mode === 'opencode'": PRE_REGISTRY,
+  // web/routes/readmymind-routes.ts
+  "web/routes/readmymind-routes.ts::mode === 'claude'": PRE_REGISTRY,
+  "web/routes/readmymind-routes.ts::mode === 'codex'": PRE_REGISTRY,
+  // web/routes/respawn-routes.ts
+  "web/routes/respawn-routes.ts::mode === 'antigravity'": PRE_REGISTRY,
+  "web/routes/respawn-routes.ts::mode === 'codex'": PRE_REGISTRY,
+  "web/routes/respawn-routes.ts::mode === 'gemini'": PRE_REGISTRY,
+  "web/routes/respawn-routes.ts::mode === 'opencode'": PRE_REGISTRY,
+  // web/routes/session-recovery-routes.ts
+  "web/routes/session-recovery-routes.ts::mode === 'codex'": PRE_REGISTRY,
+  "web/routes/session-recovery-routes.ts::mode === 'opencode'": PRE_REGISTRY,
+  // web/routes/session-routes.ts
+  "web/routes/session-routes.ts::mode !== 'deepseek'": PRE_REGISTRY,
+  "web/routes/session-routes.ts::mode === 'shell'": PRE_REGISTRY,
+  // web/server.ts
+  "web/server.ts::mode !== 'codex'": PRE_REGISTRY,
+  "web/server.ts::mode !== 'gemini'": PRE_REGISTRY,
+  "web/server.ts::mode !== 'opencode'": PRE_REGISTRY,
+  // web/session-listener-wiring.ts
+  "web/session-listener-wiring.ts::mode !== 'claude'": PRE_REGISTRY,
+  // web/session-wait-registry.ts
+  "web/session-wait-registry.ts::mode === 'claude'": PRE_REGISTRY,
+  "web/session-wait-registry.ts::mode === 'codex'": PRE_REGISTRY,
+  "web/session-wait-registry.ts::mode === 'opencode'": PRE_REGISTRY,
+
   // --- Legacy <Mode>Config plumbing (public wire shape, see the header) ---
   "web/routes/session-routes.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing',
   "web/routes/session-routes.ts::mode === 'codex'": 'legacy <Mode>Config plumbing',
@@ -116,8 +193,6 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // there, the shared predicate silently widened both to a mode with no transcript to read.
   // CLAUDE.md documents this as deliberate and `test/deepseek-mode.test.ts` pins it, so a
   // capability here would be actively wrong.
-  "web/routes/readmymind-routes.ts::mode !== 'claude'":
-    'deliberately mode-not-capability; pinned by deepseek-mode.test.ts',
   "web/server.ts::mode !== 'claude'":
     "intent capture reads Claude's own transcript, and the recovered-workspace hook sweep " +
     'writes .claude hooks — both are claude questions, not capability ones (see CLAUDE.md)',
