@@ -361,6 +361,22 @@ export interface CliCapabilities {
   effort: boolean;
   agentSkillInjection: boolean;
   statusLineTelemetry: boolean;
+  /**
+   * Whether this CLI can create and answer Approvals Inbox items
+   * (`approvalsAvailableForMode`).
+   *
+   * ⚠️ A FOURTH independent set, and it lines up with none of `hooks`, `external` or
+   * `transcript` — which is the whole reason it is its own field rather than derived.
+   * Claude qualifies through the hook path (`permission_prompt` etc); codex and opencode
+   * qualify through COD-328's confirmed turn-end transitions, which are inferred rather
+   * than reported, so they are `hooks: 'none'` and still true here. Meanwhile `deepseek`
+   * is `hooks: 'supervised'` and false here, because its bridge feeds the inbox through
+   * its own path in approval-routes.ts rather than through this predicate.
+   *
+   * Deriving this from `hooks` would therefore both admit deepseek and drop codex and
+   * opencode — the exact class of mistake CliCapabilities' header warns about.
+   */
+  approvals: boolean;
   /** Where a model override is delivered. Claude uniquely writes settings.local.json. */
   model: { source: 'flag' | 'claude-settings-file' | 'none'; param?: string };
   /**

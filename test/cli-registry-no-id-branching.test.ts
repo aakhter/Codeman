@@ -86,16 +86,19 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // never a silent deletion. ⚠️ COD-212 must survive the tmux-manager conversion: upstream's
   // generic env helpers are sync, and adopting them as-is reverts a measured 5.08s
   // /api/status freeze during session create.
-  // config/headroom-routing.ts
-  "config/headroom-routing.ts::mode !== 'claude'": PRE_REGISTRY,
-  "config/headroom-routing.ts::mode === 'claude'": PRE_REGISTRY,
-  "config/headroom-routing.ts::mode === 'codex'": PRE_REGISTRY,
-  // hooks-config.ts
-  "hooks-config.ts::mode !== 'claude'": PRE_REGISTRY,
-  // session-agent-activity-coordinator.ts
-  "session-agent-activity-coordinator.ts::mode === 'claude'": PRE_REGISTRY,
-  // session-recovery.ts
-  "session-recovery.ts::mode !== 'codex'": PRE_REGISTRY,
+  //
+  // COD-416 wave 1 removed 17 of the original 53 (36 left): 3 converted to
+  // `capabilities.approvals`, 14 triaged into ALLOWED_BRANCHES with individual reasons —
+  // see the "COD-416 wave 1" block below.
+  //
+  // ⚠️ What is LEFT is not simply "the rest": the largest remaining cluster is a set of
+  // STALE external-CLI mode lists (respawn-routes, ralph-routes, and five chains in
+  // server.ts whose own comments say "not supported for external CLI sessions"). They name
+  // opencode/codex/gemini(/antigravity) — the external set as it stood before pi, grok,
+  // deepseek and omp existed — so converting them to `capabilities.respawn`/`.ralph` or
+  // `isExternalCliMode()` REFUSES four to five modes that are accepted today. That is a
+  // user-visible behaviour change on a public API surface, not a refactor, and it is parked
+  // for a decision rather than smuggled in here. See COD-416's comments.
   // session.ts
   "session.ts::mode !== 'claude'": PRE_REGISTRY,
   "session.ts::mode !== 'codex'": PRE_REGISTRY,
@@ -124,36 +127,82 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   "tmux-manager.ts::mode === 'omp'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'opencode'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'pi'": PRE_REGISTRY,
-  // web/routes/file-routes.ts
-  "web/routes/file-routes.ts::mode !== 'codex'": PRE_REGISTRY,
   // web/routes/ralph-routes.ts
   "web/routes/ralph-routes.ts::mode === 'codex'": PRE_REGISTRY,
   "web/routes/ralph-routes.ts::mode === 'gemini'": PRE_REGISTRY,
   "web/routes/ralph-routes.ts::mode === 'opencode'": PRE_REGISTRY,
-  // web/routes/readmymind-routes.ts
-  "web/routes/readmymind-routes.ts::mode === 'claude'": PRE_REGISTRY,
-  "web/routes/readmymind-routes.ts::mode === 'codex'": PRE_REGISTRY,
   // web/routes/respawn-routes.ts
   "web/routes/respawn-routes.ts::mode === 'antigravity'": PRE_REGISTRY,
   "web/routes/respawn-routes.ts::mode === 'codex'": PRE_REGISTRY,
   "web/routes/respawn-routes.ts::mode === 'gemini'": PRE_REGISTRY,
   "web/routes/respawn-routes.ts::mode === 'opencode'": PRE_REGISTRY,
-  // web/routes/session-recovery-routes.ts
-  "web/routes/session-recovery-routes.ts::mode === 'codex'": PRE_REGISTRY,
-  "web/routes/session-recovery-routes.ts::mode === 'opencode'": PRE_REGISTRY,
-  // web/routes/session-routes.ts
-  "web/routes/session-routes.ts::mode !== 'deepseek'": PRE_REGISTRY,
-  "web/routes/session-routes.ts::mode === 'shell'": PRE_REGISTRY,
   // web/server.ts
   "web/server.ts::mode !== 'codex'": PRE_REGISTRY,
   "web/server.ts::mode !== 'gemini'": PRE_REGISTRY,
   "web/server.ts::mode !== 'opencode'": PRE_REGISTRY,
-  // web/session-listener-wiring.ts
-  "web/session-listener-wiring.ts::mode !== 'claude'": PRE_REGISTRY,
-  // web/session-wait-registry.ts
-  "web/session-wait-registry.ts::mode === 'claude'": PRE_REGISTRY,
-  "web/session-wait-registry.ts::mode === 'codex'": PRE_REGISTRY,
-  "web/session-wait-registry.ts::mode === 'opencode'": PRE_REGISTRY,
+
+  // ── COD-416 wave 1: triaged out of the baseline above ───────────────────────────────
+  //
+  // Converted to DATA (no entry needed, the branch is gone):
+  //   web/session-wait-registry.ts `approvalsAvailableForMode` → `capabilities.approvals`,
+  //   a fourth independent set that lines up with neither `hooks` nor `external`.
+  //
+  // The rest are category (2): each is a genuine per-CLI question, not a capability, and
+  // each carries its own reason below rather than a shared placeholder.
+
+  // --- Read My Mind / intent capture: strict per-provider lanes, claude-only by design ---
+  //
+  // Same reasoning as the `web/server.ts::mode !== 'claude'` entry further down, and the
+  // reason CLAUDE.md tells you NOT to reach for `hooksAvailableForMode()` here: these read
+  // Claude's OWN transcript, and the local-Codex lane reads a strictly-owned codex rollout.
+  // A capability would have to merge two deliberately separate provider lanes.
+  "web/routes/readmymind-routes.ts::mode === 'claude'": "Read My Mind claude lane: reads Claude's own transcript",
+  "web/routes/readmymind-routes.ts::mode === 'codex'":
+    'Read My Mind local-Codex lane: strictly-owned codex rollout, no cross-provider fallback',
+  "session-agent-activity-coordinator.ts::mode === 'claude'":
+    'agent observation is keyed on claudeSessionId — a Claude transcript fact, not a capability',
+  "hooks-config.ts::mode !== 'claude'":
+    "verifies CLAUDE's own SessionStart hook identity; a non-claude mode has no such hook to verify",
+
+  // --- Headroom context-compression routing (COD-98) ---
+  //
+  // Not "which CLIs support a proxy" but "which two CLIs Codeman knows how to point at one",
+  // and the two mechanisms are different in kind: claude takes ANTHROPIC_BASE_URL via env
+  // injection, codex takes a config.toml patch. A boolean capability could not say which.
+  "config/headroom-routing.ts::mode !== 'claude'": 'Headroom claude lane: ANTHROPIC_BASE_URL env injection (COD-98)',
+  "config/headroom-routing.ts::mode === 'claude'": 'Headroom claude lane: ANTHROPIC_BASE_URL env injection (COD-98)',
+  "config/headroom-routing.ts::mode === 'codex'":
+    'Headroom codex lane: config.toml patch, a different mechanism (COD-98)',
+
+  // --- Codex-specific features whose subject IS the codex artifact format ---
+  "web/routes/file-routes.ts::mode !== 'codex'":
+    "file-uri previews decode codex's own artifact URI scheme; the 403 names the mode in its prose",
+  "session-recovery.ts::mode !== 'codex'":
+    'recovers a custom CODEX launch string against a codex resume template; no other CLI has one',
+
+  // --- Approvals ingestion path split (COD-328) ---
+  //
+  // NOT a duplicate of `capabilities.approvals` above: that says WHETHER a mode has items,
+  // this says WHICH path builds them. Claude's come from hook events, so the transition
+  // path must exclude it or a claude turn-end would double-file an item the hook already
+  // filed. Both halves of the pair are claude-shaped questions, not capability ones.
+  "web/session-listener-wiring.ts::mode !== 'claude'":
+    "transition-inferred idle is for the modes WITHOUT hooks; claude's items come from hook events",
+
+  // --- Legacy <Mode>Config plumbing (public wire shape, see the header) ---
+  //
+  // Same category as the `===` block below, reached from the recovery and validation paths.
+  "web/routes/session-recovery-routes.ts::mode === 'codex'": 'legacy <Mode>Config plumbing (native resume recovery)',
+  "web/routes/session-recovery-routes.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing (native resume recovery)',
+  "web/routes/session-routes.ts::mode !== 'deepseek'":
+    'legacy <Mode>Config plumbing: rejects a <Mode>Config sent for the wrong mode',
+
+  // --- Capture-canonical terminal reload (COD-189) ---
+  //
+  // About tmux pane history vs byte history for a SHELL pane, not about any CLI's
+  // behaviour: a fast shell burst makes byte history sparse while the pane history stays
+  // contiguous. There is no CLI capability being asked about here.
+  "web/routes/session-routes.ts::mode === 'shell'": 'COD-189 capture-canonical full reload for shell panes',
 
   // --- Legacy <Mode>Config plumbing (public wire shape, see the header) ---
   "web/routes/session-routes.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing',

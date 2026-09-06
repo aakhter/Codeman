@@ -274,6 +274,13 @@ const capabilitiesSchema = z
     effort: z.boolean(),
     agentSkillInjection: z.boolean(),
     statusLineTelemetry: z.boolean(),
+    // ⚠️ DEFAULTED, unlike its neighbours, and the asymmetry is deliberate. A stock-id
+    // override deep-merges onto the shipped entry so it always inherits a value, but a
+    // CUSTOM entry is validated STANDALONE — so making this required would silently DROP a
+    // custom CLI that predates the field, with only a warning. `false` is also the only
+    // answer that could be right for one: the Approvals Inbox has no ingestion path for a
+    // CLI Codeman ships no hook bridge or turn-end parser for.
+    approvals: z.boolean().default(false),
     model: z
       .object({ source: z.enum(['flag', 'claude-settings-file', 'none']), param: z.string().optional() })
       .strict(),

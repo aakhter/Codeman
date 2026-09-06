@@ -47,6 +47,7 @@ function agentDefaults(): Pick<
   | 'effort'
   | 'agentSkillInjection'
   | 'statusLineTelemetry'
+  | 'approvals'
   | 'model'
   | 'privilegedParams'
   | 'privilegedEnvKeys'
@@ -68,6 +69,7 @@ function agentDefaults(): Pick<
     effort: false,
     agentSkillInjection: false,
     statusLineTelemetry: false,
+    approvals: false,
     model: { source: 'flag', param: 'model' },
     privilegedParams: NO_PRIVILEGED_PARAMS,
     privilegedEnvKeys: NO_PRIVILEGED_ENV_KEYS,
@@ -200,6 +202,8 @@ const CLAUDE: CliEntry = {
     effort: true,
     agentSkillInjection: true,
     statusLineTelemetry: true,
+    // Claude's items arrive from the hook path (permission_prompt / idle_prompt).
+    approvals: true,
     model: { source: 'claude-settings-file' },
     privilegedParams: [],
     privilegedEnvKeys: [],
@@ -265,6 +269,7 @@ const SHELL: CliEntry = {
     effort: false,
     agentSkillInjection: false,
     statusLineTelemetry: false,
+    approvals: false,
     model: { source: 'none' },
     privilegedParams: [],
     privilegedEnvKeys: [],
@@ -346,6 +351,9 @@ const OPENCODE: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
+    // which is why this is its own capability and not derived from `hooks`.
+    approvals: true,
     altScreen: 'strip-mux-only',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' }, predictProfile: undefined },
   },
@@ -418,6 +426,9 @@ const CODEX: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
+    // which is why this is its own capability and not derived from `hooks`.
+    approvals: true,
     transcript: 'codex-rollout',
     altScreen: 'strip-full',
     echo: { policy: 'predict', anchor: { kind: 'cursor' }, predictProfile: 'codex' },

@@ -84,6 +84,25 @@ describe('resolveRegistry (pure)', () => {
     expect(mine?.stock).toBe(false);
   });
 
+  /**
+   * COD-416: `capabilities.approvals` was added AFTER a user could already have written a
+   * custom entry. A stock-id override inherits the field by deep-merging onto the shipped
+   * definition, but a custom entry is validated STANDALONE — so a required field would have
+   * dropped a pre-existing custom CLI with nothing but a warning. It defaults instead, and
+   * the default is the only safe answer: there is no approvals ingestion path for a CLI
+   * Codeman ships no hook bridge or turn-end parser for.
+   */
+  it('keeps a custom entry that predates capabilities.approvals, defaulting it to false', () => {
+    const legacy = customEntry('legacycli');
+    delete (legacy.capabilities as Record<string, unknown>).approvals;
+    const warnings: string[] = [];
+    const { entries } = resolveRegistry(STOCK_CLIS, { schemaVersion: 1, clis: { legacycli: legacy } }, warnings);
+    expect(warnings).toEqual([]);
+    const mine = entries.find((e) => (e.id as string) === 'legacycli');
+    expect(mine, 'a custom entry without the new field must still load').toBeDefined();
+    expect(mine?.capabilities.approvals).toBe(false);
+  });
+
   it('drops an invalid custom entry but keeps the whole stock catalog', () => {
     const warnings: string[] = [];
     const { entries } = resolveRegistry(

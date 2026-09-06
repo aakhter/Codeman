@@ -266,9 +266,20 @@ export function sessionHookOptions(session: {
   };
 }
 
-/** Whether this mode can create and answer Approvals Inbox items. */
+/**
+ * Whether this mode can create and answer Approvals Inbox items.
+ *
+ * ⚠️ Reads its OWN capability rather than deriving from `hooks`, and the two sets really do
+ * differ in BOTH directions: codex and opencode are `hooks: 'none'` and belong here (COD-328
+ * infers their items from confirmed turn-end transitions), while `deepseek` is
+ * `hooks: 'supervised'` and does NOT — its bridge reaches the inbox through its own path in
+ * approval-routes.ts. A predicate derived from hooks would drop two modes and admit one.
+ *
+ * An UNREGISTERED mode gets `false`: no ingestion path exists for one, so promising an
+ * answerable item would leave a card nothing can resolve.
+ */
 export function approvalsAvailableForMode(mode: SessionMode): boolean {
-  return mode === 'claude' || mode === 'codex' || mode === 'opencode';
+  return getCli(mode)?.capabilities.approvals ?? false;
 }
 
 /** Outcome of resolving a caller-supplied wait target against a session's mode. */
