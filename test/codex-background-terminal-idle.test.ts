@@ -2,15 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { classifyCodexRenderedState } from '../src/session.js';
 
 /**
- * COD-366 — a Codex session waiting on a running background terminal was
- * classified as idle.
+ * COD-415 refines COD-366: a ready Codex composer must remain available even
+ * when the prior turn left a durable background helper running.
  *
- * Codex hands the composer back while a background terminal keeps running, so
- * the pane goes quiet and `CODEX_COMPOSER_LINE_PATTERN` matches. That made
- * `classifyCodexRenderedState` answer `input-ready`, which is the one value
- * `_armExternalCliIdleTimer` treats as "the turn ended" — so the session
- * emitted `idle` with reason `turn-end`, which in turn creates an Approvals
- * Inbox item and fires a push notification for work that needs no human.
+ * A background terminal can be a durable helper (for example, a preview
+ * server), rather than continuing parent-agent work. Its presence is
+ * informational; the ready composer controls parent-session availability.
  *
  * The frames below are the two shapes codex 0.146.0 actually renders (strings
  * lifted from the shipped binary): a `· N background terminal(s) running`
@@ -21,12 +18,11 @@ import { classifyCodexRenderedState } from '../src/session.js';
 const COMPOSER = '› type your message';
 const MODEL_FOOTER = '  gpt-5.5 medium · /home/aakht/.codeman/app';
 
-describe('COD-366 codex background-terminal idle classification', () => {
-  it('does not report input-ready while a background terminal is still running', () => {
-    // Turn is over — no "Working" row — but one terminal is still going.
+describe('COD-415 codex background-helper availability', () => {
+  it('reports input-ready when the composer is ready alongside a background terminal', () => {
     const frame = ['• Done.', '  · 1 background terminal running', COMPOSER, MODEL_FOOTER].join('\r\n');
 
-    expect(classifyCodexRenderedState(frame)).toBe('working');
+    expect(classifyCodexRenderedState(frame)).toBe('input-ready');
   });
 
   it('treats the explicit "Waiting for background terminal" screen as working', () => {
@@ -35,10 +31,10 @@ describe('COD-366 codex background-terminal idle classification', () => {
     expect(classifyCodexRenderedState(frame)).toBe('working');
   });
 
-  it('counts plural background terminals too', () => {
+  it('reports input-ready for multiple background terminals when the composer is ready', () => {
     const frame = ['  · 3 background terminals running', COMPOSER].join('\r\n');
 
-    expect(classifyCodexRenderedState(frame)).toBe('working');
+    expect(classifyCodexRenderedState(frame)).toBe('input-ready');
   });
 
   it('resumes input-ready once the last background terminal completes', () => {

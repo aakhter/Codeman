@@ -362,28 +362,19 @@ function hasCodexNumberedChoiceBlock(frame: string): boolean {
   return false;
 }
 
-const CODEX_BACKGROUND_TERMINAL_COUNT_PATTERN = /\b(\d+)\s+background\s+terminals?\s+running\b/i;
 const CODEX_BACKGROUND_TERMINAL_WAIT_PATTERN = /\bwaiting for background terminal\b/i;
 
 /**
- * Rendered-frame evidence that codex is waiting on a background terminal
- * (COD-366).
+ * Rendered-frame evidence that Codex is explicitly waiting on a background
+ * terminal.
  *
- * Codex hands the composer back while a background terminal keeps running, so
- * the pane falls quiet and the composer row matches — the turn LOOKS finished
- * while the work plainly is not. The two shapes codex renders are a
- * `· N background terminal(s) running` suffix on the status row and a distinct
- * `Waiting for background terminal` label.
- *
- * ⚠ The count must be read as a NUMBER, not matched as a substring: the `/bt`
- * status surface renders `No background terminals running.`, and a plain
- * substring test on "background terminals running" would latch such a session
- * busy forever. `0` is excluded for the same reason.
+ * A ready composer establishes parent-session availability. A remaining
+ * background terminal can be a durable helper, such as a preview server, so a
+ * numeric background-terminal count is informational rather than evidence that
+ * Codex is currently working.
  */
-export function detectCodexBackgroundTerminalFrame(data: string): boolean {
-  if (CODEX_BACKGROUND_TERMINAL_WAIT_PATTERN.test(data)) return true;
-  const running = data.match(CODEX_BACKGROUND_TERMINAL_COUNT_PATTERN);
-  return running ? Number(running[1]) > 0 : false;
+export function detectCodexBackgroundTerminalWaitFrame(data: string): boolean {
+  return CODEX_BACKGROUND_TERMINAL_WAIT_PATTERN.test(data);
 }
 
 export function classifyCodexRenderedState(frame: string | null | undefined): CodexRenderedState {
@@ -394,7 +385,7 @@ export function classifyCodexRenderedState(frame: string | null | undefined): Co
   // A genuine question outranks a running background terminal: the human still
   // has to answer it, so it must stay input-ready and keep raising an alert.
   if (hasCodexNumberedChoiceBlock(plain)) return 'input-ready';
-  if (detectCodexBackgroundTerminalFrame(plain)) return 'working';
+  if (detectCodexBackgroundTerminalWaitFrame(plain)) return 'working';
   if (CODEX_COMPOSER_LINE_PATTERN.test(plain)) return 'input-ready';
   return 'unknown';
 }
