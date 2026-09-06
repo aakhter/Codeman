@@ -72,6 +72,8 @@ import { RalphTracker } from './ralph-tracker.js';
 import { BashToolParser } from './bash-tool-parser.js';
 import {
   isTrustDialogScreen,
+  trustDialogNextKey,
+  TRUST_KEY_CONFIRM,
   TRUST_DIALOG_WINDOW_MS,
   TRUST_DIALOG_RETRY_MS,
   TRUST_DIALOG_MAX_ATTEMPTS,
@@ -109,6 +111,8 @@ import {
 } from './config/buffer-limits.js';
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
+import { getCli } from './config/cli-registry/registry.js';
+import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
   buildInteractiveArgs,
   buildPromptArgs,
@@ -281,17 +285,21 @@ const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 // eslint-disable-next-line no-control-regex
 const TMUX_ABSOLUTE_ROW_START_PATTERN = /\x1b\[\d+;1H/g;
 
+/**
+ * True for external-CLI run modes (non-Claude) that use their own TUI and output format:
+ * no Claude transcript, no hooks, no Claude-format token/BashTool parsing.
+ *
+ * ⚠️ Reads its OWN capability flag rather than being derived from `hooks` or `kind`, and
+ * that independence is load-bearing. `shell` has no hooks but is NOT external, so a
+ * predicate derived from hooks would sweep it in here; `deepseek` HAS hooks but IS
+ * external. Deriving one of these three predicates from another has already shipped a bug
+ * (see CliCapabilities' own doc comment), which is why they are three separate fields.
+ *
+ * An UNREGISTERED mode is treated as external — the conservative answer, since it disables
+ * Claude-specific parsing rather than pointing it at output that was never Claude's.
+ */
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return (
-    mode === 'opencode' ||
-    mode === 'codex' ||
-    mode === 'gemini' ||
-    mode === 'antigravity' ||
-    mode === 'pi' ||
-    mode === 'grok' ||
-    mode === 'deepseek' ||
-    mode === 'omp'
-  );
+  return getCli(mode)?.capabilities.external ?? true;
 }
 
 export function detectExternalCliWorkingFrame(data: string, mode: SessionMode): boolean {
@@ -418,29 +426,21 @@ export function detectClaudeCheckpointWorkingFrame(data: string): boolean {
   return SPINNER_PATTERN.test(data) || /\besc to interrupt\b/.test(data) || /^\s*[·✢✳∗✻✽]\s+\S[^\n]*…/m.test(data);
 }
 
+/** Display name for a run mode. Falls back to the raw id for an unregistered one. */
 function getModeLabel(mode: SessionMode): string {
-  switch (mode) {
-    case 'opencode':
-      return 'OpenCode';
-    case 'codex':
-      return 'Codex';
-    case 'gemini':
-      return 'Gemini';
-    case 'antigravity':
-      return 'Antigravity';
-    case 'pi':
-      return 'Pi';
-    case 'grok':
-      return 'Grok';
-    case 'deepseek':
-      return 'DeepSeek';
-    case 'omp':
-      return 'OMP';
-    case 'shell':
-      return 'Shell';
-    case 'claude':
-      return 'Claude';
-  }
+  return getCli(mode)?.label ?? mode;
+}
+
+/**
+ * Does this CLI's launch spec gate anything on its own version?
+ *
+ * Only such a CLI needs its version probed at session start — probing one with no gates
+ * would spawn a `--version` subprocess whose answer nothing reads. Today that is claude
+ * (the `--name` flag, gated at 2.1.224), which is why the probe used to be written as
+ * `mode === 'claude'`.
+ */
+function cliNeedsVersionProbe(mode: SessionMode): boolean {
+  return Object.keys(getCli(mode)?.capabilities.gates ?? {}).length > 0;
 }
 
 /**
@@ -469,9 +469,7 @@ function getModeLabel(mode: SessionMode): string {
  * vim inside a tmux `shell` session.
  */
 export function isAltScreenStripMode(mode: SessionMode): boolean {
-  // Antigravity is deliberately excluded (upstream #201): its Go TUI is
-  // unverified against the alt-screen strip, like opencode's.
-  return mode === 'codex' || mode === 'claude' || mode === 'gemini';
+  return getCli(mode)?.capabilities.altScreen === 'strip-full';
 }
 
 /**
@@ -742,8 +740,9 @@ export class Session extends EventEmitter {
   private _lastPaneProbeAt = 0; // Throttle for the tmux screen probe
   private _lastPaneProbeWorking: boolean | null = null; // Its last verdict (null = could not read)
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
-  private _trustDialogAttempts = 0; // Enter presses sent at the trust dialog
+  private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
+  private _trustDialogTimer: NodeJS.Timeout | null = null; // Re-read after a keystroke (see below)
   private _interactiveStartedAt = 0; // When the interactive pane launched (bounds that scan)
   private _taskTracker: TaskTracker;
 
@@ -2538,7 +2537,9 @@ export class Session extends EventEmitter {
    * session that already carries an explicit id pass through untouched.
    */
   private _pinOmpRespawnId(): void {
-    if (this.mode !== 'omp') return;
+    // The omp-jsonl transcript reader is what this pin exists to feed, so ask for the
+    // reader rather than for the CLI's name.
+    if (getCli(this.mode)?.capabilities.transcript !== 'omp-jsonl') return;
     if (this._ompConfig?.resumeSessionId) return;
     // Callers MUST call this only immediately before an ACTUAL respawn (a
     // confirmed-dead pane, or a genuine remote reattach) — never while merely
@@ -2700,9 +2701,15 @@ export class Session extends EventEmitter {
     }
 
     // Scan terminal output for attachment requests. `codeman://attach?...` is an
-    // explicit magic link; Codex generated images report `Saved to: file://...`.
-    // The web server applies the trust boundary for each request source.
-    const attachmentRequests = parseTerminalAttachmentRequests(data);
+    // explicit magic link (all modes); Codex generated images report
+    // `Saved to: file://...` — that scanner (and its relaxed trust policy) is
+    // only enabled for codex-mode sessions. The web server applies the trust
+    // boundary for each request source.
+    // Codex is the only CLI that announces generated artifacts in its pane output, and it
+    // is also the only one whose transcript is a rollout file — one implies the other.
+    const attachmentRequests = parseTerminalAttachmentRequests(data, {
+      codexArtifacts: getCli(this.mode)?.capabilities.transcript === 'codex-rollout',
+    });
     for (const request of attachmentRequests) {
       const seenKey = `${request.source}:${request.path}`;
       if (this._attachmentMagicSeen.has(seenKey)) continue;
@@ -2762,6 +2769,10 @@ export class Session extends EventEmitter {
     this._interactiveStartedAt = Date.now();
     this._trustDialogAttempts = 0;
     this._lastTrustDialogScanAt = 0;
+    if (this._trustDialogTimer) {
+      clearTimeout(this._trustDialogTimer);
+      this._trustDialogTimer = null;
+    }
 
     // COD-118: if the PTY exit breaker has tripped (repeated non-zero exits in a
     // short window), refuse to respawn. This is the uniform choke point that stops
@@ -2794,8 +2805,8 @@ export class Session extends EventEmitter {
     // repaint/alt-screen mode; issue #154). Remote sessions run claude on
     // another host, so a local probe wouldn't reflect their version; they get
     // their own over-ssh probe below. Cached process-wide, best-effort.
-    if (this.mode === 'claude' && !this._remote && !this._docker && !this._cliVersion) {
-      const probedVersion = getClaudeCliVersion();
+    if (cliNeedsVersionProbe(this.mode) && !this._remote && !this._docker && !this._cliVersion) {
+      const probedVersion = resolveSessionCliVersion(this.mode);
       if (probedVersion) {
         this._cliVersion = probedVersion;
         this.emit('cliInfoUpdated', {
@@ -2811,7 +2822,7 @@ export class Session extends EventEmitter {
     // reports the HOST claude (wrong version, and leaving cliVersion undefined
     // silently disables wheel-forwarding, #154). Probe the IN-CONTAINER version
     // instead — deferred so the container is up after the mux attach below.
-    if (this.mode === 'claude' && this._docker && !this._cliVersion) {
+    if (cliNeedsVersionProbe(this.mode) && this._docker && !this._cliVersion) {
       const dockerMeta = this._docker;
       setTimeout(() => {
         if (this._isStopped || this._cliVersion) return;
@@ -2837,7 +2848,7 @@ export class Session extends EventEmitter {
     // is the unreliable path #154 was filed for, so remote Claude cases silently
     // never got wheel-forwarding (noted in the #205 analysis). Probe over ssh,
     // deferred so session start never waits on the ssh round-trip.
-    if (this.mode === 'claude' && this._remote && !this._cliVersion) {
+    if (cliNeedsVersionProbe(this.mode) && this._remote && !this._cliVersion) {
       const remoteMeta = this._remote;
       setTimeout(() => {
         if (this._isStopped || this._cliVersion) return;
@@ -2956,35 +2967,16 @@ export class Session extends EventEmitter {
 
     // Fallback to direct PTY if mux is not used
     if (!this.ptyProcess) {
-      // OpenCode sessions require tmux for env var injection (API keys via setenv)
-      if (this.mode === 'opencode') {
-        throw new Error('OpenCode sessions require tmux. Direct PTY fallback is not supported.');
-      }
-      // Codex sessions require tmux for OPENAI_API_KEY injection via setenv
-      if (this.mode === 'codex') {
-        throw new Error('Codex sessions require tmux. Direct PTY fallback is not supported.');
-      }
-      // Gemini sessions require tmux for Gemini/Google auth env injection via setenv
-      if (this.mode === 'gemini') {
-        throw new Error('Gemini sessions require tmux. Direct PTY fallback is not supported.');
-      }
-      // Antigravity sessions require tmux for env override injection via setenv
-      if (this.mode === 'antigravity') {
-        throw new Error('Antigravity sessions require tmux. Direct PTY fallback is not supported.');
-      }
-      // Pi sessions require tmux for env override injection via setenv
-      if (this.mode === 'pi') {
-        throw new Error('Pi sessions require tmux. Direct PTY fallback is not supported.');
-      }
-      // Grok sessions require tmux for XAI_API_KEY / GROK_* injection via setenv
-      if (this.mode === 'grok') {
-        throw new Error('Grok sessions require tmux. Direct PTY fallback is not supported.');
-      }
-      // DeepSeek sessions require tmux for DEEPSEEK_API_KEY / DSH_PERMISSION_MODE
-      // injection via setenv — and for the HERDR_* status-bridge triple, without
-      // which the mode silently loses its definitive idle/blocked signals.
-      if (this.mode === 'deepseek') {
-        throw new Error('DeepSeek Harness sessions require tmux. Direct PTY fallback is not supported.');
+      // Every external CLI requires tmux and has NO direct-PTY fallback, because its
+      // secrets are injected with socket-scoped `tmux setenv` and so must never touch a
+      // spawn command line. DeepSeek additionally needs it for the HERDR_* status-bridge
+      // triple, without which the mode silently loses its definitive idle/blocked signals.
+      //
+      // Refusing is the only safe answer: falling back to a direct PTY would start the CLI
+      // unauthenticated (or, worse, tempt a future change into passing the key as an
+      // argument, where every process on the box can read it).
+      if (getCli(this.mode)?.capabilities.requiresMux) {
+        throw new Error(`${getModeLabel(this.mode)} sessions require tmux. Direct PTY fallback is not supported.`);
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
@@ -3206,6 +3198,15 @@ export class Session extends EventEmitter {
    * makes a retry safe, since the terminal buffer is append-only and keeps the
    * dialog in its tail long after it has been answered.
    *
+   * ⚠️ **The keystroke is read off the screen, never assumed.** Claude Code
+   * 2.1.252 dropped the option numbers, put "No, exit" first, and highlights IT
+   * by default, so the bare `\r` this used to send now answers *exit*: a fresh
+   * case died (`Pane is dead (status 1)`) about six seconds after spawning.
+   * `trustDialogNextKey()` returns one step at a time — an arrow while the
+   * cursor is on the wrong option, Enter only once the screen shows it on the
+   * trust option — and this method re-reads the pane between the two, so a
+   * dropped arrow costs a repaint instead of the session.
+   *
    * Three guards keep an Enter press off a live session: a startup-only window,
    * a two-marker match (isTrustDialogScreen), and an attempt cap.
    */
@@ -3226,17 +3227,39 @@ export class Session extends EventEmitter {
       this._terminalBuffer.value.slice(-TRUST_DIALOG_SCAN_BYTES);
     if (!isTrustDialogScreen(screen)) return;
 
+    // Null means the frame does not say which option is highlighted. Waiting for
+    // the next repaint is the safe move; pressing Enter blind is the bug.
+    const key = trustDialogNextKey(screen);
+    if (key === null) return;
+
     this._trustDialogAttempts++;
     if (this._trustDialogAttempts > TRUST_DIALOG_MAX_ATTEMPTS) {
       this._trustDialogAccepted = true; // leave it to the user rather than keep typing
       console.warn(`[Session] Workspace trust dialog did not clear after retries: ${this.id}`);
       return;
     }
+    const step = key === TRUST_KEY_CONFIRM ? 'confirming' : 'moving to the trust option';
     console.log(
-      `[Session] Auto-accepting workspace trust dialog for: ${this.id} (attempt ${this._trustDialogAttempts})`
+      `[Session] Auto-accepting workspace trust dialog for: ${this.id} (attempt ${this._trustDialogAttempts}, ${step})`
     );
-    // Enter confirms the highlighted default, "1. Yes, I trust this folder".
-    this.writeViaMux('\r');
+    this.writeViaMux(key);
+
+    // ⚠️ Schedule the next read; do NOT wait for more PTY output. This scan only
+    // ever ran from `onData`, which was enough while one Enter answered the
+    // dialog. It is not enough now: the arrow that moves the cursor is the LAST
+    // output the pane produces, so a dialog left sitting on the trust option
+    // never gets its Enter and the worker stays parked on it forever (measured
+    // on a live 2.1.252 spawn: cursor moved at 6 s, then nothing). The timer is
+    // one-shot and self-rearming through this same path, and every exit route
+    // goes through _clearAllTimers().
+    // The +100ms puts the re-entry OUTSIDE the scan throttle above; firing at
+    // exactly the throttle boundary would let the scan return early and break
+    // the chain with the dialog still on screen.
+    if (this._trustDialogTimer) clearTimeout(this._trustDialogTimer);
+    this._trustDialogTimer = setTimeout(() => {
+      this._trustDialogTimer = null;
+      this._maybeAcceptTrustDialog();
+    }, TRUST_DIALOG_RETRY_MS + 100);
   }
 
   /**
@@ -3397,7 +3420,7 @@ export class Session extends EventEmitter {
    * this capture or a resume/respawn that already resolved one).
    */
   private _maybeCaptureOmpSessionId(): void {
-    if (this.mode !== 'omp' || this._claudeSessionId !== this.id) return;
+    if (getCli(this.mode)?.capabilities.transcript !== 'omp-jsonl' || this._claudeSessionId !== this.id) return;
     try {
       const resolvedId = resolveAndClaimOmpSessionId(this.workingDir);
       if (resolvedId) {
@@ -3972,6 +3995,12 @@ export class Session extends EventEmitter {
   }
 
   private _clearAllTimers(): void {
+    // Clear the workspace-trust follow-up read
+    if (this._trustDialogTimer) {
+      clearTimeout(this._trustDialogTimer);
+      this._trustDialogTimer = null;
+    }
+
     // Clear activity timeout to prevent memory leak
     if (this.activityTimeout) {
       clearTimeout(this.activityTimeout);

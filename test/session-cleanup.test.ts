@@ -5,6 +5,7 @@ import { workingFramePollCoordinator } from '../src/working-frame-poll-coordinat
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
+import { safeRmHomeTree } from './mocks/index.js';
 
 const TEST_PORT = 3120;
 const CASES_DIR = join(homedir(), 'codeman-cases');
@@ -141,13 +142,9 @@ describe('Session Cleanup', () => {
   });
 
   afterEach(() => {
-    // Clean up cases created during this test
+    // Clean up cases created during this test (containment-gated).
     while (createdCases.length > 0) {
-      const caseName = createdCases.pop()!;
-      const casePath = join(CASES_DIR, caseName);
-      if (existsSync(casePath)) {
-        rmSync(casePath, { recursive: true, force: true });
-      }
+      safeRmHomeTree(join(CASES_DIR, createdCases.pop()!));
     }
   });
 
@@ -341,10 +338,7 @@ describe('Resource Management', () => {
 
   afterAll(async () => {
     for (const caseName of createdCases) {
-      const casePath = join(CASES_DIR, caseName);
-      if (existsSync(casePath)) {
-        rmSync(casePath, { recursive: true, force: true });
-      }
+      safeRmHomeTree(join(CASES_DIR, caseName));
     }
     await server.stop();
   }, 60000);

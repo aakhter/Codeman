@@ -21,14 +21,31 @@ export function parseAttachmentMagicLinks(data: string): string[] {
   return parseMagicAttachmentRequests(data).map((request) => request.path);
 }
 
-export function parseTerminalAttachmentRequests(data: string): TerminalAttachmentRequest[] {
+export interface ParseTerminalAttachmentOptions {
+  /**
+   * Also scan for codex's GENERATED-artifact announcements (`Saved to: file://…` and the
+   * labeled variant). Off by default: those carry a deliberately relaxed trust policy, and
+   * codex is the only CLI that announces artifacts this way, so enabling it for every mode
+   * widened that policy to panes it was never reasoned about for. The caller passes the
+   * registry capability (`transcript === 'codex-rollout'`) rather than a mode id.
+   */
+  codexArtifacts?: boolean;
+}
+
+export function parseTerminalAttachmentRequests(
+  data: string,
+  options: ParseTerminalAttachmentOptions = {}
+): TerminalAttachmentRequest[] {
   const results: TerminalAttachmentRequest[] = [];
   const seen = new Set<string>();
 
+  // Both generated-artifact scanners emit `source: 'codex-generated'` — they are two label
+  // formats for the same thing — so they are gated together.
   for (const request of [
     ...parseMagicAttachmentRequests(data),
-    ...parseCodexGeneratedArtifactRequests(data),
-    ...parseLabeledGeneratedArtifactRequests(data),
+    ...(options.codexArtifacts
+      ? [...parseCodexGeneratedArtifactRequests(data), ...parseLabeledGeneratedArtifactRequests(data)]
+      : []),
   ]) {
     const key = `${request.source}:${request.path}`;
     if (seen.has(key)) continue;

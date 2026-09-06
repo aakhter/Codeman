@@ -15072,6 +15072,13 @@ kbd {
   color: var(--text-dim);
   opacity: 0.45;
 }
+/* A window Claude is not currently reporting: the slot stays, dimmed, so the
+   chip keeps its shape instead of looking like half of it broke. */
+.header-plan-usage .pu-win-idle .pu-label,
+.header-plan-usage .pu-win-idle .pu-val {
+  color: var(--text-dim);
+  opacity: 0.55;
+}
 /* Green/yellow/red by how much of the window is used up. */
 .header-plan-usage .pu-green {
   color: #3fb950;
@@ -19743,6 +19750,44 @@ html[data-tab-orientation='vertical'] .home-sessions {
    label as a row label, its `.form-hint` as a row description. Scoped to the
    document, so `.form-row` everywhere else is untouched.
    ─────────────────────────────────────────────────────────────────────────── */
+/* Adopt-an-existing-container mode swaps which half of the Docker panel applies:
+   the create-time fields (image, network, resources, credential mounts) describe
+   a `docker create` that adoption never runs, and the container name is the one
+   field only adoption needs. `.docker-adopt-only` is hidden by default so the
+   panel stays exactly as it was until the checkbox is ticked. Rules carry
+   `!important` because the adapter block above paints `.form-row` as a row card
+   and `details.advanced-options` has its own display. */
+/* Run-menu notice: why a container case is offering no agent modes. Lives at the
+   top of the menu so the reason is where the missing entries would have been. */
+.run-mode-notice {
+  padding: 8px 12px;
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted, #9aa0a6);
+  border-bottom: 1px solid var(--border, #333);
+  white-space: normal;
+}
+
+#createCaseModal .docker-adopt-only {
+  display: none !important;
+}
+#createCaseModal[data-docker-adopt='1'] .docker-adopt-only {
+  display: block !important;
+}
+#createCaseModal[data-docker-adopt='1'] .docker-create-only {
+  display: none !important;
+}
+#createCaseModal .btn-inline-check {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #4a9eff);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 #createCaseModal .set-doc .form-row {
   margin: 0 0 3px;
   padding: 7px 10px;

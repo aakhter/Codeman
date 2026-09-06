@@ -81,6 +81,7 @@ import {
   hostGatewayAlias,
   resolveDockerClaudeArtifacts,
   resolveDockerCredentialArtifacts,
+  resolveDockerDaemonMountSource,
   type DockerCreateContext,
   type DockerMount,
   type DockerSeedCopy,
@@ -128,6 +129,7 @@ import {
   defaultRemoteCommandForMode,
   remoteLoginShellCommand,
   remoteSshTarget,
+  remoteTmuxSessionAlive,
   withRemotePathBootstrap,
 } from './remote-hosts.js';
 import { resolveCodexRecoveryStrategy } from './codex-command-profiles.js';
@@ -1859,14 +1861,23 @@ export interface DockerLaunchOptions {
 export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   const { mode, docker, sessionId, resumeSessionId, createContext, execEnv, execEnvNames, seedCopies } = opts;
   const base = buildDockerBaseArgs(docker).join(' ');
-  const createArgs = buildDockerCreateArgs(createContext).join(' ');
+  // ADOPTED container (docker.owned === false): the user built it and runs it, so
+  // this chain may only LOOK and then exec. No image check (the image is theirs),
+  // no create, and above all no `start` — starting a container we do not own is
+  // exactly the lifecycle mutation adoption promises never to perform. A missing
+  // or stopped container fails closed with an actionable message instead.
+  const adopted = docker.owned === false;
+  // Built lazily: an adopted case has no meaningful create-config, so computing
+  // create args for it would demand a context the adopt path never assembles.
+  const createArgs = adopted ? '' : buildDockerCreateArgs(createContext).join(' ');
   const name = shellescape(docker.containerName);
   const workdir = shellescape(docker.containerWorkdir);
   const image = shellescape(docker.image);
   const dkrName = dockerTmuxSessionName(sessionId);
   const sid = sessionId.slice(0, 8);
 
-  let modeCommand = docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
+  let modeCommand =
+    docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode, !!docker.runsAsRoot);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
   } else if (resumeSessionId && mode === 'opencode') {
@@ -1909,16 +1920,53 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   );
   const startFailMsg = shellescape(`Codeman: container ${docker.containerName} failed to start (docker daemon down?)`);
 
-  const imageCheck = `${base} image inspect ${image} >/dev/null 2>&1 || { echo ${imageMissingMsg}; exit 1; }`;
-  // create-if-missing (idempotent): reconnect / boot recovery re-runs this exact chain.
-  const ensure = `${base} inspect ${name} >/dev/null 2>&1 || ${base} ${createArgs}`;
-  const start = `${base} start ${name} >/dev/null 2>&1 || { echo ${startFailMsg}; exit 1; }`;
+  const notFoundMsg = shellescape(
+    `Codeman: container ${docker.containerName} not found. Adopted containers are never created by Codeman - start it yourself, then reopen this session.`
+  );
+  const notRunningMsg = shellescape(
+    `Codeman: container ${docker.containerName} is not running. Codeman never starts a container it does not own - start it yourself, then reopen this session.`
+  );
+
+  const imageCheck = adopted
+    ? ''
+    : `${base} image inspect ${image} >/dev/null 2>&1 || { echo ${imageMissingMsg}; exit 1; }`;
+  // create-if-missing (idempotent): reconnect / boot recovery re-runs this exact
+  // chain. A daemon without swap accounting warns whenever --memory is present,
+  // even when --memory-swap is omitted. In compatibility mode, retain the memory
+  // cap and filter ONLY that exact warning; all other stdout/stderr and the real
+  // create exit status are preserved so mount/config failures remain visible.
+  // A session-unique file avoids shell variables and command substitution, both
+  // of which would be expanded too early by the nested bash/tmux launch layers.
+  const createOutputPath = shellescape(`/tmp/codeman-create-${sessionId}.log`);
+  const filteredCreateOutput = `sed '/^WARNING: Your kernel does not support swap limit capabilities or the cgroup is not mounted\\. Memory limited without swap\\.$/d' ${createOutputPath}`;
+  const removeCreateOutput = `rm -f ${createOutputPath}`;
+  const createCommand = createContext.disableSwapLimit
+    ? `{ if ${base} ${createArgs} >${createOutputPath} 2>&1; ` +
+      `then ${filteredCreateOutput}; ${removeCreateOutput}; ` +
+      `elif ${base} inspect ${name} >/dev/null 2>&1; then ${removeCreateOutput}; ` +
+      `else ${filteredCreateOutput} >&2; ${removeCreateOutput}; false; fi; }`
+    : `${base} ${createArgs}`;
+  const ensure = adopted
+    ? `${base} inspect ${name} >/dev/null 2>&1 || { echo ${notFoundMsg}; exit 1; }`
+    : `${base} inspect ${name} >/dev/null 2>&1 || ${createCommand}`;
+  // ⚠️ No double quotes and no `$(…)` here. This whole chain is embedded in an
+  // outer `bash -c "…"`, so an unescaped `"` closes that string early, the rest
+  // is re-tokenized, and tmux fails to exec with a bare `execvp(3) failed`. A
+  // `grep -qx` pipeline reads the same answer using only the single-quoted form
+  // every other line in this builder already uses.
+  const start = adopted
+    ? `${base} inspect -f ${shellescape('{{.State.Running}}')} ${name} 2>/dev/null | grep -qx true || { echo ${notRunningMsg}; exit 1; }`
+    : `${base} start ${name} >/dev/null 2>&1 || { echo ${startFailMsg}; exit 1; }`;
   // Seed writable credential config from read-only host mounts ONCE per container
   // (guarded by [ -e ] so reconnects never clobber in-container config; `cp -a` for
   // whole-dir credential seeds). mkdir -p the parent so a file seed works even when
   // no sibling share-mount pre-created the dir. Paths are fixed CONTAINER_HOME
   // constants (no shell metachars), so the whole inner command is shell-quoted once.
-  const seedSteps = (seedCopies ?? []).map((s) => {
+  // An ADOPTED container gets NO seed copies: those read from create-time
+  // read-only mounts that do not exist here, and writing host credentials into a
+  // container the user owns is a mutation adoption does not permit. Its CLIs must
+  // already be authenticated inside it.
+  const seedSteps = (adopted ? [] : (seedCopies ?? [])).map((s) => {
     const cp = s.recursive ? 'cp -a' : 'cp';
     const parent = s.to.slice(0, s.to.lastIndexOf('/'));
     return `mkdir -p ${parent} 2>/dev/null; [ -e ${s.to} ] || ${cp} ${s.from} ${s.to} 2>/dev/null || true`;
@@ -1926,7 +1974,7 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   const innerCmd = seedSteps.length ? `${seedSteps.join(' ; ')} ; ${tmuxInvocation}` : tmuxInvocation;
   const execCmd = `exec ${base} exec -it --workdir ${workdir} ${execEnvFlags.join(' ')} ${name} sh -lc ${shellescape(innerCmd)}`;
 
-  return [imageCheck, ensure, start, execCmd].join(' ; ');
+  return [imageCheck, ensure, start, execCmd].filter(Boolean).join(' ; ');
 }
 
 /**
@@ -1942,13 +1990,29 @@ export function buildDockerKillCommand(options: { docker: SessionDocker; session
   return `${base} exec ${shellescape(docker.containerName)} tmux -L ${DOCKER_TMUX_SOCKET} kill-session -t ${shellescape(dkrName)}`;
 }
 
+/**
+ * Guard for the two builders that mutate CONTAINER lifecycle. They are pure
+ * string builders, so refusing here means an adopted container cannot even have
+ * a stop/remove command constructed for it — there is no shape of caller bug
+ * that turns into a `docker stop`/`rm` on something we do not own.
+ */
+function assertOwnedContainer(docker: SessionDocker, action: string): void {
+  if (docker.owned === false) {
+    throw new Error(
+      `Refusing to ${action} adopted container "${docker.containerName}": Codeman does not own its lifecycle.`
+    );
+  }
+}
+
 /** Explicit container stop (frees RAM/CPU; conversation resumes on next launch via --resume). */
 export function buildDockerStopCommand(docker: SessionDocker): string {
+  assertOwnedContainer(docker, 'stop');
   return `${buildDockerBaseArgs(docker).join(' ')} stop -t 10 ${shellescape(docker.containerName)}`;
 }
 
 /** Explicit container removal (case-delete). Destroys in-image state; bind mounts survive. */
 export function buildDockerRemoveCommand(docker: SessionDocker): string {
+  assertOwnedContainer(docker, 'remove');
   return `${buildDockerBaseArgs(docker).join(' ')} rm -f ${shellescape(docker.containerName)}`;
 }
 
@@ -2022,11 +2086,18 @@ export function resolveDockerLaunchOptions(
     sessionId,
     instance: CODEMAN_INSTANCE,
     userArgs,
-    credentialMounts,
-    extraMounts,
+    credentialMounts: credentialMounts.map((mount) => ({
+      ...mount,
+      src: resolveDockerDaemonMountSource(mount.src, home, process.env.CODEMAN_DOCKER_HOST_HOME),
+    })),
+    extraMounts: extraMounts.map((mount) => ({
+      ...mount,
+      src: resolveDockerDaemonMountSource(mount.src, home, process.env.CODEMAN_DOCKER_HOST_HOME),
+    })),
     envCreate,
     addHostGateway: !isDesktop,
     gatewayAlias,
+    disableSwapLimit: process.env.CODEMAN_DOCKER_DISABLE_SWAP_LIMIT === '1',
   };
 
   const execEnv: Record<string, string> = {
@@ -2243,6 +2314,25 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * torn down (killed/detached/stopping). A guarded session is NEVER revived.
    */
   private reconnectGuard: Set<string> = new Set();
+  /**
+   * Cached result of the remote tmux `has-session` probe (sessionId → alive).
+   * `true` = the durable remote tmux session exists (transport drop → reconnect
+   * is safe); `false` = remote session gone (agent exited cleanly → do NOT
+   * reconnect); `undefined` = not yet probed / probe failed. Only sessions
+   * whose pane is otherwise dead+eligible get probed, so a clean exit tears
+   * down the remote tmux and the probe reports false — killing the auto-revive
+   * (found live 2026-08-29: remote omp/opencode ctrl-c/ctrl-d auto-respawned
+   * fresh agents because the watcher couldn't tell a clean exit from a
+   * transport drop).
+   */
+  private remoteAliveCache: Map<string, boolean | undefined> = new Map();
+  /**
+   * Sessions with a `has-session` probe currently in flight. The probe is a
+   * fire-and-forget ssh round-trip with a 15s timeout against a 5s tick, so
+   * without this an unreachable host would accumulate three overlapping ssh
+   * processes per dead session.
+   */
+  private remoteAliveInFlight: Set<string> = new Set();
 
   private trueColorConfigured = false;
   private readonly checkpointExecutor?: (command: string) => Promise<void>;
@@ -2754,7 +2844,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
-      // 1. Create session with default shell (starts tmux server, stays alive)
       // 2. Set remain-on-exit (server now exists, session won't vanish on exit)
       // 3. Replace shell with actual command via respawn-pane (no terminal echo)
       // Unset $TMUX so nested sessions work when the dev server itself runs inside tmux.
@@ -3895,16 +3984,56 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * applies the pure {@link decideReconnect} decision and translates the result
    * into events + backoff/state transitions. Public for tests + the watcher.
    */
+  /**
+   * Refresh the cached remote-tmux liveness for a session whose pane is dead.
+   * Fire-and-forget (async, not awaited by the sync tick): the probe is a slow
+   * ssh round-trip, so it must not block the 5s watcher interval. On success it
+   * writes the cached result; the NEXT tick then makes the revive decision with
+   * fresh data. A clean exit makes the remote tmux session vanish, so the probe
+   * resolves false and the watcher stops reviving it (2026-08-29).
+   */
+  private async refreshRemoteAlive(session: MuxSession): Promise<void> {
+    if (!session.remote) return;
+    if (this.remoteAliveInFlight.has(session.sessionId)) return;
+    this.remoteAliveInFlight.add(session.sessionId);
+    const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(session.sessionId);
+    try {
+      const alive = await remoteTmuxSessionAlive(session.remote, remoteName);
+      this.remoteAliveCache.set(session.sessionId, alive);
+    } catch {
+      this.remoteAliveCache.set(session.sessionId, undefined);
+    } finally {
+      this.remoteAliveInFlight.delete(session.sessionId);
+    }
+  }
+
   async runRemoteReconnectTick(now: number, enabled: boolean): Promise<void> {
     for (const session of this.sessions.values()) {
       if (!session.remote) continue;
       const sessionId = session.sessionId;
       const state = this.reconnectState.get(sessionId);
+      // Only probe when the pane is actually dead — otherwise the ssh round-trip
+      // would run every 5s for every healthy remote session. The cache is
+      // refreshed lazily so a clean exit (remote tmux gone) flips it to false
+      // on the next tick and stops the auto-revive.
+      const paneDead = await this.isPaneDead(session.muxName);
+      if (!paneDead) {
+        // A live pane makes whatever the probe last said STALE, so forget it:
+        // after a successful reattach (or a manual restart) the next dead pane
+        // must be probed afresh. A cached `true` from the transport drop would
+        // otherwise revive a later CLEAN exit, the exact bug this cache exists
+        // to prevent, and a cached `false` from a clean exit would leave a
+        // manually restarted session with auto-reconnect permanently off.
+        this.remoteAliveCache.delete(sessionId);
+      } else if (this.remoteAliveCache.get(sessionId) === undefined) {
+        void this.refreshRemoteAlive(session);
+      }
       const action = decideReconnect({
         session: {
           sessionId,
           isRemote: true,
-          paneDead: await this.isPaneDead(session.muxName),
+          paneDead,
+          remoteAlive: this.remoteAliveCache.get(sessionId),
         },
         state,
         guarded: this.reconnectGuard.has(sessionId),
@@ -3952,12 +4081,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   guardRemoteReconnect(sessionId: string): void {
     this.reconnectGuard.add(sessionId);
     this.reconnectState.delete(sessionId);
+    this.remoteAliveCache.delete(sessionId);
+    this.remoteAliveInFlight.delete(sessionId);
   }
 
   /** Clear all per-session reconnect + guard state (e.g. when a session is removed). */
   clearRemoteReconnectState(sessionId: string): void {
     this.reconnectState.delete(sessionId);
     this.reconnectGuard.delete(sessionId);
+    this.remoteAliveCache.delete(sessionId);
+    this.remoteAliveInFlight.delete(sessionId);
   }
 
   destroy(): void {
@@ -3967,6 +4100,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.stopRemoteReconnectWatcher();
     this.reconnectState.clear();
     this.reconnectGuard.clear();
+    this.remoteAliveCache.clear();
+    this.remoteAliveInFlight.clear();
   }
 
   registerSession(session: MuxSession): void {

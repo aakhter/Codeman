@@ -6,9 +6,9 @@ import { homedir } from 'node:os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { remoteTmuxSessionName } from './tmux-manager.js';
+import { getCli } from './config/cli-registry/registry.js';
 import type {
   RemoteCase,
-  RemoteCommandMode,
   RemoteHost,
   RemoteSessionInfo,
   RemoteSshOptions,
@@ -97,38 +97,62 @@ export function remoteLoginShellCommand(command: string): string {
   return `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l -c ${shellescape(command)}`;
 }
 
+/**
+ * The CLI text a location overlay should launch for `mode`, or null when this build has no
+ * entry for it. `overlays.<location>.command` when the entry names one, otherwise the bare
+ * binary — which is what every non-claude CLI wants, and why only claude declares a command.
+ *
+ * ⚠️ This returns the CLI INVOCATION only. Each location wraps it its own way (remote: a
+ * login-shell `-c`; docker: `exec`), which is exactly why the overlay stores the unwrapped
+ * form rather than a ready-made line.
+ */
+function overlayCliCommand(mode: SessionMode, location: 'remote' | 'docker'): string | null {
+  const entry = getCli(mode);
+  if (!entry) return null;
+  const overlay = entry.overlays[location];
+  if (overlay && 'disabled' in overlay) return null;
+  return overlay?.command ?? entry.discovery.binaries[0] ?? null;
+}
+
+/**
+ * The default remote pane command for `mode`.
+ *
+ * Agent CLIs (claude/opencode/codex/gemini/antigravity/…) are typically installed under
+ * per-user paths like ~/.local/bin or ~/.opencode/bin, added to PATH only by the remote
+ * user's interactive-login shell startup files (~/.zshrc etc.). ssh's remote-command
+ * execution is neither interactive nor login, so a bare `exec claude` sees only sshd's
+ * minimal default PATH and fails with "command not found" (exit 127) — confirmed via
+ * `tmux capture-pane` on the remain-on-exit-preserved dead pane. Route through
+ * `$SHELL -i -l -c`, the same fix shell mode uses, so PATH is fully resolved first.
+ *
+ * ⚠️ The per-CLI half is now READ FROM THE REGISTRY (`overlays.remote`), not from a
+ * hardcoded `Record<RemoteCommandMode, string>`. The table it replaces duplicated the
+ * registry exactly, with nothing keeping the two in step — a capability that is both wrong
+ * and unread is worse than an absent one, because the next person trusts it. Notes that were
+ * attached to individual rows and are still true:
+ *   - claude carries `--dangerously-skip-permissions` so the remote agent runs
+ *     non-interactively (no trust-folder prompt nothing on the remote can answer);
+ *     `overlays.remote.command` on the claude entry is where that now lives.
+ *   - `dsh` alone boots nothing — the launcher needs a profile, and the remote box's profile
+ *     inventory is unknown here. The per-host `commands.deepseek` override names one.
+ * The per-host `commands.*` override remains the escape hatch for every mode.
+ */
 export function defaultRemoteCommandForMode(mode: SessionMode): string {
-  // Agent CLIs (claude/opencode/codex/gemini/antigravity) are typically installed
-  // under per-user paths like ~/.local/bin or ~/.opencode/bin, added to PATH only by
-  // the remote user's interactive-login shell startup files (~/.zshrc etc.). ssh's
-  // remote-command execution is neither interactive nor login, so a bare `exec
-  // claude` sees only sshd's minimal default PATH and fails with "command not
-  // found" (exit 127) — confirmed via `tmux capture-pane` on the
-  // remain-on-exit-preserved dead pane. Route through the resolved login shell
-  // `-i -l -c` (see remoteLoginShellCommand), so PATH and rc-file env are fully
-  // resolved before the CLI name is looked up.
-  const commands: Record<RemoteCommandMode, string> = {
-    // Resolve the user's ACTUAL login shell (getent/dscl) so a macOS/zsh user gets
-    // zsh and ~/.zshrc is sourced — `$SHELL` in a pane is the tmux server's, which
-    // was bash and skipped ~/.zshrc (COD-277). -i -l sources the rc files.
-    shell: `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l`,
-    // Mirror the LOCAL claude default so the remote agent runs non-interactively
-    // (no trust-folder/permission prompt that nothing on the remote answers). The
-    // per-host `commands.claude` override stays the escape hatch.
-    claude: remoteLoginShellCommand('claude --dangerously-skip-permissions'),
-    opencode: remoteLoginShellCommand('opencode'),
-    codex: remoteLoginShellCommand('codex'),
-    gemini: remoteLoginShellCommand('gemini'),
-    antigravity: remoteLoginShellCommand('agy'),
-    pi: remoteLoginShellCommand('pi'),
-    grok: remoteLoginShellCommand('grok'),
-    // `dsh` alone boots nothing: the launcher needs a profile, and the remote box's
-    // profile inventory is unknown here. The per-host `commands.deepseek` override
-    // is the escape hatch for naming one.
-    deepseek: remoteLoginShellCommand('dsh'),
-    omp: remoteLoginShellCommand('omp'),
-  };
-  return commands[mode as RemoteCommandMode] || commands.shell;
+  // Upstream (#347) replaced the hardcoded per-mode map with the CLI registry
+  // overlay, and it is the better structure: verified entry-by-entry that it
+  // preserves every command our map spelled out — claude keeps
+  // `--dangerously-skip-permissions` via its remote overlay, deepseek resolves to
+  // `dsh` and antigravity to `agy` through binaries[0], and the rest match their
+  // own names. So the map is dropped rather than kept in parallel.
+  //
+  // ⚠ The `shell` arm keeps the DOWNSTREAM resolution (COD-277). Upstream uses
+  // `$SHELL`, but in a tmux pane that is the tmux SERVER's shell — which was bash
+  // and skipped ~/.zshrc for a zsh user. REMOTE_LOGIN_SHELL_RESOLVE reads the real
+  // login shell from getent/dscl instead. `remoteLoginShellCommand` already uses
+  // it, so the two arms now agree.
+  const shellCommand = `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$login_shell" -i -l`;
+  const cli = overlayCliCommand(mode, 'remote');
+  return cli === null ? shellCommand : remoteLoginShellCommand(cli);
 }
 
 export const REMOTE_PATH_BOOTSTRAP =
@@ -325,19 +349,22 @@ export async function checkRemoteTmuxAvailable(
 }
 
 /**
- * The CLI binary each session mode runs on the remote host. Antigravity's
- * binary is `agy` (the mode name is not the command); shell has no CLI to
- * probe, so it is absent.
+ * The CLI binary a session mode runs on the remote host, read from the registry rather than
+ * from a hardcoded map. `shell` has no CLI to probe and resolves to undefined, which is what
+ * makes the probe return null for it.
+ *
+ * ⚠️ Deriving this CHANGES BEHAVIOUR, deliberately and in one direction. The map it replaces
+ * listed claude/opencode/codex/gemini/antigravity/pi/omp and simply omitted `grok` and
+ * `deepseek` — its own comment said the rule was "every mode except shell", so the two were
+ * an oversight from when those CLIs were added, not a decision. A remote grok or deepseek
+ * session therefore reported no version at all. It now probes `grok --version` /
+ * `dsh --version` through the same login-shell wrapper as its siblings.
+ *
+ * (`antigravity` is why this cannot be the mode name: its binary is `agy`.)
  */
-const REMOTE_CLI_BIN: Partial<Record<SessionMode, string>> = {
-  claude: 'claude',
-  opencode: 'opencode',
-  codex: 'codex',
-  gemini: 'gemini',
-  antigravity: 'agy',
-  pi: 'pi',
-  omp: 'omp',
-};
+function remoteCliBin(mode: SessionMode): string | undefined {
+  return getCli(mode)?.discovery.binaries[0];
+}
 
 /**
  * Build the SSH command that reads the remote CLI's version (`claude --version`
@@ -353,7 +380,7 @@ export function buildRemoteCliVersionProbeCommand(
   host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
   mode: SessionMode
 ): string | null {
-  const bin = REMOTE_CLI_BIN[mode];
+  const bin = remoteCliBin(mode);
   if (!bin) return null;
   return [
     ...buildSshConnectionArgs(host),
@@ -387,6 +414,84 @@ export async function probeRemoteCliVersion(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * COD-108 — build the SSH command that asks whether THIS Codeman's durable
+ * remote tmux session (`-L codeman-remote -s codeman-ssh-<id>`) is still alive
+ * on the remote host.
+ *
+ * `has-session` exits 0 when the session exists, non-zero otherwise (and
+ * stderr is swallowed). Connection options come from the shared
+ * `buildSshConnectionArgs` so this probe reaches exactly the hosts the launch
+ * can reach — same port/identity/proxy/jump-host as `buildRemoteLaunchCommand`.
+ */
+export function buildRemoteSessionAliveCommand(
+  host: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
+  remoteSessionName: string
+): string {
+  const [ssh, ...connectionArgs] = buildSshConnectionArgs(host);
+  const remoteCmd = `tmux -L codeman-remote has-session -t ${shellescape(remoteSessionName)} 2>/dev/null`;
+  return [ssh, ...connectionArgs, remoteSshTarget(host), shellescape(remoteCmd)].join(' ');
+}
+
+/**
+ * COD-108 — resolve whether THIS Codeman's durable remote tmux session is still
+ * alive on the remote host, for the auto-reconnect watcher.
+ *
+ * Returns:
+ *   - `true`      → the remote tmux session exists (the agent is still running
+ *                   on the remote; the LOCAL pane died from a transport drop →
+ *                   safe to auto-reconnect).
+ *   - `false`     → the remote session is gone (the agent exited cleanly and
+ *                   the remote tmux tore down; reviving would relaunch a fresh
+ *                   agent — must NOT auto-reconnect).
+ *   - `undefined` → probe failed (host unreachable, ssh error, tmux missing).
+ *                   Callers MUST treat this as "do not reconnect": an
+ *                   unreachable host is not a reason to relaunch the agent.
+ *
+ * VITEST guard — returns `true` under test so a real ssh never runs; the
+ * command construction is covered by `buildRemoteSessionAliveCommand`.
+ */
+export async function remoteTmuxSessionAlive(
+  remote: Pick<RemoteHost, 'username' | 'host' | 'port'> & RemoteSshOptions,
+  remoteSessionName: string
+): Promise<boolean | undefined> {
+  if (process.env.VITEST) return true;
+  const command = buildRemoteSessionAliveCommand(remote, remoteSessionName);
+  try {
+    await execAsync(command, { timeout: 15_000 });
+    return classifyRemoteAliveExit(0, false);
+  } catch (err) {
+    const e = err as { code?: unknown; killed?: boolean };
+    return classifyRemoteAliveExit(typeof e.code === 'number' ? e.code : null, e.killed === true);
+  }
+}
+
+/**
+ * Map the `has-session` probe's exit status onto the tri-state the watcher
+ * reads. Pure, so the mapping is unit-tested even though the probe itself is
+ * VITEST-guarded.
+ *
+ * ⚠️ `tmux has-session` prints NOTHING on success (measured: exit 0, empty
+ * stdout; the failure message goes to stderr), so the exit status is the ONLY
+ * signal. An earlier version read stdout and therefore classified every live
+ * remote session as gone, which silently disabled transport-drop reconnects.
+ *
+ *   - exit 0 → the durable remote session exists → `true`.
+ *   - exit 255 is ssh's own failure (unreachable host, auth, proxy/jump error)
+ *     and a timeout arrives as `killed` with no numeric code: we learned
+ *     nothing about the session → `undefined`, which the watcher treats as
+ *     "do not revive".
+ *   - any other non-zero status is the REMOTE command's: tmux's 1 for a missing
+ *     session, or 127 when tmux is not installed there (no durable session can
+ *     exist without it) → `false`.
+ */
+export function classifyRemoteAliveExit(code: number | null, killed: boolean): boolean | undefined {
+  if (killed) return undefined;
+  if (code === 0) return true;
+  if (code === null || code === 255) return undefined;
+  return false;
 }
 
 /**

@@ -2,7 +2,7 @@
 
 Run a case inside an **isolated Docker container** instead of directly on the host. Any number of Codeman sessions can share one container (it is scoped to the case, not the session), so a whole project lives in a sandbox with its own network, resource caps, and filesystem, and you can **export the container to move it to another machine**.
 
-Docker mode is a **location overlay on cases**, the direct analog of [remote SSH cases](./remote-hosts.md): where a remote case runs a local tmux pane doing `ssh host` into a durable remote tmux server, a docker case runs a local tmux pane doing `docker exec -it` into a durable **in-container** tmux server. It is not a separate `SessionMode`, so `claude` / `shell` / `opencode` / `codex` / `gemini` / `antigravity` / `pi` / `grok` all work inside the container.
+Docker mode is a **location overlay on cases**, the direct analog of [remote SSH cases](./remote-hosts.md): where a remote case runs a local tmux pane doing `ssh host` into a durable remote tmux server, a docker case runs a local tmux pane doing `docker exec -it` into a durable **in-container** tmux server. It is not a separate `SessionMode`, so `claude` / `shell` / `opencode` / `codex` / `gemini` / `antigravity` / `pi` / `grok` / `deepseek` / `omp` all work inside the container.
 
 ## One-time setup: build the base image
 
@@ -25,8 +25,20 @@ A zero exit code only proves the layers ran, not that the toolchain works. Verif
 
 ```bash
 docker run --rm codeman/agent:base bash -lc \
-  'for c in claude codex gemini opencode agy pi grok; do printf "%-9s " $c; $c --version 2>&1 | head -1; done'
+  'for c in claude codex gemini opencode agy pi grok dsh omp; do printf "%-9s " $c; $c --version 2>&1 | head -1; done'
 ```
+
+⚠️ `dsh --version` is the one line above that answers a different question than the
+others: `dsh` is a profile launcher, so a working binary says nothing about whether
+the image can actually run a DeepSeek session. Check the profile the Dockerfile
+installs into the agent's HOME as well, or a `mode: 'deepseek'` case starts a pane
+that dies on arrival:
+
+```bash
+docker run --rm codeman/agent:base ls ~/.dsh/profiles/dsh-tui/package.json
+```
+
+Building that profile is also why `pnpm` is in the image: `dsh plugin` forwards straight to a literal `pnpm` and exits 127 without it (issue #352), and pnpm — unlike npm — blocks dependency lifecycle scripts by default and fails the install over it, so the profile step passes `--config.dangerouslyAllowAllBuilds=true`.
 
 Antigravity (`agy`) and Grok (`grok`) are the two CLIs not installed from npm (Google and xAI ship standalone binaries), so each has its own Dockerfile step, adding roughly 190MB and 160MB respectively. Pi also gets its own step, because upstream documents installing it with `--ignore-scripts` and that flag must not silently change how the other npm CLIs install.
 
@@ -65,6 +77,49 @@ curl -X POST localhost:3000/api/docker-hosts -d '{"id":"local","label":"Local","
 curl -X POST localhost:3000/api/cases/docker-link -d '{"name":"sandbox","hostId":"local","hostWorkspacePath":"/home/you/projects/sandbox"}'
 curl -X POST localhost:3000/api/quick-start -d '{"caseName":"sandbox","mode":"claude"}'
 ```
+
+## Attach to a container you already run
+
+The tab's **Attach to an existing container** toggle points a case at a container **you**
+built and run. Codeman only ever `docker exec`s into it: it never creates, starts, stops,
+restarts or removes it, and it seeds no credentials into it, so the CLIs inside must already
+be installed and logged in. A missing or stopped container is an error to report, not a state
+to fix — start it yourself and reopen the session.
+
+- **Container Name** is a picker over the engine's containers that you can also type into
+  (the engine may be remote, or the container may not exist yet when you fill the form).
+  Stopped containers are listed too, sorted last and labelled, so "mine isn't here" is never
+  a dead end.
+- **Container Workdir** is a path that must already exist **inside** the container. Adoption
+  mounts nothing, so it need not match the host workspace path; **Browse** lists directories
+  inside the container itself. Without this check, a wrong path fails at launch as a bare
+  `execvp failed` inside the pane.
+- **Workspace Path** is still a real host directory. It backs file previews, attachments and
+  watchers exactly as it does for an owned case, but here it is only a mirror: nothing is
+  bind-mounted, so point it at whatever host directory your container already exposes.
+- **Check container** runs a read-only preflight and reports what is inside before you commit
+  to a case name (running or not, tmux present, which CLIs resolved).
+- **Run modes come from the container**, not the host: a host with no `claude` still offers
+  Claude if the container ships it, and a mode the container lacks is hidden.
+- Claude is launched **without** `--dangerously-skip-permissions` when the container's exec
+  user is root, because Claude Code refuses that flag as root and the refusal is only visible
+  inside the container.
+- Image, network and resource settings disappear from the form: they describe a
+  `docker create` that adoption never runs.
+
+Recreate is refused for an adopted case, full-image export is refused (it would commit a
+container that is not ours), unlinking the case leaves the container running, and the boot
+reaper skips it. Workspace-only export still works and never pauses the container.
+
+Equivalent API:
+
+```bash
+curl -X POST localhost:3000/api/docker-cases/adopt-preflight -d '{"hostId":"local","container":"my-dev-box","containerWorkdir":"/workspace"}'
+curl -X POST localhost:3000/api/cases/docker-adopt -d '{"name":"devbox","hostId":"local","container":"my-dev-box","hostWorkspacePath":"/home/you/projects/devbox","containerWorkdir":"/workspace"}'
+```
+
+In multi-user mode adoption is **admin-only**, unlike `docker-link`: an adopted container's
+mounts belong to whoever built it, so one mounting `/` would hand the adopter the whole host.
 
 ## Lifecycle
 
