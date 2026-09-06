@@ -448,7 +448,14 @@ const CODEX: CliEntry = {
     // does. codex is the entry where the two names differ (`bypassApprovals` here,
     // `dangerouslyBypassApprovals` on the wire), so it is the one that would have caught a
     // regression; `schema.ts` now rejects a name that is not a declared param.
-    privilegedParams: [{ param: 'bypassApprovals', clampTo: false }],
+    privilegedParams: [
+      { param: 'bypassApprovals', clampTo: false },
+      // COD-416: codex's OTHER privilege switch, and it was NOT clamped before — only its
+      // sibling was, so a non-granted multi-user owner could send
+      // `codexConfig.dangerouslyBypassHookTrust: true` and get the flag. Same only-if-sent
+      // shape: codex's bare spawn already omits it, so the clamp forces a sent one back off.
+      { param: 'hookTrust', clampTo: false },
+    ],
   },
   overlays: {
     credStore: {

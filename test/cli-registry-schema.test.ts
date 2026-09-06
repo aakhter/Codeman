@@ -161,7 +161,11 @@ describe('cross-field integrity', () => {
     // shipped entry must be on the param side of that line.
     const codex = STOCK_CLIS.find((e) => (e.id as string) === 'codex');
     expect(codex).toBeDefined();
-    expect(codex!.capabilities.privilegedParams.map((c) => c.param)).toEqual(['bypassApprovals']);
+    // COD-416: `hookTrust` joined `bypassApprovals` here. Both are LAUNCH-param names; the
+    // wire fields are `dangerouslyBypassApprovals` / `dangerouslyBypassHookTrust`, and codex
+    // is the entry where the two namespaces visibly differ — which is the point of this test.
+    expect(codex!.capabilities.privilegedParams.map((c) => c.param)).toEqual(['bypassApprovals', 'hookTrust']);
+    expect(codex!.launch.legacyConfigAliases?.hookTrust).toBe('dangerouslyBypassHookTrust');
     expect(codex!.launch.legacyConfigAliases?.bypassApprovals).toBe('dangerouslyBypassApprovals');
 
     const wrong = baseEntry('codex');
