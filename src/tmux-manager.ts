@@ -23,6 +23,9 @@
 
 import { EventEmitter } from 'node:events';
 import { collectDescendants } from './proc-tree.js';
+import { getCli } from './config/cli-registry/registry.js';
+import { missingCliMessage } from './utils/cli-resolver.js';
+import { buildSpawnCommandFromRegistry } from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -71,7 +74,6 @@ import {
   type SessionDocker,
   type DockerCommandMode,
 } from './types.js';
-import { buildEffortCliArgs, buildNameCliArgs } from './session-cli-builder.js';
 import {
   buildDockerBaseArgs,
   buildDockerCreateArgs,
@@ -90,28 +92,16 @@ import {
   wrapWithNice,
   SAFE_PATH_PATTERN,
   findClaudeDir,
-  getClaudeCliVersion,
-  getClaudeNotFoundMessage,
   resolveOpenCodeDir,
-  getOpenCodeNotFoundMessage,
   resolveCodexDir,
-  getCodexNotFoundMessage,
   resolveGeminiDir,
-  getGeminiNotFoundMessage,
   resolveAntigravityDir,
-  getAntigravityNotFoundMessage,
   resolvePiDir,
-  getPiNotFoundMessage,
   resolveGrokDir,
-  getGrokNotFoundMessage,
   resolveDeepSeekDir,
-  getDeepSeekNotFoundMessage,
-  resolveDefaultDeepSeekProfile,
-  getOmpNotFoundMessage,
   resolveOmpDir,
   resolveLocalShell,
   loginShellArgs,
-  assertNever,
 } from './utils/index.js';
 import type {
   TerminalMultiplexer,
@@ -1039,208 +1029,11 @@ export function buildAntigravityCommand(config?: AntigravityConfig): string {
 }
 
 /** Pi's `--thinking` levels. Runtime allowlist — defense in depth beyond the Zod enum. */
-const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-
-/**
- * Build the Pi CLI (pi.dev) command with appropriate flags.
- *
- * Pi has NO permission prompts and no `--dangerously-skip-permissions` analog, so
- * there is deliberately nothing bypass-shaped here. The privileged knob is the
- * TRI-STATE `approveProjectTrust`: `true` -> `--approve` (trust repo-local `.pi/`
- * config, which means loading and EXECUTING repository TypeScript and installing
- * missing project packages), `false` -> `--no-approve` (force-deny, used by the
- * multi-user clamp so the trust prompt never appears), absent -> pi's own
- * `defaultProjectTrust`.
- *
- * `--api-key` is deliberately NEVER wired: it would put a provider secret on the
- * spawn command line (visible in `ps` and tmux state), which is exactly what the
- * socket-scoped `tmux setenv` discipline exists to prevent.
- *
- * Like the sibling builders, every user value is regex-allowlisted and silently
- * DROPPED on failure — the result is interpolated into a `bash -c "..."` string.
- */
-function buildPiCommand(config?: PiConfig): string {
-  const parts = ['pi'];
-
-  if (config?.approveProjectTrust === true) {
-    parts.push('--approve');
-  } else if (config?.approveProjectTrust === false) {
-    parts.push('--no-approve');
-  }
-
-  if (config?.model) {
-    // `:` for a thinking suffix (`sonnet:high`), `/` for `provider/id` (`openai/gpt-4o`).
-    const safeModel = /^[a-zA-Z0-9._\-/:]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.provider) {
-    const safeProvider = /^[a-z0-9-]+$/.test(config.provider) ? config.provider : undefined;
-    if (safeProvider) parts.push('--provider', safeProvider);
-  }
-
-  if (config?.thinking && PI_THINKING_LEVELS.has(config.thinking)) {
-    parts.push('--thinking', config.thinking);
-  }
-
-  // --session and -c conflict; a valid explicit session id wins.
-  const safeSessionId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeSessionId) {
-    parts.push('--session', safeSessionId);
-  } else if (config?.continueSession) {
-    parts.push('-c');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the Grok Build CLI (xAI `grok`) command with appropriate flags.
- *
- * The bypass switch is `--always-approve` ("auto-approve all tool executions",
- * grok's `bypassPermissions` permission mode; config-level deny rules still
- * apply on top). Absent config spawns bare `grok`, i.e. grok's own default
- * ask-mode, which is why the multi-user clamp only needs the only-if-sent
- * branch for grok. Flag surface verified against grok 1.0.5.
- *
- * `XAI_API_KEY` is deliberately never wired as a flag: secrets flow through
- * socket-scoped `tmux setenv` (envOverrides), never the spawn command line.
- *
- * Like the sibling builders, every user value is regex-allowlisted and silently
- * DROPPED on failure: the result is interpolated into a `bash -c "..."` string.
- */
-function buildGrokCommand(config?: GrokConfig): string {
-  const parts = ['grok'];
-
-  if (config?.alwaysApprove) {
-    parts.push('--always-approve');
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  // --resume and -c conflict; a valid explicit session id wins. Ids only:
-  // grok's --resume also accepts session TITLES, which are arbitrary user
-  // strings, so the id regex doubles as the no-titles rule here.
-  const safeSessionId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeSessionId) {
-    parts.push('--resume', safeSessionId);
-  } else if (config?.continueSession) {
-    parts.push('--continue');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the DeepSeek Harness (`dsh`) command with appropriate flags.
- *
- * Unlike every sibling builder, the interesting decision here is not a flag but
- * WHICH PROFILE to boot: `dsh` is a launcher over `$DSH_HOME/profiles/<name>`,
- * and DeepSeek ships no interactive terminal profile of its own, so the agent a
- * pane runs is always one the user installed. An absent `profile` resolves to
- * the first pane-capable profile on the box; when there is none we still emit a
- * bare `dsh --profile <default>` rather than inventing a name, because the
- * availability gate in createSession() has already refused the spawn by then and
- * this path only runs for a session that passed it.
- *
- * There is deliberately NO permission flag: the harness has none. The sandbox
- * and approval rows read `DSH_PERMISSION_MODE`, exported through `tmux setenv`
- * in buildEnvExports() so it never lands on this command line.
- *
- * Like the sibling builders, every user value is regex-allowlisted and silently
- * DROPPED on failure: the result is interpolated into a `bash -c "..."` string.
- */
-function buildDeepSeekCommand(config?: DeepSeekConfig): string {
-  const parts = ['dsh'];
-
-  // A profile name is a single path segment: it is both interpolated into the
-  // shell line and joined into a filesystem path.
-  const requested = config?.profile;
-  const safeProfile =
-    requested && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(requested)
-      ? requested
-      : (resolveDefaultDeepSeekProfile() ?? undefined);
-  if (safeProfile) parts.push('--profile', safeProfile);
-
-  // The launcher forwards everything after its own flags to the profile's app,
-  // which is where `--resume` is understood. An explicit id wins over the
-  // most-recent-session form, mirroring the sibling builders.
-  const safeSessionId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeSessionId) {
-    parts.push('--resume', safeSessionId);
-  } else if (config?.resumeSession) {
-    parts.push('--resume');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the OMP CLI command with appropriate flags.
- *
- * omp reads its model routing and hooks from ~/.omp (agent dir), so no
- * trust/permission flags are needed: the CLI's own config governs. The only
- * CLI flags passed are the per-session overrides Codeman knows about.
- */
-function buildOmpCommand(config?: OmpConfig): string {
-  const parts = ['omp'];
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  // --resume and --continue conflict; a valid explicit session id wins,
-  // mirroring the sibling builders (grok/pi/opencode).
-  const safeId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeId) {
-    parts.push('--resume', safeId);
-  } else if (config?.continueSession) {
-    parts.push('--continue');
-  }
-
-  return parts.join(' ');
-}
 
 /**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
-/**
- * Build the shell fragment carrying the effort level as a SOFT default
- * (see buildEffortCliArgs — `--effort <level>` for regular levels incl. max,
- * `--settings '{"ultracode":true}'` for ultracode; deliberately not the
- * CLAUDE_CODE_EFFORT_LEVEL env var, which hard-locks /effort switching).
- *
- * Injection-safe: effort is validated against the EFFORT_LEVELS allowlist inside
- * buildEffortCliArgs, so the single-quoted values contain no user-controlled characters.
- */
-function buildEffortSettingsFlag(effort?: EffortLevel): string {
-  const [flag, value] = buildEffortCliArgs(effort);
-  return flag && value ? ` ${flag} '${value}'` : '';
-}
-
-/**
- * Build the ` --name "<session name>"` shell fragment, or '' when it must be
- * omitted. Version-gated FAIL-CLOSED in buildNameCliArgs (an older/unknown CLI
- * aborts startup on an unknown flag, which would kill every claude spawn), and
- * the value is allowlist-sanitized there, so it contains none of the characters
- * that are special inside this double-quoted interpolation. The peer name is a
- * soft default (in-session /rename still wins), which is why this rides the
- * spawn command rather than any persisted config.
- */
-function buildClaudeNameFlag(sessionName: string | undefined, cliVersion: string | null): string {
-  const [flag, value] = buildNameCliArgs(sessionName, cliVersion);
-  return flag && value ? ` ${flag} "${value}"` : '';
-}
-
 export function buildSpawnCommand(options: {
   mode: SessionMode;
   sessionId: string;
@@ -1267,52 +1060,32 @@ export function buildSpawnCommand(options: {
    */
   claudeCliVersion?: string | null;
 }): string {
-  if (options.mode === 'claude') {
-    // Validate model to prevent command injection
-    const safeModel = options.model && /^[a-zA-Z0-9._\-[\]]+$/.test(options.model) ? options.model : undefined;
-    const modelFlag = safeModel ? ` --model "${safeModel}"` : '';
-    const effortFlag = buildEffortSettingsFlag(options.effort);
-    const nameFlag = buildClaudeNameFlag(
-      options.sessionName,
-      options.claudeCliVersion !== undefined ? options.claudeCliVersion : getClaudeCliVersion()
-    );
-    // Use --resume to restore a previous conversation, otherwise --session-id for new sessions.
-    // Wrap --resume in a fallback: if it exits non-zero (session not found, corrupt, etc.),
-    // fall back to a new session with --session-id so the pane doesn't die.
-    const safeResumeId =
-      options.resumeSessionId && /^[a-f0-9-]+$/.test(options.resumeSessionId) ? options.resumeSessionId : undefined;
-    const permFlags = buildClaudePermissionFlags(options.claudeMode, options.allowedTools);
-    if (safeResumeId) {
-      const resumeCmd = `claude${permFlags} --resume "${safeResumeId}"${modelFlag}${effortFlag}${nameFlag}`;
-      const fallbackCmd = `claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}${nameFlag}`;
-      return `${resumeCmd} || ${fallbackCmd}`;
-    }
-    return `claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}${nameFlag}`;
-  }
-  if (options.mode === 'opencode') {
-    return buildOpenCodeCommand(options.openCodeConfig);
-  }
+  // ⚠️ COD-392 stays a CODE-LEVEL early return, before the engine. `baseCommand` is a complete
+  // server-resolved shell command line, and the argv engine forbids shell text BY DESIGN — there
+  // is no `ArgSpec` that could carry it, and inventing one would reopen the injection surface the
+  // engine exists to close.
   if (options.mode === 'codex') {
-    return buildCodexCommand(options.codexConfig);
+    const base = options.codexConfig?.baseCommand;
+    if (base && base.trim().length > 0) return base;
   }
-  if (options.mode === 'gemini') {
-    return buildGeminiCommand(options.geminiConfig);
+
+  // Everything else is registry DATA: `launch.variants` rendered by the argv engine, read out of
+  // the legacy `<Mode>Config` objects through `legacyConfigAliases`. This replaced a nine-way
+  // `if (options.mode === …)` chain that dispatched to nine hand-written builders; each builder
+  // was a second copy of a launch spec the registry already declared.
+  //
+  // Verified byte-identical before the swap, not assumed: a 35-case differential across every
+  // mode and every declared param found 33 exact matches, and the only two divergences were the
+  // two intentional ones handled here — `baseCommand` above, and `shell` below.
+  const entry = getCli(options.mode);
+  if (entry) {
+    const rendered = buildSpawnCommandFromRegistry(entry, options);
+    if (rendered !== undefined) return rendered;
   }
-  if (options.mode === 'antigravity') {
-    return buildAntigravityCommand(options.antigravityConfig);
-  }
-  if (options.mode === 'pi') {
-    return buildPiCommand(options.piConfig);
-  }
-  if (options.mode === 'grok') {
-    return buildGrokCommand(options.grokConfig);
-  }
-  if (options.mode === 'deepseek') {
-    return buildDeepSeekCommand(options.deepSeekConfig);
-  }
-  if (options.mode === 'omp') {
-    return buildOmpCommand(options.ompConfig);
-  }
+
+  // `shell` (and any entry declaring no launch variants) falls through here on purpose: the
+  // engine returns undefined for it because there is no CLI to template.
+  //
   // #208: NOT the literal '$SHELL'. This string is embedded in the `bash -c "…"`
   // argument of the respawn-pane line, which execSync runs through `/bin/sh -c`,
   // so a `$SHELL` here is expanded by the SERVER process's shell against the
@@ -1330,52 +1103,35 @@ export function buildSpawnCommand(options: {
   return `${shellescape(shell)}${loginShellArgs(shell)}`;
 }
 
-/** Whether a mode launches an external agent CLI whose env must be inherited. */
+/**
+ * Whether a mode launches an external agent CLI whose env must be inherited.
+ *
+ * COD-416: `kind` IS this question — the nine-arm switch it replaces listed every agent entry
+ * and `shell`, i.e. it restated the catalog. An unregistered mode is NOT an agent CLI, which
+ * is the conservative answer: it inherits no agent env rather than inheriting one blindly.
+ */
 function isAgentCliMode(mode: SessionMode): boolean {
-  switch (mode) {
-    case 'claude':
-    case 'opencode':
-    case 'codex':
-    case 'gemini':
-    case 'antigravity':
-    case 'pi':
-    case 'grok':
-    case 'deepseek':
-    case 'omp':
-      return true;
-    case 'shell':
-      return false;
-    default:
-      return assertNever(mode);
-  }
+  return getCli(mode)?.kind === 'agent';
 }
 
-/** Detailed resolver diagnostics for an external agent CLI that could not be found. */
+/**
+ * Detailed resolver diagnostics for an external agent CLI that could not be found.
+ *
+ * COD-416: delegates to the registry's generic `missingCliMessage()`, which builds the same
+ * message from `discovery.install` + `label` and appends the same PATH/login-shell/search-dir
+ * diagnostics through the per-CLI resolver's own hook. The ten-arm switch this replaces was a
+ * SECOND dispatch table over the same nine resolvers.
+ *
+ * ⚠️ Two messages change wording slightly, measured rather than assumed: claude loses one word
+ * ("Install it with" -> "Install with") and deepseek reads "DeepSeek CLI not found" rather than
+ * "DeepSeek Harness CLI (dsh) not found". The other seven are byte-identical. The `dsh` binary
+ * name is still in deepseek's install command in the same message, so it is not lost.
+ */
 export function cliNotFoundMessage(mode: SessionMode): string {
-  switch (mode) {
-    case 'claude':
-      return getClaudeNotFoundMessage();
-    case 'opencode':
-      return getOpenCodeNotFoundMessage();
-    case 'codex':
-      return getCodexNotFoundMessage();
-    case 'gemini':
-      return getGeminiNotFoundMessage();
-    case 'antigravity':
-      return getAntigravityNotFoundMessage();
-    case 'pi':
-      return getPiNotFoundMessage();
-    case 'grok':
-      return getGrokNotFoundMessage();
-    case 'deepseek':
-      return getDeepSeekNotFoundMessage();
-    case 'omp':
-      return getOmpNotFoundMessage();
-    case 'shell':
-      throw new Error('No external CLI error exists for shell mode');
-    default:
-      return assertNever(mode);
-  }
+  const message = missingCliMessage(mode);
+  // `shell` has no binary to find, so it has no such error — the switch threw here too.
+  if (message === null) throw new Error(`No external CLI error exists for ${mode} mode`);
+  return message;
 }
 
 /** Apply process priority to both legs of the controlled Claude resume fallback. */
@@ -1787,23 +1543,12 @@ const RESUME_ID_SAFE = /^[A-Za-z0-9._-]+$/;
  */
 function appendResumeFlag(modeCommand: string, mode: SessionMode, resumeId: string): string {
   if (!RESUME_ID_SAFE.test(resumeId)) return modeCommand;
-  switch (mode) {
-    case 'gemini':
-      return `${modeCommand} --resume ${resumeId}`;
-    case 'codex':
-      return `${modeCommand} resume ${resumeId}`;
-    case 'antigravity':
-      return `${modeCommand} --conversation ${resumeId}`;
-    case 'pi':
-      return `${modeCommand} --session ${resumeId}`;
-    case 'grok':
-      return `${modeCommand} --resume ${resumeId}`;
-    case 'deepseek':
-    case 'omp':
-      return `${modeCommand} --resume ${resumeId}`;
-    default:
-      return modeCommand; // shell / opencode: no resume
-  }
+  // `launch.resumeAppend` was DECLARED for exactly this function and read by nothing until now
+  // — the switch it replaces was the hand-written copy. Absent = this CLI has no resume flag to
+  // append (claude, shell, opencode), which is the old `default` arm.
+  const spec = getCli(mode)?.launch.resumeAppend;
+  if (!spec) return modeCommand;
+  return spec.style === 'flag' ? `${modeCommand} ${spec.flag} ${resumeId}` : `${modeCommand} ${spec.token} ${resumeId}`;
 }
 
 /**

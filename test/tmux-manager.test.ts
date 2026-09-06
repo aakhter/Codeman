@@ -17,6 +17,7 @@ import {
   buildLocalPaneCommand,
   buildNofileLimitCommand,
   cliNotFoundMessage,
+  buildDockerLaunchCommand,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -2015,13 +2016,31 @@ describe('COD-334 launch transport selection', () => {
 
 describe('COD-334 cliNotFoundMessage', () => {
   type AgentCliMode = Exclude<SessionMode, 'shell'>;
+  /**
+   * COD-416 wave 3b: the ten-arm switch became a delegate to the registry's generic
+   * `missingCliMessage()`. Seven of the nine messages are byte-identical; TWO CHANGED, and
+   * they are updated here DELIBERATELY rather than to make a test pass:
+   *
+   *  - claude: "Install it with" -> "Install with". Claude was the only one of the nine that
+   *    said "it"; the other eight already read "Install with", so this is the odd one out
+   *    being normalised, not eight regressing.
+   *  - deepseek: "DeepSeek Harness CLI (dsh) not found" -> "DeepSeek CLI not found". The `dsh`
+   *    binary name is still present in the install command on the same line, so the hint that
+   *    matters (Debian ships an unrelated `dsh`) is not lost.
+   *
+   * grok/deepseek/omp were MISSING from this table despite the `satisfies` clause, so the
+   * three newest CLIs had no coverage here at all. Added.
+   */
   const installHints = {
-    claude: 'Claude CLI not found. Install it with: curl -fsSL https://claude.ai/install.sh | bash',
+    claude: 'Claude CLI not found. Install with: curl -fsSL https://claude.ai/install.sh | bash',
     opencode: 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
     codex: 'Codex CLI not found. Install with: npm install -g @openai/codex',
     gemini: 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli',
     antigravity: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
     pi: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
+    grok: 'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash',
+    deepseek: 'DeepSeek CLI not found. Install with: npm install -g @deepseek-ai/dsh',
+    omp: 'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh',
   } satisfies Record<AgentCliMode, string>;
   const agentMessages = Object.entries(installHints) as Array<[AgentCliMode, string]>;
 
@@ -2035,5 +2054,85 @@ describe('COD-334 cliNotFoundMessage', () => {
 
   it('rejects shell mode explicitly', () => {
     expect(() => cliNotFoundMessage('shell')).toThrow('No external CLI error exists for shell mode');
+  });
+});
+
+/**
+ * COD-416 wave 3b — `appendResumeFlag` now reads `launch.resumeAppend` instead of a nine-arm
+ * switch. That field was DECLARED-FOR-LATER and read by nothing until this change, so nothing
+ * pinned it; the switch it replaces had no direct coverage either.
+ *
+ * Driven through `buildDockerLaunchCommand`, its only real call site, so the assertion is
+ * about a command that actually reaches a container rather than about a private helper.
+ */
+describe('COD-416 docker resume flag comes from registry data', () => {
+  const SID = '11111111-2222-3333-4444-555555555555';
+  const RID = 'resume-id-1234';
+
+  function launch(mode: SessionMode): string {
+    const docker = {
+      hostId: 'h1',
+      label: 'local',
+      engine: 'docker' as const,
+      containerName: 'c1',
+      containerWorkdir: '/work',
+      image: 'img',
+      runsAsRoot: false,
+    } as never;
+    return buildDockerLaunchCommand({
+      mode,
+      docker,
+      sessionId: SID,
+      resumeSessionId: RID,
+      createContext: {
+        docker,
+        sessionId: SID,
+        instance: 'default',
+        userArgs: [],
+        credentialMounts: [],
+        extraMounts: [],
+        envCreate: {},
+        addHostGateway: false,
+        gatewayAlias: 'host.docker.internal',
+      },
+      execEnv: {},
+      execEnvNames: [],
+      seedCopies: [],
+    } as never);
+  }
+
+  // Exactly the pairs the removed switch hardcoded, mode by mode.
+  it.each([
+    ['gemini', `--resume ${RID}`],
+    ['codex', `resume ${RID}`],
+    ['antigravity', `--conversation ${RID}`],
+    ['pi', `--session ${RID}`],
+    ['grok', `--resume ${RID}`],
+    ['deepseek', `--resume ${RID}`],
+    ['omp', `--resume ${RID}`],
+  ] as const)('appends %s resume as "%s"', (mode, expected) => {
+    expect(launch(mode as SessionMode)).toContain(expected);
+  });
+
+  // The old `default:` arm. `shell` declares no `resumeAppend`, and inventing one would put a
+  // flag onto a live pane command that no shell accepts.
+  it('appends nothing for shell, which declares no resumeAppend', () => {
+    expect(launch('shell' as SessionMode)).not.toContain(RID);
+  });
+
+  /**
+   * ⚠️ opencode and claude also declare no `resumeAppend`, and they still resume — because they
+   * never reach this helper. `buildDockerLaunchCommand` handles both in DEDICATED branches
+   * ABOVE it: claude via `claudeDockerPaneCommand` (its `--session-id … || resume` form) and
+   * opencode via `buildOpenCodeCommand({ continueSession })`, which refuses outright when a
+   * custom command override is present rather than silently starting a fresh conversation.
+   *
+   * Pinned because the absent `resumeAppend` reads like "cannot resume" and is not: the first
+   * version of this test asserted opencode appended nothing and failed against a command that
+   * correctly carried `--session`.
+   */
+  it('resumes opencode through its dedicated branch, not the generic append', () => {
+    const cmd = launch('opencode' as SessionMode);
+    expect(cmd).toContain(`opencode --session ${RID}`);
   });
 });

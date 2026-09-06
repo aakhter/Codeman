@@ -391,6 +391,7 @@ const CODEX: CliEntry = {
   launch: {
     params: {
       bypassApprovals: { type: 'bool' },
+      hookTrust: { type: 'bool' },
       animations: { type: 'bool' },
       model: { type: 'token', pattern: 'model' },
       resumeId: { type: 'token', pattern: 'id' },
@@ -401,6 +402,7 @@ const CODEX: CliEntry = {
         args: [
           { lit: 'codex' },
           { flag: '--dangerously-bypass-approvals-and-sandbox', when: { param: 'bypassApprovals', is: true } },
+          { flag: '--dangerously-bypass-hook-trust', when: { param: 'hookTrust', is: true } },
           { flag: '--config', value: 'tui.animations=true', when: { param: 'animations', is: true } },
           { flag: '--config', value: 'tui.animations=false', when: { param: 'animations', is: false } },
           { flag: '--model', valueFrom: 'model', when: { param: 'model', state: 'set' } },
@@ -409,7 +411,11 @@ const CODEX: CliEntry = {
         ],
       },
     ],
-    legacyConfigAliases: { bypassApprovals: 'dangerouslyBypassApprovals', resumeId: 'resumeSessionId' },
+    legacyConfigAliases: {
+      bypassApprovals: 'dangerouslyBypassApprovals',
+      hookTrust: 'dangerouslyBypassHookTrust',
+      resumeId: 'resumeSessionId',
+    },
     legacyConfigField: 'codexConfig',
     resumeAppend: { style: 'positional', token: 'resume' },
   },
