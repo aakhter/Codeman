@@ -203,6 +203,41 @@ describe('ralph-routes', () => {
       expect(body.success).toBe(false);
     });
 
+    /**
+     * COD-416 / Q23. The gate named `opencode|codex|gemini` — the external set from before
+     * antigravity, let alone pi/grok/deepseek/omp. Its own comment said "external CLI", so the
+     * list was the bug and `isExternalCliMode()` is what it meant.
+     *
+     * ⚠️ Deliberate behaviour change, approved on the ticket: five modes accepted before are
+     * now refused. Ralph parses Claude's todo/completion output, which no external CLI emits.
+     */
+    it.each(['opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'] as const)(
+      'refuses ralph config for external CLI mode %s',
+      async (mode) => {
+        harness.ctx._session.mode = mode;
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/ralph-config`,
+          payload: { enabled: true },
+        });
+        const body = JSON.parse(res.body);
+        expect(body.success, `${mode} must be refused`).toBe(false);
+      }
+    );
+
+    // `!isExternalCliMode()` rather than `capabilities.ralph`: shell is `ralph: false` in the
+    // registry but is not external, and shell ralph config is accepted today.
+    it.each(['claude', 'shell'] as const)('still allows ralph config for non-external mode %s', async (mode) => {
+      harness.ctx._session.mode = mode;
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/ralph-config`,
+        payload: { enabled: true },
+      });
+      const body = JSON.parse(res.body);
+      expect(body.success, `${mode} must still be allowed`).not.toBe(false);
+    });
+
     it('rejects invalid request body', async () => {
       const res = await harness.app.inject({
         method: 'POST',

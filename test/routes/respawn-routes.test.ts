@@ -159,6 +159,47 @@ describe('respawn-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.success).toBe(false);
     });
+
+    /**
+     * COD-416 / Q23. This gate used to name `opencode|codex|gemini|antigravity` — the external
+     * set as it stood when antigravity was added (dda03c3a), never extended when pi, grok,
+     * deepseek and omp arrived. Its own comment said "not supported for external CLI sessions",
+     * so the LIST was the bug and `isExternalCliMode()` is what it meant.
+     *
+     * ⚠️ Deliberate behaviour change, approved on the ticket: four modes that were accepted
+     * before are now refused. They were never actually supported — respawn drives Claude-shaped
+     * `/clear` + re-prompt into a CLI that has no idea what that means.
+     */
+    it.each(['opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'] as const)(
+      'refuses respawn for external CLI mode %s',
+      async (mode) => {
+        harness.ctx._session.mode = mode;
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/respawn/start`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.success, `${mode} must be refused`).toBe(false);
+      }
+    );
+
+    /**
+     * The other half, and the reason this is `!isExternalCliMode()` rather than
+     * `capabilities.respawn`: shell is `respawn: false` in the registry but is NOT an external
+     * CLI, and shell respawn works today. Gating on the capability would have silently killed
+     * it — a regression dressed as a cleanup.
+     */
+    it.each(['claude', 'shell'] as const)('still allows respawn for non-external mode %s', async (mode) => {
+      harness.ctx._session.mode = mode;
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/respawn/start`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success, `${mode} must still be allowed`).not.toBe(false);
+    });
   });
 
   // ========== PUT /api/sessions/:id/respawn/config ==========

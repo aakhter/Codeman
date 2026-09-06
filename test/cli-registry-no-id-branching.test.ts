@@ -98,14 +98,14 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // and fresh-thread detection. Because a key is `file::expression`, neither clears until
   // EVERY one of its sites does, so they are a single unit of work rather than a leftover.
   //
-  // ⚠️ What is LEFT is not simply "the rest": the largest remaining cluster is a set of
-  // STALE external-CLI mode lists (respawn-routes, ralph-routes, and five chains in
-  // server.ts whose own comments say "not supported for external CLI sessions"). They name
-  // opencode/codex/gemini(/antigravity) — the external set as it stood before pi, grok,
-  // deepseek and omp existed — so converting them to `capabilities.respawn`/`.ralph` or
-  // `isExternalCliMode()` REFUSES four to five modes that are accepted today. That is a
-  // user-visible behaviour change on a public API surface, not a refactor, and it is parked
-  // for a decision rather than smuggled in here. See COD-416's comments.
+  // Wave 3a resolved the stale external-CLI mode lists (Q23, approved as a deliberate
+  // behaviour change): 10 more keys, leaving 20 — see the "wave 3a" block below.
+  //
+  // ⚠️ ALL 20 SURVIVORS ARE NOW MULTI-SITE BY NATURE, which is why the count stops falling in
+  // large steps: tmux-manager.ts's 18 are the spawn core (a `switch (mode)` plus per-CLI env
+  // configuration), and session.ts's 2 cover 18 checkpoint/identity sites between them. A key
+  // is `file::expression`, so none of them clears until EVERY one of its sites does — each is
+  // a single unit of work rather than a leftover to pick off.
   // session.ts — down to the two multi-site checkpoint/identity keys (wave 2 cleared 6).
   "session.ts::mode === 'claude'": PRE_REGISTRY,
   "session.ts::mode === 'codex'": PRE_REGISTRY,
@@ -128,19 +128,6 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   "tmux-manager.ts::mode === 'omp'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'opencode'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'pi'": PRE_REGISTRY,
-  // web/routes/ralph-routes.ts
-  "web/routes/ralph-routes.ts::mode === 'codex'": PRE_REGISTRY,
-  "web/routes/ralph-routes.ts::mode === 'gemini'": PRE_REGISTRY,
-  "web/routes/ralph-routes.ts::mode === 'opencode'": PRE_REGISTRY,
-  // web/routes/respawn-routes.ts
-  "web/routes/respawn-routes.ts::mode === 'antigravity'": PRE_REGISTRY,
-  "web/routes/respawn-routes.ts::mode === 'codex'": PRE_REGISTRY,
-  "web/routes/respawn-routes.ts::mode === 'gemini'": PRE_REGISTRY,
-  "web/routes/respawn-routes.ts::mode === 'opencode'": PRE_REGISTRY,
-  // web/server.ts
-  "web/server.ts::mode !== 'codex'": PRE_REGISTRY,
-  "web/server.ts::mode !== 'gemini'": PRE_REGISTRY,
-  "web/server.ts::mode !== 'opencode'": PRE_REGISTRY,
 
   // ── COD-416 wave 1: triaged out of the baseline above ───────────────────────────────
   //
@@ -233,6 +220,34 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // through the interactive-session hooks. Same reason as the session-routes.ts shell entry:
   // this is about tmux pane history vs byte history, not about any CLI's behaviour.
   "session.ts::mode === 'shell'": 'COD-189 shell burst tracking on the shared output path',
+
+  // ── COD-416 wave 3a: the stale external-CLI mode lists (Q23, approved) ──────────────
+  //
+  // respawn-routes.ts (3 gates), ralph-routes.ts (1) and server.ts (5 restore chains) each
+  // named a hardcoded `opencode|codex|gemini(|antigravity)` list while their own comments
+  // said "not supported for EXTERNAL CLI sessions". The list was the external set as it stood
+  // when antigravity was added (dda03c3a) and was never extended for pi/grok/deepseek/omp —
+  // so all nine sites are now `isExternalCliMode()`, deleting 9 keys outright.
+  //
+  // ⚠️ A DELIBERATE, APPROVED BEHAVIOUR CHANGE, not a refactor: respawn newly refuses
+  // pi/grok/deepseek/omp and ralph newly refuses those plus antigravity. They were never
+  // really supported — respawn drives Claude-shaped `/clear` + re-prompt and ralph parses
+  // Claude's todo output, neither of which an external CLI understands.
+  //
+  // ⚠️ `!isExternalCliMode()` and NOT `capabilities.respawn`/`.ralph`: shell is `false` for
+  // both in the registry but is not an external CLI, and shell respawn/ralph work today.
+  // Gating on the capability would have silently killed them — a regression dressed up as a
+  // cleanup, which is exactly what the capability's name invites you to do.
+
+  // With those chains gone, this key's only remaining sites are the Read My Mind local-Codex
+  // provider-recovery helpers (`resolveRestoredCodexProviderIdentity` and its recovery
+  // sibling) — the same strict per-provider lane as the readmymind-routes entries above, and
+  // an early return for a mode that has no codex rollout to recover.
+  //
+  // It was blocked behind Q23 purely by the `file::expression` granularity limit: one key,
+  // two unrelated uses. Removing the chains is what made it allowlistable on its own merits.
+  "web/server.ts::mode !== 'codex'":
+    'Read My Mind local-Codex provider identity/recovery; a non-codex session has no rollout to recover',
 
   // --- Capture-canonical terminal reload (COD-189) ---
   //
