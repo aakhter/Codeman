@@ -39,13 +39,15 @@ export function parseTerminalAttachmentRequests(
   const results: TerminalAttachmentRequest[] = [];
   const seen = new Set<string>();
 
-  // Both generated-artifact scanners emit `source: 'codex-generated'` — they are two label
-  // formats for the same thing — so they are gated together.
+  // Only the `Saved to: file://…` scanner is gated: that announcement is codex's own, and
+  // it is the one carrying the relaxed trust policy. The LABELED scanner
+  // (`Mockup:`/`Screenshot:`/`Artifact:` …) is deliberately NOT gated — those labels are
+  // generic and are printed by Superpowers under claude too, so gating it would silently
+  // stop detecting artifacts on every non-codex session.
   for (const request of [
     ...parseMagicAttachmentRequests(data),
-    ...(options.codexArtifacts
-      ? [...parseCodexGeneratedArtifactRequests(data), ...parseLabeledGeneratedArtifactRequests(data)]
-      : []),
+    ...(options.codexArtifacts ? parseCodexGeneratedArtifactRequests(data) : []),
+    ...parseLabeledGeneratedArtifactRequests(data),
   ]) {
     const key = `${request.source}:${request.path}`;
     if (seen.has(key)) continue;

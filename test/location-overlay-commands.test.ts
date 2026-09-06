@@ -18,15 +18,23 @@
  */
 
 import { it, expect } from 'vitest';
-import { defaultRemoteCommandForMode, remoteLoginShellCommand } from '../src/remote-hosts.js';
+import {
+  defaultRemoteCommandForMode,
+  remoteLoginShellCommand,
+  REMOTE_LOGIN_SHELL_RESOLVE,
+} from '../src/remote-hosts.js';
 import { defaultDockerCommandForMode } from '../src/docker-hosts.js';
 import type { SessionMode } from '../src/types/session.js';
 
-const REMOTE_LOGIN_SHELL = '"${SHELL:-/bin/sh}"';
+// COD-277 — deliberately NOT upstream's `"${SHELL:-/bin/sh}"`. In a tmux pane `$SHELL` is
+// the tmux SERVER's shell (bash here), so a zsh user's ~/.zshrc was never sourced. The shell
+// arm resolves the REAL login shell from the passwd entry (getent/dscl) at runtime instead,
+// which is why this one golden differs from upstream's.
+const REMOTE_LOGIN_SHELL = 'login_shell';
 
 it('pins every remote pane command', () => {
   const expected: Record<string, string> = {
-    shell: `exec ${REMOTE_LOGIN_SHELL} -i -l`,
+    shell: `${REMOTE_LOGIN_SHELL_RESOLVE}exec "$${REMOTE_LOGIN_SHELL}" -i -l`,
     claude: remoteLoginShellCommand('claude --dangerously-skip-permissions'),
     opencode: remoteLoginShellCommand('opencode'),
     codex: remoteLoginShellCommand('codex'),

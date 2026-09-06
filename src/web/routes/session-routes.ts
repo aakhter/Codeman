@@ -1268,7 +1268,9 @@ export function registerSessionRoutes(
     // PATH pre-flight must not refuse it. Gated on the resolved command alone (never a
     // mode id), which is both sufficient — it is only ever set for codex — and keeps
     // this branch out of the no-id-branching guard.
-    if (getCli(requestedMode)?.capabilities.external && localCodexCommand === undefined) {
+    // `!remote`: the remote host runs its own CLI, so probing THIS server's PATH would
+    // refuse a perfectly good remote session. Upstream's version is not remote-gated.
+    if (!remote && getCli(requestedMode)?.capabilities.external && localCodexCommand === undefined) {
       const cliLaunchError = await resolveCliLaunchError(
         requestedMode,
         legacyConfigForMode(requestedMode, body as unknown as Record<string, unknown>)
@@ -3562,28 +3564,6 @@ export function registerSessionRoutes(
         dockerResumeId = dockerCase.lastClaudeSessionId;
       }
     } else {
-      // Same pre-flight as POST /api/sessions: refuse before spawning a pane that would die
-      // on `command not found`, with the resolver's own diagnostics, and a launcher CLI's
-      // more specific reason (dsh: binary vs no pane-capable profile vs the profile the
-      // caller named). External CLIs only — claude and shell fall through to tmux-manager's
-      // own not-found throw, exactly as before.
-      if (getCli(mode)?.capabilities.external) {
-        const qsLaunchError = await resolveCliLaunchError(
-          mode,
-          legacyConfigForMode(mode, {
-            openCodeConfig,
-            codexConfig,
-            geminiConfig,
-            antigravityConfig,
-            piConfig,
-            grokConfig,
-            deepSeekConfig,
-          } as unknown as Record<string, unknown>)
-        );
-        if (qsLaunchError) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, qsLaunchError);
-        }
-      }
       // Same pre-flight as POST /api/sessions: refuse before spawning a pane that would die
       // on `command not found`, with the resolver's own diagnostics, and a launcher CLI's
       // more specific reason (dsh: binary vs no pane-capable profile vs the profile the

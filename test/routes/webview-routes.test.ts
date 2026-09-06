@@ -22,7 +22,6 @@ import { writeWebviews } from '../../src/webview-store.js';
 import { TabLayoutService } from '../../src/tab-layout-service.js';
 import type { TabLayout } from '../../src/tab-layout.js';
 import { MAX_WEBVIEWS } from '../../src/config/webview-limits.js';
-import { writeWebviews } from '../../src/webview-store.js';
 import type { AuthUser, Webview } from '../../src/types.js';
 
 const CONSTANTS_SOURCE = readFileSync(new URL('../../src/web/public/constants.js', import.meta.url), 'utf8');

@@ -26,6 +26,7 @@ import {
   buildDockerStopCommand,
   buildDockerRemoveCommand,
   buildDockerKillCommand,
+  selectLaunchCommand,
 } from '../src/tmux-manager.js';
 import type { DockerCase, DockerHost, SessionDocker } from '../src/types.js';
 
@@ -203,21 +204,40 @@ describe('adopted container: claude as root', () => {
 describe('adopted container: the host is not required to have the CLI', () => {
   const src = readFileSync(new URL('../src/tmux-manager.ts', import.meta.url), 'utf8');
 
-  it('skips the host CLI requirement for a docker session', () => {
+  it('never evaluates the local launch path for a docker session', () => {
     // A docker session runs its CLI inside the container. Demanding it on the
     // host threw, the catch fell back to a direct PTY, and that PTY tried to
     // exec the CLI on the HOST — surfacing as a bare `execvp(3) failed` with
     // nothing naming the real cause.
     //
-    // The CLI registry collapsed the old per-mode `mode === 'claude' && !cliDir` chain
-    // into ONE `missingCliMessage(mode)` gate, so the guarantee is now that the single
-    // gate carries the docker exemption and that no per-mode arm has grown back.
-    expect(src).toContain('if (!cliRunsInContainer && !cliDir) {');
-    expect(src.match(/if \(mode === '[a-z]+' && !cliDir\)/g)).toBeNull();
+    // The guarantee is STRUCTURAL here rather than a `cliRunsInContainer` flag:
+    // the host-CLI requirement lives inside selectLaunchCommand's `local` thunk,
+    // and a docker session takes the `docker` branch, so the thunk is never run.
+    // Driving the real function is what makes this bite — a source grep would
+    // still pass if someone hoisted the throw out of the thunk.
+    let localEvaluated = false;
+    const cmd = selectLaunchCommand({
+      local: () => {
+        localEvaluated = true;
+        throw new Error('host CLI not found');
+      },
+      docker: () => 'docker exec -it box bash',
+    });
+
+    expect(cmd).toBe('docker exec -it box bash');
+    expect(localEvaluated).toBe(false);
   });
 
-  it('derives the flag from the docker metadata the session already carries', () => {
-    expect(src).toContain('const cliRunsInContainer = !!docker;');
+  it('keeps the host-CLI throw inside the local thunk, and grows no per-mode arms', () => {
+    // Nearest preceding branch key for each not-found throw must be `local:`.
+    for (const m of [...src.matchAll(/throw new Error\(cliNotFoundMessage\(/g)]) {
+      const before = src.slice(0, m.index);
+      const keys = [...before.matchAll(/\b(local|remote|docker): \(\) =>/g)];
+      expect(keys.length, 'not-found throw sits outside any launch thunk').toBeGreaterThan(0);
+      expect(keys[keys.length - 1][1]).toBe('local');
+    }
+    // The old per-mode chain must not grow back.
+    expect(src.match(/if \(mode === '[a-z]+' && !cliDir\)/g)).toBeNull();
   });
 });
 
