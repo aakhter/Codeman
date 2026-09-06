@@ -88,8 +88,15 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // /api/status freeze during session create.
   //
   // COD-416 wave 1 removed 17 of the original 53 (36 left): 3 converted to
-  // `capabilities.approvals`, 14 triaged into ALLOWED_BRANCHES with individual reasons —
-  // see the "COD-416 wave 1" block below.
+  // `capabilities.approvals`, 14 triaged into ALLOWED_BRANCHES with individual reasons.
+  // Wave 2 removed 6 more from session.ts (30 left): the native-resume chain became
+  // `legacyResumeSlot()` (deleting the gemini and antigravity keys outright), and 4 were
+  // triaged into ALLOWED_BRANCHES. See the "COD-416 wave 1"/"wave 2" blocks below.
+  //
+  // ⚠️ session.ts's two SURVIVING keys are multi-site by nature — `mode === 'codex'` covers 10
+  // sites and `mode === 'claude'` 8, spread across checkpoint readiness, conversation identity
+  // and fresh-thread detection. Because a key is `file::expression`, neither clears until
+  // EVERY one of its sites does, so they are a single unit of work rather than a leftover.
   //
   // ⚠️ What is LEFT is not simply "the rest": the largest remaining cluster is a set of
   // STALE external-CLI mode lists (respawn-routes, ralph-routes, and five chains in
@@ -99,15 +106,9 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // `isExternalCliMode()` REFUSES four to five modes that are accepted today. That is a
   // user-visible behaviour change on a public API surface, not a refactor, and it is parked
   // for a decision rather than smuggled in here. See COD-416's comments.
-  // session.ts
-  "session.ts::mode !== 'claude'": PRE_REGISTRY,
-  "session.ts::mode !== 'codex'": PRE_REGISTRY,
-  "session.ts::mode === 'antigravity'": PRE_REGISTRY,
+  // session.ts — down to the two multi-site checkpoint/identity keys (wave 2 cleared 6).
   "session.ts::mode === 'claude'": PRE_REGISTRY,
   "session.ts::mode === 'codex'": PRE_REGISTRY,
-  "session.ts::mode === 'gemini'": PRE_REGISTRY,
-  "session.ts::mode === 'opencode'": PRE_REGISTRY,
-  "session.ts::mode === 'shell'": PRE_REGISTRY,
   // tmux-manager.ts
   "tmux-manager.ts::case 'antigravity':": PRE_REGISTRY,
   "tmux-manager.ts::case 'claude':": PRE_REGISTRY,
@@ -196,6 +197,42 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   "web/routes/session-recovery-routes.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing (native resume recovery)',
   "web/routes/session-routes.ts::mode !== 'deepseek'":
     'legacy <Mode>Config plumbing: rejects a <Mode>Config sent for the wrong mode',
+
+  // ── COD-416 wave 2: session.ts ──────────────────────────────────────────────────────
+  //
+  // Converted to DATA (no entry needed, the branches are gone): `_applyNativeResumeIdForResume`
+  // read codex/opencode/gemini/antigravity out of a four-way chain that was a second copy of
+  // `legacyConfigField` + the `resumeId` alias. It now reads `legacyResumeSlot()`, which
+  // removed BOTH the gemini and antigravity keys from this file outright.
+
+  // Per-CLI TUI frame regexes. `detectExternalCliWorkingFrame` matches the literal strings
+  // codex's and opencode's TUIs paint ("Working (2s • esc to interrupt)", Bubble Tea's
+  // spinner+timer). That is per-CLI PROSE, not a behavioural switch: there is no boolean a
+  // capability could carry, and the pattern for a CLI Codeman has never observed cannot be
+  // invented. Moving these into registry `patterns` is its own change with its own risk —
+  // they feed idle detection — and is deliberately not bundled into a refactor.
+  "session.ts::mode === 'opencode'": "opencode's own TUI working-frame regex; per-CLI prose, not a capability",
+
+  // Claude session-identity + direct-PTY checkpoint. Both sites ask "is this Claude", whose
+  // SessionStart hook and `❯` prompt transition are what the code waits on: a non-claude mode
+  // is hook-ready by definition (there is no Claude hook to wait for), and the instant-clear
+  // generation check only exists for the direct-PTY Claude fallback. Same family as the
+  // `hooks-config.ts` and `web/server.ts::mode !== 'claude'` entries.
+  "session.ts::mode !== 'claude'":
+    'Claude SessionStart-hook readiness and the direct-PTY checkpoint clear — claude-identity questions',
+
+  // Codex provider identity + resolved launch command, both server-only persistence.
+  // ⚠️ The `getResolvedCodexCommandForPersist` site is COD-392's `baseCommand`, which COD-416
+  // itself records as having to STAY code-level: it is a complete server-resolved shell
+  // command, and the argv engine forbids shell text by design, so there is no registry shape
+  // for it. The identity site is the Read My Mind codex lane (see readmymind-routes entries).
+  "session.ts::mode !== 'codex'":
+    'codex provider identity + COD-392 baseCommand persistence; the argv engine cannot express a shell command',
+
+  // COD-189 shell burst tracking, on the SHARED output path because shell sessions never pass
+  // through the interactive-session hooks. Same reason as the session-routes.ts shell entry:
+  // this is about tmux pane history vs byte history, not about any CLI's behaviour.
+  "session.ts::mode === 'shell'": 'COD-189 shell burst tracking on the shared output path',
 
   // --- Capture-canonical terminal reload (COD-189) ---
   //

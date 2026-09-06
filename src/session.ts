@@ -112,6 +112,7 @@ import {
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { getCli } from './config/cli-registry/registry.js';
+import { legacyResumeSlot } from './session-cli-registry-bridge.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
   buildInteractiveArgs,
@@ -1617,28 +1618,47 @@ export class Session extends EventEmitter {
    */
   private _applyNativeResumeIdForResume(): void {
     if (!this._nativeResumeId) return;
-    if (this.mode === 'codex') {
-      this._codexConfig = {
-        ...this._codexConfig,
-        resumeSessionId: this._codexConfig?.resumeSessionId ?? this._nativeResumeId,
-      };
-    } else if (this.mode === 'opencode') {
-      this._openCodeConfig = {
-        ...this._openCodeConfig,
-        continueSession: this._openCodeConfig?.continueSession ?? this._nativeResumeId,
-      };
-    } else if (this.mode === 'gemini') {
-      this._geminiConfig = {
-        ...this._geminiConfig,
-        resumeSession: this._geminiConfig?.resumeSession ?? this._nativeResumeId,
-      };
-    } else if (this.mode === 'antigravity') {
-      this._antigravityConfig = {
-        ...this._antigravityConfig,
-        resumeConversationId: this._antigravityConfig?.resumeConversationId ?? this._nativeResumeId ?? undefined,
-      };
-    }
-    // claude/shell: no on-disk resume mechanism — nativeResumeId stays inert.
+    // WHERE the id goes is registry data (`legacyConfigField` + the `resumeId` alias), so the
+    // four-way chain this replaces was a second copy of pairs already declared per entry.
+    const slot = legacyResumeSlot(this.mode);
+    if (!slot) return; // claude/shell: no <Mode>Config object, so nothing to merge into.
+    const current = this._legacyConfigSlot(slot.field);
+    if (!current) return;
+    const existing = current.read();
+    // An explicit caller-supplied resume target always outranks an opportunistically
+    // captured one — the `??` the original chain repeated four times.
+    if (existing?.[slot.key] !== undefined && existing[slot.key] !== null) return;
+    current.write({ ...existing, [slot.key]: this._nativeResumeId });
+  }
+
+  /**
+   * Read/write access to this session's `<Mode>Config` slots, addressed by the registry's own
+   * `legacyConfigField` name.
+   *
+   * These are eight separately-typed private fields, so something has to map a field NAME to
+   * one — but that is a property of this class's storage, not a per-CLI behaviour decision:
+   * the registry still chooses which slot and which key. Anything not listed (claude, shell)
+   * has no config object and returns undefined.
+   */
+  private _legacyConfigSlot(
+    field: string
+  ): { read: () => Record<string, unknown> | undefined; write: (v: Record<string, unknown>) => void } | undefined {
+    const slots: Record<string, { read: () => object | undefined; write: (v: never) => void }> = {
+      openCodeConfig: { read: () => this._openCodeConfig, write: (v) => (this._openCodeConfig = v) },
+      codexConfig: { read: () => this._codexConfig, write: (v) => (this._codexConfig = v) },
+      geminiConfig: { read: () => this._geminiConfig, write: (v) => (this._geminiConfig = v) },
+      antigravityConfig: { read: () => this._antigravityConfig, write: (v) => (this._antigravityConfig = v) },
+      piConfig: { read: () => this._piConfig, write: (v) => (this._piConfig = v) },
+      grokConfig: { read: () => this._grokConfig, write: (v) => (this._grokConfig = v) },
+      deepSeekConfig: { read: () => this._deepSeekConfig, write: (v) => (this._deepSeekConfig = v) },
+      ompConfig: { read: () => this._ompConfig, write: (v) => (this._ompConfig = v) },
+    };
+    const slot = slots[field];
+    if (!slot) return undefined;
+    return {
+      read: () => slot.read() as Record<string, unknown> | undefined,
+      write: (v) => slot.write(v as never),
+    };
   }
 
   /** Agy CLI configuration for this session. */

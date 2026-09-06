@@ -82,6 +82,28 @@ export function legacyConfigForMode(
 }
 
 /**
+ * Where a captured native resume id belongs for this mode: the `<Mode>Config` field to write,
+ * and the key inside it this CLI's `resumeId` param is read from.
+ *
+ * The same two pieces of registry data the readers above use (`legacyConfigField` +
+ * `legacyConfigAliases`), applied in the writing direction — which is what lets
+ * `_applyNativeResumeIdForResume()` in session.ts stop hardcoding
+ * codex→`resumeSessionId` / opencode→`continueSession` / gemini→`resumeSession` /
+ * antigravity→`resumeConversationId`. Those four pairs are declared per entry already, so the
+ * hand-written chain was a second copy of them that could drift.
+ *
+ * `undefined` for an entry with no `<Mode>Config` object at all (claude, shell) and for an
+ * unregistered mode — the callers' existing "no on-disk resume mechanism, stay inert" case.
+ */
+export function legacyResumeSlot(mode: string): { field: string; key: string } | undefined {
+  const entry = getCli(mode);
+  const field = entry?.launch.legacyConfigField;
+  if (!entry || field === undefined) return undefined;
+  if (entry.launch.params.resumeId === undefined) return undefined;
+  return { field, key: entry.launch.legacyConfigAliases?.resumeId ?? 'resumeId' };
+}
+
+/**
  * Build `ParamValues` for every declared `token`/`bool`/`enum` param by reading it out of the
  * legacy config object through `legacyConfigAliases` (falling back to the param's own name).
  * `engine`-sourced params are skipped — those come from `EngineValues`, never legacy config.
