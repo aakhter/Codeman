@@ -112,7 +112,6 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // tmux-manager.ts
   "tmux-manager.ts::mode === 'antigravity'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'codex'": PRE_REGISTRY,
-  "tmux-manager.ts::mode === 'deepseek'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'gemini'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'opencode'": PRE_REGISTRY,
 

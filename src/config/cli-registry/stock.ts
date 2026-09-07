@@ -348,7 +348,10 @@ const OPENCODE: CliEntry = {
     // colours — invisible to every test, visible only on screen.
     exports: [{ name: 'COLORTERM', value: 'truecolor' }],
     unset: [],
-    tmuxSetenvKeys: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY'],
+    // ⚠️ DOWNSTREAM DIVERGENCE, measured not assumed (COD-416). Upstream's entry omits
+    // OPENROUTER_API_KEY; this tree has always forwarded it, and dropping it would silently
+    // break OpenRouter auth for opencode panes — the key simply would not reach the CLI.
+    tmuxSetenvKeys: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY'],
     dockerExecEnvNames: [],
     allowedPrefixes: ['OPENCODE_'],
     allowedKeys: [],

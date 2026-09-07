@@ -7,6 +7,7 @@
  * Port: N/A (no server needed)
  */
 
+import { getCli } from '../src/config/cli-registry/registry.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   TmuxManager,
@@ -18,6 +19,7 @@ import {
   buildNofileLimitCommand,
   cliNotFoundMessage,
   buildDockerLaunchCommand,
+  planCliEnvSetenv,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -2214,5 +2216,89 @@ describe('COD-416 pane env + PATH come from registry data', () => {
       if (dir === null) continue; // not installed on this machine — nothing to assert
       expect(pathExport, `${m}`).toBe(`export PATH='${dir}':"$PATH" && `);
     }
+  });
+});
+
+/**
+ * COD-416 wave 3d — the four per-CLI `_configure<Cli>` methods became one registry-driven
+ * `_configureCliEnv`, and the DECISION half was extracted into the pure `planCliEnvSetenv`.
+ *
+ * The helpers this replaces were async side-effect loops, so nothing could assert which vars
+ * they would set for which CLI — the key lists were only verifiable by reading them. These
+ * are the first tests of that behaviour.
+ */
+describe('COD-416 planCliEnvSetenv — per-CLI tmux setenv from registry data', () => {
+  const entryFor = (id: string) => {
+    const e = getCli(id);
+    if (!e) throw new Error(`no registry entry for ${id}`);
+    return e;
+  };
+  const keys = (id: string, cfg?: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) =>
+    planCliEnvSetenv(entryFor(id), cfg, env).map((p) => p.key);
+
+  /**
+   * ⚠️ The trap this pins. Upstream's opencode entry omits OPENROUTER_API_KEY; this tree has
+   * always forwarded it. Adopting the registry list wholesale would have silently stopped the
+   * key reaching opencode panes — OpenRouter auth would just fail, with nothing to point at.
+   * The DATA was corrected to match the behaviour, exactly as with opencode's COLORTERM.
+   */
+  it('forwards every server-env key the CLI declares, opencode OPENROUTER included', () => {
+    const env = {
+      ANTHROPIC_API_KEY: 'a',
+      OPENAI_API_KEY: 'o',
+      GOOGLE_API_KEY: 'g',
+      OPENROUTER_API_KEY: 'r',
+    };
+    expect(keys('opencode', undefined, env)).toEqual([
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'GOOGLE_API_KEY',
+      'OPENROUTER_API_KEY',
+    ]);
+    expect(keys('codex', undefined, { OPENAI_API_KEY: 'o', CODEX_HOME: '/h' })).toEqual([
+      'OPENAI_API_KEY',
+      'CODEX_HOME',
+    ]);
+    expect(keys('gemini', undefined, { GEMINI_API_KEY: 'k', GOOGLE_CLOUD_PROJECT: 'p' })).toEqual([
+      'GEMINI_API_KEY',
+      'GOOGLE_CLOUD_PROJECT',
+    ]);
+  });
+
+  // Absent server vars are skipped rather than exported empty — an empty API key is worse
+  // than none, since it looks configured and fails at the provider.
+  it('skips a declared key the server does not have', () => {
+    expect(keys('codex', undefined, {})).toEqual([]);
+  });
+
+  // claude and shell declare none: claude authenticates from its own config dir.
+  it.each(['claude', 'shell'] as const)('sets nothing for %s', (id) => {
+    expect(keys(id, undefined, { OPENAI_API_KEY: 'o', ANTHROPIC_API_KEY: 'a' })).toEqual([]);
+  });
+
+  /**
+   * `configSetenv` values come from the CALLER, and for dsh the value IS a permission level,
+   * so the planner re-validates against the declared enum. An invalid one is DROPPED, not
+   * defaulted — the var goes unset and dsh falls back to its own `workspace-write` (which
+   * asks) rather than to something we guessed.
+   */
+  it('accepts a valid deepseek permission mode and drops an invalid one', () => {
+    const ok = planCliEnvSetenv(entryFor('deepseek'), { permissionMode: 'danger-full-access' }, {});
+    expect(ok).toEqual([{ key: 'DSH_PERMISSION_MODE', value: 'danger-full-access' }]);
+    expect(planCliEnvSetenv(entryFor('deepseek'), { permissionMode: 'root' }, {})).toEqual([]);
+    // Absent = the harness's own default, which is the shape the multi-user clamp relies on.
+    expect(planCliEnvSetenv(entryFor('deepseek'), {}, {})).toEqual([]);
+  });
+
+  // opencode's config blob: autoAllowTools layers a blanket allow OVER caller JSON.
+  it('builds opencode config content, with autoAllowTools winning over caller permission', () => {
+    const [pair] = planCliEnvSetenv(entryFor('opencode'), { autoAllowTools: true, configContent: '{"model":"m"}' }, {});
+    expect(pair.key).toBe('OPENCODE_CONFIG_CONTENT');
+    expect(JSON.parse(pair.value)).toEqual({ permission: { '*': 'allow' }, model: 'm' });
+  });
+
+  // Invalid caller JSON is refused rather than passed through to the CLI as config.
+  it('refuses invalid opencode config JSON', () => {
+    expect(planCliEnvSetenv(entryFor('opencode'), { configContent: '{oops' }, {})).toEqual([]);
   });
 });

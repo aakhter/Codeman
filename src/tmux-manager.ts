@@ -24,8 +24,13 @@
 import { EventEmitter } from 'node:events';
 import { collectDescendants } from './proc-tree.js';
 import { getCli } from './config/cli-registry/registry.js';
+import type { CliEntry } from './config/cli-registry/types.js';
 import { missingCliMessage, resolveCliBinDir } from './utils/cli-resolver.js';
-import { buildSpawnCommandFromRegistry } from './session-cli-registry-bridge.js';
+import {
+  buildSpawnCommandFromRegistry,
+  configSetenvValues,
+  legacyConfigForMode,
+} from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -1855,123 +1860,92 @@ export function resolveDockerLaunchOptions(
 }
 
 /**
- * Set sensitive environment variables on a tmux session via setenv.
- * These are inherited by panes but not visible in ps output or tmux history.
+ * PURE: the `tmux setenv` pairs a session in this mode needs, in issue order.
+ *
+ * Extracted so the DECISION (which vars, from where, with what validation) is unit-testable
+ * without a tmux socket — the four hand-written `set<Cli>EnvVars` helpers this replaces were
+ * async side-effect loops, so nothing could assert what they would set.
+ *
+ * Three sources, all registry DATA:
+ *   1. `env.tmuxSetenvKeys` — names forwarded from the SERVER's own environment (secrets).
+ *   2. `env.configSetenv`   — values the CALLER supplied, re-validated against the declared
+ *      ParamSpec by `configSetenvValues()`. For dsh the value IS a permission level, so a
+ *      builder must never trust its caller here.
+ *   3. `env.configContentVar` — a JSON blob pushed as one var (opencode's config content).
+ *
+ * ⚠️ `env.setenvProfile` is deliberately NOT here: it writes an executable shim to disk and
+ * needs the resulting path, which is a side effect a pure planner must not perform.
  */
-async function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY'];
-  for (const key of sensitiveVars) {
-    const val = process.env[key];
-    if (val) {
-      // Shell-escape: wrap in single quotes, escape any inner single quotes
-      const escaped = val.replace(/'/g, "'\\''");
-      try {
-        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-        });
-      } catch {
-        /* Non-critical — key may not be needed */
-      }
-    }
+export function planCliEnvSetenv(
+  entry: CliEntry,
+  legacyConfig: Record<string, unknown> | undefined,
+  serverEnv: NodeJS.ProcessEnv = process.env
+): Array<{ key: string; value: string }> {
+  const pairs: Array<{ key: string; value: string }> = [];
+  for (const key of entry.env.tmuxSetenvKeys) {
+    const val = serverEnv[key];
+    if (val) pairs.push({ key, value: val });
   }
+  for (const [key, value] of Object.entries(configSetenvValues(entry, legacyConfig))) {
+    pairs.push({ key, value: String(value) });
+  }
+  const contentVar = entry.env.configContentVar;
+  if (contentVar) {
+    const content = resolveConfigContent(legacyConfig);
+    if (content) pairs.push({ key: contentVar, value: content });
+  }
+  return pairs;
 }
 
 /**
- * Set sensitive environment variables for Codex on a tmux session via setenv.
- * Codex (OpenAI CLI) needs OPENAI_API_KEY; we also forward CODEX_* keys.
+ * PURE: opencode's `OPENCODE_CONFIG_CONTENT` blob, or undefined when there is nothing to set.
+ *
+ * `autoAllowTools` layers a blanket allow OVER any caller JSON (the caller's keys merge in
+ * first, then `permission` is forced), and invalid caller JSON is REFUSED rather than passed
+ * through — a malformed blob would otherwise reach the CLI as config.
  */
-async function setCodexEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
-  for (const key of sensitiveVars) {
-    const val = process.env[key];
-    if (val) {
-      const escaped = val.replace(/'/g, "'\\''");
-      try {
-        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-        });
-      } catch {
-        /* Non-critical — key may not be needed */
-      }
-    }
-  }
-}
-
-/**
- * Set sensitive environment variables for Gemini on a tmux session via setenv.
- * Gemini Pro/Ultra users usually authenticate via cached Google login; these
- * variables cover API-key and Vertex AI paths without putting secrets in ps.
- */
-async function setGeminiEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = [
-    'GEMINI_API_KEY',
-    'GEMINI_MODEL',
-    'GOOGLE_API_KEY',
-    'GOOGLE_CLOUD_PROJECT',
-    'GOOGLE_CLOUD_LOCATION',
-    'GOOGLE_APPLICATION_CREDENTIALS',
-    'GOOGLE_GENAI_USE_VERTEXAI',
-  ];
-  for (const key of sensitiveVars) {
-    const val = process.env[key];
-    if (val) {
-      const escaped = val.replace(/'/g, "'\\''");
-      try {
-        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-        });
-      } catch {
-        /* Non-critical — key may not be needed */
-      }
-    }
-  }
-}
-
-/**
- * Set OPENCODE_CONFIG_CONTENT on a tmux session via setenv.
- * Uses tmux setenv to avoid shell metacharacter injection from user-supplied JSON.
- */
-async function setOpenCodeConfigContent(tmuxCmd: string, muxName: string, config?: OpenCodeConfig): Promise<void> {
-  if (!config) return;
-
-  let jsonContent: string | undefined;
-
-  if (config.autoAllowTools) {
+function resolveConfigContent(legacyConfig: Record<string, unknown> | undefined): string | undefined {
+  const autoAllow = legacyConfig?.autoAllowTools === true;
+  const raw = typeof legacyConfig?.configContent === 'string' ? legacyConfig.configContent : undefined;
+  if (autoAllow) {
     const permConfig: Record<string, unknown> = { permission: { '*': 'allow' } };
-    if (config.configContent) {
+    if (raw) {
       try {
-        const existing = JSON.parse(config.configContent) as Record<string, unknown>;
-        Object.assign(permConfig, existing);
+        Object.assign(permConfig, JSON.parse(raw) as Record<string, unknown>);
         permConfig.permission = { '*': 'allow' };
       } catch {
         /* invalid JSON, use default permConfig */
       }
     }
-    jsonContent = JSON.stringify(permConfig);
-  } else if (config.configContent) {
-    // Validate JSON to prevent garbage config
-    try {
-      JSON.parse(config.configContent);
-      jsonContent = config.configContent;
-    } catch {
-      console.error('[TmuxManager] Invalid JSON in openCodeConfig.configContent, skipping');
-      return;
-    }
+    return JSON.stringify(permConfig);
   }
+  if (!raw) return undefined;
+  try {
+    JSON.parse(raw);
+    return raw;
+  } catch {
+    console.error('[TmuxManager] Invalid JSON in openCodeConfig.configContent, skipping');
+    return undefined;
+  }
+}
 
-  if (jsonContent) {
-    const escaped = jsonContent.replace(/'/g, "'\\''");
-    try {
-      await execAsync(`${tmuxCmd} setenv -t '${muxName}' OPENCODE_CONFIG_CONTENT '${escaped}'`, {
-        encoding: 'utf8',
-        timeout: EXEC_TIMEOUT_MS,
-      });
-    } catch {
-      /* Non-critical */
-    }
+/**
+ * Issue one `tmux setenv`. Values stay off the bash command line (invisible in `ps`).
+ *
+ * ⚠️ execAsync, NEVER execSync. COD-212 converted exactly these paths off the sync helper
+ * because a blocking spawn during session create froze `/api/status` for a measured 5.08s
+ * (23.7s event-loop lag in the prod journal). Upstream's generic helper is synchronous;
+ * adopting it as-is silently reverts that fix.
+ */
+async function setTmuxEnvVar(tmuxCmd: string, muxName: string, key: string, value: string): Promise<void> {
+  const escaped = value.replace(/'/g, "'\\''");
+  try {
+    await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
+      encoding: 'utf8',
+      timeout: EXEC_TIMEOUT_MS,
+    });
+  } catch {
+    /* Non-critical — the key may not be needed */
   }
 }
 
@@ -2322,88 +2296,47 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   }
 
   /**
-   * Configure OpenCode-specific environment on a tmux session.
-   * Sets sensitive API keys and config content via tmux setenv
-   * (not visible in ps output or tmux history, inherited by panes).
+   * Configure this CLI's environment on a tmux session, entirely from registry data.
+   *
+   * Replaces `_configureOpenCode` / `_configureCodex` / `_configureGemini` /
+   * `_configureDeepSeek` and the four near-identical key-list loops behind them. Everything
+   * goes via `tmux setenv`, so secrets are inherited by the pane without appearing in `ps`.
+   *
+   * ⚠️ FULLY ASYNC, and that is the point. `_configureDeepSeek` was still `execSync` — up to
+   * six blocking spawns in the session-create path, which is exactly the pattern COD-212
+   * removed from the other three (a measured 5.08s `/api/status` freeze). Generalising the
+   * three async ones without bringing deepseek with them would have left the bug in place;
+   * adopting upstream's synchronous helper would have reintroduced it for all four.
    */
-  private async _configureOpenCode(muxName: string, openCodeConfig?: OpenCodeConfig): Promise<void> {
+  private async _configureCliEnv(
+    muxName: string,
+    sessionId: string,
+    mode: SessionMode,
+    options: Record<string, unknown>
+  ): Promise<void> {
+    const entry = getCli(mode);
+    if (!entry) return;
     const tmuxCmd = this.tmux();
-    await setOpenCodeEnvVars(tmuxCmd, muxName);
-    await setOpenCodeConfigContent(tmuxCmd, muxName, openCodeConfig);
-  }
+    const legacyConfig = legacyConfigForMode(mode, options);
 
-  /**
-   * Configure Codex-specific environment on a tmux session.
-   * Sets OPENAI_API_KEY (and related keys) via tmux setenv so secrets don't
-   * appear in the bash command line.
-   */
-  private async _configureCodex(muxName: string): Promise<void> {
-    await setCodexEnvVars(this.tmux(), muxName);
-  }
-
-  /**
-   * Configure Gemini-specific environment on a tmux session.
-   */
-  private async _configureGemini(muxName: string): Promise<void> {
-    await setGeminiEnvVars(this.tmux(), muxName);
-  }
-
-  /**
-   * Configure DeepSeek Harness environment on a tmux session.
-   *
-   * Two independent things, both via `tmux setenv` so they are inherited by the
-   * pane without appearing in `ps`:
-   *
-   * 1. `DSH_PERMISSION_MODE` — the harness's only permission input. Exported
-   *    ONLY when the caller sent one, so an absent config lands on the harness's
-   *    own `workspace-write` default (which asks) rather than on ours. That
-   *    "only if sent" shape is what the multi-user clamp relies on.
-   * 2. The `HERDR_*` triple — the supervisor contract the terminal front door
-   *    uses to report idle/working/blocked. Pointing `HERDR_BIN_PATH` at our own
-   *    generated shim is what upgrades this mode from output-stabilization
-   *    guessing to definitive hook events (see deepseek-status-shim.ts). The
-   *    pane id IS the Codeman session id, which is how the shim attributes a
-   *    report without trusting anything the agent could influence.
-   *
-   * Also forwards DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL from the server env when
-   * present, matching the codex/gemini precedent for headless auth.
-   */
-  private _configureDeepSeek(muxName: string, sessionId: string, config?: DeepSeekConfig): void {
-    const tmuxCmd = this.tmux();
-    const setenv = (key: string, value: string): void => {
-      const escaped = value.replace(/'/g, "'\\''");
-      try {
-        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-      } catch {
-        /* Non-critical */
-      }
-    };
-
-    for (const key of ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'DSH_HOME']) {
-      const val = process.env[key];
-      if (val) setenv(key, val);
+    for (const { key, value } of planCliEnvSetenv(entry, legacyConfig)) {
+      await setTmuxEnvVar(tmuxCmd, muxName, key, value);
     }
 
-    // Enum-validated at the schema boundary; re-checked here because this value
-    // reaches a shell line, and a builder must never trust its caller.
-    if (
-      config?.permissionMode &&
-      ['read-only', 'workspace-write', 'danger-full-access'].includes(config.permissionMode)
-    ) {
-      setenv('DSH_PERMISSION_MODE', config.permissionMode);
-    }
-
-    if (config?.statusReporting !== false) {
+    // `env.setenvProfile` — genuinely code-shaped work, kept out of the pure planner because
+    // it writes an executable shim to DISK and then exports that shim's path.
+    if (entry.env.setenvProfile === 'deepseek-status-bridge') {
+      // The bridge is what upgrades dsh from output-stabilization guessing to definitive
+      // idle/working/blocked events; a session may disarm it, and then Codeman must not
+      // claim to be its supervisor.
+      if (legacyConfig?.statusReporting === false) return;
       const shim = ensureDeepSeekStatusShim();
-      if (shim) {
-        setenv('HERDR_ENV', '1');
-        setenv('HERDR_BIN_PATH', shim);
-        setenv('HERDR_PANE_ID', sessionId);
-      }
+      if (!shim) return;
+      await setTmuxEnvVar(tmuxCmd, muxName, 'HERDR_ENV', '1');
+      await setTmuxEnvVar(tmuxCmd, muxName, 'HERDR_BIN_PATH', shim);
+      // The pane id IS the Codeman session id, which is how the shim attributes a report
+      // without trusting anything the agent could influence.
+      await setTmuxEnvVar(tmuxCmd, muxName, 'HERDR_PANE_ID', sessionId);
     }
   }
 
@@ -2582,23 +2515,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         /* Non-critical */
       }
 
-      // For OpenCode: set sensitive env vars and config via tmux setenv
-      // (not visible in ps output or tmux history, inherited by panes)
-      if (mode === 'opencode') {
-        await this._configureOpenCode(muxName, openCodeConfig);
-      }
-      // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv
-      if (mode === 'codex') {
-        await this._configureCodex(muxName);
-      }
-      // For Gemini: set Gemini/Google auth env vars via tmux setenv
-      if (mode === 'gemini') {
-        await this._configureGemini(muxName);
-      }
-      // For DeepSeek: permission mode + the Herdr-compatible status bridge.
-      if (mode === 'deepseek') {
-        this._configureDeepSeek(muxName, sessionId, deepSeekConfig);
-      }
+      // Per-CLI env (secrets, config blobs, the dsh status bridge) via tmux setenv, so
+      // nothing lands in the bash command line or `ps`. Which vars, and from where, is
+      // registry DATA — this replaced a four-mode `if` chain over four bespoke helpers.
+      await this._configureCliEnv(muxName, sessionId, mode, {
+        openCodeConfig,
+        codexConfig,
+        geminiConfig,
+        antigravityConfig,
+        piConfig,
+        grokConfig,
+        deepSeekConfig,
+        ompConfig,
+      });
 
       // Apply user-supplied env overrides (e.g., CLAUDE_CODE_EFFORT_LEVEL) via tmux setenv
       // so secret values stay off the bash command line. Must run before respawn-pane.
@@ -2854,22 +2783,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     });
 
     try {
-      // For OpenCode: set sensitive env vars via tmux setenv before respawn
-      if (mode === 'opencode') {
-        await this._configureOpenCode(muxName, openCodeConfig);
-      }
-      // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv before respawn
-      if (mode === 'codex') {
-        await this._configureCodex(muxName);
-      }
-      // For Gemini: set Gemini/Google auth env vars via tmux setenv before respawn
-      if (mode === 'gemini') {
-        await this._configureGemini(muxName);
-      }
-      // For DeepSeek: permission mode + the Herdr-compatible status bridge.
-      if (mode === 'deepseek') {
-        this._configureDeepSeek(muxName, sessionId, deepSeekConfig);
-      }
+      // Per-CLI env (secrets, config blobs, the dsh status bridge) via tmux setenv, so
+      // nothing lands in the bash command line or `ps`. Which vars, and from where, is
+      // registry DATA — this replaced a four-mode `if` chain over four bespoke helpers.
+      await this._configureCliEnv(muxName, sessionId, mode, {
+        openCodeConfig,
+        codexConfig,
+        geminiConfig,
+        antigravityConfig,
+        piConfig,
+        grokConfig,
+        deepSeekConfig,
+        ompConfig,
+      });
 
       // Re-apply user env overrides before respawn so the new shell inherits them.
       await this.applyEnvOverrides(muxName, envOverrides);
