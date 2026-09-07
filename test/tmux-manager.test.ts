@@ -2136,3 +2136,83 @@ describe('COD-416 docker resume flag comes from registry data', () => {
     expect(cmd).toContain(`opencode --session ${RID}`);
   });
 });
+
+/**
+ * COD-416 wave 3c — two more registry conversions in the pane-launch path, neither of which
+ * had direct coverage before. Both were verified against a captured golden of the OLD
+ * implementation across every mode before the swap; these tests are the durable form of that.
+ */
+describe('COD-416 pane env + PATH come from registry data', () => {
+  type Internals = {
+    buildEnvExports(sid: string, mux: string, mode: SessionMode, tc?: boolean, hr?: string): string[];
+    buildPathExport(mode: SessionMode): { pathExport: string; dir: string | null };
+  };
+  const tm = () => new TmuxManager() as unknown as Internals;
+  const envFor = (mode: SessionMode, truecolor?: boolean) => tm().buildEnvExports('SID', 'MUX', mode, truecolor);
+
+  /**
+   * ⚠️ The trap this pins. Upstream's opencode entry UNSETS COLORTERM; this tree has always
+   * EXPORTED truecolor for it, because opencode's Bubble Tea TUI negotiates its palette
+   * against xterm's 24-bit renderer. Adopting upstream's data wholesale would have regressed
+   * opencode's colours — invisible to every test, visible only on screen. The registry entry
+   * was corrected to match the behaviour rather than the behaviour bent to match the data.
+   */
+  it.each(['opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'] as const)(
+    'always exports truecolor for %s, even with the user setting off',
+    (mode) => {
+      expect(envFor(mode as SessionMode, false)).toContain('export COLORTERM=truecolor');
+    }
+  );
+
+  // Claude is the one agent CLI that does NOT get truecolor by default — an empirical
+  // rendering choice — and COD-75's per-user setting is what opts it back in. Both halves of
+  // that union are load-bearing, so both directions are pinned.
+  it('unsets COLORTERM for claude by default and honours the COD-75 opt-in', () => {
+    expect(envFor('claude' as SessionMode, false)).toContain('unset COLORTERM');
+    expect(envFor('claude' as SessionMode, true)).toContain('export COLORTERM=truecolor');
+  });
+
+  // `unset NO_COLOR` covers every external CLI EXCEPT opencode — a real asymmetry in the
+  // original chain, preserved because it is behaviour, not an oversight to tidy up.
+  it('unsets NO_COLOR for the CLIs that declare it, and not for opencode or claude', () => {
+    for (const m of ['codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'] as const) {
+      expect(envFor(m as SessionMode), `${m}`).toContain('unset NO_COLOR');
+    }
+    expect(envFor('opencode' as SessionMode)).not.toContain('unset NO_COLOR');
+    expect(envFor('claude' as SessionMode)).not.toContain('unset NO_COLOR');
+  });
+
+  // Ordering is part of the pane command: `unset CLAUDECODE` sits BEFORE the COLORTERM line.
+  it('places unset CLAUDECODE before the COLORTERM line, for claude only', () => {
+    const claude = envFor('claude' as SessionMode);
+    expect(claude.indexOf('unset CLAUDECODE')).toBe(2);
+    expect(claude.indexOf('unset CLAUDECODE')).toBeLessThan(claude.indexOf('unset COLORTERM'));
+    expect(envFor('codex' as SessionMode)).not.toContain('unset CLAUDECODE');
+  });
+
+  // The codex originator stamp is an `env.exports` entry with an ENGINE value, so the old
+  // `mode === 'codex'` test became "which entry asks for this".
+  it('stamps the codex originator from its declared engine-valued export', () => {
+    expect(envFor('codex' as SessionMode)).toContain('export CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codeman_SID');
+    expect(envFor('gemini' as SessionMode).join('\n')).not.toContain('ORIGINATOR');
+  });
+
+  // `shell` resolves no CLI directory — the old nine-arm fallthrough.
+  it('emits no PATH export for shell', () => {
+    expect(tm().buildPathExport('shell' as SessionMode)).toEqual({ pathExport: '', dir: null });
+  });
+
+  /**
+   * ⚠️ Every arm now SHELL-ESCAPES the directory. Six already did; grok/deepseek/omp
+   * hand-built `export PATH="<dir>:$PATH"` with the path unescaped inside double quotes.
+   * Identical PATH for an ordinary directory, broken and injectable for one containing a
+   * quote or `$` — so this pins the safe form the majority already used.
+   */
+  it('shell-escapes the resolved binary directory when one is found', () => {
+    for (const m of ['claude', 'codex', 'opencode', 'gemini', 'antigravity'] as const) {
+      const { pathExport, dir } = tm().buildPathExport(m as SessionMode);
+      if (dir === null) continue; // not installed on this machine — nothing to assert
+      expect(pathExport, `${m}`).toBe(`export PATH='${dir}':"$PATH" && `);
+    }
+  });
+});

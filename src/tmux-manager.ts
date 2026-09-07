@@ -24,7 +24,7 @@
 import { EventEmitter } from 'node:events';
 import { collectDescendants } from './proc-tree.js';
 import { getCli } from './config/cli-registry/registry.js';
-import { missingCliMessage } from './utils/cli-resolver.js';
+import { missingCliMessage, resolveCliBinDir } from './utils/cli-resolver.js';
 import { buildSpawnCommandFromRegistry } from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -88,21 +88,7 @@ import {
   type DockerMount,
   type DockerSeedCopy,
 } from './docker-hosts.js';
-import {
-  wrapWithNice,
-  SAFE_PATH_PATTERN,
-  findClaudeDir,
-  resolveOpenCodeDir,
-  resolveCodexDir,
-  resolveGeminiDir,
-  resolveAntigravityDir,
-  resolvePiDir,
-  resolveGrokDir,
-  resolveDeepSeekDir,
-  resolveOmpDir,
-  resolveLocalShell,
-  loginShellArgs,
-} from './utils/index.js';
+import { wrapWithNice, SAFE_PATH_PATTERN, resolveLocalShell, loginShellArgs } from './utils/index.js';
 import type {
   TerminalMultiplexer,
   MuxSession,
@@ -2224,47 +2210,39 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     truecolorEnabled?: boolean,
     headroomClaudeUrl?: string
   ): string[] {
+    const entry = getCli(mode);
+    const declaredExports = entry?.env.exports ?? [];
+    const declaredUnset = entry?.env.unset ?? [];
+
     // COLORTERM is unset for Claude sessions by default to avoid tmux→PTY→xterm.js
     // color glitches (an empirical rendering choice). The `truecolorEnabled` app
     // setting (COD-75) lets the user opt Claude back into 24-bit truecolor.
     // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
     // background/color palette negotiation matches xterm's 24-bit renderer.
-    const colorTermExport =
-      mode === 'opencode' ||
-      mode === 'codex' ||
-      mode === 'gemini' ||
-      mode === 'antigravity' ||
-      mode === 'pi' ||
-      mode === 'grok' ||
-      mode === 'deepseek' ||
-      mode === 'omp' ||
-      // Downstream-only (COD-75): the user's truecolor toggle, which is what
-      // opts CLAUDE back into 24-bit. Upstream has only the per-mode list, so
-      // this is a union — dropping either side loses a real behaviour.
-      truecolorEnabled
-        ? 'export COLORTERM=truecolor'
-        : 'unset COLORTERM';
+    //
+    // COD-416: the eight-mode `||` chain became "does this entry DECLARE the export".
+    // ⚠️ Still a UNION with `truecolorEnabled`, and both halves are load-bearing — the
+    // registry answers "does this CLI always want truecolor", the setting answers "has the
+    // user opted THIS session in". Dropping either loses a real behaviour (the chain's own
+    // comment said so, and it was right).
+    const declaresTruecolor = declaredExports.some((e) => e.name === 'COLORTERM' && e.value === 'truecolor');
+    const colorTermExport = declaresTruecolor || truecolorEnabled ? 'export COLORTERM=truecolor' : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
-      // Settings-driven (see colorTermExport above); upstream hardcodes this
-      // per-mode, we honor the user's truecolor toggle instead.
+      // Settings-driven (see colorTermExport above); the registry declares the per-CLI
+      // half, we honor the user's truecolor toggle on top of it.
       colorTermExport,
-      ...(mode === 'codex' ||
-      mode === 'gemini' ||
-      mode === 'antigravity' ||
-      mode === 'pi' ||
-      mode === 'grok' ||
-      mode === 'deepseek' ||
-      mode === 'omp'
-        ? ['unset NO_COLOR']
-        : []),
+      ...(declaredUnset.includes('NO_COLOR') ? ['unset NO_COLOR'] : []),
       // Stamp each Codex pane with a unique originator so the response-viewer
       // can locate THIS pane's rollout exactly — codex writes the value into
       // session_meta.originator of every rollout it creates. Without it,
       // rollouts are matched by cwd+mtime and two panes in the same directory
-      // bleed into each other.
-      ...(mode === 'codex' ? [`export CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codeman_${sessionId}`] : []),
+      // bleed into each other. Declared as `env.exports` with an ENGINE value, so the
+      // `mode === 'codex'` test became "which entry asks for this".
+      ...declaredExports
+        .filter((e) => typeof e.value === 'object' && e.value.engine === 'codemanPrefixedSessionId')
+        .map((e) => `export ${e.name}=codeman_${sessionId}`),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,
@@ -2277,8 +2255,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // execution time, so the COD-54 hook secret stays off the command line.
       `export CODEMAN_HOOK_SECRET_FILE="${dataPath('hook-secret')}"`,
     ];
-    // Only unset CLAUDECODE for Claude sessions
-    if (mode === 'claude') exports.splice(2, 0, 'unset CLAUDECODE');
+    // Claude is the only entry declaring CLAUDECODE in `env.unset`, and it goes BEFORE the
+    // COLORTERM line — the splice index is preserved exactly, since the ordering of these
+    // lines is part of the pane command this builds.
+    if (declaredUnset.includes('CLAUDECODE')) exports.splice(2, 0, 'unset CLAUDECODE');
     exports.push(...buildHeadroomExports(mode, headroomClaudeUrl));
     return exports;
   }
@@ -2328,43 +2308,17 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * In createSession(), a missing binary dir throws — the caller handles that separately.
    */
   private buildPathExport(mode: SessionMode): { pathExport: string; dir: string | null } {
-    if (mode === 'claude') {
-      const dir = findClaudeDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'opencode') {
-      const dir = resolveOpenCodeDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'codex') {
-      const dir = resolveCodexDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'gemini') {
-      const dir = resolveGeminiDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'antigravity') {
-      const dir = resolveAntigravityDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'pi') {
-      const dir = resolvePiDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'grok') {
-      const dir = resolveGrokDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
-    }
-    if (mode === 'deepseek') {
-      const dir = resolveDeepSeekDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
-    }
-    if (mode === 'omp') {
-      const dir = resolveOmpDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
-    }
-    return { pathExport: '', dir: null };
+    // COD-416: a nine-arm dispatch to nine per-CLI `resolveXDir()` helpers became one call to
+    // the registry's generic resolver. `shell` (and any unregistered mode) resolves to null,
+    // which is the old `return { pathExport: '', dir: null }` fallthrough.
+    //
+    // ⚠️ All nine now emit `buildCliPathExport`, which SHELL-ESCAPES the directory. Six arms
+    // already did; grok/deepseek/omp hand-built `export PATH="<dir>:$PATH"` with the path
+    // unescaped inside double quotes. For an ordinary directory the resulting PATH is
+    // identical — for one containing a quote or `$` the old form was broken and injectable,
+    // so this normalises three outliers onto the safe form the majority already used.
+    const dir = resolveCliBinDir(mode);
+    return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
   }
 
   /**

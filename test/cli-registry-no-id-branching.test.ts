@@ -114,10 +114,7 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   "tmux-manager.ts::mode === 'codex'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'deepseek'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'gemini'": PRE_REGISTRY,
-  "tmux-manager.ts::mode === 'grok'": PRE_REGISTRY,
-  "tmux-manager.ts::mode === 'omp'": PRE_REGISTRY,
   "tmux-manager.ts::mode === 'opencode'": PRE_REGISTRY,
-  "tmux-manager.ts::mode === 'pi'": PRE_REGISTRY,
 
   // ── COD-416 wave 1: triaged out of the baseline above ───────────────────────────────
   //

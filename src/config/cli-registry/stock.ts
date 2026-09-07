@@ -341,8 +341,13 @@ const OPENCODE: CliEntry = {
     legacyConfigField: 'openCodeConfig',
   },
   env: {
-    exports: [],
-    unset: ['COLORTERM'],
+    // ⚠️ DOWNSTREAM DIVERGENCE, measured not assumed (COD-416). Upstream's entry unsets
+    // COLORTERM for opencode; this tree has always EXPORTED truecolor for it, because its
+    // Bubble Tea TUI negotiates its background/colour palette against xterm's 24-bit
+    // renderer. Adopting upstream's data wholesale would have silently regressed opencode's
+    // colours — invisible to every test, visible only on screen.
+    exports: [{ name: 'COLORTERM', value: 'truecolor' }],
+    unset: [],
     tmuxSetenvKeys: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY'],
     dockerExecEnvNames: [],
     allowedPrefixes: ['OPENCODE_'],
