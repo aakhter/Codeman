@@ -27,7 +27,17 @@
  *    session's permission mode and its docker form is `--session-id … || resume`, semantics
  *    no other CLI has and a static `overlays.command` string cannot express.
  *  - **Genuinely per-CLI prose.** One error message that explains why a deepseek session in
- *    particular will never deliver a `stop` signal.
+ *    particular will never deliver a `stop` signal, and the literal strings a CLI's own TUI
+ *    paints (codex's `Working (2s • esc to interrupt)`, opencode's Bubble Tea spinner) — there
+ *    is no boolean a capability could carry, and the frames of a CLI nobody has watched cannot
+ *    be invented.
+ *  - **Two conversation-identity MECHANISMS.** Claude's identity arrives over its own
+ *    SessionStart hook and is adopted into session state; codex's is recovered by scanning
+ *    rollout files on disk and disambiguated against sibling panes' submit times. A field whose
+ *    value was "hook" for one and "scan \$CODEX_HOME" for the other would just be naming the two
+ *    code paths, which is a branch with extra steps. (COD-416 wave 4 DID convert the part of
+ *    this area that was genuinely data: the checkpoint terminal grammar — which glyph means
+ *    ready, which frame means working — is now `capabilities.checkpoint`.)
  *
  * ⚠️ Adding an entry here is a decision, not a formality. If the branch is about what a CLI
  * CAN DO, it belongs in `CliCapabilities` instead — and if it needs to run code, in
@@ -71,54 +81,55 @@ const EXEMPT_FILES = new Set(
  * Specific surviving branches, each with the reason it is not a capability.
  * Keyed `<relative path>::<the matched expression>`.
  */
-const PRE_REGISTRY = 'downstream pre-registry code; conversion tracked in COD-416';
-
 const ALLOWED_BRANCHES: Record<string, string> = {
-  // ── DOWNSTREAM PRE-REGISTRY BASELINE ────────────────────────────────────────────────
-  // These branches predate the CLI registry arriving downstream (upstream v1.24.7 merge).
-  // They are NOT approved designs — they are a snapshot of the conversion still owed, kept
-  // here rather than skipping the whole guard so that it stays LIVE: a branch added from
-  // now on is not in this list and still fails the build. Delete entries as they convert;
-  // the stale-entry test below makes that mandatory rather than optional.
+  // ── COD-416 wave 4: the last two, triaged rather than baselined ─────────────────────
   //
-  // Tracked in COD-416, which also records the triage rule: each key becomes either registry
-  // DATA (a capability / named profile) or an ALLOWED_BRANCHES entry with its own reason —
-  // never a silent deletion. ⚠️ COD-212 must survive the tmux-manager conversion: upstream's
-  // generic env helpers are sync, and adopting them as-is reverts a measured 5.08s
-  // /api/status freeze during session create.
+  // The DOWNSTREAM PRE-REGISTRY BASELINE block that stood here is GONE, and with it the
+  // `PRE_REGISTRY` placeholder: all 53 keys are now either registry data or an entry with its
+  // own stated reason. Wave 4 converted the checkpoint TERMINAL GRAMMAR — which glyph means
+  // "ready" and which frame means "working" — into `capabilities.checkpoint` plus a named
+  // CHECKPOINT_FRAME_PROFILES classifier, and triaged what remained.
   //
-  // COD-416 wave 1 removed 17 of the original 53 (36 left): 3 converted to
-  // `capabilities.approvals`, 14 triaged into ALLOWED_BRANCHES with individual reasons.
-  // Wave 2 removed 6 more from session.ts (30 left): the native-resume chain became
-  // `legacyResumeSlot()` (deleting the gemini and antigravity keys outright), and 4 were
-  // triaged into ALLOWED_BRANCHES. See the "COD-416 wave 1"/"wave 2" blocks below.
-  //
-  // ⚠️ session.ts's two SURVIVING keys are multi-site by nature — `mode === 'codex'` covers 10
-  // sites and `mode === 'claude'` 8, spread across checkpoint readiness, conversation identity
-  // and fresh-thread detection. Because a key is `file::expression`, neither clears until
-  // EVERY one of its sites does, so they are a single unit of work rather than a leftover.
-  //
-  // Wave 3a resolved the stale external-CLI mode lists (Q23, approved as a deliberate
-  // behaviour change): 10 more keys, leaving 20 — see the "wave 3a" block below.
-  //
-  // Wave 3e removed 3 more (3 left): the remote per-session command chain became
-  // `overlays.remote.fromLaunchSpec` + the shared launch renderer, the docker resume chain
-  // became `overlays.docker.resume`, and the docker exec env list became the already-declared
-  // `env.dockerExecEnvNames` — clearing opencode, gemini and antigravity from tmux-manager.ts.
-  //
-  // ⚠️ ALL 20 SURVIVORS ARE NOW MULTI-SITE BY NATURE, which is why the count stops falling in
-  // large steps: tmux-manager.ts's 18 are the spawn core (a `switch (mode)` plus per-CLI env
-  // configuration), and session.ts's 2 cover 18 checkpoint/identity sites between them. A key
-  // is `file::expression`, so none of them clears until EVERY one of its sites does — each is
-  // a single unit of work rather than a leftover to pick off.
-  // session.ts — down to the two multi-site checkpoint/identity keys (wave 2 cleared 6).
-  "session.ts::mode === 'claude'": PRE_REGISTRY,
-  "session.ts::mode === 'codex'": PRE_REGISTRY,
-  // tmux-manager.ts — wave 3e cleared opencode, gemini and antigravity outright by moving the
-  // remote and docker command-construction chains onto registry data. Codex survives on the
-  // LOCAL-only sites wave 3e deliberately left alone: the COD-392 grant re-check, the Headroom
-  // config.toml reconcile, its remote resume-template recovery, and the skill-invocation pattern.
-  "tmux-manager.ts::mode === 'codex'": PRE_REGISTRY,
+  // ⚠️ What remains under these two keys is NOT leftover branching: it is the two CONVERSATION
+  // IDENTITY integrations, which are different mechanisms rather than different values of one
+  // mechanism. Claude's identity arrives over its own SessionStart HOOK and is adopted into
+  // session state; codex's is recovered by scanning ROLLOUT FILES on disk and disambiguated
+  // against sibling panes' submit times. There is no field whose value could be "hook" for one
+  // and "scan ~/.codex" for the other without that field simply naming the two code paths —
+  // which is a branch with extra steps. Their negated twins are already allowlisted directly
+  // below for exactly this reason, and this is the same family.
+
+  // Claude session identity + the direct-PTY path. Every site asks "is this Claude": whether
+  // its SessionStart hook has reported in, whether its authoritative conversation id has been
+  // adopted, and the terminal write + resume-id preservation for the direct-PTY fallback —
+  // which exists only for claude, the one CLI Codeman ever runs without tmux. The `❯` glyph
+  // and working-frame that USED to be in this list are now data (`capabilities.checkpoint`).
+  "session.ts::mode === 'claude'":
+    "claude's SessionStart-hook readiness, adopted conversation identity, and the direct-PTY " +
+    "fallback — identity mechanics, not a capability (twin of the `mode !== 'claude'` entry below)",
+
+  // Codex conversation identity + its own TUI prose. The identity sites recover a conversation
+  // by scanning $CODEX_HOME rollout files, arm a fresh-thread baseline around `/new`, and
+  // publish submit times to a cross-session map so a sibling codex pane's turn is not mistaken
+  // for this one's. The two frame sites are per-CLI PROSE, the same category as the
+  // `session.ts::mode === 'opencode'` entry below and in one case the same function. The
+  // remaining site is a `CODEMAN_CODEX_RAW_LOG=1` debugging hook for codex's stacked status bar.
+  "session.ts::mode === 'codex'":
+    'codex rollout-file conversation identity, cross-session submit disambiguation, and its own ' +
+    "TUI frame prose + raw-log debug hook (twin of the `mode !== 'codex'` entry below)",
+
+  // tmux-manager.ts's last key, after wave 3e moved the remote and docker command chains onto
+  // registry data. Everything left is LOCAL-only and none of it is a "how does this CLI launch"
+  // question: two sites re-check the COD-392 grant before honouring an owner-authored command
+  // line (the value itself is `launch.rawCommandField` data now; the GRANT check is a
+  // multi-user authorization question about shell text, not about codex), four are COD-98 /
+  // COD-254 Headroom routing — the same lane split already allowlisted for
+  // `config/headroom-routing.ts`, where claude routes by env var and codex by a config.toml
+  // patch — one is codex's remote resume-TEMPLATE recovery, and one matches the literal text
+  // codex prints when a skill is invoked.
+  "tmux-manager.ts::mode === 'codex'":
+    'COD-392 owner-command grant re-check, COD-98 Headroom config.toml routing, remote ' +
+    "resume-template recovery, and codex's own skill-invocation prose — all local-only",
 
   // ── COD-416 wave 1: triaged out of the baseline above ───────────────────────────────
   //

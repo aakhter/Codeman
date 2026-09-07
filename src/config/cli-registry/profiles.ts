@@ -73,6 +73,26 @@ export const SETENV_PROFILE_NAMES = [
   'deepseek-status-bridge',
 ] as const;
 
+/**
+ * Checkpoint working-frame classifiers, selected via `capabilities.checkpoint
+ * .workingFrameProfile`.
+ *
+ * Implementation: `src/session.ts` (`detectCodexCheckpointWorkingFrame` /
+ * `detectClaudeCheckpointWorkingFrame`), which owns the frame corpus these were tuned against.
+ *
+ * ⚠️ These are NOT "a regex per CLI" — each is several patterns whose ORDER and interaction
+ * matter, tuned against real prod frames (COD-175's unit-less `Working (31 • …)`, the stacked
+ * status bar's `· Working ·`, Claude's animated `✻ Actualizing…` glyph set). That is code, so
+ * it gets a named profile rather than a pattern in data, exactly like the predictive-echo case.
+ */
+export const CHECKPOINT_FRAME_PROFILES = ['codex-checkpoint', 'claude-checkpoint'] as const;
+
+export type CheckpointFrameProfileName = (typeof CHECKPOINT_FRAME_PROFILES)[number];
+
+export function isKnownCheckpointFrameProfile(name: string): name is CheckpointFrameProfileName {
+  return (CHECKPOINT_FRAME_PROFILES as readonly string[]).includes(name);
+}
+
 export type LauncherProfileName = (typeof LAUNCHER_PROFILE_NAMES)[number];
 export type SetenvProfileName = (typeof SETENV_PROFILE_NAMES)[number];
 

@@ -14,7 +14,7 @@
 
 import { z } from 'zod';
 import { TOKEN_PATTERNS } from './patterns.js';
-import { isKnownLauncherProfile, isKnownSetenvProfile } from './profiles.js';
+import { isKnownCheckpointFrameProfile, isKnownLauncherProfile, isKnownSetenvProfile } from './profiles.js';
 
 /** A bare CLI id: lowercase, starts with a letter, at most 24 chars. Also used as a CSS/URL token. */
 const cliId = z
@@ -262,6 +262,14 @@ const echoSchema = z
   })
   .strict();
 
+const checkpointSchema = z
+  .object({
+    promptGlyph: z.string().min(1).max(4),
+    workingFrameProfile: z.string().max(40),
+    directPtyPromptTransition: z.literal(true).optional(),
+  })
+  .strict();
+
 const capabilitiesSchema = z
   .object({
     external: z.boolean(),
@@ -270,6 +278,7 @@ const capabilitiesSchema = z
     transcript: z.enum(['claude-jsonl', 'codex-rollout', 'deepseek-zstd', 'omp-jsonl', 'none']),
     altScreen: z.enum(['strip-full', 'strip-mux-only', 'preserve']),
     echo: echoSchema,
+    checkpoint: checkpointSchema.optional(),
     wheelForward: z
       .object({ mode: z.enum(['never', 'version-gated']), minVersion: z.string().max(20).optional() })
       .strict(),
@@ -410,6 +419,17 @@ export const CliEntrySchema = z
         code: 'custom',
         message: `discovery.launcherProfile "${launcherProfile}" is not a profile this build implements`,
         path: ['discovery', 'launcherProfile'],
+      });
+    }
+    // Same reasoning as launcherProfile: an unimplemented checkpoint frame profile would make
+    // every checkpoint on that CLI sit in `waiting-ready` until it timed out, with nothing
+    // naming the cause.
+    const checkpoint = entry.capabilities.checkpoint;
+    if (checkpoint !== undefined && !isKnownCheckpointFrameProfile(checkpoint.workingFrameProfile)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `capabilities.checkpoint.workingFrameProfile "${checkpoint.workingFrameProfile}" is not a profile this build implements`,
+        path: ['capabilities', 'checkpoint', 'workingFrameProfile'],
       });
     }
     // An env var exported from a param that does not exist would silently export nothing,

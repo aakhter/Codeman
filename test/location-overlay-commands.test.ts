@@ -26,6 +26,7 @@ import {
 import { defaultDockerCommandForMode } from '../src/docker-hosts.js';
 import { renderRemoteCliCommand } from '../src/tmux-manager.js';
 import { STOCK_CLIS } from '../src/config/cli-registry/stock.js';
+import { CHECKPOINT_FRAME_PROFILES, isKnownCheckpointFrameProfile } from '../src/config/cli-registry/profiles.js';
 import type { SessionMode } from '../src/types/session.js';
 
 // COD-277 — deliberately NOT upstream's `"${SHELL:-/bin/sh}"`. In a tmux pane `$SHELL` is
@@ -159,4 +160,38 @@ it('forwards exactly the declared docker exec env names', () => {
     codex: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
     gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
   });
+});
+
+// ---------------------------------------------------------------------------
+// COD-416 wave 4 — checkpoint terminal grammar
+// ---------------------------------------------------------------------------
+
+it('declares checkpoint grammar for exactly the CLIs whose prompt syntax is verified', () => {
+  // ⚠️ ABSENT is meaningful: a CLI with no verified prompt syntax falls back to "ready unless
+  // working". Declaring a GUESSED glyph would be worse than declaring none — a wrong glyph
+  // never matches, so `ready` would latch false and every checkpoint would sit in waiting-ready
+  // until it timed out. Widening this set requires watching that CLI's real frames first.
+  const declared = Object.fromEntries(
+    STOCK_CLIS.filter((e) => e.capabilities.checkpoint).map((e) => [
+      e.id,
+      [e.capabilities.checkpoint!.promptGlyph, e.capabilities.checkpoint!.workingFrameProfile],
+    ])
+  );
+  expect(declared).toEqual({
+    claude: ['❯', 'claude-checkpoint'],
+    codex: ['›', 'codex-checkpoint'],
+  });
+  // Only claude runs without tmux, so only claude has a frameless readiness path.
+  const directPty = STOCK_CLIS.filter((e) => e.capabilities.checkpoint?.directPtyPromptTransition).map((e) => e.id);
+  expect(directPty).toEqual(['claude']);
+});
+
+it('names only checkpoint frame profiles this build implements', () => {
+  // schema.ts rejects an unknown name at LOAD time; this pins the two lists together so
+  // renaming a profile without updating the entry fails here rather than at a checkpoint.
+  for (const entry of STOCK_CLIS) {
+    const profile = entry.capabilities.checkpoint?.workingFrameProfile;
+    if (profile) expect(isKnownCheckpointFrameProfile(profile), `${entry.id}: ${profile}`).toBe(true);
+  }
+  expect([...CHECKPOINT_FRAME_PROFILES]).toEqual(['codex-checkpoint', 'claude-checkpoint']);
 });

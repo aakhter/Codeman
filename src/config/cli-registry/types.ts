@@ -361,6 +361,32 @@ export interface CliCapabilities {
     /** Names a PREDICT_PROFILES key. Unknown or absent degrades to 'buffer', never to broken. */
     predictProfile?: string;
   };
+  /**
+   * The terminal grammar checkpoint automation (COD-101 `/clear` · `/compact` · `/new`) reads
+   * off this CLI's pane: how a pane SHOWS "ready for input" and how it shows "still working".
+   *
+   * ⚠️ ABSENT is a meaningful third state, not a gap — it means this CLI has no VERIFIED prompt
+   * syntax, and the automation falls back to "ready unless independently known to be working".
+   * Declaring a guessed glyph for a CLI nobody has watched would be worse than declaring none:
+   * a wrong glyph never matches, so `ready` would latch false and every checkpoint would sit in
+   * `waiting-ready` until it timed out.
+   *
+   * `workingFrameProfile` names a CHECKPOINT_FRAME_PROFILES entry rather than carrying a
+   * pattern, because these classifiers are several regexes plus ordering that has been tuned
+   * against real prod frames (COD-175) — genuinely code, which is what a named profile is for.
+   */
+  checkpoint?: {
+    /** Composer prompt glyph, matched `^`-anchored per row on a row-restored frame. */
+    promptGlyph: string;
+    /** Names a CHECKPOINT_FRAME_PROFILES key. */
+    workingFrameProfile: string;
+    /**
+     * This CLI has a direct-PTY (no mux) fallback whose readiness comes from a positively
+     * recorded prompt transition instead of a captured frame. Only claude has one: it is the
+     * only CLI Codeman ever runs without tmux.
+     */
+    directPtyPromptTransition?: true;
+  };
   /** Forwarding the wheel to the CLI's own transcript. 'never' keeps local scrollback. */
   wheelForward: { mode: 'never' | 'version-gated'; minVersion?: string };
   keyboardAccessory: 'agent' | 'shell';

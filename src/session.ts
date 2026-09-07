@@ -427,6 +427,39 @@ export function detectClaudeCheckpointWorkingFrame(data: string): boolean {
   return SPINNER_PATTERN.test(data) || /\besc to interrupt\b/.test(data) || /^\s*[·✢✳∗✻✽]\s+\S[^\n]*…/m.test(data);
 }
 
+/**
+ * The `^`-anchored composer-prompt matcher for a declared glyph.
+ *
+ * ⚠️ Built per call rather than shared: a `/g`-less regex has no `lastIndex` to reset, but these
+ * are cheap and the alternative — a module-level cache keyed by glyph — buys nothing measurable
+ * on a path that already just captured and ANSI-stripped a pane frame.
+ *
+ * The glyph is registry data, so it is escaped rather than interpolated raw: a custom entry
+ * declaring `.` must match a literal dot, not any character.
+ */
+function checkpointPromptPattern(glyph: string): RegExp {
+  return new RegExp(`^\\s*${glyph.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'm');
+}
+
+/**
+ * Dispatch to the frame classifier a CLI's `capabilities.checkpoint.workingFrameProfile` names.
+ *
+ * ⚠️ An UNKNOWN profile returns false — "no working evidence" — which is the same answer a CLI
+ * with no classifier at all gets, and it is the safe direction here: a false positive would
+ * make a checkpoint wait forever for a pane that is already idle. `schema.ts` rejects an
+ * unknown name at LOAD time, so reaching this arm means a build/registry mismatch, not a typo.
+ */
+function detectCheckpointWorkingFrame(grammar: { workingFrameProfile: string }, plain: string): boolean {
+  switch (grammar.workingFrameProfile) {
+    case 'codex-checkpoint':
+      return detectCodexCheckpointWorkingFrame(plain);
+    case 'claude-checkpoint':
+      return detectClaudeCheckpointWorkingFrame(plain);
+    default:
+      return false;
+  }
+}
+
 /** Display name for a run mode. Falls back to the raw id for an unregistered one. */
 function getModeLabel(mode: SessionMode): string {
   return getCli(mode)?.label ?? mode;
@@ -1885,6 +1918,9 @@ export class Session extends EventEmitter {
    * and a ready prompt later returns; repainting the same prompt is stable.
    */
   getCheckpointObservation(): CheckpointObservation {
+    // COD-416: which glyph means "ready" and which frame means "working" is registry DATA
+    // (`capabilities.checkpoint`), read once here. ABSENT is meaningful — see the type.
+    const checkpointGrammar = getCli(this.mode)?.capabilities.checkpoint;
     const muxName = this._muxSession?.muxName;
     const rendered = muxName ? this._mux?.captureActivePaneBuffer?.(muxName) : null;
     if (muxName && !rendered) {
@@ -1912,19 +1948,11 @@ export class Session extends EventEmitter {
       // checkpoint mode in `waiting-ready` until `readiness-timeout`.
       const checkpointFrame = rendered.replace(TMUX_ABSOLUTE_ROW_START_PATTERN, '\n');
       const plain = checkpointFrame.replace(ANSI_ESCAPE_PATTERN_FULL, '');
-      const renderedWorking =
-        this.mode === 'codex'
-          ? detectCodexCheckpointWorkingFrame(plain)
-          : this.mode === 'claude'
-            ? detectClaudeCheckpointWorkingFrame(plain)
-            : false;
+      const renderedWorking = checkpointGrammar ? detectCheckpointWorkingFrame(checkpointGrammar, plain) : false;
       working = working || renderedWorking;
-      const promptVisible =
-        this.mode === 'codex'
-          ? /^\s*›(?:\s|$)/m.test(plain)
-          : this.mode === 'claude'
-            ? /^\s*❯(?:\s|$)/m.test(plain)
-            : false;
+      const promptVisible = checkpointGrammar
+        ? checkpointPromptPattern(checkpointGrammar.promptGlyph).test(plain)
+        : false;
       ready = promptVisible && !working;
       if (ready) {
         const fingerprint = this._checkpointSemanticFrameFingerprint(plain);
@@ -1940,12 +1968,14 @@ export class Session extends EventEmitter {
         }
         this._checkpointReadyFingerprint = fingerprint;
       }
-    } else if (this.mode === 'claude') {
-      // Direct-PTY Claude fallback uses the existing positively recorded prompt
+    } else if (checkpointGrammar?.directPtyPromptTransition) {
+      // Direct-PTY fallback uses the existing positively recorded prompt
       // transition; initial `idle` alone is not sufficient evidence.
       ready = this._lastPromptTime > 0 && this._status === 'idle' && !working;
-    } else if (this.mode !== 'codex') {
-      // Preserve legacy behavior for modes without verified prompt syntax.
+    } else if (!checkpointGrammar) {
+      // Preserve legacy behavior for modes without verified prompt syntax. ⚠️ A CLI that
+      // DECLARES a grammar but has no frame lands in neither arm and stays not-ready, which
+      // is the point: it has a prompt we know how to see, and we did not see it.
       ready = !working;
     }
 
