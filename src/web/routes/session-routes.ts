@@ -29,8 +29,9 @@ import {
   type DeepSeekConfig,
   type OmpConfig,
 } from '../../types.js';
-import { Session, isAltScreenStripMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
+import { Session, isAltScreenStripMode, isExternalCliMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
+import { webviewCapabilities } from '../../webview-capabilities.js';
 import {
   CreateSessionSchema,
   SessionNameSchema,
@@ -86,6 +87,9 @@ import {
   validatePathWithinBase,
 } from '../route-helpers.js';
 import { canUsernameRunPrivilegedCommands, resolveClaudeModeForUsername } from '../../user-store.js';
+import { enabledClis, getCli } from '../../config/cli-registry/registry.js';
+import { resolveCliLaunchError } from '../../utils/cli-launcher.js';
+import { legacyConfigForMode } from '../../session-cli-registry-bridge.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import {
@@ -156,6 +160,7 @@ import { LRUMap } from '../../utils/lru-map.js';
 import {
   checkDockerAvailable,
   checkDockerConfigDrift,
+  probeAdoptableContainer,
   checkDockerTmuxAvailable,
   ensureAgentBaseImage,
   DEFAULT_AGENT_IMAGE,
@@ -555,12 +560,54 @@ function disarmRespawnForPark(ctx: RespawnPort & InfraPort, id: string): void {
 
 async function clampExternalCliBypassForOwner(
   owner: string | undefined,
-  codexConfig: CodexConfig | undefined,
-  geminiConfig: GeminiConfig | undefined,
-  antigravityConfig: AntigravityConfig | undefined,
-  piConfig: PiConfig | undefined,
-  grokConfig: GrokConfig | undefined,
-  deepSeekConfig: DeepSeekConfig | undefined
+  configs: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (await canUsernameRunPrivilegedCommands(owner)) return configs;
+
+  const out = { ...configs };
+  for (const entry of enabledClis()) {
+    const field = entry.launch.legacyConfigField;
+    if (!field) continue;
+    // `privilegedParams[].param` names the REGISTRY param, so it has to be translated to the
+    // legacy wire field on the way out — the same `legacyConfigAliases` hop `configSetenvValues`
+    // already makes. Writing `param` straight through would put it in a DIFFERENT namespace
+    // from every other `param` in the schema, and a name that is right in one and wrong in the
+    // other is a SILENT no-op: no load error, no failing test, the clamp simply stops clamping.
+    // Codex is where the two names differ (`bypassApprovals` vs `dangerouslyBypassApprovals`),
+    // and `schema.ts` refuses an entry naming a param it never declared.
+    const aliases = entry.launch.legacyConfigAliases ?? {};
+    const existing = out[field] as Record<string, unknown> | undefined;
+    let next = existing;
+    for (const { param, clampTo, materializeWhenAbsent } of entry.capabilities.privilegedParams) {
+      // MATERIALIZE vs ONLY-IF-SENT is the whole design of this clamp, and the two are not
+      // interchangeable — see CliCapabilities.privilegedParams. Materialize where the CLI's
+      // own absent-config default is ITSELF unsafe (gemini defaults to yolo; pi's default is
+      // an interactive trust prompt the session user could just answer "yes" to), so a
+      // caller who sends no config at all still gets clamped.
+      if (next === undefined && !materializeWhenAbsent) continue;
+      next = { ...(next ?? {}), [aliases[param] ?? param]: clampTo };
+    }
+    if (next !== existing) out[field] = next;
+  }
+  return out;
+}
+
+/**
+ * Test hook, and the positional shape the clamp has always been called with in tests.
+ *
+ * The clamp itself is now generic over the registry, which is what makes a CUSTOM CLI's
+ * privileged flag clampable with no code here — previously the five config objects were
+ * named individually, so `privilegedParams` on anything outside that list was declared but
+ * unreachable.
+ */
+export async function _clampExternalCliBypassForOwner(
+  owner: string | undefined,
+  codexConfig?: CodexConfig,
+  geminiConfig?: GeminiConfig,
+  antigravityConfig?: AntigravityConfig,
+  piConfig?: PiConfig,
+  grokConfig?: GrokConfig,
+  deepSeekConfig?: DeepSeekConfig
 ): Promise<{
   codexConfig: CodexConfig | undefined;
   geminiConfig: GeminiConfig | undefined;
@@ -569,33 +616,23 @@ async function clampExternalCliBypassForOwner(
   grokConfig: GrokConfig | undefined;
   deepSeekConfig: DeepSeekConfig | undefined;
 }> {
-  const granted = await canUsernameRunPrivilegedCommands(owner);
-  if (granted) return { codexConfig, geminiConfig, antigravityConfig, piConfig, grokConfig, deepSeekConfig };
-  // Non-granted: force codex/antigravity bypass off (only meaningful when a config was
-  // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default)
-  // and pi to --no-approve (clamps an explicit true AND pi's own "ask" default).
-  const clampedCodex = codexConfig ? { ...codexConfig, dangerouslyBypassApprovals: false } : codexConfig;
-  const clampedGemini: GeminiConfig = { ...(geminiConfig ?? {}), approvalMode: 'auto_edit' };
-  const clampedAntigravity = antigravityConfig
-    ? { ...antigravityConfig, dangerouslySkipPermissions: false }
-    : antigravityConfig;
-  const clampedPi: PiConfig = { ...(piConfig ?? {}), approveProjectTrust: false };
-  const clampedGrok = grokConfig ? { ...grokConfig, alwaysApprove: false } : grokConfig;
-  const clampedDeepSeek = deepSeekConfig
-    ? { ...deepSeekConfig, permissionMode: 'workspace-write' as const }
-    : deepSeekConfig;
-  return {
-    codexConfig: clampedCodex,
-    geminiConfig: clampedGemini,
-    antigravityConfig: clampedAntigravity,
-    piConfig: clampedPi,
-    grokConfig: clampedGrok,
-    deepSeekConfig: clampedDeepSeek,
+  const out = await clampExternalCliBypassForOwner(owner, {
+    codexConfig,
+    geminiConfig,
+    antigravityConfig,
+    piConfig,
+    grokConfig,
+    deepSeekConfig,
+  });
+  return out as {
+    codexConfig: CodexConfig | undefined;
+    geminiConfig: GeminiConfig | undefined;
+    antigravityConfig: AntigravityConfig | undefined;
+    piConfig: PiConfig | undefined;
+    grokConfig: GrokConfig | undefined;
+    deepSeekConfig: DeepSeekConfig | undefined;
   };
 }
-
-/** Test hook: the clamp is the multi-user safety gate for the external CLIs' privileged flags. */
-export const _clampExternalCliBypassForOwner = clampExternalCliBypassForOwner;
 
 /**
  * Env-var keys a non-granted owner must not be able to set, because each one
@@ -613,7 +650,7 @@ export const _clampExternalCliBypassForOwner = clampExternalCliBypassForOwner;
  * - `DSH_HOME` points the launcher at a profile tree, and a profile's plugin code
  *   executes at BOOT, before any approval row can apply. A user who can write a
  *   workspace can put a profile in it, so this is the wider of the two.
- * - `DEEPSEEK_BASE_URL` aims the provider endpoint, and `_configureDeepSeek()`
+ * - `DEEPSEEK_BASE_URL` aims the provider endpoint, and `_configureCliEnv()`
  *   forwards the SERVER's own `DEEPSEEK_API_KEY` into every dsh pane before
  *   `applyEnvOverrides()` runs — so a non-granted owner who could set the base
  *   URL would have the operator's API key sent as a bearer credential to a host
@@ -630,25 +667,21 @@ export const _clampExternalCliBypassForOwner = clampExternalCliBypassForOwner;
  *   Ark0N/Codeman#353 review; omp's own knobs are otherwise mostly `PI_*`,
  *   already allowlisted for pi and not addressed here — see resolveOmpHome()).
  */
-const OWNER_CLAMPED_ENV_KEYS = [
-  'DSH_PERMISSION_MODE',
-  'DSH_HOME',
-  'DEEPSEEK_BASE_URL',
-  'OMP_AUTH_BROKER_URL',
-  'OMP_AUTH_BROKER_TOKEN',
-] as const;
+function ownerClampedEnvKeys(): string[] {
+  return enabledClis().flatMap((entry) => entry.capabilities.privilegedEnvKeys);
+}
 
 /**
  * Env-var half of the multi-user bypass clamp.
  *
  * `clampExternalCliBypassForOwner()` clamps the per-CLI CONFIG, and for every CLI
  * but DeepSeek that is the whole story. Here it is not: `applyEnvOverrides()` runs
- * AFTER `_configureDeepSeek()` in tmux-manager, so an override sent on the SAME
+ * AFTER `_configureCliEnv()` in tmux-manager, so an override sent on the SAME
  * request lands last and wins, and a non-granted owner could restore
  * `danger-full-access` on the very request the config clamp downgraded.
  *
  * Keys are DROPPED rather than rewritten: dropping falls through to what
- * `_configureDeepSeek()` exports, which is the clamped config and the server's own
+ * `_configureCliEnv()` exports, which is the clamped config and the server's own
  * `DSH_HOME`, i.e. exactly the intended state. No-op in single-user mode and for a
  * granted owner, like every other clamp here
  * (`canUsernameRunPrivilegedCommands()` returns true when `!isMultiUserMode()`),
@@ -659,37 +692,16 @@ async function clampEnvOverridesForOwner(
   envOverrides: Record<string, string> | undefined
 ): Promise<Record<string, string> | undefined> {
   if (!envOverrides) return envOverrides;
-  if (!OWNER_CLAMPED_ENV_KEYS.some((key) => key in envOverrides)) return envOverrides;
+  const keys = ownerClampedEnvKeys();
+  if (!keys.some((key) => key in envOverrides)) return envOverrides;
   if (await canUsernameRunPrivilegedCommands(owner)) return envOverrides;
   const clamped = { ...envOverrides };
-  for (const key of OWNER_CLAMPED_ENV_KEYS) delete clamped[key];
+  for (const key of keys) delete clamped[key];
   return clamped;
 }
 
 /** Test hook: the env-var half of the same multi-user safety gate. */
 export const _clampEnvOverridesForOwner = clampEnvOverridesForOwner;
-
-/**
- * Why a DeepSeek session cannot start, or null when it can.
- *
- * Availability for this mode is TWO questions, not one, because `dsh` is a
- * profile launcher rather than an agent: the binary must resolve (and prove it
- * is the harness and not Debian's dancer's shell), AND a profile that can occupy
- * a pane must exist. Reporting only the first would let the Run button spawn a
- * pane that dies instantly, which is the single most confusing failure this mode
- * can produce, so each half gets its own actionable message.
- *
- * A profile named EXPLICITLY is checked on both counts: existence, and whether
- * it is pane-capable — `web` serves a browser UI and `headless` answers one task
- * and exits, so both would present as "the tab immediately died".
- */
-async function resolveDeepSeekLaunchError(requestedProfile?: string): Promise<string | null> {
-  // Thin async wrapper: the implementation moved into the resolver module so
-  // CRON fires can ask the same question before constructing a Session; the
-  // dynamic import keeps this file's startup free of the probe machinery.
-  const { resolveDeepSeekLaunchError: impl } = await import('../../utils/deepseek-cli-resolver.js');
-  return impl(requestedProfile);
-}
 
 // ═══════════════════════════════════════════════════════════════
 // Agent wait helpers (shared by GET /wait, GET /wait-output, POST /input)
@@ -1023,6 +1035,10 @@ export function registerSessionRoutes(
     if (sessionToken) {
       ctx.authSessions?.delete(sessionToken);
     }
+    // The web-tab proxy authenticates on capabilities, not on this cookie, so a
+    // logout has to retire them too or every dashboard URL opened during this
+    // login keeps relaying without one (WebviewCapabilityStore.revokeOwner).
+    webviewCapabilities.revokeOwner(ownerFor(req));
     reply.clearCookie(AUTH_COOKIE_NAME, { path: '/' });
     return {};
   });
@@ -1116,7 +1132,10 @@ export function registerSessionRoutes(
     // Multi-user: shell mode is arbitrary command execution as the host account,
     // gated behind the same grant as bypass (section 6.3). Resolve the owner's grant
     // from the store so a GRANTED regular user is not wrongly denied (AuthUser role alone can't tell).
-    if (body.mode === 'shell' && !(await canUsernameRunPrivilegedCommands(owner))) {
+    if (
+      getCli(body.mode ?? 'claude')?.capabilities.privilegedCommandGate &&
+      !(await canUsernameRunPrivilegedCommands(owner))
+    ) {
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Shell sessions require the can-bypass-permissions grant');
     }
 
@@ -1169,15 +1188,11 @@ export function registerSessionRoutes(
     //     repos that POST /api/sessions can target, as those may have hand-authored
     //     values).
     const managedCasesBase = resolveCasesDir(getAuthUser(req));
+    // `!isExternalCliMode()` is byte-identical to the eight-mode `!==` chain it replaces
+    // (claude and shell are the two non-external modes) and, unlike the chain, cannot fall
+    // behind the next CLI added.
     const canStripDisk =
-      body.mode !== 'opencode' &&
-      body.mode !== 'codex' &&
-      body.mode !== 'gemini' &&
-      body.mode !== 'antigravity' &&
-      body.mode !== 'pi' &&
-      body.mode !== 'grok' &&
-      body.mode !== 'deepseek' &&
-      body.mode !== 'omp' &&
+      !isExternalCliMode(body.mode ?? 'claude') &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       (workingDir.startsWith(CASES_DIR + '/') || workingDir.startsWith(managedCasesBase + '/'));
@@ -1238,59 +1253,30 @@ export function registerSessionRoutes(
       }
     }
 
-    // The remote host runs its own CLI; only local creates probe this server.
-    if (!remote) {
-      if (body.mode === 'opencode') {
-        const { isOpenCodeAvailable, getOpenCodeNotFoundMessage } =
-          await import('../../utils/opencode-cli-resolver.js');
-        if (!isOpenCodeAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getOpenCodeNotFoundMessage());
-        }
-      }
-
-      if (body.mode === 'codex') {
-        const { isCodexAvailable, getCodexNotFoundMessage } = await import('../../utils/codex-cli-resolver.js');
-        if (localCodexCommand === undefined && !isCodexAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getCodexNotFoundMessage());
-        }
-      }
-
-      if (body.mode === 'gemini') {
-        const { isGeminiAvailable, getGeminiNotFoundMessage } = await import('../../utils/gemini-cli-resolver.js');
-        if (!isGeminiAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getGeminiNotFoundMessage());
-        }
-      }
-
-      if (body.mode === 'antigravity') {
-        const { isAntigravityAvailable, getAntigravityNotFoundMessage } =
-          await import('../../utils/antigravity-cli-resolver.js');
-        if (!isAntigravityAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getAntigravityNotFoundMessage());
-        }
-      }
-
-      if (body.mode === 'pi') {
-        const { isPiAvailable, getPiNotFoundMessage } = await import('../../utils/pi-cli-resolver.js');
-        if (!isPiAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getPiNotFoundMessage());
-        }
-      }
-    }
-    if (body.mode === 'deepseek') {
-      const err = await resolveDeepSeekLaunchError(body.deepSeekConfig?.profile);
-      if (err) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, err);
-    }
-    if (body.mode === 'grok') {
-      const { isGrokAvailable, getGrokNotFoundMessage } = await import('../../utils/grok-cli-resolver.js');
-      if (!isGrokAvailable()) {
-        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getGrokNotFoundMessage());
-      }
-    }
-    if (body.mode === 'omp') {
-      const { isOmpAvailable, getOmpNotFoundMessage } = await import('../../utils/omp-cli-resolver.js');
-      if (!isOmpAvailable()) {
-        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getOmpNotFoundMessage());
+    // Refuse up front if the requested CLI cannot start, rather than spawning a pane that
+    // dies on `command not found`. The message comes from the resolver, so it names where
+    // resolution actually looked (server PATH, login shell, the entry's search dirs); a
+    // LAUNCHER CLI answers with its own more specific reason instead — for dsh, whether the
+    // binary is missing, no pane-capable profile exists, or the profile the caller NAMED
+    // cannot drive a pane, which are three different things to go and fix.
+    //
+    // Scoped to EXTERNAL CLIs, matching what this route has always pre-flighted: claude and
+    // shell deliberately fall through to tmux-manager's own not-found throw instead, and
+    // pulling them forward here would change which error a missing claude produces.
+    const requestedMode = body.mode ?? 'claude';
+    // COD-392: a server-resolved local Codex command supplies its own binary, so the
+    // PATH pre-flight must not refuse it. Gated on the resolved command alone (never a
+    // mode id), which is both sufficient — it is only ever set for codex — and keeps
+    // this branch out of the no-id-branching guard.
+    // `!remote`: the remote host runs its own CLI, so probing THIS server's PATH would
+    // refuse a perfectly good remote session. Upstream's version is not remote-gated.
+    if (!remote && getCli(requestedMode)?.capabilities.external && localCodexCommand === undefined) {
+      const cliLaunchError = await resolveCliLaunchError(
+        requestedMode,
+        legacyConfigForMode(requestedMode, body as unknown as Record<string, unknown>)
+      );
+      if (cliLaunchError) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, cliLaunchError);
       }
     }
 
@@ -1326,27 +1312,25 @@ export function registerSessionRoutes(
 
     const globalNice = await ctx.getGlobalNiceConfig();
     const modelConfig = await ctx.getModelConfig();
+    // Where a model override comes from is a capability, and the three answers are
+    // genuinely different mechanisms:
+    //   'flag'                 — the CLI takes --model, so read the value the caller sent
+    //                            in that CLI's own config object.
+    //   'claude-settings-file' — claude alone, whose model is written to
+    //                            <case>/.claude/settings.local.json rather than passed as
+    //                            a flag, so the app-wide default applies here.
+    //   'none'                 — shell has no model; deepseek's is a composition entry in
+    //                            the profile's config tree, not a session field
+    //                            (docs/deepseek-integration.md). Both get nothing.
+    const modelSource = getCli(mode)?.capabilities.model;
     const model =
-      mode === 'opencode'
-        ? body.openCodeConfig?.model
-        : mode === 'codex'
-          ? body.codexConfig?.model
-          : mode === 'gemini'
-            ? body.geminiConfig?.model
-            : mode === 'antigravity'
-              ? body.antigravityConfig?.model
-              : mode === 'pi'
-                ? body.piConfig?.model
-                : mode === 'grok'
-                  ? body.grokConfig?.model
-                  : mode === 'omp'
-                    ? body.ompConfig?.model
-                    : // DeepSeek's model is a composition entry in the profile's config
-                      // tree, not a session flag, so there is deliberately nothing to
-                      // read here (see docs/deepseek-integration.md).
-                      mode !== 'shell' && mode !== 'deepseek'
-                      ? modelConfig?.defaultModel || undefined
-                      : undefined;
+      modelSource?.source === 'flag'
+        ? (legacyConfigForMode(mode, body as unknown as Record<string, unknown>)?.[modelSource.param ?? 'model'] as
+            | string
+            | undefined)
+        : modelSource?.source === 'claude-settings-file'
+          ? modelConfig?.defaultModel || undefined
+          : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     // Section 6.3: force non-granted users to a classifier-guarded mode.
     const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, owner);
@@ -1358,7 +1342,7 @@ export function registerSessionRoutes(
       piConfig: gatedPiConfig,
       grokConfig: gatedGrokConfig,
       deepSeekConfig: gatedDeepSeekConfig,
-    } = await clampExternalCliBypassForOwner(
+    } = await _clampExternalCliBypassForOwner(
       owner,
       body.codexConfig,
       body.geminiConfig,
@@ -1423,7 +1407,7 @@ export function registerSessionRoutes(
     await ctx.setupSessionListeners(session);
     // Pre-seed the agent skill's preamble cache so its §0 bootstrap is a two-line
     // loader (see seedAgentSessionPreamble). Local claude sessions only; best-effort.
-    if (mode === 'claude' && !remote && (await ctx.getAgentSkillEnabled())) {
+    if (getCli(mode)?.capabilities.agentSkillInjection && !remote && (await ctx.getAgentSkillEnabled())) {
       await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
         console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
       );
@@ -1653,20 +1637,21 @@ export function registerSessionRoutes(
     }
 
     try {
-      // Auto-detect completion phrase from CLAUDE.md BEFORE starting (only if globally enabled and not explicitly disabled by user)
-      // Ralph tracker is not supported for opencode / codex / gemini / antigravity / pi sessions.
-      // Keep this list in step with isExternalCliMode(): _processExpensiveParsers() returns early
-      // for those modes, so a tracker enabled here would never be fed, and the session would
-      // still report ralphEnabled + Ralph UI state that no other external CLI shows.
+      // Auto-detect completion phrase from CLAUDE.md BEFORE starting (only if globally
+      // enabled and not explicitly disabled by user).
+      //
+      // `isExternalCliMode()` is what the eight-mode `!==` chain this replaces was FOR: its
+      // own comment asked the next person to keep the list in step with that predicate by
+      // hand. Calling it instead is byte-identical today (claude and shell are the two
+      // non-external modes, exactly what the chain admitted) and cannot drift.
+      //
+      // ⚠️ Deliberately NOT `capabilities.ralph`, which the quick-start path below reads:
+      // that capability is claude-only, so using it here would stop auto-enabling Ralph for
+      // SHELL sessions, which this path has always done. The two paths genuinely disagree
+      // about shell, and they disagree upstream too — reconciling them is a behaviour change
+      // and belongs in its own PR, not in a refactor that is meant to change nothing.
       if (
-        session.mode !== 'opencode' &&
-        session.mode !== 'codex' &&
-        session.mode !== 'gemini' &&
-        session.mode !== 'antigravity' &&
-        session.mode !== 'pi' &&
-        session.mode !== 'grok' &&
-        session.mode !== 'deepseek' &&
-        session.mode !== 'omp' &&
+        !isExternalCliMode(session.mode) &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -2537,7 +2522,7 @@ export function registerSessionRoutes(
     // Codex has a structured rollout source. Prefer it when a rollout can be
     // attributed to this pane; fall back to the rendered terminal transcript
     // for live/legacy panes that do not yet have a matching rollout.
-    if (session.mode === 'codex') {
+    if (getCli(session.mode)?.capabilities.transcript === 'codex-rollout') {
       const full = query.context === 'full';
       const codexResponse = await readCodexLastResponse(session, full);
       if (codexResponse.text || (full && codexResponse.messages && codexResponse.messages.length > 0)) {
@@ -2585,7 +2570,7 @@ export function registerSessionRoutes(
     // and return "nothing said yet" forever — an agent polling that worker
     // would starve on an answer that exists. Those configurations keep the
     // pane segmenter below: coarse, but the real conversation.
-    if (session.mode === 'deepseek' && !session.docker && !session.remote) {
+    if (getCli(session.mode)?.capabilities.transcript === 'deepseek-zstd' && !session.docker && !session.remote) {
       const deepSeekQuery = req.query as { context?: string };
       const full = deepSeekQuery.context === 'full';
       const transcript = await readDeepSeekLastResponse(session, { blocks: full });
@@ -3040,7 +3025,8 @@ export function registerSessionRoutes(
     // During long thinking phases, Ink rewrites the same rows thousands of times
     // (500KB+). Without stripping, tail mode returns only spinner frames and
     // the terminal appears empty when switching tabs.
-    let strippedBuffer = session.mode === 'shell' ? rawBuffer : stripInkRedrawBloat(rawBuffer);
+    let strippedBuffer =
+      getCli(session.mode)?.capabilities.stripInkBloat === false ? rawBuffer : stripInkRedrawBloat(rawBuffer);
 
     // Strip alt-screen toggles and scrollback-erase from Codex/Claude byte
     // streams. xterm.js obeys them by switching to its scrollback-less alt
@@ -3409,7 +3395,7 @@ export function registerSessionRoutes(
 
     // Multi-user: shell mode is arbitrary host-account execution, gated by the grant.
     // Resolve the owner's grant from the store so a GRANTED regular user is not wrongly denied.
-    if (mode === 'shell' && !(await canUsernameRunPrivilegedCommands(owner))) {
+    if (getCli(mode)?.capabilities.privilegedCommandGate && !(await canUsernameRunPrivilegedCommands(owner))) {
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Shell sessions require the can-bypass-permissions grant');
     }
 
@@ -3512,25 +3498,48 @@ export function registerSessionRoutes(
         );
       }
       const sessionDocker = toSessionDocker(host, dockerCase);
-      // Ensure the base image exists, auto-building the default image on first use so
-      // it is never a blocker. Dedup'd with any build kicked off at case-create, so
-      // this awaits the SAME in-flight build rather than starting a second one.
-      const ensured = await ensureAgentBaseImage(sessionDocker, sessionDocker.image, {
-        onProgress: (line) => ctx.broadcast(SseEvent.DockerImageBuildProgress, { name: dockerCase.name, line }),
-      });
-      if (!ensured.ok) {
-        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, ensured.error || 'base image not available');
-      }
-      if (ensured.built) {
-        ctx.broadcast(SseEvent.DockerImageBuildComplete, { name: dockerCase.name, image: sessionDocker.image });
-      }
-      // tmux is a hard prerequisite (the in-container tmux makes reconnect durable).
-      // Skip the extra container-run probe for our OWN default image (the baked
-      // Dockerfile always contains tmux); still verify a custom image.
-      if (sessionDocker.image !== DEFAULT_AGENT_IMAGE) {
-        const tmuxCheck = await checkDockerTmuxAvailable(sessionDocker);
-        if (!tmuxCheck.ok) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error || 'base image is missing tmux');
+      // An ADOPTED container skips every image-side gate: we never run `docker
+      // create`, so the image is the user's business, and `ensureAgentBaseImage`
+      // would build/require an image that has nothing to do with their container.
+      // The prerequisite that DOES still hold is tmux inside it, so probe the live
+      // container (not the image) and refuse before launch rather than dead-paning.
+      if (sessionDocker.owned === false) {
+        const probe = await probeAdoptableContainer(sessionDocker, [mode]);
+        if (!probe.ok) {
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, probe.error || 'container is not usable');
+        }
+        // The probe already exec'd into the container; carry its facts onto the
+        // live session so the launch chain does not have to re-ask.
+        sessionDocker.runsAsRoot = probe.runsAsRoot;
+        // No `mode !== 'shell'` arm: a mode with no binary of its own is reported
+        // available by the probe unconditionally, so this reads the same answer for it.
+        if (!probe.availableModes?.includes(mode)) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            `"${mode}" is not installed in container "${sessionDocker.containerName}". Adoption never modifies the container — install it inside, or pick another mode.`
+          );
+        }
+      } else {
+        // Ensure the base image exists, auto-building the default image on first use so
+        // it is never a blocker. Dedup'd with any build kicked off at case-create, so
+        // this awaits the SAME in-flight build rather than starting a second one.
+        const ensured = await ensureAgentBaseImage(sessionDocker, sessionDocker.image, {
+          onProgress: (line) => ctx.broadcast(SseEvent.DockerImageBuildProgress, { name: dockerCase.name, line }),
+        });
+        if (!ensured.ok) {
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, ensured.error || 'base image not available');
+        }
+        if (ensured.built) {
+          ctx.broadcast(SseEvent.DockerImageBuildComplete, { name: dockerCase.name, image: sessionDocker.image });
+        }
+        // tmux is a hard prerequisite (the in-container tmux makes reconnect durable).
+        // Skip the extra container-run probe for our OWN default image (the baked
+        // Dockerfile always contains tmux); still verify a custom image.
+        if (sessionDocker.image !== DEFAULT_AGENT_IMAGE) {
+          const tmuxCheck = await checkDockerTmuxAvailable(sessionDocker);
+          if (!tmuxCheck.ok) {
+            return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error || 'base image is missing tmux');
+          }
         }
       }
 
@@ -3549,71 +3558,32 @@ export function registerSessionRoutes(
 
       casePath = dockerCase.hostWorkspacePath; // a REAL host dir (bind-mounted into the container)
       docker = sessionDocker;
-      // Seed resume so a relaunch resumes the case's last conversation from the
-      // bind-mounted transcript (decision: resume-on-start default ON).
-      if (sessionDocker.resumeOnStart && dockerCase.lastClaudeSessionId) {
+      // Seed only Claude's resume id. Codex, Gemini, and the other CLIs have
+      // separate conversation stores and must never receive a Claude UUID.
+      if (mode === 'claude' && sessionDocker.resumeOnStart && dockerCase.lastClaudeSessionId) {
         dockerResumeId = dockerCase.lastClaudeSessionId;
       }
     } else {
-      // Check OpenCode availability if requested. Error text comes from the
-      // resolver so it carries the resolution diagnostics; same for the modes below.
-      if (mode === 'opencode') {
-        const { isOpenCodeAvailable, getOpenCodeNotFoundMessage } =
-          await import('../../utils/opencode-cli-resolver.js');
-        if (!isOpenCodeAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getOpenCodeNotFoundMessage());
-        }
-      }
-      if (mode === 'codex') {
-        const { isCodexAvailable, getCodexNotFoundMessage } = await import('../../utils/codex-cli-resolver.js');
-        if (qsLocalCodexCommand === undefined && !isCodexAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getCodexNotFoundMessage());
-        }
-      }
-      if (mode === 'gemini') {
-        const { isGeminiAvailable, getGeminiNotFoundMessage } = await import('../../utils/gemini-cli-resolver.js');
-        if (!isGeminiAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getGeminiNotFoundMessage());
-        }
-      }
-      if (mode === 'antigravity') {
-        const { isAntigravityAvailable, getAntigravityNotFoundMessage } =
-          await import('../../utils/antigravity-cli-resolver.js');
-        if (!isAntigravityAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getAntigravityNotFoundMessage());
-        }
-      }
-
-      // Check Pi availability if requested
-      if (mode === 'pi') {
-        const { isPiAvailable, getPiNotFoundMessage } = await import('../../utils/pi-cli-resolver.js');
-        if (!isPiAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getPiNotFoundMessage());
-        }
-      }
-      // Check OMP availability if requested
-      if (mode === 'omp') {
-        const { isOmpAvailable } = await import('../../utils/omp-cli-resolver.js');
-        if (!isOmpAvailable()) {
-          return createErrorResponse(
-            ApiErrorCode.OPERATION_FAILED,
-            'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh'
-          );
-        }
-      }
-
-      // Check Grok availability if requested
-      if (mode === 'grok') {
-        const { isGrokAvailable, getGrokNotFoundMessage } = await import('../../utils/grok-cli-resolver.js');
-        if (!isGrokAvailable()) {
-          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getGrokNotFoundMessage());
-        }
-      }
-
-      // Check DeepSeek Harness availability if requested (binary AND a pane-capable profile).
-      if (mode === 'deepseek') {
-        const err = await resolveDeepSeekLaunchError(deepSeekConfig?.profile);
-        if (err) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, err);
+      // Same pre-flight as POST /api/sessions: refuse before spawning a pane that would die
+      // on `command not found`, with the resolver's own diagnostics, and a launcher CLI's
+      // more specific reason (dsh: binary vs no pane-capable profile vs the profile the
+      // caller named). External CLIs only — claude and shell fall through to tmux-manager's
+      // own not-found throw, exactly as before. COD-392: a resolved local Codex command
+      // supplies its own binary, so it skips the PATH check.
+      if (getCli(mode)?.capabilities.external && qsLocalCodexCommand === undefined) {
+        const qsLaunchError = await resolveCliLaunchError(
+          mode,
+          legacyConfigForMode(mode, {
+            openCodeConfig,
+            codexConfig,
+            geminiConfig,
+            antigravityConfig,
+            piConfig,
+            grokConfig,
+            deepSeekConfig,
+          } as unknown as Record<string, unknown>)
+        );
+        if (qsLaunchError) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, qsLaunchError);
       }
 
       // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
@@ -3684,7 +3654,7 @@ export function registerSessionRoutes(
       // reads `.claude` hooks, so a shell/codex quick-start should not author a block
       // of its own. Skipped for remote cases — resolvedCasePath is a REMOTE path that
       // doesn't exist on the local filesystem.
-      if (mode === 'claude') {
+      if (getCli(mode)?.capabilities.hooks === 'always') {
         await applyWorkspaceHooks(resolvedCasePath, await ctx.getWorkspaceHooksEnabled());
       } else {
         await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
@@ -3696,7 +3666,7 @@ export function registerSessionRoutes(
     // (`.claude/skills/` is a Claude Code surface); skipped for remote cases, whose
     // casePath lives on another host. Docker cases qualify: hostWorkspacePath is a
     // real host dir and the skill crosses the bind mount like the rest of `.claude/`.
-    if (!remote && mode === 'claude' && (await ctx.getAgentSkillEnabled())) {
+    if (!remote && getCli(mode)?.capabilities.agentSkillInjection && (await ctx.getAgentSkillEnabled())) {
       await injectAgentSkill(resolvedCasePath);
     }
 
@@ -3707,7 +3677,7 @@ export function registerSessionRoutes(
     // shell or external-CLI quick-start must not author a block of its own (the same
     // rule the existing-case branch above states; this branch used to exclude just
     // the five external CLIs and let `shell` through).
-    if (docker && docker.hooksEnabled && mode === 'claude') {
+    if (docker && docker.hooksEnabled && getCli(mode)?.capabilities.hooks === 'always') {
       try {
         if (!existsSync(join(resolvedCasePath, 'CLAUDE.md'))) {
           const templatePath = await ctx.getDefaultClaudeMdPath();
@@ -3729,25 +3699,14 @@ export function registerSessionRoutes(
     // Model override → <case>/.claude/settings.local.json (claude-mode; local AND
     // docker — the docker workspace is a real host dir, so the settings file crosses
     // the bind mount and the in-container claude reads it). Remote was rejected above.
-    if (mode === 'claude' && modelOverride !== undefined) {
+    if (getCli(mode)?.capabilities.model.source === 'claude-settings-file' && modelOverride !== undefined) {
       await updateCaseModel(resolvedCasePath, modelOverride || null);
     }
 
     // Strip stale disk entries for keys this request is actively setting (Claude only —
     // see POST /api/sessions for full rationale).
-    if (
-      mode !== 'opencode' &&
-      mode !== 'codex' &&
-      mode !== 'gemini' &&
-      mode !== 'antigravity' &&
-      mode !== 'pi' &&
-      mode !== 'grok' &&
-      mode !== 'deepseek' &&
-      mode !== 'omp' &&
-      !remote &&
-      envOverrides &&
-      Object.keys(envOverrides).length > 0
-    ) {
+    // Same chain, same replacement as the create path above: byte-identical, drift-proof.
+    if (!isExternalCliMode(mode) && !remote && envOverrides && Object.keys(envOverrides).length > 0) {
       await stripCaseEnvKeys(resolvedCasePath, Object.keys(envOverrides));
     }
 
@@ -3755,25 +3714,22 @@ export function registerSessionRoutes(
     // Apply global Nice priority config and model config from settings
     const niceConfig = await ctx.getGlobalNiceConfig();
     const qsModelConfig = await ctx.getModelConfig();
+    // See the create path for why this is a capability rather than a mode ladder.
+    const qsModelSource = getCli(mode)?.capabilities.model;
     const qsModel =
-      mode === 'opencode'
-        ? openCodeConfig?.model
-        : mode === 'codex'
-          ? codexConfig?.model
-          : mode === 'gemini'
-            ? geminiConfig?.model
-            : mode === 'antigravity'
-              ? antigravityConfig?.model
-              : mode === 'pi'
-                ? piConfig?.model
-                : mode === 'grok'
-                  ? grokConfig?.model
-                  : mode === 'omp'
-                    ? ompConfig?.model
-                    : // DeepSeek's model lives in the profile's config tree, not here.
-                      mode !== 'shell' && mode !== 'deepseek'
-                      ? qsModelConfig?.defaultModel || undefined
-                      : undefined;
+      qsModelSource?.source === 'flag'
+        ? (legacyConfigForMode(mode, {
+            openCodeConfig,
+            codexConfig,
+            geminiConfig,
+            antigravityConfig,
+            piConfig,
+            grokConfig,
+            deepSeekConfig,
+          } as unknown as Record<string, unknown>)?.[qsModelSource.param ?? 'model'] as string | undefined)
+        : qsModelSource?.source === 'claude-settings-file'
+          ? qsModelConfig?.defaultModel || undefined
+          : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const qsEffectiveClaudeMode = await resolveClaudeModeForUsername(qsClaudeModeConfig.claudeMode, owner);
     // Section 6.3: clamp Codex/Gemini/Antigravity bypass switches for a non-granted owner (no-op single-user/granted).
@@ -3784,7 +3740,7 @@ export function registerSessionRoutes(
       piConfig: qsGatedPiConfig,
       grokConfig: qsGatedGrokConfig,
       deepSeekConfig: qsGatedDeepSeekConfig,
-    } = await clampExternalCliBypassForOwner(
+    } = await _clampExternalCliBypassForOwner(
       owner,
       codexConfig,
       geminiConfig,
@@ -3867,7 +3823,7 @@ export function registerSessionRoutes(
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
-    if (mode === 'claude' && !remote && !docker && ctx.store.getConfig().ralphEnabled) {
+    if (getCli(mode)?.capabilities.ralph && !remote && !docker && ctx.store.getConfig().ralphEnabled) {
       autoConfigureRalph(session, resolvedCasePath, ctx);
       if (!session.ralphTracker.enabled) {
         session.ralphTracker.enable();
@@ -3884,7 +3840,7 @@ export function registerSessionRoutes(
     await ctx.setupSessionListeners(session);
     // Pre-seed the agent skill's preamble cache so its §0 bootstrap is a two-line
     // loader (see seedAgentSessionPreamble). Local claude sessions only; best-effort.
-    if (mode === 'claude' && !remote && !docker && (await ctx.getAgentSkillEnabled())) {
+    if (getCli(mode)?.capabilities.agentSkillInjection && !remote && !docker && (await ctx.getAgentSkillEnabled())) {
       await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
         console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
       );
@@ -3899,7 +3855,7 @@ export function registerSessionRoutes(
 
     // Start in the appropriate mode
     try {
-      if (mode === 'shell') {
+      if (getCli(mode)?.capabilities.startMode === 'shell') {
         await session.startShell();
         getLifecycleLog().log({
           event: 'started',

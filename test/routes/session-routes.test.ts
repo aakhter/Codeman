@@ -71,6 +71,13 @@ const cliAvailability = vi.hoisted(() => ({
   antigravity: true,
   pi: true,
 }));
+const cliDiagnostics = vi.hoisted(() => ({
+  opencode: 'OpenCode resolver diagnostic',
+  codex: 'Codex resolver diagnostic',
+  gemini: 'Gemini resolver diagnostic',
+  antigravity: 'Antigravity resolver diagnostic',
+  pi: 'Pi resolver diagnostic',
+}));
 vi.mock('node:child_process', async (orig) => {
   const actual = await orig<typeof import('node:child_process')>();
   return { ...actual, execFile, spawn };
@@ -119,6 +126,26 @@ vi.mock('../../src/utils/pi-cli-resolver.js', async (orig) => ({
   isPiAvailable: vi.fn(() => cliAvailability.pi),
   getPiNotFoundMessage: vi.fn(() => 'Pi resolver diagnostic'),
 }));
+
+// The CLI registry moved the not-found seam: the create/quick-start pre-flights now go
+// through resolveCliLaunchError -> resolveCliBinDir / missingCliMessage instead of each
+// CLI's own isXAvailable/getXNotFoundMessage. Mocking HERE is what keeps the pre-flight
+// tests meaningful and, importantly, environment-independent — reading the real resolver
+// would make them pass or fail depending on which CLIs happen to be installed on the box.
+vi.mock('../../src/utils/cli-resolver.js', async (orig) => {
+  const actual = await orig<typeof import('../../src/utils/cli-resolver.js')>();
+  return {
+    ...actual,
+    resolveCliBinDir: vi.fn((id: string) =>
+      id in cliAvailability && !cliAvailability[id as keyof typeof cliAvailability]
+        ? null
+        : actual.resolveCliBinDir(id)
+    ),
+    missingCliMessage: vi.fn((id: string) =>
+      id in cliDiagnostics ? cliDiagnostics[id as keyof typeof cliDiagnostics] : actual.missingCliMessage(id)
+    ),
+  };
+});
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 import { checkRemoteTmuxAvailable as checkRemoteTmuxProbe } from '../../src/remote-hosts.js';

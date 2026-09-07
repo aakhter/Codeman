@@ -29,6 +29,12 @@ export interface TabLayout {
   groups: TabGroup[];
   ungrouped: TabRef[];
   updatedAt: string;
+  /**
+   * Explicit order for the Focus section, independent of group order. Absent
+   * until a move materializes one; focused refs it omits sort after it in
+   * stored order, so an untouched layout keeps its historical projection.
+   */
+  focusOrder?: TabRef[];
 }
 
 /** Owner and lineage facts supplied by the server or browser integration. */
@@ -124,6 +130,24 @@ function parseRef(value: unknown, label: string): TabRef {
   };
 }
 
+function parseFocusOrder(input: unknown, repairDuplicates: boolean): TabRef[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) throw new TabLayoutValidationError('layout.focusOrder must be an array');
+  const seen = new Set<string>();
+  const result: TabRef[] = [];
+  for (const [index, entry] of input.entries()) {
+    const ref = parseRef(entry, `layout.focusOrder[${index}]`);
+    const key = keyOf(ref);
+    if (seen.has(key)) {
+      if (repairDuplicates) continue;
+      throw new TabLayoutValidationError(`duplicate focusOrder ref: ${ref.kind}:${ref.id}`);
+    }
+    seen.add(key);
+    result.push({ kind: ref.kind, id: ref.id });
+  }
+  return result;
+}
+
 function parseTabLayout(input: unknown, repairDuplicates: boolean): TabLayout {
   assertRecord(input, 'layout');
   if (!Number.isSafeInteger(input.version) || (input.version as number) < 0) {
@@ -164,11 +188,13 @@ function parseTabLayout(input: unknown, repairDuplicates: boolean): TabLayout {
   if (refCount > MAX_TAB_REFS) {
     throw new TabLayoutValidationError(`layout cannot contain more than ${MAX_TAB_REFS} refs`);
   }
+  const focusOrder = parseFocusOrder(input.focusOrder, repairDuplicates);
   return {
     version: input.version as number,
     groups,
     ungrouped: input.ungrouped.map((entry, index) => parseStoredRef(entry, `layout.ungrouped[${index}]`)),
     updatedAt,
+    ...(focusOrder === undefined ? {} : { focusOrder }),
   };
 }
 
@@ -329,7 +355,52 @@ export function normalizeTabLayout(input: TabLayout, metadata: readonly TabRefMe
     if (item.ref.kind === 'session' && parentOf.has(item.ref.id)) continue;
     emitSubtree(item.ref, item.container);
   }
-  return withContainers(working, output);
+  return withPrunedFocusOrder(withContainers(working, output));
+}
+
+/** Drop Focus order entries that are no longer stored or no longer focused. */
+function withPrunedFocusOrder(layout: TabLayout): TabLayout {
+  if (layout.focusOrder === undefined) return layout;
+  const focusedKeys = new Set(
+    locations(layout)
+      .filter((item) => item.ref.focus === true)
+      .map((item) => keyOf(item.ref))
+  );
+  const kept = layout.focusOrder.filter((ref) => focusedKeys.has(keyOf(ref)));
+  if (kept.length === layout.focusOrder.length) return layout;
+  if (kept.length === 0) {
+    const { focusOrder: _dropped, ...rest } = layout;
+    return rest;
+  }
+  return { ...layout, focusOrder: kept };
+}
+
+/**
+ * Focus section order: explicitly ordered refs first, then any focused ref the
+ * stored order has not been asked about, in stored order.
+ */
+export function orderedFocusRefs(input: TabLayout): TabRef[] {
+  const layout = validateTabLayout(input);
+  const focused = locations(layout)
+    .filter((item) => item.ref.focus === true)
+    .map((item) => ({ kind: item.ref.kind, id: item.ref.id }) as TabRef);
+  const byKey = new Map(focused.map((ref) => [keyOf(ref), ref]));
+  const result: TabRef[] = [];
+  const emitted = new Set<string>();
+  for (const ref of layout.focusOrder ?? []) {
+    const key = keyOf(ref);
+    const match = byKey.get(key);
+    if (!match || emitted.has(key)) continue;
+    emitted.add(key);
+    result.push(match);
+  }
+  for (const ref of focused) {
+    const key = keyOf(ref);
+    if (emitted.has(key)) continue;
+    emitted.add(key);
+    result.push(ref);
+  }
+  return result;
 }
 
 /** Server-authoritative presentation facts for lineage-controlled placement. */
@@ -467,12 +538,32 @@ export function setManualPlacement(input: TabLayout, target: TabRef, manual: boo
 }
 
 export function setTabFocus(input: TabLayout, target: TabRef, focused: boolean): TabLayout {
-  return mapRef(input, target, (ref) => {
+  const mapped = mapRef(input, target, (ref) => {
     if (focused) return ref.focus === true ? ref : { ...ref, focus: true };
     if (ref.focus !== true) return ref;
     const { focus: _focus, ...rest } = ref;
     return rest;
   });
+  // A ref leaving Focus leaves the explicit order with it; one entering Focus is
+  // unlisted and therefore sorts after the ordered entries.
+  return withPrunedFocusOrder(mapped);
+}
+
+/** Reorder one Focus entry without disturbing its stored group position. */
+export function moveFocusRef(input: TabLayout, target: TabRef, index: number): TabLayout {
+  const layout = cloneForEdit(input);
+  const targetKey = keyOf(target);
+  if (!locations(layout).some((item) => keyOf(item.ref) === targetKey)) {
+    throw new TabLayoutValidationError(`unknown ref: ${target.kind}:${target.id}`);
+  }
+  const ordered = orderedFocusRefs(layout);
+  const from = ordered.findIndex((ref) => keyOf(ref) === targetKey);
+  if (from < 0) throw new TabLayoutValidationError(`ref is not in Focus: ${target.kind}:${target.id}`);
+  const to = boundedIndex(index, Math.max(0, ordered.length - 1), 'focus');
+  const focusOrder = [...ordered];
+  const [moved] = focusOrder.splice(from, 1);
+  focusOrder.splice(to, 0, moved);
+  return { ...layout, focusOrder };
 }
 
 export function followParent(input: TabLayout, target: TabRef, metadata: readonly TabRefMetadata[]): TabLayout {

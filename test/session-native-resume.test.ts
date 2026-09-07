@@ -23,6 +23,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Session } from '../src/session.js';
+import { legacyResumeSlot } from '../src/session-cli-registry-bridge.js';
 import type { TerminalMultiplexer } from '../src/mux-interface.js';
 
 function makeFakeMux(overrides: Partial<TerminalMultiplexer> = {}): TerminalMultiplexer {
@@ -275,5 +276,62 @@ describe('Session nativeResumeId (COD-124 Gap B)', () => {
     expect(session.openCodeConfig).toBeUndefined();
     expect(session.geminiConfig).toBeUndefined();
     expect(session.agyConfig).toBeUndefined();
+  });
+
+  /**
+   * COD-416: the four-way `mode === 'codex' / 'opencode' / 'gemini' / 'antigravity'` chain
+   * became `legacyResumeSlot()`, which reads the SAME pairs the registry already declares
+   * (`legacyConfigField` + the `resumeId` alias).
+   *
+   * ⚠️ This is a DELIBERATE widening, called out rather than buried. The old chain covered
+   * only the four CLIs that had park-time capture wired when it was written; the registry
+   * declares a resume slot for pi/grok/deepseek/omp too, so they now merge as well.
+   *
+   * It is unreachable today — `captureNativeResumeId()` (session-routes.ts) returns null for
+   * every mode outside those four, and the merge is guarded by `if (!this._nativeResumeId)`
+   * — so nothing a user can reach changes. It is the RIGHT direction regardless: when capture
+   * is widened, the apply side follows automatically instead of silently not following, which
+   * is the exact drift the four-way chain was an instance of.
+   */
+  it.each([
+    ['pi', 'piConfig', 'resumeSessionId'],
+    ['grok', 'grokConfig', 'resumeSessionId'],
+    ['deepseek', 'deepSeekConfig', 'resumeSessionId'],
+    ['omp', 'ompConfig', 'resumeSessionId'],
+  ] as const)('merges into the registry-declared slot for mode %s', (mode, field, key) => {
+    const session = track(
+      new Session({
+        id: `native-resume-registry-${mode}`,
+        workingDir: '/tmp',
+        mode,
+        mux: makeFakeMux(),
+        useMux: true,
+      })
+    );
+    session.setNativeResumeId(`captured-${mode}-id`);
+
+    (session as unknown as SessionInternals)._applyNativeResumeIdForResume();
+
+    // Read the PRIVATE field: unlike codex/antigravity, these four expose no public getter,
+    // and reading a missing getter returns undefined — indistinguishable from "did not merge".
+    const config = (session as unknown as Record<string, Record<string, unknown> | undefined>)[`_${field}`];
+    expect(config?.[key], `${mode} should merge into ${field}.${key}`).toBe(`captured-${mode}-id`);
+  });
+
+  /**
+   * The slot is chosen by REGISTRY DATA, so the four originally-wired pairs must still be
+   * exactly the ones the removed chain hardcoded. Pinned as a table because a wrong alias is
+   * otherwise silent: the id lands on a key the CLI's launch template never reads, and the
+   * session simply starts a fresh conversation instead of resuming.
+   */
+  it('resolves each mode to the same config field and key the removed chain hardcoded', () => {
+    expect(legacyResumeSlot('codex')).toEqual({ field: 'codexConfig', key: 'resumeSessionId' });
+    expect(legacyResumeSlot('opencode')).toEqual({ field: 'openCodeConfig', key: 'continueSession' });
+    expect(legacyResumeSlot('gemini')).toEqual({ field: 'geminiConfig', key: 'resumeSession' });
+    expect(legacyResumeSlot('antigravity')).toEqual({ field: 'antigravityConfig', key: 'resumeConversationId' });
+    // No <Mode>Config object at all — the chain's explicit "stays inert" case.
+    expect(legacyResumeSlot('claude')).toBeUndefined();
+    expect(legacyResumeSlot('shell')).toBeUndefined();
+    expect(legacyResumeSlot('not-a-cli')).toBeUndefined();
   });
 });

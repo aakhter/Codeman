@@ -21,13 +21,32 @@ export function parseAttachmentMagicLinks(data: string): string[] {
   return parseMagicAttachmentRequests(data).map((request) => request.path);
 }
 
-export function parseTerminalAttachmentRequests(data: string): TerminalAttachmentRequest[] {
+export interface ParseTerminalAttachmentOptions {
+  /**
+   * Also scan for codex's GENERATED-artifact announcements (`Saved to: file://…` and the
+   * labeled variant). Off by default: those carry a deliberately relaxed trust policy, and
+   * codex is the only CLI that announces artifacts this way, so enabling it for every mode
+   * widened that policy to panes it was never reasoned about for. The caller passes the
+   * registry capability (`transcript === 'codex-rollout'`) rather than a mode id.
+   */
+  codexArtifacts?: boolean;
+}
+
+export function parseTerminalAttachmentRequests(
+  data: string,
+  options: ParseTerminalAttachmentOptions = {}
+): TerminalAttachmentRequest[] {
   const results: TerminalAttachmentRequest[] = [];
   const seen = new Set<string>();
 
+  // Only the `Saved to: file://…` scanner is gated: that announcement is codex's own, and
+  // it is the one carrying the relaxed trust policy. The LABELED scanner
+  // (`Mockup:`/`Screenshot:`/`Artifact:` …) is deliberately NOT gated — those labels are
+  // generic and are printed by Superpowers under claude too, so gating it would silently
+  // stop detecting artifacts on every non-codex session.
   for (const request of [
     ...parseMagicAttachmentRequests(data),
-    ...parseCodexGeneratedArtifactRequests(data),
+    ...(options.codexArtifacts ? parseCodexGeneratedArtifactRequests(data) : []),
     ...parseLabeledGeneratedArtifactRequests(data),
   ]) {
     const key = `${request.source}:${request.path}`;

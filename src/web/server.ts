@@ -47,7 +47,7 @@ import { getHookSecret } from '../config/hook-secret.js';
 import { verifyClaudeSessionStartHookCapability } from '../hooks-config.js';
 import { resolveCodemanCliName, CODEMAN_CLI_ALIASES } from '../utils/codeman-cli-resolver.js';
 import { EventEmitter } from 'node:events';
-import { Session, type BackgroundTask } from '../session.js';
+import { Session, isExternalCliMode, type BackgroundTask } from '../session.js';
 import {
   parseCodexProviderIdentity,
   type CodexProviderEnvironment,
@@ -2375,8 +2375,10 @@ export class WebServer extends EventEmitter {
     this.runSummaryTrackers.set(session.id, summaryTracker);
     summaryTracker.recordSessionStarted(session.mode, session.workingDir);
 
-    // Set working directory for Ralph tracker to auto-load @fix_plan.md (not supported for external CLI sessions)
-    if (session.mode !== 'opencode' && session.mode !== 'codex' && session.mode !== 'gemini') {
+    // Set working directory for Ralph tracker to auto-load @fix_plan.md (not supported for external CLI
+    // sessions). COD-416/Q23: was a hardcoded opencode|codex|gemini list, stale since pi/grok/
+    // deepseek/omp were added; the comment already said what it meant.
+    if (!isExternalCliMode(session.mode)) {
       session.ralphTracker.setWorkingDir(session.workingDir);
     }
 
@@ -3876,7 +3878,7 @@ export class WebServer extends EventEmitter {
                 }
               }
               // Ralph / Todo tracker (not supported for external CLI sessions)
-              if (session.mode !== 'opencode' && session.mode !== 'codex' && session.mode !== 'gemini') {
+              if (!isExternalCliMode(session.mode)) {
                 if (savedState.ralphAutoEnableDisabled) {
                   session.ralphTracker.disableAutoEnable();
                   console.log(`[Server] Restored Ralph auto-enable disabled for session ${session.id}`);
@@ -3906,13 +3908,7 @@ export class WebServer extends EventEmitter {
                 session.flickerFilterEnabled = savedState.flickerFilterEnabled;
               }
               // Respawn controller (not supported for external CLI sessions)
-              if (
-                session.mode !== 'opencode' &&
-                session.mode !== 'codex' &&
-                session.mode !== 'gemini' &&
-                savedState.respawnEnabled &&
-                savedState.respawnConfig
-              ) {
+              if (!isExternalCliMode(session.mode) && savedState.respawnEnabled && savedState.respawnConfig) {
                 try {
                   this.restoreRespawnController(session, savedState.respawnConfig, 'state.json');
                 } catch (err) {
@@ -3923,9 +3919,7 @@ export class WebServer extends EventEmitter {
 
             // Fallback: restore respawn from mux-sessions.json if state.json didn't have it (not supported for external CLI sessions)
             if (
-              session.mode !== 'opencode' &&
-              session.mode !== 'codex' &&
-              session.mode !== 'gemini' &&
+              !isExternalCliMode(session.mode) &&
               !this.respawnControllers.has(session.id) &&
               muxSession.respawnConfig?.enabled
             ) {
@@ -3942,9 +3936,7 @@ export class WebServer extends EventEmitter {
             // Fallback: restore Ralph state from state-inner.json if not already set and not explicitly disabled
             // Ralph tracker is not supported for external CLI sessions
             if (
-              session.mode !== 'opencode' &&
-              session.mode !== 'codex' &&
-              session.mode !== 'gemini' &&
+              !isExternalCliMode(session.mode) &&
               !session.ralphTracker.enabled &&
               !session.ralphTracker.autoEnableDisabled
             ) {
@@ -3957,9 +3949,7 @@ export class WebServer extends EventEmitter {
 
             // Fallback: auto-detect completion phrase from CLAUDE.md (not supported for external CLI sessions)
             if (
-              session.mode !== 'opencode' &&
-              session.mode !== 'codex' &&
-              session.mode !== 'gemini' &&
+              !isExternalCliMode(session.mode) &&
               session.ralphTracker.enabled &&
               !session.ralphTracker.loopState.completionPhrase
             ) {

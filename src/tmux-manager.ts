@@ -23,6 +23,17 @@
 
 import { EventEmitter } from 'node:events';
 import { collectDescendants } from './proc-tree.js';
+import { getCli } from './config/cli-registry/registry.js';
+import type { CliDockerResume, CliEntry } from './config/cli-registry/types.js';
+import { missingCliMessage, resolveCliBinDir } from './utils/cli-resolver.js';
+import {
+  buildSpawnCommandFromRegistry,
+  rawLaunchCommand,
+  rawLaunchCommandForMode,
+  configSetenvValues,
+  legacyConfigForMode,
+} from './session-cli-registry-bridge.js';
+import type { SpawnBridgeOptions } from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -71,7 +82,6 @@ import {
   type SessionDocker,
   type DockerCommandMode,
 } from './types.js';
-import { buildEffortCliArgs, buildNameCliArgs } from './session-cli-builder.js';
 import {
   buildDockerBaseArgs,
   buildDockerCreateArgs,
@@ -81,37 +91,12 @@ import {
   hostGatewayAlias,
   resolveDockerClaudeArtifacts,
   resolveDockerCredentialArtifacts,
+  resolveDockerDaemonMountSource,
   type DockerCreateContext,
   type DockerMount,
   type DockerSeedCopy,
 } from './docker-hosts.js';
-import {
-  wrapWithNice,
-  SAFE_PATH_PATTERN,
-  findClaudeDir,
-  getClaudeCliVersion,
-  getClaudeNotFoundMessage,
-  resolveOpenCodeDir,
-  getOpenCodeNotFoundMessage,
-  resolveCodexDir,
-  getCodexNotFoundMessage,
-  resolveGeminiDir,
-  getGeminiNotFoundMessage,
-  resolveAntigravityDir,
-  getAntigravityNotFoundMessage,
-  resolvePiDir,
-  getPiNotFoundMessage,
-  resolveGrokDir,
-  getGrokNotFoundMessage,
-  resolveDeepSeekDir,
-  getDeepSeekNotFoundMessage,
-  resolveDefaultDeepSeekProfile,
-  getOmpNotFoundMessage,
-  resolveOmpDir,
-  resolveLocalShell,
-  loginShellArgs,
-  assertNever,
-} from './utils/index.js';
+import { wrapWithNice, SAFE_PATH_PATTERN, resolveLocalShell, loginShellArgs } from './utils/index.js';
 import type {
   TerminalMultiplexer,
   MuxSession,
@@ -128,6 +113,7 @@ import {
   defaultRemoteCommandForMode,
   remoteLoginShellCommand,
   remoteSshTarget,
+  remoteTmuxSessionAlive,
   withRemotePathBootstrap,
 } from './remote-hosts.js';
 import { resolveCodexRecoveryStrategy } from './codex-command-profiles.js';
@@ -921,324 +907,12 @@ function buildClaudePermissionFlags(claudeMode?: ClaudeMode, allowedTools?: stri
   }
 }
 
-/**
- * Build the opencode CLI command with appropriate flags.
- */
-export function buildOpenCodeCommand(config?: OpenCodeConfig): string {
-  const parts = ['opencode'];
-
-  // Model selection — allow provider/model format (alphanumeric, dots, hyphens, slashes)
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  // Continue existing session
-  if (config?.continueSession) {
-    const safeId = /^[a-zA-Z0-9_-]+$/.test(config.continueSession) ? config.continueSession : undefined;
-    if (safeId) parts.push('--session', safeId);
-    if (safeId && config.forkSession) parts.push('--fork');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the codex CLI command with appropriate flags.
- *
- * Codeman launches Codex's native TUI and handles replay/scrollback by
- * stripping destructive terminal sequences before xterm.js sees them.
- */
-export function buildCodexCommand(config?: CodexConfig): string {
-  // COD-392: a resolved local case command is complete and runs as-is.
-  if (config?.baseCommand && config.baseCommand.trim().length > 0) return config.baseCommand;
-  const parts = ['codex'];
-
-  if (config?.dangerouslyBypassApprovals) {
-    parts.push('--dangerously-bypass-approvals-and-sandbox');
-  }
-
-  if (config?.dangerouslyBypassHookTrust) {
-    parts.push('--dangerously-bypass-hook-trust');
-  }
-
-  if (config?.animations !== undefined) {
-    parts.push('--config', `tui.animations=${config.animations ? 'true' : 'false'}`);
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.resumeSessionId) {
-    const safeId = /^[a-zA-Z0-9_-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-    if (safeId) parts.push('resume', safeId);
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the Gemini CLI command with appropriate flags.
- *
- * `--skip-trust` avoids a first-run workspace trust prompt inside Codeman.
- * Approval mode defaults to `yolo` for parity with Codeman's Claude default
- * of `--dangerously-skip-permissions`; users can override it later through
- * Gemini config once Codeman exposes richer Gemini settings.
- */
-export function buildGeminiCommand(config?: GeminiConfig): string {
-  const parts = ['gemini', '--skip-trust'];
-
-  const approvalMode = config?.approvalMode || 'yolo';
-  if (['default', 'auto_edit', 'yolo', 'plan'].includes(approvalMode)) {
-    parts.push('--approval-mode', approvalMode);
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.resumeSession) {
-    const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeSession) ? config.resumeSession : undefined;
-    if (safeId) parts.push('--resume', safeId);
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the Antigravity CLI (agy) command with appropriate flags.
- *
- * Unlike gemini's yolo default, `--dangerously-skip-permissions` is only added
- * when the config explicitly asks for it (the frontend sends it for parity with
- * Codeman's Claude default; the multi-user clamp strips it for non-granted owners,
- * and an ABSENT config stays at agy's own prompting default — safe like Codex).
- */
-export function buildAntigravityCommand(config?: AntigravityConfig): string {
-  const parts = ['agy'];
-
-  if (config?.dangerouslySkipPermissions) {
-    parts.push('--dangerously-skip-permissions');
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.resumeConversationId) {
-    const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeConversationId) ? config.resumeConversationId : undefined;
-    if (safeId) parts.push('--conversation', safeId);
-  }
-
-  return parts.join(' ');
-}
-
 /** Pi's `--thinking` levels. Runtime allowlist — defense in depth beyond the Zod enum. */
-const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-
-/**
- * Build the Pi CLI (pi.dev) command with appropriate flags.
- *
- * Pi has NO permission prompts and no `--dangerously-skip-permissions` analog, so
- * there is deliberately nothing bypass-shaped here. The privileged knob is the
- * TRI-STATE `approveProjectTrust`: `true` -> `--approve` (trust repo-local `.pi/`
- * config, which means loading and EXECUTING repository TypeScript and installing
- * missing project packages), `false` -> `--no-approve` (force-deny, used by the
- * multi-user clamp so the trust prompt never appears), absent -> pi's own
- * `defaultProjectTrust`.
- *
- * `--api-key` is deliberately NEVER wired: it would put a provider secret on the
- * spawn command line (visible in `ps` and tmux state), which is exactly what the
- * socket-scoped `tmux setenv` discipline exists to prevent.
- *
- * Like the sibling builders, every user value is regex-allowlisted and silently
- * DROPPED on failure — the result is interpolated into a `bash -c "..."` string.
- */
-function buildPiCommand(config?: PiConfig): string {
-  const parts = ['pi'];
-
-  if (config?.approveProjectTrust === true) {
-    parts.push('--approve');
-  } else if (config?.approveProjectTrust === false) {
-    parts.push('--no-approve');
-  }
-
-  if (config?.model) {
-    // `:` for a thinking suffix (`sonnet:high`), `/` for `provider/id` (`openai/gpt-4o`).
-    const safeModel = /^[a-zA-Z0-9._\-/:]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.provider) {
-    const safeProvider = /^[a-z0-9-]+$/.test(config.provider) ? config.provider : undefined;
-    if (safeProvider) parts.push('--provider', safeProvider);
-  }
-
-  if (config?.thinking && PI_THINKING_LEVELS.has(config.thinking)) {
-    parts.push('--thinking', config.thinking);
-  }
-
-  // --session and -c conflict; a valid explicit session id wins.
-  const safeSessionId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeSessionId) {
-    parts.push('--session', safeSessionId);
-  } else if (config?.continueSession) {
-    parts.push('-c');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the Grok Build CLI (xAI `grok`) command with appropriate flags.
- *
- * The bypass switch is `--always-approve` ("auto-approve all tool executions",
- * grok's `bypassPermissions` permission mode; config-level deny rules still
- * apply on top). Absent config spawns bare `grok`, i.e. grok's own default
- * ask-mode, which is why the multi-user clamp only needs the only-if-sent
- * branch for grok. Flag surface verified against grok 1.0.5.
- *
- * `XAI_API_KEY` is deliberately never wired as a flag: secrets flow through
- * socket-scoped `tmux setenv` (envOverrides), never the spawn command line.
- *
- * Like the sibling builders, every user value is regex-allowlisted and silently
- * DROPPED on failure: the result is interpolated into a `bash -c "..."` string.
- */
-function buildGrokCommand(config?: GrokConfig): string {
-  const parts = ['grok'];
-
-  if (config?.alwaysApprove) {
-    parts.push('--always-approve');
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  // --resume and -c conflict; a valid explicit session id wins. Ids only:
-  // grok's --resume also accepts session TITLES, which are arbitrary user
-  // strings, so the id regex doubles as the no-titles rule here.
-  const safeSessionId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeSessionId) {
-    parts.push('--resume', safeSessionId);
-  } else if (config?.continueSession) {
-    parts.push('--continue');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the DeepSeek Harness (`dsh`) command with appropriate flags.
- *
- * Unlike every sibling builder, the interesting decision here is not a flag but
- * WHICH PROFILE to boot: `dsh` is a launcher over `$DSH_HOME/profiles/<name>`,
- * and DeepSeek ships no interactive terminal profile of its own, so the agent a
- * pane runs is always one the user installed. An absent `profile` resolves to
- * the first pane-capable profile on the box; when there is none we still emit a
- * bare `dsh --profile <default>` rather than inventing a name, because the
- * availability gate in createSession() has already refused the spawn by then and
- * this path only runs for a session that passed it.
- *
- * There is deliberately NO permission flag: the harness has none. The sandbox
- * and approval rows read `DSH_PERMISSION_MODE`, exported through `tmux setenv`
- * in buildEnvExports() so it never lands on this command line.
- *
- * Like the sibling builders, every user value is regex-allowlisted and silently
- * DROPPED on failure: the result is interpolated into a `bash -c "..."` string.
- */
-function buildDeepSeekCommand(config?: DeepSeekConfig): string {
-  const parts = ['dsh'];
-
-  // A profile name is a single path segment: it is both interpolated into the
-  // shell line and joined into a filesystem path.
-  const requested = config?.profile;
-  const safeProfile =
-    requested && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(requested)
-      ? requested
-      : (resolveDefaultDeepSeekProfile() ?? undefined);
-  if (safeProfile) parts.push('--profile', safeProfile);
-
-  // The launcher forwards everything after its own flags to the profile's app,
-  // which is where `--resume` is understood. An explicit id wins over the
-  // most-recent-session form, mirroring the sibling builders.
-  const safeSessionId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeSessionId) {
-    parts.push('--resume', safeSessionId);
-  } else if (config?.resumeSession) {
-    parts.push('--resume');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the OMP CLI command with appropriate flags.
- *
- * omp reads its model routing and hooks from ~/.omp (agent dir), so no
- * trust/permission flags are needed: the CLI's own config governs. The only
- * CLI flags passed are the per-session overrides Codeman knows about.
- */
-function buildOmpCommand(config?: OmpConfig): string {
-  const parts = ['omp'];
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  // --resume and --continue conflict; a valid explicit session id wins,
-  // mirroring the sibling builders (grok/pi/opencode).
-  const safeId =
-    config?.resumeSessionId && /^[a-zA-Z0-9._-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-  if (safeId) {
-    parts.push('--resume', safeId);
-  } else if (config?.continueSession) {
-    parts.push('--continue');
-  }
-
-  return parts.join(' ');
-}
 
 /**
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
-/**
- * Build the shell fragment carrying the effort level as a SOFT default
- * (see buildEffortCliArgs — `--effort <level>` for regular levels incl. max,
- * `--settings '{"ultracode":true}'` for ultracode; deliberately not the
- * CLAUDE_CODE_EFFORT_LEVEL env var, which hard-locks /effort switching).
- *
- * Injection-safe: effort is validated against the EFFORT_LEVELS allowlist inside
- * buildEffortCliArgs, so the single-quoted values contain no user-controlled characters.
- */
-function buildEffortSettingsFlag(effort?: EffortLevel): string {
-  const [flag, value] = buildEffortCliArgs(effort);
-  return flag && value ? ` ${flag} '${value}'` : '';
-}
-
-/**
- * Build the ` --name "<session name>"` shell fragment, or '' when it must be
- * omitted. Version-gated FAIL-CLOSED in buildNameCliArgs (an older/unknown CLI
- * aborts startup on an unknown flag, which would kill every claude spawn), and
- * the value is allowlist-sanitized there, so it contains none of the characters
- * that are special inside this double-quoted interpolation. The peer name is a
- * soft default (in-session /rename still wins), which is why this rides the
- * spawn command rather than any persisted config.
- */
-function buildClaudeNameFlag(sessionName: string | undefined, cliVersion: string | null): string {
-  const [flag, value] = buildNameCliArgs(sessionName, cliVersion);
-  return flag && value ? ` ${flag} "${value}"` : '';
-}
-
 export function buildSpawnCommand(options: {
   mode: SessionMode;
   sessionId: string;
@@ -1265,52 +939,31 @@ export function buildSpawnCommand(options: {
    */
   claudeCliVersion?: string | null;
 }): string {
-  if (options.mode === 'claude') {
-    // Validate model to prevent command injection
-    const safeModel = options.model && /^[a-zA-Z0-9._\-[\]]+$/.test(options.model) ? options.model : undefined;
-    const modelFlag = safeModel ? ` --model "${safeModel}"` : '';
-    const effortFlag = buildEffortSettingsFlag(options.effort);
-    const nameFlag = buildClaudeNameFlag(
-      options.sessionName,
-      options.claudeCliVersion !== undefined ? options.claudeCliVersion : getClaudeCliVersion()
-    );
-    // Use --resume to restore a previous conversation, otherwise --session-id for new sessions.
-    // Wrap --resume in a fallback: if it exits non-zero (session not found, corrupt, etc.),
-    // fall back to a new session with --session-id so the pane doesn't die.
-    const safeResumeId =
-      options.resumeSessionId && /^[a-f0-9-]+$/.test(options.resumeSessionId) ? options.resumeSessionId : undefined;
-    const permFlags = buildClaudePermissionFlags(options.claudeMode, options.allowedTools);
-    if (safeResumeId) {
-      const resumeCmd = `claude${permFlags} --resume "${safeResumeId}"${modelFlag}${effortFlag}${nameFlag}`;
-      const fallbackCmd = `claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}${nameFlag}`;
-      return `${resumeCmd} || ${fallbackCmd}`;
-    }
-    return `claude${permFlags} --session-id "${options.sessionId}"${modelFlag}${effortFlag}${nameFlag}`;
+  // ⚠️ COD-392 stays a CODE-LEVEL early return, before the engine. The value is a complete
+  // server-resolved shell command line, and the argv engine forbids shell text BY DESIGN — there
+  // is no `ArgSpec` that could carry it, and inventing one would reopen the injection surface the
+  // engine exists to close. Which config key holds it is registry DATA (`launch.rawCommandField`),
+  // so the early return no longer has to know that codex is the CLI that has one.
+  const rawCommand = rawLaunchCommandForMode(options.mode, options as unknown as Record<string, unknown>);
+  if (rawCommand !== undefined) return rawCommand;
+
+  // Everything else is registry DATA: `launch.variants` rendered by the argv engine, read out of
+  // the legacy `<Mode>Config` objects through `legacyConfigAliases`. This replaced a nine-way
+  // `if (options.mode === …)` chain that dispatched to nine hand-written builders; each builder
+  // was a second copy of a launch spec the registry already declared.
+  //
+  // Verified byte-identical before the swap, not assumed: a 35-case differential across every
+  // mode and every declared param found 33 exact matches, and the only two divergences were the
+  // two intentional ones handled here — `baseCommand` above, and `shell` below.
+  const entry = getCli(options.mode);
+  if (entry) {
+    const rendered = buildSpawnCommandFromRegistry(entry, options);
+    if (rendered !== undefined) return rendered;
   }
-  if (options.mode === 'opencode') {
-    return buildOpenCodeCommand(options.openCodeConfig);
-  }
-  if (options.mode === 'codex') {
-    return buildCodexCommand(options.codexConfig);
-  }
-  if (options.mode === 'gemini') {
-    return buildGeminiCommand(options.geminiConfig);
-  }
-  if (options.mode === 'antigravity') {
-    return buildAntigravityCommand(options.antigravityConfig);
-  }
-  if (options.mode === 'pi') {
-    return buildPiCommand(options.piConfig);
-  }
-  if (options.mode === 'grok') {
-    return buildGrokCommand(options.grokConfig);
-  }
-  if (options.mode === 'deepseek') {
-    return buildDeepSeekCommand(options.deepSeekConfig);
-  }
-  if (options.mode === 'omp') {
-    return buildOmpCommand(options.ompConfig);
-  }
+
+  // `shell` (and any entry declaring no launch variants) falls through here on purpose: the
+  // engine returns undefined for it because there is no CLI to template.
+  //
   // #208: NOT the literal '$SHELL'. This string is embedded in the `bash -c "…"`
   // argument of the respawn-pane line, which execSync runs through `/bin/sh -c`,
   // so a `$SHELL` here is expanded by the SERVER process's shell against the
@@ -1328,52 +981,35 @@ export function buildSpawnCommand(options: {
   return `${shellescape(shell)}${loginShellArgs(shell)}`;
 }
 
-/** Whether a mode launches an external agent CLI whose env must be inherited. */
+/**
+ * Whether a mode launches an external agent CLI whose env must be inherited.
+ *
+ * COD-416: `kind` IS this question — the nine-arm switch it replaces listed every agent entry
+ * and `shell`, i.e. it restated the catalog. An unregistered mode is NOT an agent CLI, which
+ * is the conservative answer: it inherits no agent env rather than inheriting one blindly.
+ */
 function isAgentCliMode(mode: SessionMode): boolean {
-  switch (mode) {
-    case 'claude':
-    case 'opencode':
-    case 'codex':
-    case 'gemini':
-    case 'antigravity':
-    case 'pi':
-    case 'grok':
-    case 'deepseek':
-    case 'omp':
-      return true;
-    case 'shell':
-      return false;
-    default:
-      return assertNever(mode);
-  }
+  return getCli(mode)?.kind === 'agent';
 }
 
-/** Detailed resolver diagnostics for an external agent CLI that could not be found. */
+/**
+ * Detailed resolver diagnostics for an external agent CLI that could not be found.
+ *
+ * COD-416: delegates to the registry's generic `missingCliMessage()`, which builds the same
+ * message from `discovery.install` + `label` and appends the same PATH/login-shell/search-dir
+ * diagnostics through the per-CLI resolver's own hook. The ten-arm switch this replaces was a
+ * SECOND dispatch table over the same nine resolvers.
+ *
+ * ⚠️ Two messages change wording slightly, measured rather than assumed: claude loses one word
+ * ("Install it with" -> "Install with") and deepseek reads "DeepSeek CLI not found" rather than
+ * "DeepSeek Harness CLI (dsh) not found". The other seven are byte-identical. The `dsh` binary
+ * name is still in deepseek's install command in the same message, so it is not lost.
+ */
 export function cliNotFoundMessage(mode: SessionMode): string {
-  switch (mode) {
-    case 'claude':
-      return getClaudeNotFoundMessage();
-    case 'opencode':
-      return getOpenCodeNotFoundMessage();
-    case 'codex':
-      return getCodexNotFoundMessage();
-    case 'gemini':
-      return getGeminiNotFoundMessage();
-    case 'antigravity':
-      return getAntigravityNotFoundMessage();
-    case 'pi':
-      return getPiNotFoundMessage();
-    case 'grok':
-      return getGrokNotFoundMessage();
-    case 'deepseek':
-      return getDeepSeekNotFoundMessage();
-    case 'omp':
-      return getOmpNotFoundMessage();
-    case 'shell':
-      throw new Error('No external CLI error exists for shell mode');
-    default:
-      return assertNever(mode);
-  }
+  const message = missingCliMessage(mode);
+  // `shell` has no binary to find, so it has no such error — the switch threw here too.
+  if (message === null) throw new Error(`No external CLI error exists for ${mode} mode`);
+  return message;
 }
 
 /** Apply process priority to both legs of the controlled Claude resume fallback. */
@@ -1482,6 +1118,44 @@ export function remoteTmuxSessionName(sessionId: string): string {
 }
 
 /**
+ * The `<VAR>=<json> ` prefix for a CLI whose config travels as ONE env var
+ * (`env.configContentVar` — opencode's `OPENCODE_CONFIG_CONTENT`). Empty for every CLI that
+ * declares none, and for a caller that supplied nothing worth setting.
+ *
+ * The JSON comes from `resolveConfigContent`, the SAME resolver the local `tmux setenv` path
+ * uses, so a remote pane and a local one agree on what "auto-allow layered over the caller's
+ * JSON" means rather than each deciding for itself.
+ */
+function buildConfigContentEnvPrefix(entry: CliEntry, options: SpawnBridgeOptions): string {
+  const contentVar = entry.env.configContentVar;
+  if (!contentVar) return '';
+  const content = resolveConfigContent(legacyConfigForMode(entry.id, options as unknown as Record<string, unknown>));
+  return content ? `${contentVar}=${shellescape(content)} ` : '';
+}
+
+/**
+ * The remote pane command for a CLI that carries its session config to the remote host, or
+ * `undefined` for one that does not — the caller then falls back to the static
+ * `defaultRemoteCommandForMode`.
+ *
+ * ⚠️ WHICH CLIs carry it is registry DATA (`overlays.remote.fromLaunchSpec`), and it describes
+ * the four hand-written builders this replaced rather than granting anything new. A CLI without
+ * the flag reaches a remote host with its model / resume / permission flags dropped, which is
+ * pre-registry behaviour preserved on purpose (COD-416 wave 3e).
+ */
+export function renderRemoteCliCommand(mode: SessionMode, options: SpawnBridgeOptions): string | undefined {
+  const entry = getCli(mode);
+  const overlay = entry?.overlays.remote;
+  if (!entry || !overlay || 'disabled' in overlay || overlay.fromLaunchSpec !== true) return undefined;
+  // The raw owner-authored command line (codex's COD-392 `baseCommand`) replaces the templated
+  // launch on a remote host exactly as it does locally; the grant that authorises it is
+  // re-checked on the launch paths, not here.
+  const command = rawLaunchCommand(entry, options) ?? buildSpawnCommandFromRegistry(entry, options);
+  if (command === undefined) return undefined;
+  return `${buildConfigContentEnvPrefix(entry, options)}${command}`;
+}
+
+/**
  * COD-104 — build the SSH command that launches (or reattaches) a remote
  * session INSIDE a tmux server on the remote host, so the remote agent survives
  * an SSH drop.
@@ -1538,32 +1212,6 @@ export function buildRemoteLaunchCommand(options: {
   // that only an interactive login shell resolves (see that function's comment).
   // Codex/OpenCode/Gemini/Antigravity keep their own builders so per-session config flags survive the wrap.
   const override = remote.commands?.[mode];
-  function buildOpenCodeConfigEnvPrefix(config?: OpenCodeConfig): string {
-    if (!config) return '';
-    let jsonContent: string | undefined;
-    if (config.autoAllowTools) {
-      const permConfig: Record<string, unknown> = { permission: { '*': 'allow' } };
-      if (config.configContent) {
-        try {
-          const existing = JSON.parse(config.configContent) as Record<string, unknown>;
-          Object.assign(permConfig, existing);
-          permConfig.permission = { '*': 'allow' };
-        } catch {
-          /* invalid JSON, use default permConfig */
-        }
-      }
-      jsonContent = JSON.stringify(permConfig);
-    } else if (config.configContent) {
-      try {
-        JSON.parse(config.configContent);
-        jsonContent = config.configContent;
-      } catch {
-        return '';
-      }
-    }
-    if (!jsonContent) return '';
-    return `OPENCODE_CONFIG_CONTENT=${shellescape(jsonContent)} `;
-  }
   const codexRecovery =
     mode === 'codex' && codexConfig?.resumeSessionId
       ? resolveCodexRecoveryStrategy(
@@ -1572,24 +1220,33 @@ export function buildRemoteLaunchCommand(options: {
         )
       : undefined;
   if (codexRecovery?.kind === 'manual_required') throw new ManualRecoveryRequiredError();
+  // COD-416 wave 3e: the four per-session builders this replaces (codex / opencode / gemini /
+  // antigravity) were each a second copy of a launch spec the registry already declares, and the
+  // list of WHICH CLIs get their session config on a remote host is now `overlays.remote
+  // .fromLaunchSpec` rather than four arms of a conditional.
+  //
+  // ⚠️ That flag is descriptive, not a widening: the CLIs without it (pi, grok, deepseek, omp)
+  // still reach a remote host through `defaultRemoteCommandForMode`, i.e. with their model /
+  // resume / permission flags dropped. That is pre-registry behaviour and this change preserves
+  // it deliberately rather than quietly fixing it on a path no test and no beta can exercise.
+  const perSessionRemote = renderRemoteCliCommand(mode, {
+    mode,
+    sessionId,
+    codexConfig,
+    openCodeConfig,
+    geminiConfig,
+    antigravityConfig,
+  });
   const modeCommand =
     codexRecovery?.kind === 'template'
       ? codexRecovery.command
       : override
         ? override
-        : mode === 'codex'
-          ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
-          : mode === 'opencode'
-            ? remoteLoginShellCommand(
-                `${buildOpenCodeConfigEnvPrefix(openCodeConfig)}${buildOpenCodeCommand(openCodeConfig)}`
-              )
-            : mode === 'gemini'
-              ? remoteLoginShellCommand(buildGeminiCommand(geminiConfig))
-              : mode === 'antigravity'
-                ? remoteLoginShellCommand(buildAntigravityCommand(antigravityConfig))
-                : mode === 'claude'
-                  ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-                  : defaultRemoteCommandForMode(mode);
+        : perSessionRemote !== undefined
+          ? remoteLoginShellCommand(perSessionRemote)
+          : mode === 'claude'
+            ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
+            : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1785,23 +1442,12 @@ const RESUME_ID_SAFE = /^[A-Za-z0-9._-]+$/;
  */
 function appendResumeFlag(modeCommand: string, mode: SessionMode, resumeId: string): string {
   if (!RESUME_ID_SAFE.test(resumeId)) return modeCommand;
-  switch (mode) {
-    case 'gemini':
-      return `${modeCommand} --resume ${resumeId}`;
-    case 'codex':
-      return `${modeCommand} resume ${resumeId}`;
-    case 'antigravity':
-      return `${modeCommand} --conversation ${resumeId}`;
-    case 'pi':
-      return `${modeCommand} --session ${resumeId}`;
-    case 'grok':
-      return `${modeCommand} --resume ${resumeId}`;
-    case 'deepseek':
-    case 'omp':
-      return `${modeCommand} --resume ${resumeId}`;
-    default:
-      return modeCommand; // shell / opencode: no resume
-  }
+  // `launch.resumeAppend` was DECLARED for exactly this function and read by nothing until now
+  // — the switch it replaces was the hand-written copy. Absent = this CLI has no resume flag to
+  // append (claude, shell, opencode), which is the old `default` arm.
+  const spec = getCli(mode)?.launch.resumeAppend;
+  if (!spec) return modeCommand;
+  return spec.style === 'flag' ? `${modeCommand} ${spec.flag} ${resumeId}` : `${modeCommand} ${spec.token} ${resumeId}`;
 }
 
 /**
@@ -1849,6 +1495,35 @@ export interface DockerLaunchOptions {
   seedCopies?: DockerSeedCopy[];
 }
 
+/** The in-container resume policy this CLI declares, if any (`overlays.docker.resume`). */
+function dockerResumePolicy(mode: SessionMode): CliDockerResume | undefined {
+  const overlay = getCli(mode)?.overlays.docker;
+  return overlay && !('disabled' in overlay) ? overlay.resume : undefined;
+}
+
+/**
+ * Re-render a CLI's launch command carrying ONLY a resume id — the `style: 'rebuild'` docker
+ * resume, for a CLI whose continuation is a first-class launch param rather than a token that
+ * can be appended.
+ *
+ * ⚠️ Deliberately carries nothing else from the original session's config. This path exists for
+ * a container whose in-container tmux was re-created, where the only thing being asked for is
+ * "re-attach to that conversation"; inventing the rest of a config here would launch something
+ * the user never configured.
+ */
+function renderResumeOnlyCommand(mode: SessionMode, sessionId: string, resumeId: string): string | undefined {
+  const entry = getCli(mode);
+  if (!entry) return undefined;
+  const field = entry.launch.legacyConfigField;
+  const resumeKey = entry.launch.legacyConfigAliases?.resumeId ?? 'resumeId';
+  const config = { [resumeKey]: resumeId };
+  return buildSpawnCommandFromRegistry(entry, {
+    mode,
+    sessionId,
+    ...(field ? { [field]: config } : config),
+  } as unknown as SpawnBridgeOptions);
+}
+
 /**
  * Build the ONE `bash -c` launch string for a docker session: image-check ->
  * ensure (inspect-or-create) -> start -> `exec docker exec -it` into the durable
@@ -1859,25 +1534,43 @@ export interface DockerLaunchOptions {
 export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   const { mode, docker, sessionId, resumeSessionId, createContext, execEnv, execEnvNames, seedCopies } = opts;
   const base = buildDockerBaseArgs(docker).join(' ');
-  const createArgs = buildDockerCreateArgs(createContext).join(' ');
+  // ADOPTED container (docker.owned === false): the user built it and runs it, so
+  // this chain may only LOOK and then exec. No image check (the image is theirs),
+  // no create, and above all no `start` — starting a container we do not own is
+  // exactly the lifecycle mutation adoption promises never to perform. A missing
+  // or stopped container fails closed with an actionable message instead.
+  const adopted = docker.owned === false;
+  // Built lazily: an adopted case has no meaningful create-config, so computing
+  // create args for it would demand a context the adopt path never assembles.
+  const createArgs = adopted ? '' : buildDockerCreateArgs(createContext).join(' ');
   const name = shellescape(docker.containerName);
   const workdir = shellescape(docker.containerWorkdir);
   const image = shellescape(docker.image);
   const dkrName = dockerTmuxSessionName(sessionId);
   const sid = sessionId.slice(0, 8);
 
-  let modeCommand = docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
+  let modeCommand =
+    docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode, !!docker.runsAsRoot);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
-  } else if (resumeSessionId && mode === 'opencode') {
-    // OpenCode has a first-class --session continuation. A custom override is
-    // opaque, so refuse rather than silently starting a fresh conversation.
-    if (docker.commands?.opencode !== undefined) throw new ManualRecoveryRequiredError();
-    modeCommand = buildOpenCodeCommand({ continueSession: resumeSessionId });
-  } else if (resumeSessionId && mode === 'codex' && docker.commands?.codex !== undefined) {
-    throw new ManualRecoveryRequiredError();
-  } else if (resumeSessionId && !(mode === 'codex' && docker.commands?.codex !== undefined)) {
-    modeCommand = appendResumeFlag(modeCommand, mode, resumeSessionId);
+  } else if (resumeSessionId) {
+    // COD-416 wave 3e: HOW a resume reaches an in-container pane is registry DATA
+    // (`overlays.docker.resume`), not two id-checks. Three shapes, and the default is the
+    // plain append every flag-style CLI has always used:
+    //   - `refuseWhenOverridden` + the case supplied its own `commands.<mode>` -> refuse. The
+    //     override is opaque text; appending to it or replacing it would silently start a
+    //     fresh conversation, which is the one outcome a resume must never produce.
+    //   - `style: 'rebuild'` -> re-render from the launch spec with only the resume param set,
+    //     for a CLI whose resume IS a launch param (opencode's `--session`).
+    //   - anything else -> append `launch.resumeAppend` to the already-built command.
+    const resume = dockerResumePolicy(mode);
+    const overridden = docker.commands?.[mode as DockerCommandMode] !== undefined;
+    if (resume?.refuseWhenOverridden && overridden) throw new ManualRecoveryRequiredError();
+    if (resume?.style === 'rebuild') {
+      modeCommand = renderResumeOnlyCommand(mode, sessionId, resumeSessionId) ?? modeCommand;
+    } else {
+      modeCommand = appendResumeFlag(modeCommand, mode, resumeSessionId);
+    }
   }
   // Run by tmux via /bin/sh -c, so the path is shell-quoted here. `exec` makes the
   // pane PID the agent itself.
@@ -1909,16 +1602,53 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   );
   const startFailMsg = shellescape(`Codeman: container ${docker.containerName} failed to start (docker daemon down?)`);
 
-  const imageCheck = `${base} image inspect ${image} >/dev/null 2>&1 || { echo ${imageMissingMsg}; exit 1; }`;
-  // create-if-missing (idempotent): reconnect / boot recovery re-runs this exact chain.
-  const ensure = `${base} inspect ${name} >/dev/null 2>&1 || ${base} ${createArgs}`;
-  const start = `${base} start ${name} >/dev/null 2>&1 || { echo ${startFailMsg}; exit 1; }`;
+  const notFoundMsg = shellescape(
+    `Codeman: container ${docker.containerName} not found. Adopted containers are never created by Codeman - start it yourself, then reopen this session.`
+  );
+  const notRunningMsg = shellescape(
+    `Codeman: container ${docker.containerName} is not running. Codeman never starts a container it does not own - start it yourself, then reopen this session.`
+  );
+
+  const imageCheck = adopted
+    ? ''
+    : `${base} image inspect ${image} >/dev/null 2>&1 || { echo ${imageMissingMsg}; exit 1; }`;
+  // create-if-missing (idempotent): reconnect / boot recovery re-runs this exact
+  // chain. A daemon without swap accounting warns whenever --memory is present,
+  // even when --memory-swap is omitted. In compatibility mode, retain the memory
+  // cap and filter ONLY that exact warning; all other stdout/stderr and the real
+  // create exit status are preserved so mount/config failures remain visible.
+  // A session-unique file avoids shell variables and command substitution, both
+  // of which would be expanded too early by the nested bash/tmux launch layers.
+  const createOutputPath = shellescape(`/tmp/codeman-create-${sessionId}.log`);
+  const filteredCreateOutput = `sed '/^WARNING: Your kernel does not support swap limit capabilities or the cgroup is not mounted\\. Memory limited without swap\\.$/d' ${createOutputPath}`;
+  const removeCreateOutput = `rm -f ${createOutputPath}`;
+  const createCommand = createContext.disableSwapLimit
+    ? `{ if ${base} ${createArgs} >${createOutputPath} 2>&1; ` +
+      `then ${filteredCreateOutput}; ${removeCreateOutput}; ` +
+      `elif ${base} inspect ${name} >/dev/null 2>&1; then ${removeCreateOutput}; ` +
+      `else ${filteredCreateOutput} >&2; ${removeCreateOutput}; false; fi; }`
+    : `${base} ${createArgs}`;
+  const ensure = adopted
+    ? `${base} inspect ${name} >/dev/null 2>&1 || { echo ${notFoundMsg}; exit 1; }`
+    : `${base} inspect ${name} >/dev/null 2>&1 || ${createCommand}`;
+  // ⚠️ No double quotes and no `$(…)` here. This whole chain is embedded in an
+  // outer `bash -c "…"`, so an unescaped `"` closes that string early, the rest
+  // is re-tokenized, and tmux fails to exec with a bare `execvp(3) failed`. A
+  // `grep -qx` pipeline reads the same answer using only the single-quoted form
+  // every other line in this builder already uses.
+  const start = adopted
+    ? `${base} inspect -f ${shellescape('{{.State.Running}}')} ${name} 2>/dev/null | grep -qx true || { echo ${notRunningMsg}; exit 1; }`
+    : `${base} start ${name} >/dev/null 2>&1 || { echo ${startFailMsg}; exit 1; }`;
   // Seed writable credential config from read-only host mounts ONCE per container
   // (guarded by [ -e ] so reconnects never clobber in-container config; `cp -a` for
   // whole-dir credential seeds). mkdir -p the parent so a file seed works even when
   // no sibling share-mount pre-created the dir. Paths are fixed CONTAINER_HOME
   // constants (no shell metachars), so the whole inner command is shell-quoted once.
-  const seedSteps = (seedCopies ?? []).map((s) => {
+  // An ADOPTED container gets NO seed copies: those read from create-time
+  // read-only mounts that do not exist here, and writing host credentials into a
+  // container the user owns is a mutation adoption does not permit. Its CLIs must
+  // already be authenticated inside it.
+  const seedSteps = (adopted ? [] : (seedCopies ?? [])).map((s) => {
     const cp = s.recursive ? 'cp -a' : 'cp';
     const parent = s.to.slice(0, s.to.lastIndexOf('/'));
     return `mkdir -p ${parent} 2>/dev/null; [ -e ${s.to} ] || ${cp} ${s.from} ${s.to} 2>/dev/null || true`;
@@ -1926,7 +1656,7 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   const innerCmd = seedSteps.length ? `${seedSteps.join(' ; ')} ; ${tmuxInvocation}` : tmuxInvocation;
   const execCmd = `exec ${base} exec -it --workdir ${workdir} ${execEnvFlags.join(' ')} ${name} sh -lc ${shellescape(innerCmd)}`;
 
-  return [imageCheck, ensure, start, execCmd].join(' ; ');
+  return [imageCheck, ensure, start, execCmd].filter(Boolean).join(' ; ');
 }
 
 /**
@@ -1942,13 +1672,29 @@ export function buildDockerKillCommand(options: { docker: SessionDocker; session
   return `${base} exec ${shellescape(docker.containerName)} tmux -L ${DOCKER_TMUX_SOCKET} kill-session -t ${shellescape(dkrName)}`;
 }
 
+/**
+ * Guard for the two builders that mutate CONTAINER lifecycle. They are pure
+ * string builders, so refusing here means an adopted container cannot even have
+ * a stop/remove command constructed for it — there is no shape of caller bug
+ * that turns into a `docker stop`/`rm` on something we do not own.
+ */
+function assertOwnedContainer(docker: SessionDocker, action: string): void {
+  if (docker.owned === false) {
+    throw new Error(
+      `Refusing to ${action} adopted container "${docker.containerName}": Codeman does not own its lifecycle.`
+    );
+  }
+}
+
 /** Explicit container stop (frees RAM/CPU; conversation resumes on next launch via --resume). */
 export function buildDockerStopCommand(docker: SessionDocker): string {
+  assertOwnedContainer(docker, 'stop');
   return `${buildDockerBaseArgs(docker).join(' ')} stop -t 10 ${shellescape(docker.containerName)}`;
 }
 
 /** Explicit container removal (case-delete). Destroys in-image state; bind mounts survive. */
 export function buildDockerRemoveCommand(docker: SessionDocker): string {
+  assertOwnedContainer(docker, 'remove');
   return `${buildDockerBaseArgs(docker).join(' ')} rm -f ${shellescape(docker.containerName)}`;
 }
 
@@ -2022,11 +1768,18 @@ export function resolveDockerLaunchOptions(
     sessionId,
     instance: CODEMAN_INSTANCE,
     userArgs,
-    credentialMounts,
-    extraMounts,
+    credentialMounts: credentialMounts.map((mount) => ({
+      ...mount,
+      src: resolveDockerDaemonMountSource(mount.src, home, process.env.CODEMAN_DOCKER_HOST_HOME),
+    })),
+    extraMounts: extraMounts.map((mount) => ({
+      ...mount,
+      src: resolveDockerDaemonMountSource(mount.src, home, process.env.CODEMAN_DOCKER_HOST_HOME),
+    })),
     envCreate,
     addHostGateway: !isDesktop,
     gatewayAlias,
+    disableSwapLimit: process.env.CODEMAN_DOCKER_DISABLE_SWAP_LIMIT === '1',
   };
 
   const execEnv: Record<string, string> = {
@@ -2042,134 +1795,100 @@ export function resolveDockerLaunchOptions(
   };
   // NAME-ONLY exec env forwarded from Codeman's process env (the docker client
   // inherits it), so API-key CLIs get their key without it appearing in argv.
-  const execEnvNames =
-    mode === 'codex'
-      ? ['OPENAI_API_KEY', 'CODEX_API_KEY']
-      : mode === 'gemini'
-        ? ['GEMINI_API_KEY', 'GOOGLE_API_KEY']
-        : [];
+  // COD-416 wave 3e: `env.dockerExecEnvNames` has always declared exactly this list per CLI;
+  // the two-arm conditional was a second copy of it.
+  const execEnvNames = getCli(mode)?.env.dockerExecEnvNames ?? [];
 
   return { mode, docker, sessionId, resumeSessionId, createContext, execEnv, execEnvNames, seedCopies };
 }
 
 /**
- * Set sensitive environment variables on a tmux session via setenv.
- * These are inherited by panes but not visible in ps output or tmux history.
+ * PURE: the `tmux setenv` pairs a session in this mode needs, in issue order.
+ *
+ * Extracted so the DECISION (which vars, from where, with what validation) is unit-testable
+ * without a tmux socket — the four hand-written `set<Cli>EnvVars` helpers this replaces were
+ * async side-effect loops, so nothing could assert what they would set.
+ *
+ * Three sources, all registry DATA:
+ *   1. `env.tmuxSetenvKeys` — names forwarded from the SERVER's own environment (secrets).
+ *   2. `env.configSetenv`   — values the CALLER supplied, re-validated against the declared
+ *      ParamSpec by `configSetenvValues()`. For dsh the value IS a permission level, so a
+ *      builder must never trust its caller here.
+ *   3. `env.configContentVar` — a JSON blob pushed as one var (opencode's config content).
+ *
+ * ⚠️ `env.setenvProfile` is deliberately NOT here: it writes an executable shim to disk and
+ * needs the resulting path, which is a side effect a pure planner must not perform.
  */
-async function setOpenCodeEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY'];
-  for (const key of sensitiveVars) {
-    const val = process.env[key];
-    if (val) {
-      // Shell-escape: wrap in single quotes, escape any inner single quotes
-      const escaped = val.replace(/'/g, "'\\''");
-      try {
-        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-        });
-      } catch {
-        /* Non-critical — key may not be needed */
-      }
-    }
+export function planCliEnvSetenv(
+  entry: CliEntry,
+  legacyConfig: Record<string, unknown> | undefined,
+  serverEnv: NodeJS.ProcessEnv = process.env
+): Array<{ key: string; value: string }> {
+  const pairs: Array<{ key: string; value: string }> = [];
+  for (const key of entry.env.tmuxSetenvKeys) {
+    const val = serverEnv[key];
+    if (val) pairs.push({ key, value: val });
   }
+  for (const [key, value] of Object.entries(configSetenvValues(entry, legacyConfig))) {
+    pairs.push({ key, value: String(value) });
+  }
+  const contentVar = entry.env.configContentVar;
+  if (contentVar) {
+    const content = resolveConfigContent(legacyConfig);
+    if (content) pairs.push({ key: contentVar, value: content });
+  }
+  return pairs;
 }
 
 /**
- * Set sensitive environment variables for Codex on a tmux session via setenv.
- * Codex (OpenAI CLI) needs OPENAI_API_KEY; we also forward CODEX_* keys.
+ * PURE: opencode's `OPENCODE_CONFIG_CONTENT` blob, or undefined when there is nothing to set.
+ *
+ * `autoAllowTools` layers a blanket allow OVER any caller JSON (the caller's keys merge in
+ * first, then `permission` is forced), and invalid caller JSON is REFUSED rather than passed
+ * through — a malformed blob would otherwise reach the CLI as config.
  */
-async function setCodexEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME'];
-  for (const key of sensitiveVars) {
-    const val = process.env[key];
-    if (val) {
-      const escaped = val.replace(/'/g, "'\\''");
-      try {
-        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-        });
-      } catch {
-        /* Non-critical — key may not be needed */
-      }
-    }
-  }
-}
-
-/**
- * Set sensitive environment variables for Gemini on a tmux session via setenv.
- * Gemini Pro/Ultra users usually authenticate via cached Google login; these
- * variables cover API-key and Vertex AI paths without putting secrets in ps.
- */
-async function setGeminiEnvVars(tmuxCmd: string, muxName: string): Promise<void> {
-  const sensitiveVars = [
-    'GEMINI_API_KEY',
-    'GEMINI_MODEL',
-    'GOOGLE_API_KEY',
-    'GOOGLE_CLOUD_PROJECT',
-    'GOOGLE_CLOUD_LOCATION',
-    'GOOGLE_APPLICATION_CREDENTIALS',
-    'GOOGLE_GENAI_USE_VERTEXAI',
-  ];
-  for (const key of sensitiveVars) {
-    const val = process.env[key];
-    if (val) {
-      const escaped = val.replace(/'/g, "'\\''");
-      try {
-        await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-        });
-      } catch {
-        /* Non-critical — key may not be needed */
-      }
-    }
-  }
-}
-
-/**
- * Set OPENCODE_CONFIG_CONTENT on a tmux session via setenv.
- * Uses tmux setenv to avoid shell metacharacter injection from user-supplied JSON.
- */
-async function setOpenCodeConfigContent(tmuxCmd: string, muxName: string, config?: OpenCodeConfig): Promise<void> {
-  if (!config) return;
-
-  let jsonContent: string | undefined;
-
-  if (config.autoAllowTools) {
+function resolveConfigContent(legacyConfig: Record<string, unknown> | undefined): string | undefined {
+  const autoAllow = legacyConfig?.autoAllowTools === true;
+  const raw = typeof legacyConfig?.configContent === 'string' ? legacyConfig.configContent : undefined;
+  if (autoAllow) {
     const permConfig: Record<string, unknown> = { permission: { '*': 'allow' } };
-    if (config.configContent) {
+    if (raw) {
       try {
-        const existing = JSON.parse(config.configContent) as Record<string, unknown>;
-        Object.assign(permConfig, existing);
+        Object.assign(permConfig, JSON.parse(raw) as Record<string, unknown>);
         permConfig.permission = { '*': 'allow' };
       } catch {
         /* invalid JSON, use default permConfig */
       }
     }
-    jsonContent = JSON.stringify(permConfig);
-  } else if (config.configContent) {
-    // Validate JSON to prevent garbage config
-    try {
-      JSON.parse(config.configContent);
-      jsonContent = config.configContent;
-    } catch {
-      console.error('[TmuxManager] Invalid JSON in openCodeConfig.configContent, skipping');
-      return;
-    }
+    return JSON.stringify(permConfig);
   }
+  if (!raw) return undefined;
+  try {
+    JSON.parse(raw);
+    return raw;
+  } catch {
+    console.error('[TmuxManager] Invalid JSON in openCodeConfig.configContent, skipping');
+    return undefined;
+  }
+}
 
-  if (jsonContent) {
-    const escaped = jsonContent.replace(/'/g, "'\\''");
-    try {
-      await execAsync(`${tmuxCmd} setenv -t '${muxName}' OPENCODE_CONFIG_CONTENT '${escaped}'`, {
-        encoding: 'utf8',
-        timeout: EXEC_TIMEOUT_MS,
-      });
-    } catch {
-      /* Non-critical */
-    }
+/**
+ * Issue one `tmux setenv`. Values stay off the bash command line (invisible in `ps`).
+ *
+ * ⚠️ execAsync, NEVER execSync. COD-212 converted exactly these paths off the sync helper
+ * because a blocking spawn during session create froze `/api/status` for a measured 5.08s
+ * (23.7s event-loop lag in the prod journal). Upstream's generic helper is synchronous;
+ * adopting it as-is silently reverts that fix.
+ */
+async function setTmuxEnvVar(tmuxCmd: string, muxName: string, key: string, value: string): Promise<void> {
+  const escaped = value.replace(/'/g, "'\\''");
+  try {
+    await execAsync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
+      encoding: 'utf8',
+      timeout: EXEC_TIMEOUT_MS,
+    });
+  } catch {
+    /* Non-critical — the key may not be needed */
   }
 }
 
@@ -2243,6 +1962,25 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * torn down (killed/detached/stopping). A guarded session is NEVER revived.
    */
   private reconnectGuard: Set<string> = new Set();
+  /**
+   * Cached result of the remote tmux `has-session` probe (sessionId → alive).
+   * `true` = the durable remote tmux session exists (transport drop → reconnect
+   * is safe); `false` = remote session gone (agent exited cleanly → do NOT
+   * reconnect); `undefined` = not yet probed / probe failed. Only sessions
+   * whose pane is otherwise dead+eligible get probed, so a clean exit tears
+   * down the remote tmux and the probe reports false — killing the auto-revive
+   * (found live 2026-08-29: remote omp/opencode ctrl-c/ctrl-d auto-respawned
+   * fresh agents because the watcher couldn't tell a clean exit from a
+   * transport drop).
+   */
+  private remoteAliveCache: Map<string, boolean | undefined> = new Map();
+  /**
+   * Sessions with a `has-session` probe currently in flight. The probe is a
+   * fire-and-forget ssh round-trip with a 15s timeout against a 5s tick, so
+   * without this an unreachable host would accumulate three overlapping ssh
+   * processes per dead session.
+   */
+  private remoteAliveInFlight: Set<string> = new Set();
 
   private trueColorConfigured = false;
   private readonly checkpointExecutor?: (command: string) => Promise<void>;
@@ -2389,47 +2127,39 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     truecolorEnabled?: boolean,
     headroomClaudeUrl?: string
   ): string[] {
+    const entry = getCli(mode);
+    const declaredExports = entry?.env.exports ?? [];
+    const declaredUnset = entry?.env.unset ?? [];
+
     // COLORTERM is unset for Claude sessions by default to avoid tmux→PTY→xterm.js
     // color glitches (an empirical rendering choice). The `truecolorEnabled` app
     // setting (COD-75) lets the user opt Claude back into 24-bit truecolor.
     // Bubble Tea/Ink TUIs (OpenCode, Codex, Gemini) always get truecolor so their
     // background/color palette negotiation matches xterm's 24-bit renderer.
-    const colorTermExport =
-      mode === 'opencode' ||
-      mode === 'codex' ||
-      mode === 'gemini' ||
-      mode === 'antigravity' ||
-      mode === 'pi' ||
-      mode === 'grok' ||
-      mode === 'deepseek' ||
-      mode === 'omp' ||
-      // Downstream-only (COD-75): the user's truecolor toggle, which is what
-      // opts CLAUDE back into 24-bit. Upstream has only the per-mode list, so
-      // this is a union — dropping either side loses a real behaviour.
-      truecolorEnabled
-        ? 'export COLORTERM=truecolor'
-        : 'unset COLORTERM';
+    //
+    // COD-416: the eight-mode `||` chain became "does this entry DECLARE the export".
+    // ⚠️ Still a UNION with `truecolorEnabled`, and both halves are load-bearing — the
+    // registry answers "does this CLI always want truecolor", the setting answers "has the
+    // user opted THIS session in". Dropping either loses a real behaviour (the chain's own
+    // comment said so, and it was right).
+    const declaresTruecolor = declaredExports.some((e) => e.name === 'COLORTERM' && e.value === 'truecolor');
+    const colorTermExport = declaresTruecolor || truecolorEnabled ? 'export COLORTERM=truecolor' : 'unset COLORTERM';
     const exports = [
       'export LANG=en_US.UTF-8',
       'export LC_ALL=en_US.UTF-8',
-      // Settings-driven (see colorTermExport above); upstream hardcodes this
-      // per-mode, we honor the user's truecolor toggle instead.
+      // Settings-driven (see colorTermExport above); the registry declares the per-CLI
+      // half, we honor the user's truecolor toggle on top of it.
       colorTermExport,
-      ...(mode === 'codex' ||
-      mode === 'gemini' ||
-      mode === 'antigravity' ||
-      mode === 'pi' ||
-      mode === 'grok' ||
-      mode === 'deepseek' ||
-      mode === 'omp'
-        ? ['unset NO_COLOR']
-        : []),
+      ...(declaredUnset.includes('NO_COLOR') ? ['unset NO_COLOR'] : []),
       // Stamp each Codex pane with a unique originator so the response-viewer
       // can locate THIS pane's rollout exactly — codex writes the value into
       // session_meta.originator of every rollout it creates. Without it,
       // rollouts are matched by cwd+mtime and two panes in the same directory
-      // bleed into each other.
-      ...(mode === 'codex' ? [`export CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codeman_${sessionId}`] : []),
+      // bleed into each other. Declared as `env.exports` with an ENGINE value, so the
+      // `mode === 'codex'` test became "which entry asks for this".
+      ...declaredExports
+        .filter((e) => typeof e.value === 'object' && e.value.engine === 'codemanPrefixedSessionId')
+        .map((e) => `export ${e.name}=codeman_${sessionId}`),
       'export CODEMAN_MUX=1',
       `export CODEMAN_SESSION_ID=${sessionId}`,
       `export CODEMAN_MUX_NAME=${muxName}`,
@@ -2442,8 +2172,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // execution time, so the COD-54 hook secret stays off the command line.
       `export CODEMAN_HOOK_SECRET_FILE="${dataPath('hook-secret')}"`,
     ];
-    // Only unset CLAUDECODE for Claude sessions
-    if (mode === 'claude') exports.splice(2, 0, 'unset CLAUDECODE');
+    // Claude is the only entry declaring CLAUDECODE in `env.unset`, and it goes BEFORE the
+    // COLORTERM line — the splice index is preserved exactly, since the ordering of these
+    // lines is part of the pane command this builds.
+    if (declaredUnset.includes('CLAUDECODE')) exports.splice(2, 0, 'unset CLAUDECODE');
     exports.push(...buildHeadroomExports(mode, headroomClaudeUrl));
     return exports;
   }
@@ -2493,128 +2225,61 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * In createSession(), a missing binary dir throws — the caller handles that separately.
    */
   private buildPathExport(mode: SessionMode): { pathExport: string; dir: string | null } {
-    if (mode === 'claude') {
-      const dir = findClaudeDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'opencode') {
-      const dir = resolveOpenCodeDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'codex') {
-      const dir = resolveCodexDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'gemini') {
-      const dir = resolveGeminiDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'antigravity') {
-      const dir = resolveAntigravityDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'pi') {
-      const dir = resolvePiDir();
-      return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
-    }
-    if (mode === 'grok') {
-      const dir = resolveGrokDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
-    }
-    if (mode === 'deepseek') {
-      const dir = resolveDeepSeekDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
-    }
-    if (mode === 'omp') {
-      const dir = resolveOmpDir();
-      return { pathExport: dir ? `export PATH="${dir}:$PATH" && ` : '', dir };
-    }
-    return { pathExport: '', dir: null };
+    // COD-416: a nine-arm dispatch to nine per-CLI `resolveXDir()` helpers became one call to
+    // the registry's generic resolver. `shell` (and any unregistered mode) resolves to null,
+    // which is the old `return { pathExport: '', dir: null }` fallthrough.
+    //
+    // ⚠️ All nine now emit `buildCliPathExport`, which SHELL-ESCAPES the directory. Six arms
+    // already did; grok/deepseek/omp hand-built `export PATH="<dir>:$PATH"` with the path
+    // unescaped inside double quotes. For an ordinary directory the resulting PATH is
+    // identical — for one containing a quote or `$` the old form was broken and injectable,
+    // so this normalises three outliers onto the safe form the majority already used.
+    const dir = resolveCliBinDir(mode);
+    return { pathExport: dir ? buildCliPathExport(dir) : '', dir };
   }
 
   /**
-   * Configure OpenCode-specific environment on a tmux session.
-   * Sets sensitive API keys and config content via tmux setenv
-   * (not visible in ps output or tmux history, inherited by panes).
+   * Configure this CLI's environment on a tmux session, entirely from registry data.
+   *
+   * Replaces `_configureOpenCode` / `_configureCodex` / `_configureGemini` /
+   * `_configureDeepSeek` and the four near-identical key-list loops behind them. Everything
+   * goes via `tmux setenv`, so secrets are inherited by the pane without appearing in `ps`.
+   *
+   * ⚠️ FULLY ASYNC, and that is the point. `_configureDeepSeek` was still `execSync` — up to
+   * six blocking spawns in the session-create path, which is exactly the pattern COD-212
+   * removed from the other three (a measured 5.08s `/api/status` freeze). Generalising the
+   * three async ones without bringing deepseek with them would have left the bug in place;
+   * adopting upstream's synchronous helper would have reintroduced it for all four.
    */
-  private async _configureOpenCode(muxName: string, openCodeConfig?: OpenCodeConfig): Promise<void> {
+  private async _configureCliEnv(
+    muxName: string,
+    sessionId: string,
+    mode: SessionMode,
+    options: Record<string, unknown>
+  ): Promise<void> {
+    const entry = getCli(mode);
+    if (!entry) return;
     const tmuxCmd = this.tmux();
-    await setOpenCodeEnvVars(tmuxCmd, muxName);
-    await setOpenCodeConfigContent(tmuxCmd, muxName, openCodeConfig);
-  }
+    const legacyConfig = legacyConfigForMode(mode, options);
 
-  /**
-   * Configure Codex-specific environment on a tmux session.
-   * Sets OPENAI_API_KEY (and related keys) via tmux setenv so secrets don't
-   * appear in the bash command line.
-   */
-  private async _configureCodex(muxName: string): Promise<void> {
-    await setCodexEnvVars(this.tmux(), muxName);
-  }
-
-  /**
-   * Configure Gemini-specific environment on a tmux session.
-   */
-  private async _configureGemini(muxName: string): Promise<void> {
-    await setGeminiEnvVars(this.tmux(), muxName);
-  }
-
-  /**
-   * Configure DeepSeek Harness environment on a tmux session.
-   *
-   * Two independent things, both via `tmux setenv` so they are inherited by the
-   * pane without appearing in `ps`:
-   *
-   * 1. `DSH_PERMISSION_MODE` — the harness's only permission input. Exported
-   *    ONLY when the caller sent one, so an absent config lands on the harness's
-   *    own `workspace-write` default (which asks) rather than on ours. That
-   *    "only if sent" shape is what the multi-user clamp relies on.
-   * 2. The `HERDR_*` triple — the supervisor contract the terminal front door
-   *    uses to report idle/working/blocked. Pointing `HERDR_BIN_PATH` at our own
-   *    generated shim is what upgrades this mode from output-stabilization
-   *    guessing to definitive hook events (see deepseek-status-shim.ts). The
-   *    pane id IS the Codeman session id, which is how the shim attributes a
-   *    report without trusting anything the agent could influence.
-   *
-   * Also forwards DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL from the server env when
-   * present, matching the codex/gemini precedent for headless auth.
-   */
-  private _configureDeepSeek(muxName: string, sessionId: string, config?: DeepSeekConfig): void {
-    const tmuxCmd = this.tmux();
-    const setenv = (key: string, value: string): void => {
-      const escaped = value.replace(/'/g, "'\\''");
-      try {
-        execSync(`${tmuxCmd} setenv -t '${muxName}' ${key} '${escaped}'`, {
-          encoding: 'utf8',
-          timeout: EXEC_TIMEOUT_MS,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-      } catch {
-        /* Non-critical */
-      }
-    };
-
-    for (const key of ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'DSH_HOME']) {
-      const val = process.env[key];
-      if (val) setenv(key, val);
+    for (const { key, value } of planCliEnvSetenv(entry, legacyConfig)) {
+      await setTmuxEnvVar(tmuxCmd, muxName, key, value);
     }
 
-    // Enum-validated at the schema boundary; re-checked here because this value
-    // reaches a shell line, and a builder must never trust its caller.
-    if (
-      config?.permissionMode &&
-      ['read-only', 'workspace-write', 'danger-full-access'].includes(config.permissionMode)
-    ) {
-      setenv('DSH_PERMISSION_MODE', config.permissionMode);
-    }
-
-    if (config?.statusReporting !== false) {
+    // `env.setenvProfile` — genuinely code-shaped work, kept out of the pure planner because
+    // it writes an executable shim to DISK and then exports that shim's path.
+    if (entry.env.setenvProfile === 'deepseek-status-bridge') {
+      // The bridge is what upgrades dsh from output-stabilization guessing to definitive
+      // idle/working/blocked events; a session may disarm it, and then Codeman must not
+      // claim to be its supervisor.
+      if (legacyConfig?.statusReporting === false) return;
       const shim = ensureDeepSeekStatusShim();
-      if (shim) {
-        setenv('HERDR_ENV', '1');
-        setenv('HERDR_BIN_PATH', shim);
-        setenv('HERDR_PANE_ID', sessionId);
-      }
+      if (!shim) return;
+      await setTmuxEnvVar(tmuxCmd, muxName, 'HERDR_ENV', '1');
+      await setTmuxEnvVar(tmuxCmd, muxName, 'HERDR_BIN_PATH', shim);
+      // The pane id IS the Codeman session id, which is how the shim attributes a report
+      // without trusting anything the agent could influence.
+      await setTmuxEnvVar(tmuxCmd, muxName, 'HERDR_PANE_ID', sessionId);
     }
   }
 
@@ -2754,7 +2419,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       // Create tmux session in three steps to handle cold-start (no server running)
       // and avoid the race where the command exits before remain-on-exit is set:
-      // 1. Create session with default shell (starts tmux server, stays alive)
       // 2. Set remain-on-exit (server now exists, session won't vanish on exit)
       // 3. Replace shell with actual command via respawn-pane (no terminal echo)
       // Unset $TMUX so nested sessions work when the dev server itself runs inside tmux.
@@ -2794,23 +2458,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         /* Non-critical */
       }
 
-      // For OpenCode: set sensitive env vars and config via tmux setenv
-      // (not visible in ps output or tmux history, inherited by panes)
-      if (mode === 'opencode') {
-        await this._configureOpenCode(muxName, openCodeConfig);
-      }
-      // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv
-      if (mode === 'codex') {
-        await this._configureCodex(muxName);
-      }
-      // For Gemini: set Gemini/Google auth env vars via tmux setenv
-      if (mode === 'gemini') {
-        await this._configureGemini(muxName);
-      }
-      // For DeepSeek: permission mode + the Herdr-compatible status bridge.
-      if (mode === 'deepseek') {
-        this._configureDeepSeek(muxName, sessionId, deepSeekConfig);
-      }
+      // Per-CLI env (secrets, config blobs, the dsh status bridge) via tmux setenv, so
+      // nothing lands in the bash command line or `ps`. Which vars, and from where, is
+      // registry DATA — this replaced a four-mode `if` chain over four bespoke helpers.
+      await this._configureCliEnv(muxName, sessionId, mode, {
+        openCodeConfig,
+        codexConfig,
+        geminiConfig,
+        antigravityConfig,
+        piConfig,
+        grokConfig,
+        deepSeekConfig,
+        ompConfig,
+      });
 
       // Apply user-supplied env overrides (e.g., CLAUDE_CODE_EFFORT_LEVEL) via tmux setenv
       // so secret values stay off the bash command line. Must run before respawn-pane.
@@ -3066,22 +2726,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     });
 
     try {
-      // For OpenCode: set sensitive env vars via tmux setenv before respawn
-      if (mode === 'opencode') {
-        await this._configureOpenCode(muxName, openCodeConfig);
-      }
-      // For Codex: set OPENAI_API_KEY (and friends) via tmux setenv before respawn
-      if (mode === 'codex') {
-        await this._configureCodex(muxName);
-      }
-      // For Gemini: set Gemini/Google auth env vars via tmux setenv before respawn
-      if (mode === 'gemini') {
-        await this._configureGemini(muxName);
-      }
-      // For DeepSeek: permission mode + the Herdr-compatible status bridge.
-      if (mode === 'deepseek') {
-        this._configureDeepSeek(muxName, sessionId, deepSeekConfig);
-      }
+      // Per-CLI env (secrets, config blobs, the dsh status bridge) via tmux setenv, so
+      // nothing lands in the bash command line or `ps`. Which vars, and from where, is
+      // registry DATA — this replaced a four-mode `if` chain over four bespoke helpers.
+      await this._configureCliEnv(muxName, sessionId, mode, {
+        openCodeConfig,
+        codexConfig,
+        geminiConfig,
+        antigravityConfig,
+        piConfig,
+        grokConfig,
+        deepSeekConfig,
+        ompConfig,
+      });
 
       // Re-apply user env overrides before respawn so the new shell inherits them.
       await this.applyEnvOverrides(muxName, envOverrides);
@@ -3895,16 +3552,56 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * applies the pure {@link decideReconnect} decision and translates the result
    * into events + backoff/state transitions. Public for tests + the watcher.
    */
+  /**
+   * Refresh the cached remote-tmux liveness for a session whose pane is dead.
+   * Fire-and-forget (async, not awaited by the sync tick): the probe is a slow
+   * ssh round-trip, so it must not block the 5s watcher interval. On success it
+   * writes the cached result; the NEXT tick then makes the revive decision with
+   * fresh data. A clean exit makes the remote tmux session vanish, so the probe
+   * resolves false and the watcher stops reviving it (2026-08-29).
+   */
+  private async refreshRemoteAlive(session: MuxSession): Promise<void> {
+    if (!session.remote) return;
+    if (this.remoteAliveInFlight.has(session.sessionId)) return;
+    this.remoteAliveInFlight.add(session.sessionId);
+    const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(session.sessionId);
+    try {
+      const alive = await remoteTmuxSessionAlive(session.remote, remoteName);
+      this.remoteAliveCache.set(session.sessionId, alive);
+    } catch {
+      this.remoteAliveCache.set(session.sessionId, undefined);
+    } finally {
+      this.remoteAliveInFlight.delete(session.sessionId);
+    }
+  }
+
   async runRemoteReconnectTick(now: number, enabled: boolean): Promise<void> {
     for (const session of this.sessions.values()) {
       if (!session.remote) continue;
       const sessionId = session.sessionId;
       const state = this.reconnectState.get(sessionId);
+      // Only probe when the pane is actually dead — otherwise the ssh round-trip
+      // would run every 5s for every healthy remote session. The cache is
+      // refreshed lazily so a clean exit (remote tmux gone) flips it to false
+      // on the next tick and stops the auto-revive.
+      const paneDead = await this.isPaneDead(session.muxName);
+      if (!paneDead) {
+        // A live pane makes whatever the probe last said STALE, so forget it:
+        // after a successful reattach (or a manual restart) the next dead pane
+        // must be probed afresh. A cached `true` from the transport drop would
+        // otherwise revive a later CLEAN exit, the exact bug this cache exists
+        // to prevent, and a cached `false` from a clean exit would leave a
+        // manually restarted session with auto-reconnect permanently off.
+        this.remoteAliveCache.delete(sessionId);
+      } else if (this.remoteAliveCache.get(sessionId) === undefined) {
+        void this.refreshRemoteAlive(session);
+      }
       const action = decideReconnect({
         session: {
           sessionId,
           isRemote: true,
-          paneDead: await this.isPaneDead(session.muxName),
+          paneDead,
+          remoteAlive: this.remoteAliveCache.get(sessionId),
         },
         state,
         guarded: this.reconnectGuard.has(sessionId),
@@ -3952,12 +3649,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   guardRemoteReconnect(sessionId: string): void {
     this.reconnectGuard.add(sessionId);
     this.reconnectState.delete(sessionId);
+    this.remoteAliveCache.delete(sessionId);
+    this.remoteAliveInFlight.delete(sessionId);
   }
 
   /** Clear all per-session reconnect + guard state (e.g. when a session is removed). */
   clearRemoteReconnectState(sessionId: string): void {
     this.reconnectState.delete(sessionId);
     this.reconnectGuard.delete(sessionId);
+    this.remoteAliveCache.delete(sessionId);
+    this.remoteAliveInFlight.delete(sessionId);
   }
 
   destroy(): void {
@@ -3967,6 +3668,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.stopRemoteReconnectWatcher();
     this.reconnectState.clear();
     this.reconnectGuard.clear();
+    this.remoteAliveCache.clear();
+    this.remoteAliveInFlight.clear();
   }
 
   registerSession(session: MuxSession): void {

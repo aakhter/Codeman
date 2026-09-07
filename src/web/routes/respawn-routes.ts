@@ -6,6 +6,7 @@
 import { FastifyInstance } from 'fastify';
 import { ApiErrorCode, createErrorResponse, getErrorMessage, type PersistedRespawnConfig } from '../../types.js';
 import { RespawnController, type RespawnConfig } from '../../respawn-controller.js';
+import { isExternalCliMode } from '../../session.js';
 import { RespawnConfigSchema, InteractiveRespawnSchema, RespawnEnableSchema } from '../schemas.js';
 import { SseEvent } from '../sse-events.js';
 import { findSessionOrFail, autoConfigureRalph, parseBody, canAccessOwned, getAuthUser } from '../route-helpers.js';
@@ -97,13 +98,15 @@ export function registerRespawnRoutes(
     }
     const session = findSessionOrFail(ctx, id, req);
 
-    // Respawn is not supported for opencode / codex / gemini / agy sessions
-    if (
-      session.mode === 'opencode' ||
-      session.mode === 'codex' ||
-      session.mode === 'gemini' ||
-      session.mode === 'antigravity'
-    ) {
+    // Respawn is not supported for external CLI sessions.
+    //
+    // COD-416/Q23: this was a hardcoded `opencode|codex|gemini|antigravity` list — the external
+    // set as it stood when antigravity was added (dda03c3a) and never extended when pi, grok,
+    // deepseek and omp arrived. The comment already said "external CLI", so the LIST was the
+    // bug. Respawn drives Claude-shaped `/clear` + re-prompt, which no external CLI understands.
+    // ⚠️ NOT `capabilities.respawn`: shell is `respawn: false` there but is not external, and
+    // shell respawn works today — gating on the capability would silently kill it.
+    if (isExternalCliMode(session.mode)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
 
@@ -245,13 +248,15 @@ export function registerRespawnRoutes(
       return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
     }
 
-    // Respawn is not supported for opencode / codex / gemini / agy sessions
-    if (
-      session.mode === 'opencode' ||
-      session.mode === 'codex' ||
-      session.mode === 'gemini' ||
-      session.mode === 'antigravity'
-    ) {
+    // Respawn is not supported for external CLI sessions.
+    //
+    // COD-416/Q23: this was a hardcoded `opencode|codex|gemini|antigravity` list — the external
+    // set as it stood when antigravity was added (dda03c3a) and never extended when pi, grok,
+    // deepseek and omp arrived. The comment already said "external CLI", so the LIST was the
+    // bug. Respawn drives Claude-shaped `/clear` + re-prompt, which no external CLI understands.
+    // ⚠️ NOT `capabilities.respawn`: shell is `respawn: false` there but is not external, and
+    // shell respawn works today — gating on the capability would silently kill it.
+    if (isExternalCliMode(session.mode)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
 
@@ -319,13 +324,15 @@ export function registerRespawnRoutes(
     const body = reResult.data as { config?: Partial<RespawnConfig>; durationMinutes?: number };
     const session = findSessionOrFail(ctx, id, req);
 
-    // Respawn is not supported for opencode / codex / gemini / agy sessions
-    if (
-      session.mode === 'opencode' ||
-      session.mode === 'codex' ||
-      session.mode === 'gemini' ||
-      session.mode === 'antigravity'
-    ) {
+    // Respawn is not supported for external CLI sessions.
+    //
+    // COD-416/Q23: this was a hardcoded `opencode|codex|gemini|antigravity` list — the external
+    // set as it stood when antigravity was added (dda03c3a) and never extended when pi, grok,
+    // deepseek and omp arrived. The comment already said "external CLI", so the LIST was the
+    // bug. Respawn drives Claude-shaped `/clear` + re-prompt, which no external CLI understands.
+    // ⚠️ NOT `capabilities.respawn`: shell is `respawn: false` there but is not external, and
+    // shell respawn works today — gating on the capability would silently kill it.
+    if (isExternalCliMode(session.mode)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Respawn is not supported for ${session.mode} sessions`);
     }
 

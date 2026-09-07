@@ -1,6 +1,12 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+Canonical agent/contributor guidance for this repository lives in [CLAUDE.md](CLAUDE.md) —
+project structure, build/test/lint commands, code style, testing safety rules
+(`npm test` is the CI gate and is safe to run bare; the three excluded suites
+have their own runners), security notes, and
+the deployment workflow are all maintained there. Please read it before making
+changes, and keep it the single source of truth rather than duplicating
+sections here.
 
 This is a TypeScript ESM Node app. Runtime code lives in `src/`; Fastify wiring is in `src/web/`, routes in `src/web/routes/`, config in `src/config/`, shared types in `src/types/`, and utilities in `src/utils/`. Browser assets are plain JS/CSS/HTML under `src/web/public/`. Tests live in `test/`, including `test/routes/`, `test/mobile/`, `test/mocks/`, and `test/utils/`. Workspace packages live in `packages/`: `xterm-zerolag-input/` (local-echo overlay) and `gesture-control/` (camera hand-tracking overlay, built to `src/web/public/gesture/`). Docs belong in `docs/`; automation scripts belong in `scripts/`. Two subsystems beyond the core session manager: **remote sessions** run the agent inside tmux on an SSH host (`src/remote-hosts.ts`; design in `docs/remote-sessions.md`), and **document preview/export** turns session files into previewable/diffable/exportable docs (`src/document-*.ts`, `src/attachment-*.ts`; design in `docs/document-preview.md`).
 

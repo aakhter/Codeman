@@ -5214,7 +5214,17 @@ Object.assign(CodemanApp.prototype, {
         (data.type === 'document' && sourceExtension === 'docx') ||
         (data.type === 'presentation' && sourceExtension === 'pptx');
       // .docx supports a view switcher: rendered PDF (default), selectable HTML, and Changes (COD-68).
-      const isDocx = data.type === 'document' && !!attachmentId;
+      // COD-418: PDF/HTML are a property of the FILE — a docx renders to both — not of how it was
+      // opened, so they are gated on docx-ness. Gating them on `attachmentId` meant a docx opened by
+      // WORKSPACE PATH (the Files panel and terminal file-path links make the identical
+      // openFilePreview(path, sessionId) call) had no selectable HTML view and therefore no Comment,
+      // while the SAME file outside the workspace — registered as an attachment by
+      // openExternalPathPreview — did. The affordance depended on where the file happened to live.
+      // The server was already path-capable: /documents/html resolves attachmentId OR path.
+      // `Changes` stays attachment-only, and stays keyed on the attachment rather than on docx-ness,
+      // because it needs stored versions and a non-docx attachment still has a revision history.
+      const isDocx = data.type === 'document' && sourceExtension === 'docx';
+      const hasRevisions = !!attachmentId;
       const view = isDocx ? st?.docxView || 'pdf' : 'pdf';
       if (isDocx && view === 'html') {
         let html = '';
@@ -5228,6 +5238,11 @@ Object.assign(CodemanApp.prototype, {
         const safe = typeof this._sanitizeHtml === 'function' ? this._sanitizeHtml(html) : escapeHtml(html);
         bodyEl.innerHTML = `<div class="document-preview-html rv-text">${safe}</div>`;
         this._bindDocxCommentInspector(bodyEl);
+        // COD-418: re-apply comment highlights onto the freshly-rendered HTML, exactly as the
+        // markdown/text branch does. Without this a comment could be added on this view but its
+        // highlight vanished on the next poll re-render, and the COD-95 occurrence anchor was
+        // resolved against a null root (see _previewProseEl).
+        this._applyCommentHighlights(bodyEl.querySelector('.document-preview-html'));
       } else {
         const previewUrl =
           data.previewUrl || data.url || `/api/sessions/${sessionId}/file-preview?path=${encodeURIComponent(filePath)}`;
@@ -5260,13 +5275,17 @@ Object.assign(CodemanApp.prototype, {
         }
       }
       const label = data.type === 'presentation' ? 'slides' : data.type === 'document' ? 'document' : 'pdf';
-      const switcher = isDocx
-        ? ` <span class="document-view-switch">` +
-          `<button class="btn-icon-sm ${view === 'pdf' ? 'active' : ''}" onclick="app.switchDocxView('pdf')">PDF</button>` +
-          `<button class="btn-icon-sm ${view === 'html' ? 'active' : ''}" onclick="app.switchDocxView('html')">HTML</button>` +
-          `<button class="btn-icon-sm" onclick="app.switchDocxView('changes')">Changes</button>` +
-          `</span>`
+      const viewButtons = isDocx
+        ? `<button class="btn-icon-sm ${view === 'pdf' ? 'active' : ''}" onclick="app.switchDocxView('pdf')">PDF</button>` +
+          `<button class="btn-icon-sm ${view === 'html' ? 'active' : ''}" onclick="app.switchDocxView('html')">HTML</button>`
         : '';
+      const changesButton = hasRevisions
+        ? `<button class="btn-icon-sm" onclick="app.switchDocxView('changes')">Changes</button>`
+        : '';
+      const switcher =
+        viewButtons || changesButton
+          ? ` <span class="document-view-switch">${viewButtons}${changesButton}</span>`
+          : '';
       // Comment is available on the selectable HTML view (COD-68/69).
       const comment =
         isDocx && view === 'html'
@@ -5798,11 +5817,16 @@ Object.assign(CodemanApp.prototype, {
    * The rendered prose container the highlights live in: markdown, plain text, or
    * the diff/Changes body (COD-68). COD-100 adds `.document-preview-diff` so the
    * comment highlight + click-to-edit work while comparing versions, not just in
-   * the normal preview.
+   * the normal preview. COD-418 adds `.document-preview-html` — the docx HTML view, which is
+   * where a docx is commented — so its anchors resolve against real prose instead of null.
    */
   _previewProseEl() {
     const bodyEl = this.$('filePreviewBody');
-    return bodyEl?.querySelector('.document-preview-markdown, .document-preview-text, .document-preview-diff') || null;
+    return (
+      bodyEl?.querySelector(
+        '.document-preview-markdown, .document-preview-text, .document-preview-diff, .document-preview-html'
+      ) || null
+    );
   },
 
   /** Collapse runs of whitespace to single spaces (matches stored anchor quotes). */

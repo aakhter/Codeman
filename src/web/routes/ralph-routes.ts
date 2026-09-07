@@ -9,7 +9,7 @@ import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { ApiErrorCode, createErrorResponse, getErrorMessage, type ApiResponse } from '../../types.js';
-import { Session } from '../../session.js';
+import { Session, isExternalCliMode } from '../../session.js';
 import { RespawnController } from '../../respawn-controller.js';
 import { RalphConfigSchema, FixPlanImportSchema, RalphPromptWriteSchema, RalphLoopStartSchema } from '../schemas.js';
 import { SseEvent } from '../sse-events.js';
@@ -53,8 +53,15 @@ export function registerRalphRoutes(
       };
     const session = findSessionOrFail(ctx, id, req);
 
-    // Ralph tracker is not supported for opencode / codex / gemini sessions
-    if (session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini') {
+    // Ralph tracker is not supported for external CLI sessions.
+    //
+    // COD-416/Q23: this was a hardcoded `opencode|codex|gemini` list — the external set from
+    // before antigravity was added, let alone pi/grok/deepseek/omp. The comment already said
+    // "external CLI", so the LIST was the bug. Ralph parses Claude's own todo/completion
+    // output, which no external CLI emits.
+    // ⚠️ NOT `capabilities.ralph`: shell is `ralph: false` there but is not external, and
+    // shell ralph config is accepted today.
+    if (isExternalCliMode(session.mode)) {
       return createErrorResponse(
         ApiErrorCode.INVALID_INPUT,
         `Ralph tracker is not supported for ${session.mode} sessions`

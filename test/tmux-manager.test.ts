@@ -7,16 +7,18 @@
  * Port: N/A (no server needed)
  */
 
+import { getCli } from '../src/config/cli-registry/registry.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   TmuxManager,
-  buildCodexCommand,
   buildRemoteKillCommand,
   buildRemoteLaunchCommand,
   buildSpawnCommand,
   buildLocalPaneCommand,
   buildNofileLimitCommand,
   cliNotFoundMessage,
+  buildDockerLaunchCommand,
+  planCliEnvSetenv,
   formatPaneSnapshot,
   isUsableWorkingDir,
   parsePaneList,
@@ -191,16 +193,19 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('Codex command builder', () => {
+    // COD-416 wave 3e: the hand-written buildCodexCommand is gone — the registry's launch spec
+    // renders these, so the assertions now run through the one surviving builder.
+    const codexCommand = (codexConfig?: Record<string, unknown>) =>
+      buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: codexConfig as never });
+
     it('controls decorative TUI animation through Codex config', () => {
-      expect(buildCodexCommand({ animations: false })).toBe('codex --config tui.animations=false');
-      expect(buildCodexCommand({ animations: true })).toBe('codex --config tui.animations=true');
-      expect(buildCodexCommand()).toBe('codex');
+      expect(codexCommand({ animations: false })).toBe('codex --config tui.animations=false');
+      expect(codexCommand({ animations: true })).toBe('codex --config tui.animations=true');
+      expect(codexCommand()).toBe('codex');
     });
 
     it('runs a resolved local case command exactly as saved', () => {
-      expect(buildCodexCommand({ baseCommand: 'codex --local-exact --model o3' })).toBe(
-        'codex --local-exact --model o3'
-      );
+      expect(codexCommand({ baseCommand: 'codex --local-exact --model o3' })).toBe('codex --local-exact --model o3');
       expect(
         buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: { baseCommand: 'codex --local-exact' } })
       ).toBe('codex --local-exact');
@@ -277,9 +282,11 @@ describe('TmuxManager (unit)', () => {
 
   describe('codex command builder', () => {
     it('passes hook trust bypass only when explicitly configured for automation', () => {
-      expect(buildCodexCommand()).not.toContain('--dangerously-bypass-hook-trust');
+      const codexCommand = (codexConfig?: Record<string, unknown>) =>
+        buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: codexConfig as never });
+      expect(codexCommand()).not.toContain('--dangerously-bypass-hook-trust');
 
-      expect(buildCodexCommand({ dangerouslyBypassHookTrust: true })).toContain('--dangerously-bypass-hook-trust');
+      expect(codexCommand({ dangerouslyBypassHookTrust: true })).toContain('--dangerously-bypass-hook-trust');
     });
   });
 
@@ -2015,13 +2022,31 @@ describe('COD-334 launch transport selection', () => {
 
 describe('COD-334 cliNotFoundMessage', () => {
   type AgentCliMode = Exclude<SessionMode, 'shell'>;
+  /**
+   * COD-416 wave 3b: the ten-arm switch became a delegate to the registry's generic
+   * `missingCliMessage()`. Seven of the nine messages are byte-identical; TWO CHANGED, and
+   * they are updated here DELIBERATELY rather than to make a test pass:
+   *
+   *  - claude: "Install it with" -> "Install with". Claude was the only one of the nine that
+   *    said "it"; the other eight already read "Install with", so this is the odd one out
+   *    being normalised, not eight regressing.
+   *  - deepseek: "DeepSeek Harness CLI (dsh) not found" -> "DeepSeek CLI not found". The `dsh`
+   *    binary name is still present in the install command on the same line, so the hint that
+   *    matters (Debian ships an unrelated `dsh`) is not lost.
+   *
+   * grok/deepseek/omp were MISSING from this table despite the `satisfies` clause, so the
+   * three newest CLIs had no coverage here at all. Added.
+   */
   const installHints = {
-    claude: 'Claude CLI not found. Install it with: curl -fsSL https://claude.ai/install.sh | bash',
+    claude: 'Claude CLI not found. Install with: curl -fsSL https://claude.ai/install.sh | bash',
     opencode: 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
     codex: 'Codex CLI not found. Install with: npm install -g @openai/codex',
     gemini: 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli',
     antigravity: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
     pi: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
+    grok: 'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash',
+    deepseek: 'DeepSeek CLI not found. Install with: npm install -g @deepseek-ai/dsh',
+    omp: 'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh',
   } satisfies Record<AgentCliMode, string>;
   const agentMessages = Object.entries(installHints) as Array<[AgentCliMode, string]>;
 
@@ -2035,5 +2060,249 @@ describe('COD-334 cliNotFoundMessage', () => {
 
   it('rejects shell mode explicitly', () => {
     expect(() => cliNotFoundMessage('shell')).toThrow('No external CLI error exists for shell mode');
+  });
+});
+
+/**
+ * COD-416 wave 3b — `appendResumeFlag` now reads `launch.resumeAppend` instead of a nine-arm
+ * switch. That field was DECLARED-FOR-LATER and read by nothing until this change, so nothing
+ * pinned it; the switch it replaces had no direct coverage either.
+ *
+ * Driven through `buildDockerLaunchCommand`, its only real call site, so the assertion is
+ * about a command that actually reaches a container rather than about a private helper.
+ */
+describe('COD-416 docker resume flag comes from registry data', () => {
+  const SID = '11111111-2222-3333-4444-555555555555';
+  const RID = 'resume-id-1234';
+
+  function launch(mode: SessionMode): string {
+    const docker = {
+      hostId: 'h1',
+      label: 'local',
+      engine: 'docker' as const,
+      containerName: 'c1',
+      containerWorkdir: '/work',
+      image: 'img',
+      runsAsRoot: false,
+    } as never;
+    return buildDockerLaunchCommand({
+      mode,
+      docker,
+      sessionId: SID,
+      resumeSessionId: RID,
+      createContext: {
+        docker,
+        sessionId: SID,
+        instance: 'default',
+        userArgs: [],
+        credentialMounts: [],
+        extraMounts: [],
+        envCreate: {},
+        addHostGateway: false,
+        gatewayAlias: 'host.docker.internal',
+      },
+      execEnv: {},
+      execEnvNames: [],
+      seedCopies: [],
+    } as never);
+  }
+
+  // Exactly the pairs the removed switch hardcoded, mode by mode.
+  it.each([
+    ['gemini', `--resume ${RID}`],
+    ['codex', `resume ${RID}`],
+    ['antigravity', `--conversation ${RID}`],
+    ['pi', `--session ${RID}`],
+    ['grok', `--resume ${RID}`],
+    ['deepseek', `--resume ${RID}`],
+    ['omp', `--resume ${RID}`],
+  ] as const)('appends %s resume as "%s"', (mode, expected) => {
+    expect(launch(mode as SessionMode)).toContain(expected);
+  });
+
+  // The old `default:` arm. `shell` declares no `resumeAppend`, and inventing one would put a
+  // flag onto a live pane command that no shell accepts.
+  it('appends nothing for shell, which declares no resumeAppend', () => {
+    expect(launch('shell' as SessionMode)).not.toContain(RID);
+  });
+
+  /**
+   * ⚠️ opencode and claude also declare no `resumeAppend`, and they still resume — because they
+   * never reach this helper. `buildDockerLaunchCommand` handles both in DEDICATED branches
+   * ABOVE it: claude via `claudeDockerPaneCommand` (its `--session-id … || resume` form) and
+   * opencode via `buildOpenCodeCommand({ continueSession })`, which refuses outright when a
+   * custom command override is present rather than silently starting a fresh conversation.
+   *
+   * Pinned because the absent `resumeAppend` reads like "cannot resume" and is not: the first
+   * version of this test asserted opencode appended nothing and failed against a command that
+   * correctly carried `--session`.
+   */
+  it('resumes opencode through its dedicated branch, not the generic append', () => {
+    const cmd = launch('opencode' as SessionMode);
+    expect(cmd).toContain(`opencode --session ${RID}`);
+  });
+});
+
+/**
+ * COD-416 wave 3c — two more registry conversions in the pane-launch path, neither of which
+ * had direct coverage before. Both were verified against a captured golden of the OLD
+ * implementation across every mode before the swap; these tests are the durable form of that.
+ */
+describe('COD-416 pane env + PATH come from registry data', () => {
+  type Internals = {
+    buildEnvExports(sid: string, mux: string, mode: SessionMode, tc?: boolean, hr?: string): string[];
+    buildPathExport(mode: SessionMode): { pathExport: string; dir: string | null };
+  };
+  const tm = () => new TmuxManager() as unknown as Internals;
+  const envFor = (mode: SessionMode, truecolor?: boolean) => tm().buildEnvExports('SID', 'MUX', mode, truecolor);
+
+  /**
+   * ⚠️ The trap this pins. Upstream's opencode entry UNSETS COLORTERM; this tree has always
+   * EXPORTED truecolor for it, because opencode's Bubble Tea TUI negotiates its palette
+   * against xterm's 24-bit renderer. Adopting upstream's data wholesale would have regressed
+   * opencode's colours — invisible to every test, visible only on screen. The registry entry
+   * was corrected to match the behaviour rather than the behaviour bent to match the data.
+   */
+  it.each(['opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'] as const)(
+    'always exports truecolor for %s, even with the user setting off',
+    (mode) => {
+      expect(envFor(mode as SessionMode, false)).toContain('export COLORTERM=truecolor');
+    }
+  );
+
+  // Claude is the one agent CLI that does NOT get truecolor by default — an empirical
+  // rendering choice — and COD-75's per-user setting is what opts it back in. Both halves of
+  // that union are load-bearing, so both directions are pinned.
+  it('unsets COLORTERM for claude by default and honours the COD-75 opt-in', () => {
+    expect(envFor('claude' as SessionMode, false)).toContain('unset COLORTERM');
+    expect(envFor('claude' as SessionMode, true)).toContain('export COLORTERM=truecolor');
+  });
+
+  // `unset NO_COLOR` covers every external CLI EXCEPT opencode — a real asymmetry in the
+  // original chain, preserved because it is behaviour, not an oversight to tidy up.
+  it('unsets NO_COLOR for the CLIs that declare it, and not for opencode or claude', () => {
+    for (const m of ['codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp'] as const) {
+      expect(envFor(m as SessionMode), `${m}`).toContain('unset NO_COLOR');
+    }
+    expect(envFor('opencode' as SessionMode)).not.toContain('unset NO_COLOR');
+    expect(envFor('claude' as SessionMode)).not.toContain('unset NO_COLOR');
+  });
+
+  // Ordering is part of the pane command: `unset CLAUDECODE` sits BEFORE the COLORTERM line.
+  it('places unset CLAUDECODE before the COLORTERM line, for claude only', () => {
+    const claude = envFor('claude' as SessionMode);
+    expect(claude.indexOf('unset CLAUDECODE')).toBe(2);
+    expect(claude.indexOf('unset CLAUDECODE')).toBeLessThan(claude.indexOf('unset COLORTERM'));
+    expect(envFor('codex' as SessionMode)).not.toContain('unset CLAUDECODE');
+  });
+
+  // The codex originator stamp is an `env.exports` entry with an ENGINE value, so the old
+  // `mode === 'codex'` test became "which entry asks for this".
+  it('stamps the codex originator from its declared engine-valued export', () => {
+    expect(envFor('codex' as SessionMode)).toContain('export CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codeman_SID');
+    expect(envFor('gemini' as SessionMode).join('\n')).not.toContain('ORIGINATOR');
+  });
+
+  // `shell` resolves no CLI directory — the old nine-arm fallthrough.
+  it('emits no PATH export for shell', () => {
+    expect(tm().buildPathExport('shell' as SessionMode)).toEqual({ pathExport: '', dir: null });
+  });
+
+  /**
+   * ⚠️ Every arm now SHELL-ESCAPES the directory. Six already did; grok/deepseek/omp
+   * hand-built `export PATH="<dir>:$PATH"` with the path unescaped inside double quotes.
+   * Identical PATH for an ordinary directory, broken and injectable for one containing a
+   * quote or `$` — so this pins the safe form the majority already used.
+   */
+  it('shell-escapes the resolved binary directory when one is found', () => {
+    for (const m of ['claude', 'codex', 'opencode', 'gemini', 'antigravity'] as const) {
+      const { pathExport, dir } = tm().buildPathExport(m as SessionMode);
+      if (dir === null) continue; // not installed on this machine — nothing to assert
+      expect(pathExport, `${m}`).toBe(`export PATH='${dir}':"$PATH" && `);
+    }
+  });
+});
+
+/**
+ * COD-416 wave 3d — the four per-CLI `_configure<Cli>` methods became one registry-driven
+ * `_configureCliEnv`, and the DECISION half was extracted into the pure `planCliEnvSetenv`.
+ *
+ * The helpers this replaces were async side-effect loops, so nothing could assert which vars
+ * they would set for which CLI — the key lists were only verifiable by reading them. These
+ * are the first tests of that behaviour.
+ */
+describe('COD-416 planCliEnvSetenv — per-CLI tmux setenv from registry data', () => {
+  const entryFor = (id: string) => {
+    const e = getCli(id);
+    if (!e) throw new Error(`no registry entry for ${id}`);
+    return e;
+  };
+  const keys = (id: string, cfg?: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) =>
+    planCliEnvSetenv(entryFor(id), cfg, env).map((p) => p.key);
+
+  /**
+   * ⚠️ The trap this pins. Upstream's opencode entry omits OPENROUTER_API_KEY; this tree has
+   * always forwarded it. Adopting the registry list wholesale would have silently stopped the
+   * key reaching opencode panes — OpenRouter auth would just fail, with nothing to point at.
+   * The DATA was corrected to match the behaviour, exactly as with opencode's COLORTERM.
+   */
+  it('forwards every server-env key the CLI declares, opencode OPENROUTER included', () => {
+    const env = {
+      ANTHROPIC_API_KEY: 'a',
+      OPENAI_API_KEY: 'o',
+      GOOGLE_API_KEY: 'g',
+      OPENROUTER_API_KEY: 'r',
+    };
+    expect(keys('opencode', undefined, env)).toEqual([
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'GOOGLE_API_KEY',
+      'OPENROUTER_API_KEY',
+    ]);
+    expect(keys('codex', undefined, { OPENAI_API_KEY: 'o', CODEX_HOME: '/h' })).toEqual([
+      'OPENAI_API_KEY',
+      'CODEX_HOME',
+    ]);
+    expect(keys('gemini', undefined, { GEMINI_API_KEY: 'k', GOOGLE_CLOUD_PROJECT: 'p' })).toEqual([
+      'GEMINI_API_KEY',
+      'GOOGLE_CLOUD_PROJECT',
+    ]);
+  });
+
+  // Absent server vars are skipped rather than exported empty — an empty API key is worse
+  // than none, since it looks configured and fails at the provider.
+  it('skips a declared key the server does not have', () => {
+    expect(keys('codex', undefined, {})).toEqual([]);
+  });
+
+  // claude and shell declare none: claude authenticates from its own config dir.
+  it.each(['claude', 'shell'] as const)('sets nothing for %s', (id) => {
+    expect(keys(id, undefined, { OPENAI_API_KEY: 'o', ANTHROPIC_API_KEY: 'a' })).toEqual([]);
+  });
+
+  /**
+   * `configSetenv` values come from the CALLER, and for dsh the value IS a permission level,
+   * so the planner re-validates against the declared enum. An invalid one is DROPPED, not
+   * defaulted — the var goes unset and dsh falls back to its own `workspace-write` (which
+   * asks) rather than to something we guessed.
+   */
+  it('accepts a valid deepseek permission mode and drops an invalid one', () => {
+    const ok = planCliEnvSetenv(entryFor('deepseek'), { permissionMode: 'danger-full-access' }, {});
+    expect(ok).toEqual([{ key: 'DSH_PERMISSION_MODE', value: 'danger-full-access' }]);
+    expect(planCliEnvSetenv(entryFor('deepseek'), { permissionMode: 'root' }, {})).toEqual([]);
+    // Absent = the harness's own default, which is the shape the multi-user clamp relies on.
+    expect(planCliEnvSetenv(entryFor('deepseek'), {}, {})).toEqual([]);
+  });
+
+  // opencode's config blob: autoAllowTools layers a blanket allow OVER caller JSON.
+  it('builds opencode config content, with autoAllowTools winning over caller permission', () => {
+    const [pair] = planCliEnvSetenv(entryFor('opencode'), { autoAllowTools: true, configContent: '{"model":"m"}' }, {});
+    expect(pair.key).toBe('OPENCODE_CONFIG_CONTENT');
+    expect(JSON.parse(pair.value)).toEqual({ permission: { '*': 'allow' }, model: 'm' });
+  });
+
+  // Invalid caller JSON is refused rather than passed through to the CLI as config.
+  it('refuses invalid opencode config JSON', () => {
+    expect(planCliEnvSetenv(entryFor('opencode'), { configContent: '{oops' }, {})).toEqual([]);
   });
 });

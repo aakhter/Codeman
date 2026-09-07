@@ -2225,6 +2225,8 @@
                   <div class="set-modelgrid" id="appSettingsModelCards" role="radiogroup" aria-label="Model for new Claude sessions" data-search="model opus sonnet haiku fable claude"></div>
                   <select id="appSettingsClaudeModel" class="set-select set-field-hidden" aria-hidden="true" tabindex="-1">
                     <option value="" data-meta="Whatever the CLI picks">Default (CLI setting)</option>
+                    <option value="claude-fable-5-1" data-meta="Latest" data-base="claude-fable-5-1" data-ctx="1">Fable 5.1</option>
+                    <option value="claude-fable-5-1[1m]" data-variant="1m" data-base="claude-fable-5-1">Fable 5.1 (1M context)</option>
                     <option value="claude-fable-5" data-meta="Most powerful" data-base="claude-fable-5" data-ctx="1">Fable 5</option>
                     <option value="claude-fable-5[1m]" data-variant="1m" data-base="claude-fable-5">Fable 5 (1M context)</option>
                     <option value="opus" data-meta="Most capable" data-base="opus" data-ctx="1">Opus</option>
@@ -2237,7 +2239,7 @@
                   <div class="set-row" id="appSettingsContextRow" data-search="1m context window opus long">
                     <div class="set-row-text">
                       <span class="set-row-label">1M context window</span>
-                      <span class="set-row-desc" id="appSettingsContextDesc">Available for Fable 5, Opus and Opus 4.6.</span>
+                      <span class="set-row-desc" id="appSettingsContextDesc">Available for Fable 5.1, Fable 5, Opus and Opus 4.6.</span>
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsOpusContext1m"><span class="slider"></span></label>
                   </div>
@@ -2277,6 +2279,7 @@
                     </div>
                     <select id="appSettingsDefaultModel" class="set-select">
                       <option value="">Default (CLI default)</option>
+                      <option value="claude-fable-5-1">Fable 5.1 (Latest)</option>
                       <option value="claude-fable-5">Fable 5 (Most powerful)</option>
                       <option value="opus">Opus (Most capable)</option>
                       <option value="sonnet">Sonnet (Balanced)</option>
@@ -2291,6 +2294,7 @@
                         <option value="haiku">Haiku</option>
                         <option value="sonnet">Sonnet</option>
                         <option value="opus">Opus</option>
+                        <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
                       </select>
                     </div>
@@ -2301,6 +2305,7 @@
                         <option value="haiku">Haiku</option>
                         <option value="sonnet">Sonnet</option>
                         <option value="opus">Opus</option>
+                        <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
                       </select>
                     </div>
@@ -2311,6 +2316,7 @@
                         <option value="haiku">Haiku</option>
                         <option value="sonnet">Sonnet</option>
                         <option value="opus">Opus</option>
+                        <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
                       </select>
                     </div>
@@ -2321,6 +2327,7 @@
                         <option value="haiku">Haiku</option>
                         <option value="sonnet">Sonnet</option>
                         <option value="opus">Opus</option>
+                        <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
                       </select>
                     </div>
@@ -2933,6 +2940,7 @@
             <div class="form-row docker-quick-row">
               <label class="checkbox-row"><input type="checkbox" id="newCaseDocker"> 🐳 Run in an isolated Docker container</label>
               <span class="form-hint">Runs this case in a hardened, isolated container. The base image is built automatically on first use. Docker/Podman must be installed.</span>
+              <span class="form-hint">Already have a container running? <button type="button" class="btn-inline-check" id="dockerAdoptJumpBtn">Attach to it instead</button> Codeman only runs docker exec into it and never touches its lifecycle.</span>
             </div>
             <details class="advanced-options docker-quick-settings" id="dockerQuickSettings">
               <summary><svg class="set-adv-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Container settings (optional, sensible defaults)</span></summary>
@@ -3136,13 +3144,34 @@
             </div>
             <p class="set-section-blurb">Run the case inside a container: one per case, shared by all its sessions.</p>
             <div class="form-row">
+              <label class="checkbox-row"><input type="checkbox" id="dockerAdoptExisting"> Attach to an existing container</label>
+              <span class="form-hint">On: Codeman only runs docker exec into a container you already built and run — it never creates, starts, stops or removes it. The CLIs must already be installed and logged in inside it.</span>
+            </div>
+            <div class="form-row docker-adopt-only">
+              <label>Container Name</label>
+              <input type="text" id="dockerContainerName" list="dockerContainerList" placeholder="my-dev-box" pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <datalist id="dockerContainerList"></datalist>
+              <span class="form-hint">Pick from the running containers or type a name. <button type="button" class="btn-inline-check" id="dockerAdoptCheckBtn">Check container</button></span>
+            </div>
+            <div class="form-row docker-adopt-only">
+              <label>Container Workdir</label>
+              <div class="path-input-group">
+                <input type="text" id="dockerAdoptWorkdir" placeholder="/workspace" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+                <button type="button" class="btn path-input-browse" onclick="app.openDockerWorkdirPicker()">Browse&hellip;</button>
+              </div>
+              <span class="form-hint">A path that already exists inside the container. Adoption mounts nothing, so this need not match the host workspace path.</span>
+            </div>
+            <div class="form-row">
               <label>Case Name</label>
               <input type="text" id="dockerCaseName" placeholder="sandbox" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
               <span class="form-hint">Runs inside an isolated container. Multiple sessions can share the same container.</span>
             </div>
             <div class="form-row">
               <label>Workspace Path</label>
-              <input type="text" id="dockerWorkspacePath" placeholder="/home/user/projects/sandbox" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+              <div class="path-input-group">
+                <input type="text" id="dockerWorkspacePath" placeholder="/home/user/projects/sandbox" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+                <button type="button" class="btn path-input-browse" onclick="app.openDockerWorkspacePathPicker()">Browse&hellip;</button>
+              </div>
               <span class="form-hint">Absolute HOST directory, bind-mounted into the container. Codeman scaffolds CLAUDE.md + hooks into it.</span>
             </div>
             <div class="form-row">
@@ -3150,12 +3179,12 @@
               <input type="text" id="dockerHostId" placeholder="local" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
               <span class="form-hint">A reusable docker host profile. Reuse the same ID across cases to share settings.</span>
             </div>
-            <div class="form-row">
+            <div class="form-row docker-create-only">
               <label>Image</label>
               <input type="text" id="dockerImage" placeholder="codeman/agent:base" autocomplete="off" autocapitalize="off" spellcheck="false">
               <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini/opencode/agy/pi/grok/dsh + tmux.</span>
             </div>
-            <div class="form-row">
+            <div class="form-row docker-create-only">
               <label>Network</label>
               <select id="dockerNetwork">
                 <option value="bridge">bridge (internet on, default)</option>
@@ -3163,7 +3192,7 @@
                 <option value="custom">custom bridge</option>
               </select>
             </div>
-            <details class="advanced-options">
+            <details class="advanced-options docker-create-only">
               <summary><svg class="set-adv-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Advanced container settings</span></summary>
               <div class="advanced-options-content">
                 <div class="form-row">

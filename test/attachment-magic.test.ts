@@ -57,8 +57,11 @@ describe('attachment magic links', () => {
   });
 
   it('extracts Codex generated image file URLs from saved-to terminal output', () => {
+    // Codex's own `Saved to:` announcement is opt-in per session (registry capability
+    // `transcript === 'codex-rollout'`), so the codex-mode caller is what this pins.
     const requests = parseTerminalAttachmentRequests(
-      'Saved to: file:///Users/aamer/.codex-personal/generated_images/mockup%20one.png'
+      'Saved to: file:///Users/aamer/.codex-personal/generated_images/mockup%20one.png',
+      { codexArtifacts: true }
     );
 
     expect(requests).toEqual([

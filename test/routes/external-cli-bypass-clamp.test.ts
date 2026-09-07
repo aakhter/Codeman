@@ -90,6 +90,28 @@ describe('clampExternalCliBypassForOwner — multi-user mode', () => {
     expect(out.grokConfig).toEqual({ alwaysApprove: true });
   });
 
+  /**
+   * COD-416: `--dangerously-bypass-hook-trust` was codex's ONE ungated privilege switch. Only
+   * its sibling `dangerouslyBypassApprovals` was clamped, so a non-granted multi-user owner
+   * could send hook-trust and have it reach the pane command.
+   *
+   * Asserted as the SECURITY property — an explicitly-sent `true` comes back `false` — rather
+   * than by re-listing the config, so it fails for the right reason if the clamp regresses.
+   */
+  it('clamps an explicitly-sent codex hook-trust bypass for a non-granted owner', async () => {
+    const out = await _clampExternalCliBypassForOwner('untrusted', {
+      dangerouslyBypassHookTrust: true,
+    } as never);
+    expect(out.codexConfig?.dangerouslyBypassHookTrust).toBe(false);
+  });
+
+  it("leaves a granted owner's codex hook-trust bypass alone", async () => {
+    const out = await _clampExternalCliBypassForOwner('trusted', {
+      dangerouslyBypassHookTrust: true,
+    } as never);
+    expect(out.codexConfig?.dangerouslyBypassHookTrust).toBe(true);
+  });
+
   it('forces codex/antigravity/grok bypass off for a non-granted owner (only-if-sent branch)', async () => {
     const out = await _clampExternalCliBypassForOwner(
       'peon',
@@ -99,7 +121,15 @@ describe('clampExternalCliBypassForOwner — multi-user mode', () => {
       undefined,
       { alwaysApprove: true, model: 'grok-4.5' }
     );
-    expect(out.codexConfig).toEqual({ dangerouslyBypassApprovals: false, model: 'gpt-5' });
+    // COD-416: `dangerouslyBypassHookTrust` is now clamped too — it is codex's other
+    // privilege switch and was previously ungated, so a non-granted owner could send it and
+    // get `--dangerously-bypass-hook-trust` on the pane command. `false` means the flag is
+    // simply not emitted, matching how `dangerouslyBypassApprovals` has always behaved.
+    expect(out.codexConfig).toEqual({
+      dangerouslyBypassApprovals: false,
+      dangerouslyBypassHookTrust: false,
+      model: 'gpt-5',
+    });
     expect(out.antigravityConfig).toEqual({ dangerouslySkipPermissions: false, model: 'gemini-3-pro' });
     expect(out.grokConfig).toEqual({ alwaysApprove: false, model: 'grok-4.5' });
   });
