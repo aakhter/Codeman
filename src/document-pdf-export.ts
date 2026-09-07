@@ -22,6 +22,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
+import { probeOfficeConverter } from './office-converter-runtime.js';
+
 const execFileAsync = promisify(execFile);
 
 const SOFFICE_TIMEOUT_MS = 5 * 60_000;
@@ -222,6 +224,15 @@ async function renderMarkdownViaMarked(content: string): Promise<string | null> 
  * invocation is shared in spirit but the surrounding lifecycle differs.
  */
 export async function convertHtmlToPdf(html: string): Promise<string | null> {
+  // COD-426: fail fast on an unusable converter instead of blocking for the
+  // multi-minute conversion timeout. Kept outside any conversion-limiter slot
+  // (the probe takes one of its own and the limiter is not re-entrant).
+  const verdict = await probeOfficeConverter();
+  if (!verdict.usable) {
+    console.warn(`[DocumentPdfExport] Skipping HTML→PDF conversion: ${verdict.reason}`);
+    return null;
+  }
+
   let workDir: string | undefined;
   try {
     await fs.mkdir(EXPORT_WORK_DIR, { recursive: true });
@@ -232,7 +243,7 @@ export async function convertHtmlToPdf(html: string): Promise<string | null> {
     await fs.writeFile(htmlPath, html, 'utf-8');
 
     await execFileAsync(
-      'soffice',
+      verdict.bin,
       [
         '--headless',
         '--nologo',

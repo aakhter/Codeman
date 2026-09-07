@@ -64,6 +64,7 @@ import { MAX_PASTE_IMAGE_BYTES } from '../../config/buffer-limits.js';
 import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
+import { probeOfficeConverter } from '../../office-converter-runtime.js';
 import {
   buildTextExportHtml,
   classifyExportBranch,
@@ -350,7 +351,12 @@ async function serveConvertedPreview(
   try {
     const previewPath = await getOfficePreviewPdfPath(resolvedPath, extension);
     if (!previewPath) {
-      reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document preview conversion failed'));
+      // COD-426: distinguish "this host cannot convert anything" from "this
+      // document failed to convert". The verdict is cached by the gate the
+      // conversion itself just consulted, so this costs no extra spawn.
+      const verdict = await probeOfficeConverter();
+      const message = verdict.usable ? 'Document preview conversion failed' : verdict.reason;
+      reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, message));
       return;
     }
 

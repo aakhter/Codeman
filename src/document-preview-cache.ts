@@ -10,6 +10,7 @@ import { basename, dirname, extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { runWithConversionLimit } from './document-conversion-limiter.js';
+import { probeOfficeConverter } from './office-converter-runtime.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -230,7 +231,22 @@ async function convertWordDocumentToCachedPdf(filePath: string, cachePath: strin
   }
 }
 
+/**
+ * COD-426: consult the capability gate BEFORE anything else. An unusable
+ * LibreOffice used to present as a ~5 minute hang (the conversion timeout) and
+ * then a generic 500; now it fails immediately with an actionable reason.
+ *
+ * ⚠ The probe takes its own `runWithConversionLimit` slot, and that limiter is
+ * NOT re-entrant — so this call must stay strictly outside the slot taken
+ * below, never nested inside it.
+ */
 async function convertLibreOfficeDocumentToCachedPdf(filePath: string, cachePath: string): Promise<string | null> {
+  const verdict = await probeOfficeConverter();
+  if (!verdict.usable) {
+    console.warn(`[DocumentPreviewCache] Skipping LibreOffice conversion of ${filePath}: ${verdict.reason}`);
+    return null;
+  }
+
   let workDir: string | undefined;
   try {
     await fs.mkdir(DOCUMENT_PREVIEW_CACHE_DIR, { recursive: true });
@@ -241,7 +257,7 @@ async function convertLibreOfficeDocumentToCachedPdf(filePath: string, cachePath
 
     await runWithConversionLimit(() =>
       execFileAsync(
-        'soffice',
+        verdict.bin,
         [
           '--headless',
           '--nologo',

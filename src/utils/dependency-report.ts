@@ -13,6 +13,8 @@
 import { columnWidths, padStyled } from '../cli-style.js';
 import type { ProbeEnvironment, ToolCategory } from '../config/dependency-registry.js';
 import type { ToolResult, ToolStatus } from './dependency-checker.js';
+import { officeConverterReason } from '../config/office-converter.js';
+import type { OfficeConverterVerdict } from '../office-converter-runtime.js';
 
 const CATEGORY_ORDER: ToolCategory[] = ['core', 'office', 'other'];
 
@@ -55,8 +57,31 @@ function statusText(r: ToolResult): string {
   if (r.status === 'ok') return r.version ?? 'installed';
   if (r.status === 'outdated') return `${r.version ?? '?'} (below minimum)`;
   if (r.status === 'skipped') return 'n/a';
-  if (r.status === 'error') return 'version error';
+  if (r.status === 'error') return r.reason ?? 'version error';
   return 'not found';
+}
+
+/**
+ * COD-426: refine the LibreOffice row with a real capability verdict, so
+ * `codeman doctor` cannot report a binary that prints a version but converts
+ * nothing as green.
+ *
+ * PURE and non-mutating on purpose: the sync probe engine must never spawn a
+ * conversion (a sync spawn on the server path freezes the port with no trace),
+ * so the async `doctor` action applies this after `checkAll`.
+ *
+ * Only an otherwise-`ok` row is downgraded — a `missing`/`skipped` LibreOffice
+ * must not be resurrected as an error row, and the path is rewritten to the
+ * binary the probe actually resolved, which is the whole point of the ticket.
+ */
+export function applyOfficeConverterProbe(results: ToolResult[], verdict: OfficeConverterVerdict | null): ToolResult[] {
+  if (!verdict || verdict.usable) return results;
+  return results.map((r) => {
+    if (r.id !== 'libreoffice' || r.status !== 'ok') return r;
+    // Rendered for THIS audience: doctor must not tell the reader to run doctor.
+    const reason = verdict.failure ? officeConverterReason(verdict.failure, false) : verdict.reason;
+    return { ...r, status: 'error' as ToolStatus, reason, path: verdict.bin ?? r.path };
+  });
 }
 
 export function computeExitCode(results: ToolResult[]): number {

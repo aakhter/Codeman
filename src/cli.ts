@@ -2021,7 +2021,8 @@ program
   .option('--category <name>', 'Only check one category (core|office|other)')
   .action(async (options) => {
     const { createRealHost, checkAll } = await import('./utils/dependency-checker.js');
-    const { renderTable, renderJson, computeExitCode } = await import('./utils/dependency-report.js');
+    const { renderTable, renderJson, computeExitCode, applyOfficeConverterProbe } =
+      await import('./utils/dependency-report.js');
     const { dependencyRegistry, TOOL_CATEGORIES } = await import('./config/dependency-registry.js');
 
     if (options.category && !(TOOL_CATEGORIES as readonly string[]).includes(options.category)) {
@@ -2032,7 +2033,20 @@ program
     const host = createRealHost();
     const allTools = dependencyRegistry();
     const registry = options.category ? allTools.filter((t) => t.category === options.category) : allTools;
-    const results = checkAll(registry, host);
+    const rawResults = checkAll(registry, host);
+
+    // COD-426: presence + `--version` is not capability. A LibreOffice that
+    // prints a version but cannot convert anything used to report green here
+    // while every document preview failed, so refine that one row with the SAME
+    // capability probe the converters consult (cached, so this is also what
+    // warms the gate). Only worth spawning when the row is otherwise green.
+    const libreOfficeRow = rawResults.find((r) => r.id === 'libreoffice');
+    let officeProbe = null;
+    if (libreOfficeRow?.status === 'ok') {
+      const { probeOfficeConverter } = await import('./office-converter-runtime.js');
+      officeProbe = await probeOfficeConverter();
+    }
+    const results = applyOfficeConverterProbe(rawResults, officeProbe);
 
     if (options.json) {
       // Raw JSON, never styled: this output is parsed, not read.

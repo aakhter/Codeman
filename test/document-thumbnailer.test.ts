@@ -4,6 +4,12 @@ import fs from 'node:fs/promises';
 import { generateFirstPageThumbnail } from '../src/document-thumbnailer.js';
 import { clearDocumentPreviewCache } from '../src/document-preview-cache.js';
 
+// COD-426: the office preview path consults the converter capability gate
+// before spawning. Stub it usable so this suite stays about thumbnailing.
+vi.mock('../src/office-converter-runtime.js', () => ({
+  probeOfficeConverter: vi.fn(async () => ({ usable: true, bin: '/usr/bin/libreoffice' })),
+}));
+
 vi.mock('node:child_process', () => ({
   execFile: vi.fn((_cmd, _args, _options, callback) => {
     callback(null, { stdout: '', stderr: '' });
