@@ -108,6 +108,14 @@ const launchSchema = z
         z.object({ style: z.literal('positional'), token: shellToken }).strict(),
       ])
       .optional(),
+    // A legacy-config KEY name, not shell text and not a param name — see the type's comment
+    // for why the raw command line deliberately never enters the argv engine.
+    rawCommandField: z
+      .string()
+      .min(1)
+      .max(60)
+      .regex(/^[A-Za-z][A-Za-z0-9]*$/, 'must be a plain identifier naming a legacy config key')
+      .optional(),
   })
   .strict()
   .superRefine((launch, ctx) => {
@@ -328,8 +336,22 @@ const commandLine = z
     'must be space-separated bare words with no shell metacharacters'
   );
 
+const dockerResumeSchema = z
+  .object({
+    style: z.enum(['rebuild', 'append']),
+    refuseWhenOverridden: z.literal(true).optional(),
+  })
+  .strict();
+
 const overlayTargetSchema = z.union([
-  z.object({ command: commandLine.optional(), rootCommand: commandLine.optional() }).strict(),
+  z
+    .object({
+      command: commandLine.optional(),
+      rootCommand: commandLine.optional(),
+      fromLaunchSpec: z.literal(true).optional(),
+      resume: dockerResumeSchema.optional(),
+    })
+    .strict(),
   z.object({ disabled: z.literal(true) }).strict(),
 ]);
 

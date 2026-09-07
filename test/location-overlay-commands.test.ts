@@ -24,6 +24,8 @@ import {
   REMOTE_LOGIN_SHELL_RESOLVE,
 } from '../src/remote-hosts.js';
 import { defaultDockerCommandForMode } from '../src/docker-hosts.js';
+import { renderRemoteCliCommand } from '../src/tmux-manager.js';
+import { STOCK_CLIS } from '../src/config/cli-registry/stock.js';
 import type { SessionMode } from '../src/types/session.js';
 
 // COD-277 — deliberately NOT upstream's `"${SHELL:-/bin/sh}"`. In a tmux pane `$SHELL` is
@@ -68,4 +70,93 @@ it('pins every in-container pane command', () => {
     expect(defaultDockerCommandForMode(mode as SessionMode), mode).toBe(want);
   }
   expect(defaultDockerCommandForMode('nope' as SessionMode)).toBe('exec bash -l');
+});
+
+// ---------------------------------------------------------------------------
+// COD-416 wave 3e — the per-session half of the same two overlays
+// ---------------------------------------------------------------------------
+//
+// The goldens above pin the STATIC default each location falls back to. These pin the part
+// that varies with the session: which CLIs carry their own config to a remote host, and how a
+// resume id reaches an in-container pane. Both were id-branches in tmux-manager.ts and are now
+// `overlays.remote.fromLaunchSpec` / `overlays.docker.resume`.
+
+it('renders a remote command from the launch spec for exactly the CLIs that declare it', () => {
+  // Descriptive, not aspirational: these four are the four that had a hand-written per-session
+  // builder before the conversion. Widening this set is a behaviour change on a path no test
+  // and no beta instance can exercise — see the note on `overlays.remote.fromLaunchSpec`.
+  const carriesSessionConfig = STOCK_CLIS.filter((entry) => {
+    const overlay = entry.overlays.remote;
+    return !!overlay && !('disabled' in overlay) && overlay.fromLaunchSpec === true;
+  }).map((entry) => entry.id);
+  expect([...carriesSessionConfig].sort()).toEqual(['antigravity', 'codex', 'gemini', 'opencode']);
+
+  // And the flag is what actually selects the per-session render.
+  expect(renderRemoteCliCommand('gemini' as SessionMode, { mode: 'gemini', sessionId: 'abc123' })).toBe(
+    'gemini --skip-trust --approval-mode yolo'
+  );
+  expect(
+    renderRemoteCliCommand('gemini' as SessionMode, {
+      mode: 'gemini',
+      sessionId: 'abc123',
+      geminiConfig: { model: 'gemini-2.5-pro', resumeSession: 'sess-1' },
+    })
+  ).toBe('gemini --skip-trust --approval-mode yolo --model gemini-2.5-pro --resume sess-1');
+  // pi declares no remote overlay, so it keeps the static default — its config is dropped.
+  expect(
+    renderRemoteCliCommand('pi' as SessionMode, {
+      mode: 'pi',
+      sessionId: 'abc123',
+      piConfig: { model: 'pi-1' },
+    })
+  ).toBeUndefined();
+});
+
+it("carries opencode's config blob to a remote pane as its declared env var", () => {
+  // `env.configContentVar` names the var; the JSON is built by the same resolver the local
+  // `tmux setenv` path uses, so remote and local cannot disagree about auto-allow.
+  const command = renderRemoteCliCommand('opencode' as SessionMode, {
+    mode: 'opencode',
+    sessionId: 'abc123',
+    openCodeConfig: { autoAllowTools: true },
+  });
+  expect(command).toBe(`OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode`);
+  // A CLI declaring no configContentVar gets no prefix.
+  expect(renderRemoteCliCommand('codex' as SessionMode, { mode: 'codex', sessionId: 'abc123' })).toBe('codex');
+});
+
+it('runs a resolved raw command line verbatim on a remote host too', () => {
+  // `launch.rawCommandField` (codex's COD-392 `baseCommand`) replaces the templated launch in
+  // both locations. The grant that authorises it is re-checked on the launch paths.
+  expect(
+    renderRemoteCliCommand('codex' as SessionMode, {
+      mode: 'codex',
+      sessionId: 'abc123',
+      codexConfig: { baseCommand: 'codex --profile custom', model: 'ignored' },
+    })
+  ).toBe('codex --profile custom');
+});
+
+it('pins which CLIs refuse an in-container resume against a case-supplied command', () => {
+  // A case's own `commands.<mode>` is opaque text. For these two, applying a resume to it would
+  // silently start a fresh conversation, so the launch refuses and a human recovers instead.
+  const refusing = STOCK_CLIS.filter((entry) => {
+    const overlay = entry.overlays.docker;
+    return !!overlay && !('disabled' in overlay) && overlay.resume?.refuseWhenOverridden === true;
+  }).map((entry) => entry.id);
+  expect([...refusing].sort()).toEqual(['codex', 'opencode']);
+});
+
+it('forwards exactly the declared docker exec env names', () => {
+  // Was a two-arm conditional over codex/gemini; the same list has always been registry data.
+  const declared = Object.fromEntries(
+    STOCK_CLIS.filter((entry) => entry.env.dockerExecEnvNames.length > 0).map((entry) => [
+      entry.id,
+      entry.env.dockerExecEnvNames,
+    ])
+  );
+  expect(declared).toEqual({
+    codex: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
+    gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  });
 });

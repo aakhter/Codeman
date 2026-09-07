@@ -69,6 +69,27 @@ function legacyConfigFor(entry: CliEntry, options: SpawnBridgeOptions): Record<s
 }
 
 /**
+ * The complete, server-resolved shell command line this session was given, if its CLI declares
+ * one (`launch.rawCommandField`) and the caller actually sent a non-blank value.
+ *
+ * Returned VERBATIM: it is owner-authored shell text that replaces the templated launch, which
+ * is exactly why every caller must first re-check the owner's bypass grant.
+ */
+export function rawLaunchCommand(entry: CliEntry, options: SpawnBridgeOptions): string | undefined {
+  const field = entry.launch.rawCommandField;
+  if (field === undefined) return undefined;
+  const raw = legacyConfigFor(entry, options)?.[field];
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw : undefined;
+}
+
+/** Same question, addressed by mode — for callers holding only a mode and an option bag. */
+export function rawLaunchCommandForMode(mode: string, options: Record<string, unknown>): string | undefined {
+  const entry = getCli(mode);
+  if (!entry) return undefined;
+  return rawLaunchCommand(entry, options as unknown as SpawnBridgeOptions);
+}
+
+/**
  * Same lookup, addressed by mode rather than by entry, for callers holding only a mode and an
  * option bag (tmux-manager's env configuration). Returns undefined for an unregistered mode.
  */

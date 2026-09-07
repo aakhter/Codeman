@@ -131,6 +131,18 @@ export interface CliLaunch {
    * append (shell, opencode: opencode's docker resume goes through its own config object).
    */
   resumeAppend?: { style: 'flag'; flag: string } | { style: 'positional'; token: string };
+  /**
+   * The legacy `<Mode>Config` KEY holding a COMPLETE, server-resolved shell command line that
+   * REPLACES the templated launch entirely (codex's COD-392 `baseCommand`).
+   *
+   * ⚠️ Deliberately a config key rather than a `launch.params` entry: the argv engine forbids
+   * shell text BY DESIGN, so there is no `ArgSpec` that could carry this and inventing one
+   * would reopen the injection surface the engine exists to close. Naming the key here lets
+   * the code READ it generically while the value stays outside the engine — and the value is
+   * owner-authored shell on a shared host, so every launch path that honours it must first
+   * re-check the owner's bypass grant.
+   */
+  rawCommandField?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +461,25 @@ export interface CliCredStore {
   seedWhole?: boolean;
 }
 
+/**
+ * How a resume id reaches an in-container pane, for the CLIs whose docker resume is NOT the
+ * plain `launch.resumeAppend` append.
+ *
+ * `style: 'rebuild'` = the resume is a normal launch param, so the command is re-rendered from
+ * the launch spec with only that param set (opencode's `--session`), rather than having a token
+ * bolted onto an already-built string.
+ *
+ * `refuseWhenOverridden` = when the CASE supplies its own `commands.<mode>` for this CLI, a
+ * resume request is REFUSED (`ManualRecoveryRequiredError`) instead of being applied to it. The
+ * override is opaque text: appending to it, or replacing it, would silently start a fresh
+ * conversation or launch something the user did not ask for. Absent = the resume is appended to
+ * the override, which is what every flag-style CLI does.
+ */
+export interface CliDockerResume {
+  style: 'rebuild' | 'append';
+  refuseWhenOverridden?: true;
+}
+
 export interface CliOverlays {
   /**
    * The remote/docker DEFAULT pane command: just the CLI invocation (e.g. `claude
@@ -456,8 +487,15 @@ export interface CliOverlays {
    * (remote: login-shell `-c`; docker: `exec`). Absent `command` = the bare
    * `discovery.binaries[0]`. `disabled: true` = this location has no story for this CLI at
    * all (docker for `shell`) — distinct from "no override", which still gets a default.
+   *
+   * `fromLaunchSpec: true` says the remote pane command is RENDERED FROM `launch` with this
+   * session's own config (model, resume id, permission flags) instead of the static `command`
+   * above. ⚠️ It is descriptive, not aspirational: the four CLIs that declare it are the four
+   * whose remote arm has always run a per-session builder. The CLIs without it reach a remote
+   * host with their flags dropped — pre-registry behaviour, preserved deliberately here rather
+   * than quietly widened, and parked as a question of its own (COD-416 wave 3e).
    */
-  remote?: { command?: string } | { disabled: true };
+  remote?: { command?: string; fromLaunchSpec?: true } | { disabled: true };
   /**
    * `rootCommand` is the same invocation for a container whose exec user is uid 0. Only
    * declare it when the normal `command` would be REFUSED as root: claude's carries
@@ -466,7 +504,7 @@ export interface CliOverlays {
    * the outside. Codeman's own base image runs a non-root user and never selects this; an
    * ADOPTED container belongs to its owner and is frequently root. Absent = use `command`.
    */
-  docker?: { command?: string; rootCommand?: string } | { disabled: true };
+  docker?: { command?: string; rootCommand?: string; resume?: CliDockerResume } | { disabled: true };
   /**
    * ⚠️ DECLARED-FOR-LATER, unlike `remote`/`docker` above, which are live.
    *

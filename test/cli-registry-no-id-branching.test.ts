@@ -101,6 +101,11 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // Wave 3a resolved the stale external-CLI mode lists (Q23, approved as a deliberate
   // behaviour change): 10 more keys, leaving 20 — see the "wave 3a" block below.
   //
+  // Wave 3e removed 3 more (3 left): the remote per-session command chain became
+  // `overlays.remote.fromLaunchSpec` + the shared launch renderer, the docker resume chain
+  // became `overlays.docker.resume`, and the docker exec env list became the already-declared
+  // `env.dockerExecEnvNames` — clearing opencode, gemini and antigravity from tmux-manager.ts.
+  //
   // ⚠️ ALL 20 SURVIVORS ARE NOW MULTI-SITE BY NATURE, which is why the count stops falling in
   // large steps: tmux-manager.ts's 18 are the spawn core (a `switch (mode)` plus per-CLI env
   // configuration), and session.ts's 2 cover 18 checkpoint/identity sites between them. A key
@@ -109,11 +114,11 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // session.ts — down to the two multi-site checkpoint/identity keys (wave 2 cleared 6).
   "session.ts::mode === 'claude'": PRE_REGISTRY,
   "session.ts::mode === 'codex'": PRE_REGISTRY,
-  // tmux-manager.ts
-  "tmux-manager.ts::mode === 'antigravity'": PRE_REGISTRY,
+  // tmux-manager.ts — wave 3e cleared opencode, gemini and antigravity outright by moving the
+  // remote and docker command-construction chains onto registry data. Codex survives on the
+  // LOCAL-only sites wave 3e deliberately left alone: the COD-392 grant re-check, the Headroom
+  // config.toml reconcile, its remote resume-template recovery, and the skill-invocation pattern.
   "tmux-manager.ts::mode === 'codex'": PRE_REGISTRY,
-  "tmux-manager.ts::mode === 'gemini'": PRE_REGISTRY,
-  "tmux-manager.ts::mode === 'opencode'": PRE_REGISTRY,
 
   // ── COD-416 wave 1: triaged out of the baseline above ───────────────────────────────
   //

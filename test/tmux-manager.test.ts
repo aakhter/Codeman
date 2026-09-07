@@ -11,7 +11,6 @@ import { getCli } from '../src/config/cli-registry/registry.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   TmuxManager,
-  buildCodexCommand,
   buildRemoteKillCommand,
   buildRemoteLaunchCommand,
   buildSpawnCommand,
@@ -194,16 +193,19 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('Codex command builder', () => {
+    // COD-416 wave 3e: the hand-written buildCodexCommand is gone — the registry's launch spec
+    // renders these, so the assertions now run through the one surviving builder.
+    const codexCommand = (codexConfig?: Record<string, unknown>) =>
+      buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: codexConfig as never });
+
     it('controls decorative TUI animation through Codex config', () => {
-      expect(buildCodexCommand({ animations: false })).toBe('codex --config tui.animations=false');
-      expect(buildCodexCommand({ animations: true })).toBe('codex --config tui.animations=true');
-      expect(buildCodexCommand()).toBe('codex');
+      expect(codexCommand({ animations: false })).toBe('codex --config tui.animations=false');
+      expect(codexCommand({ animations: true })).toBe('codex --config tui.animations=true');
+      expect(codexCommand()).toBe('codex');
     });
 
     it('runs a resolved local case command exactly as saved', () => {
-      expect(buildCodexCommand({ baseCommand: 'codex --local-exact --model o3' })).toBe(
-        'codex --local-exact --model o3'
-      );
+      expect(codexCommand({ baseCommand: 'codex --local-exact --model o3' })).toBe('codex --local-exact --model o3');
       expect(
         buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: { baseCommand: 'codex --local-exact' } })
       ).toBe('codex --local-exact');
@@ -280,9 +282,11 @@ describe('TmuxManager (unit)', () => {
 
   describe('codex command builder', () => {
     it('passes hook trust bypass only when explicitly configured for automation', () => {
-      expect(buildCodexCommand()).not.toContain('--dangerously-bypass-hook-trust');
+      const codexCommand = (codexConfig?: Record<string, unknown>) =>
+        buildSpawnCommand({ mode: 'codex', sessionId: 'abc123', codexConfig: codexConfig as never });
+      expect(codexCommand()).not.toContain('--dangerously-bypass-hook-trust');
 
-      expect(buildCodexCommand({ dangerouslyBypassHookTrust: true })).toContain('--dangerously-bypass-hook-trust');
+      expect(codexCommand({ dangerouslyBypassHookTrust: true })).toContain('--dangerously-bypass-hook-trust');
     });
   });
 

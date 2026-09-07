@@ -24,13 +24,16 @@
 import { EventEmitter } from 'node:events';
 import { collectDescendants } from './proc-tree.js';
 import { getCli } from './config/cli-registry/registry.js';
-import type { CliEntry } from './config/cli-registry/types.js';
+import type { CliDockerResume, CliEntry } from './config/cli-registry/types.js';
 import { missingCliMessage, resolveCliBinDir } from './utils/cli-resolver.js';
 import {
   buildSpawnCommandFromRegistry,
+  rawLaunchCommand,
+  rawLaunchCommandForMode,
   configSetenvValues,
   legacyConfigForMode,
 } from './session-cli-registry-bridge.js';
+import type { SpawnBridgeOptions } from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -904,121 +907,6 @@ function buildClaudePermissionFlags(claudeMode?: ClaudeMode, allowedTools?: stri
   }
 }
 
-/**
- * Build the opencode CLI command with appropriate flags.
- */
-export function buildOpenCodeCommand(config?: OpenCodeConfig): string {
-  const parts = ['opencode'];
-
-  // Model selection — allow provider/model format (alphanumeric, dots, hyphens, slashes)
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  // Continue existing session
-  if (config?.continueSession) {
-    const safeId = /^[a-zA-Z0-9_-]+$/.test(config.continueSession) ? config.continueSession : undefined;
-    if (safeId) parts.push('--session', safeId);
-    if (safeId && config.forkSession) parts.push('--fork');
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the codex CLI command with appropriate flags.
- *
- * Codeman launches Codex's native TUI and handles replay/scrollback by
- * stripping destructive terminal sequences before xterm.js sees them.
- */
-export function buildCodexCommand(config?: CodexConfig): string {
-  // COD-392: a resolved local case command is complete and runs as-is.
-  if (config?.baseCommand && config.baseCommand.trim().length > 0) return config.baseCommand;
-  const parts = ['codex'];
-
-  if (config?.dangerouslyBypassApprovals) {
-    parts.push('--dangerously-bypass-approvals-and-sandbox');
-  }
-
-  if (config?.dangerouslyBypassHookTrust) {
-    parts.push('--dangerously-bypass-hook-trust');
-  }
-
-  if (config?.animations !== undefined) {
-    parts.push('--config', `tui.animations=${config.animations ? 'true' : 'false'}`);
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.resumeSessionId) {
-    const safeId = /^[a-zA-Z0-9_-]+$/.test(config.resumeSessionId) ? config.resumeSessionId : undefined;
-    if (safeId) parts.push('resume', safeId);
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the Gemini CLI command with appropriate flags.
- *
- * `--skip-trust` avoids a first-run workspace trust prompt inside Codeman.
- * Approval mode defaults to `yolo` for parity with Codeman's Claude default
- * of `--dangerously-skip-permissions`; users can override it later through
- * Gemini config once Codeman exposes richer Gemini settings.
- */
-export function buildGeminiCommand(config?: GeminiConfig): string {
-  const parts = ['gemini', '--skip-trust'];
-
-  const approvalMode = config?.approvalMode || 'yolo';
-  if (['default', 'auto_edit', 'yolo', 'plan'].includes(approvalMode)) {
-    parts.push('--approval-mode', approvalMode);
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.resumeSession) {
-    const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeSession) ? config.resumeSession : undefined;
-    if (safeId) parts.push('--resume', safeId);
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Build the Antigravity CLI (agy) command with appropriate flags.
- *
- * Unlike gemini's yolo default, `--dangerously-skip-permissions` is only added
- * when the config explicitly asks for it (the frontend sends it for parity with
- * Codeman's Claude default; the multi-user clamp strips it for non-granted owners,
- * and an ABSENT config stays at agy's own prompting default — safe like Codex).
- */
-export function buildAntigravityCommand(config?: AntigravityConfig): string {
-  const parts = ['agy'];
-
-  if (config?.dangerouslySkipPermissions) {
-    parts.push('--dangerously-skip-permissions');
-  }
-
-  if (config?.model) {
-    const safeModel = /^[a-zA-Z0-9._\-/]+$/.test(config.model) ? config.model : undefined;
-    if (safeModel) parts.push('--model', safeModel);
-  }
-
-  if (config?.resumeConversationId) {
-    const safeId = /^[a-zA-Z0-9._-]+$/.test(config.resumeConversationId) ? config.resumeConversationId : undefined;
-    if (safeId) parts.push('--conversation', safeId);
-  }
-
-  return parts.join(' ');
-}
-
 /** Pi's `--thinking` levels. Runtime allowlist — defense in depth beyond the Zod enum. */
 
 /**
@@ -1051,14 +939,13 @@ export function buildSpawnCommand(options: {
    */
   claudeCliVersion?: string | null;
 }): string {
-  // ⚠️ COD-392 stays a CODE-LEVEL early return, before the engine. `baseCommand` is a complete
+  // ⚠️ COD-392 stays a CODE-LEVEL early return, before the engine. The value is a complete
   // server-resolved shell command line, and the argv engine forbids shell text BY DESIGN — there
   // is no `ArgSpec` that could carry it, and inventing one would reopen the injection surface the
-  // engine exists to close.
-  if (options.mode === 'codex') {
-    const base = options.codexConfig?.baseCommand;
-    if (base && base.trim().length > 0) return base;
-  }
+  // engine exists to close. Which config key holds it is registry DATA (`launch.rawCommandField`),
+  // so the early return no longer has to know that codex is the CLI that has one.
+  const rawCommand = rawLaunchCommandForMode(options.mode, options as unknown as Record<string, unknown>);
+  if (rawCommand !== undefined) return rawCommand;
 
   // Everything else is registry DATA: `launch.variants` rendered by the argv engine, read out of
   // the legacy `<Mode>Config` objects through `legacyConfigAliases`. This replaced a nine-way
@@ -1231,6 +1118,44 @@ export function remoteTmuxSessionName(sessionId: string): string {
 }
 
 /**
+ * The `<VAR>=<json> ` prefix for a CLI whose config travels as ONE env var
+ * (`env.configContentVar` — opencode's `OPENCODE_CONFIG_CONTENT`). Empty for every CLI that
+ * declares none, and for a caller that supplied nothing worth setting.
+ *
+ * The JSON comes from `resolveConfigContent`, the SAME resolver the local `tmux setenv` path
+ * uses, so a remote pane and a local one agree on what "auto-allow layered over the caller's
+ * JSON" means rather than each deciding for itself.
+ */
+function buildConfigContentEnvPrefix(entry: CliEntry, options: SpawnBridgeOptions): string {
+  const contentVar = entry.env.configContentVar;
+  if (!contentVar) return '';
+  const content = resolveConfigContent(legacyConfigForMode(entry.id, options as unknown as Record<string, unknown>));
+  return content ? `${contentVar}=${shellescape(content)} ` : '';
+}
+
+/**
+ * The remote pane command for a CLI that carries its session config to the remote host, or
+ * `undefined` for one that does not — the caller then falls back to the static
+ * `defaultRemoteCommandForMode`.
+ *
+ * ⚠️ WHICH CLIs carry it is registry DATA (`overlays.remote.fromLaunchSpec`), and it describes
+ * the four hand-written builders this replaced rather than granting anything new. A CLI without
+ * the flag reaches a remote host with its model / resume / permission flags dropped, which is
+ * pre-registry behaviour preserved on purpose (COD-416 wave 3e).
+ */
+export function renderRemoteCliCommand(mode: SessionMode, options: SpawnBridgeOptions): string | undefined {
+  const entry = getCli(mode);
+  const overlay = entry?.overlays.remote;
+  if (!entry || !overlay || 'disabled' in overlay || overlay.fromLaunchSpec !== true) return undefined;
+  // The raw owner-authored command line (codex's COD-392 `baseCommand`) replaces the templated
+  // launch on a remote host exactly as it does locally; the grant that authorises it is
+  // re-checked on the launch paths, not here.
+  const command = rawLaunchCommand(entry, options) ?? buildSpawnCommandFromRegistry(entry, options);
+  if (command === undefined) return undefined;
+  return `${buildConfigContentEnvPrefix(entry, options)}${command}`;
+}
+
+/**
  * COD-104 — build the SSH command that launches (or reattaches) a remote
  * session INSIDE a tmux server on the remote host, so the remote agent survives
  * an SSH drop.
@@ -1287,32 +1212,6 @@ export function buildRemoteLaunchCommand(options: {
   // that only an interactive login shell resolves (see that function's comment).
   // Codex/OpenCode/Gemini/Antigravity keep their own builders so per-session config flags survive the wrap.
   const override = remote.commands?.[mode];
-  function buildOpenCodeConfigEnvPrefix(config?: OpenCodeConfig): string {
-    if (!config) return '';
-    let jsonContent: string | undefined;
-    if (config.autoAllowTools) {
-      const permConfig: Record<string, unknown> = { permission: { '*': 'allow' } };
-      if (config.configContent) {
-        try {
-          const existing = JSON.parse(config.configContent) as Record<string, unknown>;
-          Object.assign(permConfig, existing);
-          permConfig.permission = { '*': 'allow' };
-        } catch {
-          /* invalid JSON, use default permConfig */
-        }
-      }
-      jsonContent = JSON.stringify(permConfig);
-    } else if (config.configContent) {
-      try {
-        JSON.parse(config.configContent);
-        jsonContent = config.configContent;
-      } catch {
-        return '';
-      }
-    }
-    if (!jsonContent) return '';
-    return `OPENCODE_CONFIG_CONTENT=${shellescape(jsonContent)} `;
-  }
   const codexRecovery =
     mode === 'codex' && codexConfig?.resumeSessionId
       ? resolveCodexRecoveryStrategy(
@@ -1321,24 +1220,33 @@ export function buildRemoteLaunchCommand(options: {
         )
       : undefined;
   if (codexRecovery?.kind === 'manual_required') throw new ManualRecoveryRequiredError();
+  // COD-416 wave 3e: the four per-session builders this replaces (codex / opencode / gemini /
+  // antigravity) were each a second copy of a launch spec the registry already declares, and the
+  // list of WHICH CLIs get their session config on a remote host is now `overlays.remote
+  // .fromLaunchSpec` rather than four arms of a conditional.
+  //
+  // ⚠️ That flag is descriptive, not a widening: the CLIs without it (pi, grok, deepseek, omp)
+  // still reach a remote host through `defaultRemoteCommandForMode`, i.e. with their model /
+  // resume / permission flags dropped. That is pre-registry behaviour and this change preserves
+  // it deliberately rather than quietly fixing it on a path no test and no beta can exercise.
+  const perSessionRemote = renderRemoteCliCommand(mode, {
+    mode,
+    sessionId,
+    codexConfig,
+    openCodeConfig,
+    geminiConfig,
+    antigravityConfig,
+  });
   const modeCommand =
     codexRecovery?.kind === 'template'
       ? codexRecovery.command
       : override
         ? override
-        : mode === 'codex'
-          ? remoteLoginShellCommand(buildCodexCommand(codexConfig))
-          : mode === 'opencode'
-            ? remoteLoginShellCommand(
-                `${buildOpenCodeConfigEnvPrefix(openCodeConfig)}${buildOpenCodeCommand(openCodeConfig)}`
-              )
-            : mode === 'gemini'
-              ? remoteLoginShellCommand(buildGeminiCommand(geminiConfig))
-              : mode === 'antigravity'
-                ? remoteLoginShellCommand(buildAntigravityCommand(antigravityConfig))
-                : mode === 'claude'
-                  ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-                  : defaultRemoteCommandForMode(mode);
+        : perSessionRemote !== undefined
+          ? remoteLoginShellCommand(perSessionRemote)
+          : mode === 'claude'
+            ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
+            : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1587,6 +1495,35 @@ export interface DockerLaunchOptions {
   seedCopies?: DockerSeedCopy[];
 }
 
+/** The in-container resume policy this CLI declares, if any (`overlays.docker.resume`). */
+function dockerResumePolicy(mode: SessionMode): CliDockerResume | undefined {
+  const overlay = getCli(mode)?.overlays.docker;
+  return overlay && !('disabled' in overlay) ? overlay.resume : undefined;
+}
+
+/**
+ * Re-render a CLI's launch command carrying ONLY a resume id — the `style: 'rebuild'` docker
+ * resume, for a CLI whose continuation is a first-class launch param rather than a token that
+ * can be appended.
+ *
+ * ⚠️ Deliberately carries nothing else from the original session's config. This path exists for
+ * a container whose in-container tmux was re-created, where the only thing being asked for is
+ * "re-attach to that conversation"; inventing the rest of a config here would launch something
+ * the user never configured.
+ */
+function renderResumeOnlyCommand(mode: SessionMode, sessionId: string, resumeId: string): string | undefined {
+  const entry = getCli(mode);
+  if (!entry) return undefined;
+  const field = entry.launch.legacyConfigField;
+  const resumeKey = entry.launch.legacyConfigAliases?.resumeId ?? 'resumeId';
+  const config = { [resumeKey]: resumeId };
+  return buildSpawnCommandFromRegistry(entry, {
+    mode,
+    sessionId,
+    ...(field ? { [field]: config } : config),
+  } as unknown as SpawnBridgeOptions);
+}
+
 /**
  * Build the ONE `bash -c` launch string for a docker session: image-check ->
  * ensure (inspect-or-create) -> start -> `exec docker exec -it` into the durable
@@ -1616,15 +1553,24 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
     docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode, !!docker.runsAsRoot);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
-  } else if (resumeSessionId && mode === 'opencode') {
-    // OpenCode has a first-class --session continuation. A custom override is
-    // opaque, so refuse rather than silently starting a fresh conversation.
-    if (docker.commands?.opencode !== undefined) throw new ManualRecoveryRequiredError();
-    modeCommand = buildOpenCodeCommand({ continueSession: resumeSessionId });
-  } else if (resumeSessionId && mode === 'codex' && docker.commands?.codex !== undefined) {
-    throw new ManualRecoveryRequiredError();
-  } else if (resumeSessionId && !(mode === 'codex' && docker.commands?.codex !== undefined)) {
-    modeCommand = appendResumeFlag(modeCommand, mode, resumeSessionId);
+  } else if (resumeSessionId) {
+    // COD-416 wave 3e: HOW a resume reaches an in-container pane is registry DATA
+    // (`overlays.docker.resume`), not two id-checks. Three shapes, and the default is the
+    // plain append every flag-style CLI has always used:
+    //   - `refuseWhenOverridden` + the case supplied its own `commands.<mode>` -> refuse. The
+    //     override is opaque text; appending to it or replacing it would silently start a
+    //     fresh conversation, which is the one outcome a resume must never produce.
+    //   - `style: 'rebuild'` -> re-render from the launch spec with only the resume param set,
+    //     for a CLI whose resume IS a launch param (opencode's `--session`).
+    //   - anything else -> append `launch.resumeAppend` to the already-built command.
+    const resume = dockerResumePolicy(mode);
+    const overridden = docker.commands?.[mode as DockerCommandMode] !== undefined;
+    if (resume?.refuseWhenOverridden && overridden) throw new ManualRecoveryRequiredError();
+    if (resume?.style === 'rebuild') {
+      modeCommand = renderResumeOnlyCommand(mode, sessionId, resumeSessionId) ?? modeCommand;
+    } else {
+      modeCommand = appendResumeFlag(modeCommand, mode, resumeSessionId);
+    }
   }
   // Run by tmux via /bin/sh -c, so the path is shell-quoted here. `exec` makes the
   // pane PID the agent itself.
@@ -1849,12 +1795,9 @@ export function resolveDockerLaunchOptions(
   };
   // NAME-ONLY exec env forwarded from Codeman's process env (the docker client
   // inherits it), so API-key CLIs get their key without it appearing in argv.
-  const execEnvNames =
-    mode === 'codex'
-      ? ['OPENAI_API_KEY', 'CODEX_API_KEY']
-      : mode === 'gemini'
-        ? ['GEMINI_API_KEY', 'GOOGLE_API_KEY']
-        : [];
+  // COD-416 wave 3e: `env.dockerExecEnvNames` has always declared exactly this list per CLI;
+  // the two-arm conditional was a second copy of it.
+  const execEnvNames = getCli(mode)?.env.dockerExecEnvNames ?? [];
 
   return { mode, docker, sessionId, resumeSessionId, createContext, execEnv, execEnvNames, seedCopies };
 }

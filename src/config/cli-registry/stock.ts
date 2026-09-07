@@ -366,6 +366,15 @@ const OPENCODE: CliEntry = {
     echo: { policy: 'buffer', anchor: { kind: 'cursor' }, predictProfile: undefined },
   },
   overlays: {
+    // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
+    // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
+    // hand-written builder it replaces, not a new capability.
+    remote: { fromLaunchSpec: true },
+    // OpenCode's resume is a first-class launch param (`--session`), so an in-container
+    // resume RE-RENDERS the command rather than bolting a token onto it — and a case that
+    // supplies its own opaque `commands.opencode` gets a refusal, because silently starting a
+    // fresh conversation is the one outcome a resume must never produce.
+    docker: { resume: { style: 'rebuild', refuseWhenOverridden: true } },
     credStore: { rel: '.config/opencode', seedWhole: true },
   },
 };
@@ -426,6 +435,10 @@ const CODEX: CliEntry = {
     },
     legacyConfigField: 'codexConfig',
     resumeAppend: { style: 'positional', token: 'resume' },
+    // COD-392: a resolved local case command is complete and runs as-is, replacing everything
+    // templated above. Named here so the launch paths can read it without asking "is this
+    // codex?" — the value itself still never reaches the argv engine.
+    rawCommandField: 'baseCommand',
   },
   env: {
     exports: [
@@ -466,6 +479,14 @@ const CODEX: CliEntry = {
     ],
   },
   overlays: {
+    // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
+    // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
+    // hand-written builder it replaces, not a new capability.
+    remote: { fromLaunchSpec: true },
+    // Codex appends its positional `resume <id>` (launch.resumeAppend) — but never onto a
+    // case's own opaque `commands.codex`, where a trailing positional would land in the wrong
+    // place. Refuse and let a human recover instead.
+    docker: { resume: { style: 'append', refuseWhenOverridden: true } },
     credStore: {
       rel: '.codex',
       shareDirs: ['sessions'],
@@ -549,6 +570,10 @@ const GEMINI: CliEntry = {
     privilegedParams: [{ param: 'approvalMode', clampTo: 'auto_edit', materializeWhenAbsent: true }],
   },
   overlays: {
+    // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
+    // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
+    // hand-written builder it replaces, not a new capability.
+    remote: { fromLaunchSpec: true },
     credStore: { rel: '.gemini', seedWhole: true }, // also covers antigravity — see its own entry
   },
 };
@@ -614,6 +639,10 @@ const ANTIGRAVITY: CliEntry = {
     privilegedParams: [{ param: 'dangerouslySkipPermissions', clampTo: false }],
   },
   overlays: {
+    // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
+    // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
+    // hand-written builder it replaces, not a new capability.
+    remote: { fromLaunchSpec: true },
     // No credStore of its own: agy nests its whole state under ~/.gemini/antigravity-cli/,
     // which gemini's seedWhole entry already covers.
   },
