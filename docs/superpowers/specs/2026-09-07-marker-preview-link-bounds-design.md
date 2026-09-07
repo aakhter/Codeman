@@ -23,8 +23,8 @@ the prose and wrapper remain ordinary terminal text.
 
 Explicit marker paths that begin with `/`, standalone paths, quoted paths,
 wrapped xterm rows, and external-path handling retain their current branches and
-behavior. If no bounded suffix can be identified, the existing conservative
-suppression behavior remains in force rather than guessing a partial path.
+behavior. If no bounded suffix can be identified, the existing complete-marker
+path branch remains in force rather than adding a new partial-path guess.
 
 ## Components and data flow
 
@@ -54,7 +54,7 @@ Add a focused terminal link-provider regression test for:
 - `- Partner outline (out/.../outline.md)` linking only the path suffix;
 - activation passing the workspace-relative path and originating session;
 - a bounded path with spaces remaining intact when wrapped;
-- an unbounded prose line remaining conservative.
+- an existing complete marker path remaining unchanged.
 
 Run the targeted provider test, then the repository verification checks required
 by `AGENTS.md`: typecheck, lint, format check, lockfile check, and the relevant
