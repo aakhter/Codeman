@@ -2475,12 +2475,23 @@ Object.assign(CodemanApp.prototype, {
           suppress(rawStartIndex, rawStartIndex + rawCandidate.length);
           continue;
         }
+        // Agent citations commonly put a source location immediately after an
+        // absolute document path (`/tmp/design.md:1`). Keep the location out
+        // of the file candidate; otherwise its apparent extension is `md:1`
+        // and this marker branch suppresses the valid fallback path link.
+        const absoluteSourceMatch = absoluteFilePathPattern().exec(rawCandidate);
+        const sourceLocatedAbsolutePath =
+          absoluteSourceMatch && /^:\d+[ \t]+\(/.test(rawCandidate.slice(absoluteSourceMatch.index + absoluteSourceMatch[1].length))
+            ? absoluteSourceMatch[1]
+            : null;
         // A response bullet may name an artifact before its relative path
         // (`• Wrote the design: docs/design.md`). The path is the final
         // colon-delimited suffix, not the surrounding prose.
         const descriptionPathMatch = !rawCandidate.startsWith('/') && /^.+:[ \t]+([^/].+)$/.exec(rawCandidate);
-        const candidate = trimTrailingPunctuation(descriptionPathMatch ? descriptionPathMatch[1] : rawCandidate);
-        const startIndex = rawStartIndex + (descriptionPathMatch ? descriptionPathMatch[0].length - descriptionPathMatch[1].length : 0);
+        const candidate = trimTrailingPunctuation(sourceLocatedAbsolutePath || (descriptionPathMatch ? descriptionPathMatch[1] : rawCandidate));
+        const startIndex = sourceLocatedAbsolutePath
+          ? rawStartIndex + absoluteSourceMatch.index
+          : rawStartIndex + (descriptionPathMatch ? descriptionPathMatch[0].length - descriptionPathMatch[1].length : 0);
         const endIndex = startIndex + candidate.length;
         if (candidate.startsWith('/')) {
           if (!isSingleAbsolutePath(candidate)) {
