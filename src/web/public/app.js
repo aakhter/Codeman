@@ -5694,6 +5694,45 @@ class CodemanApp {
     return this.editTabLayout({ type: 'setFocus', ref, focused }, `${ref.kind}:${ref.id}`);
   }
 
+  /** Full Focus order, including entries that are not currently renderable. */
+  _focusOrder() {
+    if (!this.tabLayout) return [];
+    try {
+      return window.CodemanTabLayout.focusOrder(this.tabLayout);
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  /**
+   * Move one Focus entry past the next visible one in that direction. The index
+   * is absolute in the stored Focus order, so a focused-but-hidden ref between
+   * the two neighbours is stepped over rather than landed on.
+   */
+  moveFocusRefBy(ref, delta) {
+    if (this.tabLayoutReadOnly || this._isTabRailSessionSearchActive()) return false;
+    const target = this._focusMoveTarget(ref, delta);
+    if (target === null) return false;
+    return this.editTabLayout({ type: 'moveFocus', ref, index: target }, `${ref.kind}:${ref.id}`);
+  }
+
+  /** Destination index for a Focus move, or null when the entry cannot move. */
+  _focusMoveTarget(ref, delta) {
+    if (delta !== 1 && delta !== -1) return null;
+    const order = this._focusOrder();
+    const key = `${ref.kind}:${ref.id}`;
+    const from = order.findIndex((entry) => `${entry.kind}:${entry.id}` === key);
+    if (from < 0) return null;
+    const visible = new Set(
+      (this._refreshTabProjection()?.focusRefs || []).map((entry) => `${entry.kind}:${entry.id}`)
+    );
+    if (!visible.has(key)) return null;
+    for (let index = from + delta; index >= 0 && index < order.length; index += delta) {
+      if (visible.has(`${order[index].kind}:${order[index].id}`)) return index;
+    }
+    return null;
+  }
+
   _tabRefFocusAction(ref) {
     const focused = this._tabRefFocused(ref);
     return {
@@ -6179,15 +6218,29 @@ class CodemanApp {
     menu.className = 'tab-rail-action-menu tab-focus-action-menu';
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-label', 'Focus actions');
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.setAttribute('role', 'menuitem');
-    button.textContent = 'Remove from Focus';
-    button.addEventListener('click', () => {
-      this.closeTabRailActionMenu?.();
-      this.setTabRefFocus(ref, false);
-    });
-    menu.appendChild(button);
+    const addItem = (label, run, disabled = false) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.setAttribute('role', 'menuitem');
+      item.textContent = label;
+      if (disabled) {
+        item.disabled = true;
+        item.setAttribute('aria-disabled', 'true');
+      } else {
+        item.addEventListener('click', () => {
+          this.closeTabRailActionMenu?.();
+          run();
+        });
+      }
+      menu.appendChild(item);
+      return item;
+    };
+    const searchActive = this._isTabRailSessionSearchActive();
+    if (!searchActive) {
+      addItem('Move up', () => this.moveFocusRefBy(ref, -1), this._focusMoveTarget(ref, -1) === null);
+      addItem('Move down', () => this.moveFocusRefBy(ref, 1), this._focusMoveTarget(ref, 1) === null);
+    }
+    addItem('Remove from Focus', () => this.setTabRefFocus(ref, false));
     document.body.appendChild(menu);
     const rect = trigger?.getBoundingClientRect?.();
     if (rect) {
@@ -6206,7 +6259,7 @@ class CodemanApp {
       keyEvent.preventDefault();
       this.closeTabRailActionMenu?.({ restoreFocus: true });
     });
-    button.focus();
+    menu.querySelector('[role="menuitem"]:not([disabled])')?.focus();
   }
 
   _tabOrientation() {

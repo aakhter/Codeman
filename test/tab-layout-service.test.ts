@@ -303,6 +303,61 @@ describe('TabLayoutService', () => {
     ]);
   });
 
+  it('reorders Focus without moving refs and rejects a move for a ref that is not in Focus', async () => {
+    const h = createHarness({
+      layouts: {
+        alice: existing([
+          { kind: 'session', id: 'a', focus: true },
+          { kind: 'session', id: 'b' },
+          { kind: 'webview', id: 'dash', focus: true },
+        ]),
+      },
+      live: [
+        { id: 'a', owner: 'alice', createdAt: 1 },
+        { id: 'b', owner: 'alice', createdAt: 2 },
+      ],
+      webviews: [{ id: 'dash', owner: 'alice' }],
+    });
+
+    const moved = await h.service.putOperations(
+      'alice',
+      [{ type: 'moveFocus', ref: { kind: 'webview', id: 'dash' }, index: 0 }],
+      7
+    );
+    expect(moved.status).toBe('updated');
+    expect(moved.layout.focusOrder).toEqual([
+      { kind: 'webview', id: 'dash' },
+      { kind: 'session', id: 'a' },
+    ]);
+    expect(moved.layout.ungrouped.map((ref) => ref.id)).toEqual(['a', 'b', 'dash']);
+    expect(h.store.setTabLayout).toHaveBeenCalledTimes(1);
+
+    const legacy = await h.service.put(
+      'alice',
+      existing(moved.layout.ungrouped, moved.layout.version),
+      moved.layout.version
+    );
+    expect(legacy.layout.focusOrder).toEqual([
+      { kind: 'webview', id: 'dash' },
+      { kind: 'session', id: 'a' },
+    ]);
+
+    await expect(
+      h.service.putOperations(
+        'alice',
+        [{ type: 'moveFocus', ref: { kind: 'session', id: 'b' }, index: 0 }],
+        legacy.layout.version
+      )
+    ).rejects.toThrow(/not in Focus/);
+    await expect(
+      h.service.putOperations(
+        'alice',
+        [{ type: 'moveFocus', ref: { kind: 'session', id: 'a' } } as never],
+        legacy.layout.version
+      )
+    ).rejects.toThrow(/moveFocus/);
+  });
+
   it('applies Follow parent intent through the authoritative model instead of accepting a browser-derived layout', async () => {
     const h = createHarness({
       layouts: {

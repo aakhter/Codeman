@@ -10,8 +10,10 @@ import {
   flattenVisibleRefs,
   followParent,
   materializeOrphans,
+  moveFocusRef,
   moveRef,
   normalizeTabLayout,
+  orderedFocusRefs,
   renameGroup,
   reorderGroup,
   setManualPlacement,
@@ -199,6 +201,62 @@ describe('tab group operations', () => {
     expect(value.ungrouped).toContainEqual({ ...ref('b'), focus: true });
     expect(setTabFocus(value, ref('b'), false).ungrouped).toContainEqual(ref('b'));
     expect(() => setTabFocus(value, ref('missing'), true)).toThrow(/unknown ref/);
+  });
+});
+
+describe('Focus order', () => {
+  const focused = (id: string) => ({ ...ref(id), focus: true }) as const;
+
+  it('falls back to stored order and omits focusOrder until an explicit move materializes one', () => {
+    const value = layout([{ id: 'g', name: 'G', refs: [focused('a'), ref('b'), focused('c')] }], [focused('d')]);
+    expect(orderedFocusRefs(value)).toEqual([ref('a'), ref('c'), ref('d')]);
+    expect(validateTabLayout(value).focusOrder).toBeUndefined();
+    expect(setTabFocus(value, ref('b'), true).focusOrder).toBeUndefined();
+  });
+
+  it('reorders Focus without touching group membership or stored positions', () => {
+    const metadata = [session('a', 0), session('b', 1), session('c', 2), session('d', 3)];
+    const value = layout([{ id: 'g', name: 'G', refs: [focused('a'), ref('b'), focused('c')] }], [focused('d')]);
+
+    const moved = moveFocusRef(value, ref('d'), 0);
+    expect(orderedFocusRefs(moved)).toEqual([ref('d'), ref('a'), ref('c')]);
+    expect(moved.focusOrder).toEqual([ref('d'), ref('a'), ref('c')]);
+    expect(moved.groups).toEqual(value.groups);
+    expect(moved.ungrouped).toEqual(value.ungrouped);
+    expect(flattenOwnerSessionOrder(moved)).toEqual(['a', 'b', 'c', 'd']);
+    expect(normalizeTabLayout(moved, metadata).focusOrder).toEqual([ref('d'), ref('a'), ref('c')]);
+
+    expect(orderedFocusRefs(moveFocusRef(moved, ref('d'), 2))).toEqual([ref('a'), ref('c'), ref('d')]);
+    expect(() => moveFocusRef(value, ref('b'), 0)).toThrow(/not in Focus/);
+    expect(() => moveFocusRef(value, ref('missing'), 0)).toThrow(/unknown ref/);
+    expect(() => moveFocusRef(value, ref('a'), 3)).toThrow(/index/);
+    expect(() => moveFocusRef(value, ref('a'), -1)).toThrow(/index/);
+  });
+
+  it('appends a re-added ref at the end and prunes entries that leave Focus', () => {
+    const metadata = [session('a', 0), session('b', 1), session('c', 2)];
+    const value = moveFocusRef(
+      layout([{ id: 'g', name: 'G', refs: [focused('a'), focused('b'), focused('c')] }]),
+      ref('c'),
+      0
+    );
+    expect(orderedFocusRefs(value)).toEqual([ref('c'), ref('a'), ref('b')]);
+
+    const dropped = setTabFocus(value, ref('c'), false);
+    expect(dropped.focusOrder).toEqual([ref('a'), ref('b')]);
+    expect(orderedFocusRefs(setTabFocus(dropped, ref('c'), true))).toEqual([ref('a'), ref('b'), ref('c')]);
+    expect(
+      normalizeTabLayout({ ...value, focusOrder: [ref('c'), ref('gone'), ref('a')] }, metadata).focusOrder
+    ).toEqual([ref('c'), ref('a')]);
+  });
+
+  it('validates focusOrder shape and rejects duplicates', () => {
+    expect(() => validateTabLayout({ ...layout(), focusOrder: 'nope' })).toThrow(/focusOrder/);
+    expect(() => validateTabLayout({ ...layout(), focusOrder: [{ kind: 'nope', id: 'a' }] })).toThrow(/focusOrder/);
+    expect(() => validateTabLayout({ ...layout(), focusOrder: [ref('a'), ref('a')] })).toThrow(/duplicate/);
+    expect(validateTabLayout({ ...layout(), focusOrder: [{ ...ref('a'), focus: true }] }).focusOrder).toEqual([
+      ref('a'),
+    ]);
   });
 });
 

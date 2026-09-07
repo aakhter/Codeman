@@ -20,6 +20,7 @@ import {
   renameGroup,
   reorderGroup,
   setManualPlacement,
+  moveFocusRef,
   setTabFocus,
   MAX_TAB_GROUP_NAME_LENGTH,
   MAX_TAB_GROUPS,
@@ -115,6 +116,7 @@ export type TabLayoutSemanticOperation =
   | { type: 'moveRef'; ref: TabRef; groupId: string | null; index: number }
   | { type: 'setManualPlacement'; ref: TabRef; manual: true }
   | { type: 'setFocus'; ref: TabRef; focused: boolean }
+  | { type: 'moveFocus'; ref: TabRef; index: number }
   | { type: 'followParent'; ref: TabRef };
 
 export type TabLayoutSnapshot = {
@@ -152,15 +154,17 @@ const preserveLegacyFocusFlags = (desired: TabLayout, current: TabLayout): TabLa
     const { focus: _ignored, ...rest } = value;
     return focused.has(refKey(value)) ? { ...rest, focus: true } : rest;
   };
+  const { focusOrder: _discarded, ...rest } = desired;
   return {
-    ...desired,
+    ...rest,
     groups: desired.groups.map((group) => ({ ...group, refs: group.refs.map(ref) })),
     ungrouped: desired.ungrouped.map(ref),
+    ...(current.focusOrder === undefined ? {} : { focusOrder: current.focusOrder.map((value) => ({ ...value })) }),
   };
 };
 const sameContent = (a: TabLayout, b: TabLayout): boolean =>
-  JSON.stringify({ groups: a.groups, ungrouped: a.ungrouped }) ===
-  JSON.stringify({ groups: b.groups, ungrouped: b.ungrouped });
+  JSON.stringify({ groups: a.groups, ungrouped: a.ungrouped, focusOrder: a.focusOrder ?? null }) ===
+  JSON.stringify({ groups: b.groups, ungrouped: b.ungrouped, focusOrder: b.focusOrder ?? null });
 const validOperationRef = (value: unknown): value is TabRef =>
   value !== null &&
   typeof value === 'object' &&
@@ -220,6 +224,11 @@ function validateOperationRequest(value: unknown): asserts value is TabLayoutSem
     case 'setFocus':
       if (!validOperationRef(operation.ref) || typeof operation.focused !== 'boolean') {
         throw new TabLayoutValidationError('setFocus operation has invalid fields');
+      }
+      return;
+    case 'moveFocus':
+      if (!validOperationRef(operation.ref) || !validOperationIndex(operation.index, MAX_TAB_REFS)) {
+        throw new TabLayoutValidationError('moveFocus operation has invalid fields');
       }
       return;
     case 'followParent':
@@ -509,6 +518,7 @@ export class TabLayoutService {
           (operation.type === 'moveRef' ||
             operation.type === 'setManualPlacement' ||
             operation.type === 'setFocus' ||
+            operation.type === 'moveFocus' ||
             operation.type === 'followParent') &&
           !validOperationRef(operation.ref)
         ) {
@@ -529,6 +539,8 @@ export class TabLayoutService {
             return setManualPlacement(input, operation.ref, operation.manual);
           case 'setFocus':
             return setTabFocus(input, operation.ref, operation.focused);
+          case 'moveFocus':
+            return moveFocusRef(input, operation.ref, operation.index);
           case 'followParent': {
             const followState = describeTabPlacements(input, metadata).find(
               (placement) => placement.kind === operation.ref.kind && placement.id === operation.ref.id

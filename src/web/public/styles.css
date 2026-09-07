@@ -2969,11 +2969,16 @@ html[data-tab-orientation='vertical'].tab-rail-compact .session-tab.active .tab-
   cursor: pointer;
 }
 
-.tab-rail-action-menu button:hover,
+.tab-rail-action-menu button:hover:not(:disabled),
 .tab-rail-action-menu button:focus-visible {
   background: var(--control-bg-hover);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+.tab-rail-action-menu button:disabled {
+  color: var(--text-muted);
+  cursor: default;
 }
 
 .tab-rail-action-menu .danger {

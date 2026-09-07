@@ -251,6 +251,56 @@ describe('COD-306 browser projection', () => {
     ).toEqual({ kind: 'session', id: 's2' });
   });
 
+  it('projects and edits an explicit Focus order without moving refs', () => {
+    const h = loadHelper();
+    const focused = layout();
+    focused.groups[0].refs[0] = { ...focused.groups[0].refs[0], focus: true };
+    focused.groups[0].refs[1] = { ...focused.groups[0].refs[1], focus: true };
+    focused.ungrouped[1] = { ...focused.ungrouped[1], focus: true };
+    const options = {
+      liveSessionIds: ['s1', 's2', 's3', 's4'],
+      openWebviewIds: ['w1', 'w2'],
+      orientation: 'vertical',
+    };
+    expect(h.project(focused, options).focusRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+      { kind: 'session', id: 's4' },
+    ]);
+
+    const moved = h.applyOperation(focused, { type: 'moveFocus', ref: { kind: 'session', id: 's4' }, index: 0 });
+    expect(moved.focusOrder).toEqual([
+      { kind: 'session', id: 's4' },
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+    ]);
+    expect(moved.groups).toEqual(focused.groups);
+    expect(moved.ungrouped).toEqual(focused.ungrouped);
+    expect(h.project(moved, options).focusRefs).toEqual([
+      { kind: 'session', id: 's4' },
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+    ]);
+    expect(h.contentKey(moved)).not.toBe(h.contentKey(focused));
+
+    const dropped = h.applyOperation(moved, {
+      type: 'setFocus',
+      ref: { kind: 'session', id: 's4' },
+      focused: false,
+    });
+    expect(dropped.focusOrder).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+    ]);
+    expect(h.project(dropped, options).focusRefs).toEqual([
+      { kind: 'session', id: 's2' },
+      { kind: 'webview', id: 'w1' },
+    ]);
+    expect(() =>
+      h.applyOperation(focused, { type: 'moveFocus', ref: { kind: 'session', id: 's3' }, index: 0 })
+    ).toThrow(/Focus/);
+  });
+
   it('treats Focus membership and smart collapse as structural rendering state', () => {
     const h = loadHelper();
     const common = {

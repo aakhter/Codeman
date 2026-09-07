@@ -100,7 +100,53 @@
         ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
         ...(ref.focus === true ? { focus: true } : {}),
       })),
+      ...(Array.isArray(value.focusOrder) ? { focusOrder: uniqueRefs(value.focusOrder) } : {}),
     };
+  }
+
+  /**
+   * Focus section order: explicitly ordered refs first, then focused refs the
+   * stored order has not been asked about, in stored order. Mirrors
+   * orderedFocusRefs() in src/tab-layout.ts.
+   */
+  function orderedFocusRefs(layout, accept) {
+    const focused = new Map();
+    for (const { ref } of refLocations(layout)) {
+      if (ref.focus !== true) continue;
+      if (typeof accept === 'function' && !accept(ref)) continue;
+      focused.set(refKey(ref), { kind: ref.kind, id: ref.id });
+    }
+    const result = [];
+    const emitted = new Set();
+    for (const ref of Array.isArray(layout.focusOrder) ? layout.focusOrder : []) {
+      const key = refKey(ref);
+      if (!focused.has(key) || emitted.has(key)) continue;
+      emitted.add(key);
+      result.push(focused.get(key));
+    }
+    for (const [key, ref] of focused) {
+      if (emitted.has(key)) continue;
+      emitted.add(key);
+      result.push(ref);
+    }
+    return result;
+  }
+
+  /** Drop Focus order entries that are no longer stored or no longer focused. */
+  function prunedFocusOrder(layout) {
+    if (!Array.isArray(layout.focusOrder)) return layout;
+    const focusedKeys = new Set(
+      refLocations(layout)
+        .filter((item) => item.ref.focus === true)
+        .map((item) => refKey(item.ref))
+    );
+    const kept = layout.focusOrder.filter((ref) => focusedKeys.has(refKey(ref)));
+    if (kept.length === layout.focusOrder.length) return layout;
+    if (kept.length === 0) {
+      const { focusOrder: _dropped, ...rest } = layout;
+      return rest;
+    }
+    return { ...layout, focusOrder: kept };
   }
 
   function operationError(message) {
@@ -239,11 +285,26 @@
     }
     if (operation.type === 'setFocus') {
       if (!validRef(operation.ref) || typeof operation.focused !== 'boolean') operationError('invalid Focus state');
-      return mapStoredRef(layout, operation.ref, (ref) => {
-        if (operation.focused) return { ...ref, focus: true };
-        const { focus: _focus, ...rest } = ref;
-        return rest;
-      });
+      return prunedFocusOrder(
+        mapStoredRef(layout, operation.ref, (ref) => {
+          if (operation.focused) return { ...ref, focus: true };
+          const { focus: _focus, ...rest } = ref;
+          return rest;
+        })
+      );
+    }
+    if (operation.type === 'moveFocus') {
+      if (!validRef(operation.ref)) operationError('invalid ref');
+      const targetKey = refKey(operation.ref);
+      if (!refLocations(layout).some((item) => refKey(item.ref) === targetKey)) operationError('unknown ref');
+      const ordered = orderedFocusRefs(layout);
+      const from = ordered.findIndex((ref) => refKey(ref) === targetKey);
+      if (from < 0) operationError('ref is not in Focus');
+      const focusOrder = [...ordered];
+      const [moved] = focusOrder.splice(from, 1);
+      focusOrder.splice(boundedIndex(operation.index, focusOrder.length), 0, moved);
+      layout.focusOrder = focusOrder;
+      return layout;
     }
     if (operation.type === 'followParent') {
       if (!validRef(operation.ref) || operation.ref.kind !== 'session') operationError('only a session can follow');
@@ -256,7 +317,11 @@
 
   function layoutContentKey(layoutInput) {
     const layout = normalizedLayout(layoutInput);
-    return JSON.stringify({ groups: layout.groups, ungrouped: layout.ungrouped });
+    return JSON.stringify({
+      groups: layout.groups,
+      ungrouped: layout.ungrouped,
+      focusOrder: layout.focusOrder ?? null,
+    });
   }
 
   function operationsAfterAppliedPrefix(baseLayout, operationsInput, currentLayout, authoritativeAppliedCount) {
@@ -311,9 +376,7 @@
 
     const renderable = (ref) => (ref.kind === 'session' ? liveSessionIds.has(ref.id) : openWebviewIds.has(ref.id));
     if (orientation === 'vertical') {
-      for (const { ref } of refLocations(layout)) {
-        if (ref.focus === true && renderable(ref)) focusRefs.push({ kind: ref.kind, id: ref.id });
-      }
+      focusRefs.push(...orderedFocusRefs(layout, renderable));
     }
     const addVisible = (ref, sectionRefs, isCollapsed, groupId = null, stored = true) => {
       const key = refKey(ref);
@@ -834,6 +897,8 @@
     adjacentSession,
     renderProjection,
     applyOperation,
+    contentKey: layoutContentKey,
+    focusOrder: (layout) => orderedFocusRefs(normalizedLayout(layout)),
     operationsAfterAppliedPrefix,
     previewOperation,
     createEditCoordinator,

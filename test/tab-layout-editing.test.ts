@@ -1247,8 +1247,64 @@ describe('COD-319 Focus smart group rendering', () => {
       { kind: 'session', id: 'parent' }
     );
     expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([
+      'Move up',
+      'Move down',
       'Remove from Focus',
     ]);
+  });
+
+  it('moves a Focus entry within the Focus section and leaves its group position alone', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.groups[1].refs[0] = { kind: 'session', id: 'other', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app.loadAppSettingsFromStorage = () => ({ showTabDetachButton: false });
+    app.editTabLayout = vi.fn(() => true);
+    app._fullRenderSessionTabs();
+
+    expect(
+      [...document.querySelectorAll('[data-tab-focus-shortcut]')].map((tab) =>
+        tab.getAttribute('data-tab-focus-shortcut')
+      )
+    ).toEqual(['session:parent', 'session:other', 'webview:web']);
+
+    const openShortcutMenu = (key: string, ref: Record<string, string>) => {
+      document.querySelector('.tab-focus-action-menu')?.remove();
+      const trigger = document.querySelector<HTMLElement>(`[data-tab-focus-shortcut="${key}"] .tab-more`)!;
+      app.openFocusShortcutMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger }, ref);
+    };
+    const menuItem = (label: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (candidate) => candidate.textContent === label
+      )!;
+
+    openShortcutMenu('webview:web', { kind: 'webview', id: 'web' });
+    expect(document.activeElement?.textContent).toBe('Move up');
+    expect(menuItem('Move down').disabled).toBe(true);
+    expect(menuItem('Move up').disabled).toBe(false);
+    clickMenuItem('Move up');
+    expect(app.editTabLayout).toHaveBeenLastCalledWith(
+      { type: 'moveFocus', ref: { kind: 'webview', id: 'web' }, index: 1 },
+      'webview:web'
+    );
+
+    openShortcutMenu('session:parent', { kind: 'session', id: 'parent' });
+    expect(menuItem('Move up').disabled).toBe(true);
+    clickMenuItem('Move down');
+    expect(app.editTabLayout).toHaveBeenLastCalledWith(
+      { type: 'moveFocus', ref: { kind: 'session', id: 'parent' }, index: 1 },
+      'session:parent'
+    );
+
+    expect(app.tabLayout.groups[0].refs[0]).toEqual({ kind: 'session', id: 'parent', focus: true });
+    expect(app.tabLayout.groups[1].refs[0]).toEqual({ kind: 'session', id: 'other', focus: true });
+
+    // 'r' matches Parent and Other, so a search result list has a neighbour to
+    // move past; the section is a result list there and must refuse the edit.
+    app.setTabRailSessionSearch('r');
+    expect(app._refreshTabProjection().focusRefs.length).toBeGreaterThan(1);
+    expect(app.moveFocusRefBy({ kind: 'session', id: 'parent' }, 1)).toBe(false);
+    expect(app.editTabLayout).toHaveBeenCalledTimes(2);
   });
 
   it('keeps canonical markers and shortcut state synchronized without duplicate selected semantics', () => {
