@@ -42,10 +42,11 @@ already enforces workspace containment.
 
 ## Error handling and security
 
-Malformed, unsupported, traversal, ambiguous, or unbounded candidates remain
-unlinked. The extracted suffix must pass the existing extension allowlist and
-path normalization checks. The parser must not widen the accepted filesystem
-scope or create a link from the prose prefix.
+Malformed, unsupported, traversal, or ambiguous extracted candidates remain
+unlinked. Existing complete-marker paths continue through their current gates.
+The extracted suffix must pass the existing extension allowlist and path
+normalization checks. The parser must not widen the accepted filesystem scope or
+create a link from the prose prefix.
 
 ## Testing
 
