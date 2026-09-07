@@ -851,6 +851,22 @@ describe('COD-390 labeled spaced relative paths', () => {
     expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
   });
 
+  it('links an absolute document path before a source line locator in a bullet', () => {
+    const absolute =
+      '/tmp/opencode/brain-remote/.worktrees/outlook-reanalysis-ops-dashboard/docs/superpowers/specs/2026-09-07-outlook-reanalysis-operations-design.md';
+    const relative =
+      '.worktrees/outlook-reanalysis-ops-dashboard/docs/superpowers/specs/2026-09-07-outlook-reanalysis-operations-design.md';
+    const { provide, previewSpy, originalSessionId } = makeHarness(
+      `• The approved design is documented and committed as ${absolute}:1 (e7ae1b4).`,
+      { workingDir: '/tmp/opencode/brain-remote' }
+    );
+
+    const [link] = provide();
+    expect(link.text).toBe(absolute);
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
+  });
+
   it('does not promote an absolute suffix from a bulleted description', () => {
     const { provide } = makeHarness('• Design committed in the isolated worktree: /etc/private/design.md', {
       workingDir: '/opt/projects/nzbdav',
