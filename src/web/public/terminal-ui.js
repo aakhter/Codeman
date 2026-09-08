@@ -2507,9 +2507,12 @@ Object.assign(CodemanApp.prototype, {
         // (`• Wrote the design: docs/design.md`). The path is the final
         // colon-delimited suffix, not the surrounding prose.
         const descriptionPathMatch = !rawCandidate.startsWith('/') && /^.+:[ \t]+([^/].+)$/.exec(rawCandidate);
+        const sentenceTrimmedRawCandidate = rawCandidate.replace(/[.,;:!?]+$/, '');
         const trimmedRawCandidate = trimTrailingPunctuation(rawCandidate);
         const boundedRelativePath = !descriptionPathMatch
-          ? trailingBoundedRelativePath(rawCandidate) || trailingBoundedRelativePath(trimmedRawCandidate)
+          ? trailingBoundedRelativePath(rawCandidate) ||
+            trailingBoundedRelativePath(sentenceTrimmedRawCandidate) ||
+            trailingBoundedRelativePath(trimmedRawCandidate)
           : null;
         const candidate = trimTrailingPunctuation(
           sourceLocatedAbsolutePath ||

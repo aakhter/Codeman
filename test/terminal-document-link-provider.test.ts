@@ -858,6 +858,19 @@ describe('COD-390 labeled spaced relative paths', () => {
     expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
   });
 
+  it('links only the bounded path when sentence punctuation follows a descriptive bullet', () => {
+    const path = 'out/networking-ai-era-session/deliverables/ai-networking-vision-discussion-deck.pptx';
+    const line = `- Editable PowerPoint (${path}).`;
+    const { provide, previewSpy, originalSessionId } = makeHarness(line);
+
+    const [link] = provide();
+    expect(link.text).toBe(path);
+    expect(link.range.start).toEqual({ x: line.indexOf(path) + 1, y: 1 });
+    expect(link.range.end).toEqual({ x: line.indexOf(path) + path.length, y: 1 });
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
   it('links only the relative suffix after a bulleted description', () => {
     const relative =
       '.worktrees/jira-NZBDAV-1151-deferral-normalization/docs/superpowers/specs/2026-09-05-health-deferral-normalization-design.md';
