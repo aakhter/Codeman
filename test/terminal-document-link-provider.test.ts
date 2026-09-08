@@ -159,6 +159,27 @@ function makeHarness(
 }
 
 describe('COD-232 terminal document link provider', () => {
+  it('links only the bounded path suffix in a descriptive bullet marker', () => {
+    const path = 'out/partner-summit-tokenomics-2026-09/deliverables/partner-summit-tokenomics-outline.md';
+    const line = `- Partner outline (${path})`;
+    const { provide, previewSpy, originalSessionId } = makeHarness(line);
+
+    const links = provide();
+
+    expect(links.map((link) => link.text)).toEqual([path]);
+    expect(links[0].range.start).toEqual({ x: line.indexOf(path) + 1, y: 1 });
+    expect(links[0].range.end).toEqual({ x: line.indexOf(path) + path.length, y: 1 });
+    links[0].activate(null, links[0].text);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
+  it('preserves spaces inside a bounded bullet path', () => {
+    const path = 'out/My Big Docs/report.docx';
+    const { provide } = makeHarness(`- Report (${path})`);
+
+    expect(provide().map((link) => link.text)).toEqual([path]);
+  });
+
   it('links a strict generated-image file URI before ordinary URL and path candidates', () => {
     const uri = 'file:///Users/saqeb/.codex-personal/generated_images/mockup.png';
     const { provide, fileUriSpy, openSpy, previewSpy, originalSessionId } = makeHarness(`Saved to: ${uri}`);
@@ -835,6 +856,19 @@ describe('COD-390 labeled spaced relative paths', () => {
     expect(link.text).toBe(relative);
     link.activate(null, link.text);
     expect(previewSpy).toHaveBeenCalledWith(relative, originalSessionId);
+  });
+
+  it('links only the bounded path when sentence punctuation follows a descriptive bullet', () => {
+    const path = 'out/networking-ai-era-session/deliverables/ai-networking-vision-discussion-deck.pptx';
+    const line = `- Editable PowerPoint (${path}).`;
+    const { provide, previewSpy, originalSessionId } = makeHarness(line);
+
+    const [link] = provide();
+    expect(link.text).toBe(path);
+    expect(link.range.start).toEqual({ x: line.indexOf(path) + 1, y: 1 });
+    expect(link.range.end).toEqual({ x: line.indexOf(path) + path.length, y: 1 });
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
   });
 
   it('links only the relative suffix after a bulleted description', () => {
