@@ -595,15 +595,16 @@
     const focusContent = focusCollapsed
       ? ''
       : focusRefs
-          .map((ref) => {
+          .map((ref, index) => {
             let rendered = renderFocusRef(ref, -1, { focusShortcut: true })
               .replace(/role="tab"/, 'role="treeitem"')
               .replace(/tabindex="0"/g, 'tabindex="-1"')
               .replace(/<button(?![^>]*tabindex)/g, '<button tabindex="-1"');
             if (!/role="treeitem"/.test(rendered)) rendered = rendered.replace(/^<([a-z]+)/, '<$1 role="treeitem"');
-            return rendered;
+            return `<div class="tab-layout-drop-zone tab-focus-drop-zone" role="presentation" data-tab-focus-drop-index="${index}"></div>${rendered}`;
           })
-          .join('');
+          .join('') +
+        `<div class="tab-layout-drop-zone tab-focus-drop-zone" role="presentation" data-tab-focus-drop-index="${focusRefs.length}"></div>`;
     const focusToggle = searchActive
       ? '<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="Focus search results" aria-expanded="true" aria-disabled="true" disabled><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>'
       : `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleFocusGroupCollapsed()"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`;
