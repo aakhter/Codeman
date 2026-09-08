@@ -7,7 +7,7 @@ label, a bounded path, and sentence punctuation after the closing delimiter, for
 example:
 
 ```text
-– Editable PowerPoint (out/networking-ai-era-session/deliverables/deck.pptx).
+- Editable PowerPoint (out/networking-ai-era-session/deliverables/deck.pptx).
 ```
 
 The preview link must cover only the document path. The label and the sentence
