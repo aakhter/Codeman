@@ -284,9 +284,15 @@
 })(window);
 
 const TERMINAL_FONT_SIZE_MAX = 24;
+const TERMINAL_FONT_SIZE_SESSION_KEY_PREFIX = 'codeman-font-size-session:';
+
+function resolveTerminalFontSizeSessionKey(sessionId, fallbackKey) {
+  const normalizedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+  return normalizedSessionId ? `${TERMINAL_FONT_SIZE_SESSION_KEY_PREFIX}${normalizedSessionId}` : fallbackKey;
+}
 
 /**
- * Resolve the device- and mode-local terminal font preference. This is pure so
+ * Resolve the device- and mode-local terminal font policy. This is pure so
  * selecting a policy cannot resize a shared PTY or mutate browser storage.
  */
 function resolveTerminalFontSize({ deviceType, mode, stored, performanceFallback = false } = {}) {
@@ -7012,11 +7018,16 @@ Object.assign(CodemanApp.prototype, {
         ? MobileDetection.getDeviceType()
         : 'desktop';
     const unresolved = window.CodemanTerminalFont.resolveSize({ deviceType, mode: activeMode, stored: null, performanceFallback });
+    const key = resolveTerminalFontSizeSessionKey(this.activeSessionId, unresolved.key);
     let stored = null;
     try {
-      stored = localStorage.getItem(unresolved.key);
+      stored = localStorage.getItem(key);
+      if (stored === null && key !== unresolved.key) stored = localStorage.getItem(unresolved.key);
     } catch {}
-    return window.CodemanTerminalFont.resolveSize({ deviceType, mode: activeMode, stored, performanceFallback });
+    return {
+      ...window.CodemanTerminalFont.resolveSize({ deviceType, mode: activeMode, stored, performanceFallback }),
+      key,
+    };
   },
 
   /** Apply cell metrics only. The caller owns any subsequent fit or resize. */

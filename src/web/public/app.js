@@ -7715,7 +7715,7 @@ class CodemanApp {
     tab.setAttribute('tabindex', '-1');
     tab.setAttribute('aria-label', `Focus shortcut, ${tab.getAttribute('aria-label') || ref.id}`);
     tab
-      .querySelectorAll('.tab-number, .tab-focus-marker, [data-tab-ref-drag], .tab-actions')
+      .querySelectorAll('.tab-number, .tab-focus-marker, .tab-actions')
       .forEach((element) => element.remove());
     tab.querySelectorAll('[id]').forEach((element) => element.removeAttribute('id'));
     const actions = document.createElement('span');
@@ -8252,18 +8252,25 @@ class CodemanApp {
       const handle = event.target.closest?.('[data-tab-group-drag]');
       const refHandle = event.target.closest?.('[data-tab-ref-drag]');
       const tab = event.target.closest?.('.session-tab');
+      const focusShortcut = tab?.classList.contains('tab-focus-shortcut') === true;
       if (!handle && !refHandle) return;
       const ref = tab
         ? tab.dataset.webviewId
           ? { kind: 'webview', id: tab.dataset.webviewId }
-          : { kind: 'session', id: tab.dataset.id }
+          : tab.dataset.focusWebviewId
+            ? { kind: 'webview', id: tab.dataset.focusWebviewId }
+            : tab.dataset.focusSessionId
+              ? { kind: 'session', id: tab.dataset.focusSessionId }
+              : { kind: 'session', id: tab.dataset.id }
         : null;
       this._tabPointerDrag = {
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         active: false,
-        source: handle ? { type: 'group', groupId: handle.dataset.tabGroupDrag } : { type: 'ref', ref },
+        source: handle
+          ? { type: 'group', groupId: handle.dataset.tabGroupDrag }
+          : { type: focusShortcut ? 'focus' : 'ref', ref },
         origin: handle || refHandle || tab,
         zone: null,
       };
@@ -8291,7 +8298,16 @@ class CodemanApp {
       event.preventDefault();
       const hit = document.elementFromPoint?.(event.clientX, event.clientY);
       const candidate = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
-      const zone = candidate?.classList?.contains('tab-focus-shortcut') ? null : candidate;
+      const focusDrag = drag.source.type === 'focus';
+      const isFocusZone = candidate?.classList?.contains('tab-focus-drop-zone');
+      const isFocusShortcut = candidate?.classList?.contains('tab-focus-shortcut');
+      const zone = focusDrag
+        ? isFocusZone || isFocusShortcut
+          ? candidate
+          : null
+        : isFocusZone || isFocusShortcut
+          ? null
+          : candidate;
       if (drag.zone === zone) return;
       drag.zone?.classList?.remove('tab-layout-drop-active');
       drag.zone = zone;
@@ -8347,6 +8363,30 @@ class CodemanApp {
     };
   }
 
+  _tabRefFromElement(element) {
+    if (!element) return null;
+    if (element.dataset.focusWebviewId) return { kind: 'webview', id: element.dataset.focusWebviewId };
+    if (element.dataset.focusSessionId) return { kind: 'session', id: element.dataset.focusSessionId };
+    if (element.dataset.webviewId) return { kind: 'webview', id: element.dataset.webviewId };
+    if (element.dataset.id) return { kind: 'session', id: element.dataset.id };
+    return null;
+  }
+
+  _focusPointerDropIndex(zone) {
+    const visible = this._refreshTabProjection()?.focusRefs || [];
+    const visibleIndex = Number(zone?.dataset?.tabFocusDropIndex);
+    if (!Number.isInteger(visibleIndex) || visibleIndex < 0 || visibleIndex > visible.length) return null;
+    const order = this._focusOrder();
+    if (visibleIndex === visible.length) {
+      const last = visible.at(-1);
+      const lastIndex = last ? order.findIndex((ref) => ref.kind === last.kind && ref.id === last.id) : -1;
+      return lastIndex < 0 ? null : lastIndex + 1;
+    }
+    const target = visible[visibleIndex];
+    const targetIndex = order.findIndex((ref) => ref.kind === target.kind && ref.id === target.id);
+    return targetIndex < 0 ? null : targetIndex;
+  }
+
   _adjustGroupReorderIndex(groupId, destinationIndex) {
     const sourceIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
     return sourceIndex >= 0 && sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex;
@@ -8357,7 +8397,34 @@ class CodemanApp {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const zone = drag.zone;
     if (drag.active && zone) {
-      if (drag.source.type === 'group') {
+      if (drag.source.type === 'focus') {
+        const sourceRef = drag.source.ref;
+        const order = this._focusOrder();
+        const sourceIndex = order.findIndex((ref) => ref.kind === sourceRef.kind && ref.id === sourceRef.id);
+        let destinationIndex = zone.classList.contains('tab-focus-drop-zone')
+          ? this._focusPointerDropIndex(zone)
+          : null;
+        if (destinationIndex === null && zone.classList.contains('tab-focus-shortcut')) {
+          const targetRef = this._tabRefFromElement(zone);
+          const targetIndex = targetRef
+            ? order.findIndex((ref) => ref.kind === targetRef.kind && ref.id === targetRef.id)
+            : -1;
+          if (targetIndex >= 0) {
+            const rect = zone.getBoundingClientRect();
+            const after = event.clientY >= rect.top + rect.height / 2;
+            destinationIndex = targetIndex + (after ? 1 : 0);
+          }
+        }
+        if (sourceIndex >= 0 && destinationIndex !== null) {
+          const adjustedIndex = sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex;
+          if (adjustedIndex !== sourceIndex) {
+            this.editTabLayout(
+              { type: 'moveFocus', ref: sourceRef, index: adjustedIndex },
+              `${sourceRef.kind}:${sourceRef.id}`
+            );
+          }
+        }
+      } else if (drag.source.type === 'group') {
         const beforeId = zone.dataset.tabDropBeforeGroup;
         if (beforeId !== undefined) {
           const beforeIndex = beforeId

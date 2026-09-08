@@ -946,6 +946,10 @@ html[data-tab-orientation='vertical'] .tab-ref-drag-handle {
   border-radius: 3px;
 }
 
+.tab-focus-drop-zone {
+  min-height: 4px;
+}
+
 .tab-layout-drop-active {
   min-height: 8px;
   background: var(--accent);
