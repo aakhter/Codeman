@@ -407,7 +407,17 @@ done
 printf '%s\n' "$TXT"
 ```
 
-`.data` is `{text, timestamp}`. ⚠️ **On a hook-less workspace this reads the PREVIOUS
+`.data` is `{text, timestamp}`. Add `?context=full` for the whole conversation in
+`.data.messages[]`. ⚠️ **The four readers do not emit the same fields — only `{role, text}`
+is guaranteed.** `kind`/`label` come from claude (`prompt`/`response`), deepseek and the pane
+parser (the last two also emit `status`/`tool`), but **not** from codex; `timestamp` comes
+from claude and codex but not from deepseek or the pane parser. A claude worker additionally
+carries `turn` (a run of same-speaker messages inside one `turn` is one utterance split into
+segments, not separate exchanges) and `queued: true` on a prompt the user typed while the
+agent was still working. Filter on `role`, not on `kind`, unless you know the mode.
+`.data.text` does not change under `context=full`: it stays the
+last **assistant** message, so never read it as `messages[-1]`, which can be a prompt.
+⚠️ **On a hook-less workspace this reads the PREVIOUS
 turn.** `last-response` returns whatever the transcript last flushed, so it is only as
 correct as your end-of-turn signal: pair it with a `stop` signal or a marker, never
 with a bare `idle` ([§5.1](#51-where-to-spawn)). ⚠️ **Poll it, do not read it once.** `text` is written
@@ -724,6 +734,21 @@ Deleting a session ends the agent and its pane. It does **not** remove:
 - any **git worktree** you created for a worker. Keep that as a second list, report
   it, and ask before running `git worktree remove`, which discards uncommitted work
   inside it.
+
+Those case directories are **labelled** rather than left anonymous. A directory
+`quick-start` creates for a spawn carrying the preamble's `X-Codeman-Agent-Origin`
+header gets a `.codeman-agent-case.json` marker, which is what puts it in the web UI's
+agent-case cleanup list (Add Case → Manage) and in:
+
+```bash
+"${CURL[@]}" "$API/api/v1/cases/agent-created" | jq -r '.data.cases[] | "\(.name)\t\(.createdAt)\tinUse=\(.inUse)"'
+```
+
+Read-only, scoped to the user's own case space, and `inUse` is true while a live
+session is still working in that directory. Report that list when you finish a run
+with workers, so the user knows exactly what to sweep; the deletion is still theirs to
+ask for by name. Only a directory Codeman **created** is ever labelled, so a linked
+case, a cloned repo or a worktree never appears there.
 
 Confirm cleanup with `GET /api/v1/sessions`, never with `/api/v1/sessions/unified`
 (that one folds in transcript history from the whole machine and will keep showing

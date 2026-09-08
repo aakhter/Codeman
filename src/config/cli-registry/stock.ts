@@ -189,6 +189,13 @@ const CLAUDE: CliEntry = {
     // Codeman ever runs WITHOUT tmux, so it is the only one with a frameless readiness path.
     checkpoint: { promptGlyph: '❯', workingFrameProfile: 'claude-checkpoint', directPtyPromptTransition: true },
     external: false,
+    // The historical hard-coded pair, now stated as data. `workingLine` matches both the
+    // `✻ Actualizing… (39s · ↓ 2.0k tokens)` status line and the bare `esc to interrupt`
+    // footer, because tmux repaints partially and only one of the two may land in a chunk.
+    workDetect: {
+      promptGlyph: '❯',
+      workingLine: String.raw`…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b|esc to interrupt`,
+    },
     requiresMux: false,
     // Claude installs Codeman's own hooks block into every workspace it runs in, so its
     // stop/idle signals are unconditional — no per-session veto, unlike deepseek's bridge.
@@ -464,6 +471,11 @@ const CODEX: CliEntry = {
     // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
     // which is why this is its own capability and not derived from `hooks`.
     approvals: true,
+    // Codex draws `› Ask Codex to do anything` on its composer row and
+    // `Working (2m 49s • esc to interrupt)` above it while a turn runs. It animates no
+    // braille spinner, and it never prints `esc to interrupt` at rest, so that phrase
+    // alone separates a running turn from an idle one.
+    workDetect: { promptGlyph: '›', workingLine: '[Ee]sc to interrupt' },
     transcript: 'codex-rollout',
     altScreen: 'strip-full',
     echo: { policy: 'predict', anchor: { kind: 'cursor' }, predictProfile: 'codex' },

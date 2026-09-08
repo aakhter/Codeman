@@ -393,6 +393,21 @@ export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
   // the plain loopback bypass (tunnel down), same as pre-secret behavior.
   const curlCmd = generateHookCommand;
 
+  // Upstream keeps stdout-discarding OPT-IN (a `discardStdout` option used only by
+  // UserPromptSubmit). This fork discards it for EVERY event instead — see
+  // `generateHookCommand`, whose curl always carries `-o /dev/null` — because it
+  // also installs a SessionStart hook, and BOTH UserPromptSubmit and SessionStart
+  // are events whose stdout Claude Code injects into the model's context (the CLI's
+  // own hook reference: "Exit code 0 - stdout shown to Claude"). An undiscarded curl
+  // there pastes Codeman's `{"success":true,…}` envelope into the user's prompt on
+  // every single turn. The other events' stdout is harmless either way, so the
+  // superset is the simpler invariant and `curlCmdSilent` is just `curlCmd`.
+  // ⚠️ It MUST be curl's flag, not a trailing redirect. The command already ends
+  // `… 2>/dev/null || true`, and in `pipeline || true >/dev/null` the shell binds
+  // the redirection to `true` — which never runs on the success path — so the
+  // envelope still reaches stdout. Verified in dash and bash.
+  const curlCmdSilent = curlCmd;
+
   return {
     hooks: {
       Notification: [
@@ -427,6 +442,16 @@ export function generateHooksConfig(): { hooks: Record<string, unknown[]> } {
       // No matcher: Claude emits SessionStart for startup/resume and conversation
       // transitions including /clear, /compact, and supported /new behavior.
       SessionStart: [generateSessionStartHookEntry()],
+      // The pane's LIVE conversation id, reported by the CLI process itself.
+      // Without it the response viewer has to guess which `<uuid>.jsonl` a pane
+      // is on after a `/clear`, and the only anchor it can guess from is an
+      // Enter that went THROUGH Codeman — so a user who attaches to tmux
+      // directly never gets one and stays pinned to the launch conversation.
+      UserPromptSubmit: [
+        {
+          hooks: [{ type: 'command', command: curlCmdSilent('prompt_submitted'), timeout: HOOK_TIMEOUT_SECONDS }],
+        },
+      ],
       SubagentStop: [
         {
           hooks: [
@@ -778,6 +803,14 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
     // Approvals Inbox needs the elicitation_complete/elicitation_response
     // matchers; their absence marks a pre-inbox hooks block.
     const hasElicitationComplete = hooksJson.includes('elicitation_complete');
+    // The UserPromptSubmit event is what gives a tmux-driven pane a first-hand
+    // conversation id; its absence marks a pre-prompt_submitted hooks block.
+    // ⚠️ No surrounding quotes: `hooksJson` is JSON.stringify'd, so the marker
+    // inside the command reads \"prompt_submitted\" and a quoted needle never
+    // matches — which would make this gate permanently false and rewrite every
+    // workspace's settings file on every Claude spawn. The sibling markers are
+    // quote-free for the same reason.
+    const hasPromptSubmit = hooksJson.includes('prompt_submitted');
     if (!isOurs) return;
     if (
       hasSecret &&
@@ -785,6 +818,7 @@ export async function refreshStaleCodemanHooks(casePath: string): Promise<boolea
       hasSessionStart &&
       hasSubagentStopGuard &&
       hasElicitationComplete &&
+      hasPromptSubmit &&
       !hasTlsFlaglessCurl
     ) {
       sessionStartReady = true;
@@ -1097,9 +1131,80 @@ export async function installAgentSkillInto(skillDir: string): Promise<AgentSkil
  */
 export async function seedAgentSessionPreamble(sessionId: string): Promise<void> {
   const content = await readFile(join(agentSkillSourceDir(), 'preamble.sh'), 'utf-8');
-  const cacheDir = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
-  await mkdir(cacheDir, { recursive: true });
-  await writeFile(join(cacheDir, `codeman-agent-${sessionId}.sh`), content, { mode: 0o600 });
+  await mkdir(agentPreambleCacheDir(), { recursive: true });
+  await writeFile(agentPreamblePath(sessionId), content, { mode: 0o600 });
+}
+
+/** Where the preamble caches live. One formula, shared by seed / remove / prune. */
+function agentPreambleCacheDir(): string {
+  return process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
+}
+
+/** `codeman-agent-<sessionId>.sh` in that directory. */
+function agentPreamblePath(sessionId: string): string {
+  return join(agentPreambleCacheDir(), `codeman-agent-${sessionId}.sh`);
+}
+
+/** Matches exactly what seedAgentSessionPreamble writes, and nothing else in ~/.cache. */
+const AGENT_PREAMBLE_FILE_PATTERN = /^codeman-agent-(.+)\.sh$/;
+
+/** How long a preamble cache with no live session behind it is kept before the sweep takes it. */
+export const AGENT_PREAMBLE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Drop one session's preamble cache. Called when a session is deleted, which is the
+ * precise counterpart to seeding it at create: one file per claude session was being
+ * written and nothing ever removed them (236 leftovers measured on a working machine,
+ * the oldest three weeks old). Best-effort — a file that will not delete is litter,
+ * never a reason to fail a teardown.
+ */
+export async function removeAgentSessionPreamble(sessionId: string): Promise<void> {
+  await unlink(agentPreamblePath(sessionId)).catch(() => {});
+}
+
+/**
+ * Sweep preamble caches left by sessions that are gone: the delete path above covers
+ * an orderly teardown, and this covers everything else (a crash, a killed server, a
+ * session deleted by an older build, another instance's leftovers).
+ *
+ * ⚠️ Two guards, and both matter: a file whose session is in `keepSessionIds` is never
+ * touched however old it is, and everything else needs `maxAgeMs` of age on top. A live
+ * session's cache is load-bearing — remove it and the skill's two-line loader fails its
+ * version check mid-run — and the age floor is what keeps a session belonging to
+ * ANOTHER instance (whose ids this process cannot see) out of the blast radius. Losing
+ * one is degradation rather than breakage: the §0 fallback block rewrites it.
+ *
+ * Returns how many it removed. Best-effort throughout; a missing cache dir is 0.
+ */
+export async function pruneAgentSessionPreambles(
+  keepSessionIds: Iterable<string>,
+  maxAgeMs: number = AGENT_PREAMBLE_MAX_AGE_MS
+): Promise<number> {
+  const cacheDir = agentPreambleCacheDir();
+  const keep = new Set(keepSessionIds);
+  const cutoff = Date.now() - maxAgeMs;
+  let removed = 0;
+
+  let entries: string[];
+  try {
+    entries = await readdir(cacheDir);
+  } catch {
+    return 0;
+  }
+
+  for (const entry of entries) {
+    const sessionId = AGENT_PREAMBLE_FILE_PATTERN.exec(entry)?.[1];
+    if (!sessionId || keep.has(sessionId)) continue;
+    const path = join(cacheDir, entry);
+    try {
+      if ((await lstat(path)).mtimeMs > cutoff) continue;
+      await unlink(path);
+      removed++;
+    } catch {
+      /* best-effort — a vanished or unreadable file is not our problem */
+    }
+  }
+  return removed;
 }
 
 /**

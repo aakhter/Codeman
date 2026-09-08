@@ -80,12 +80,14 @@ import {
   parseBody,
   persistAndBroadcastSession,
   readJsonConfig,
+  resolveAgentCaseOrigin,
   resolveCasesDir,
   resolveParentSessionId,
   sessionCapacityMessage,
   SETTINGS_PATH,
   validatePathWithinBase,
 } from '../route-helpers.js';
+import { buildAgentCaseMarker, writeAgentCaseMarker } from '../../agent-case-marker.js';
 import { canUsernameRunPrivilegedCommands, resolveClaudeModeForUsername } from '../../user-store.js';
 import { enabledClis, getCli } from '../../config/cli-registry/registry.js';
 import { resolveCliLaunchError } from '../../utils/cli-launcher.js';
@@ -171,6 +173,7 @@ import {
 } from '../../docker-hosts.js';
 import { findLatestOmpSessionId } from '../../utils/omp-session-resolver.js';
 import { scanOmpSessionsHistory } from '../../omp-transcript.js';
+import { scanCodexSessionsHistory, codexThreadBySessionId } from '../../codex-transcript.js';
 import { readDeepSeekLastResponse } from '../../deepseek-transcript.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
@@ -2255,8 +2258,17 @@ export function registerSessionRoutes(
     session: Session,
     projectsDir: string
   ): Promise<string | null> {
+    // A pane whose conversation id came from its OWN hook needs no correlation:
+    // $CODEMAN_SESSION_ID (the pane's env) -> data.session_id (the CLI's own
+    // stdin JSON) is a first-hand binding that never looks at cwd, so it cannot
+    // be stolen by a sibling pane, a closed tab, or a bare `claude` in a
+    // terminal. Guessing can only be worse than the fact. This is also what
+    // closes the hole below for a pane driven straight from tmux: it never
+    // reaches `if (!submitAt)`.
+    if (session.claudeSessionIdIsFirstHand) return null;
+
     const submitAt = session.lastSubmitAt;
-    if (!submitAt) return null; // never typed through Codeman — nothing to credit
+    if (!submitAt) return null; // no anchor at all — nothing to credit
     const cached = claudeHistoryPinCache.get(session.id);
     if (cached && cached.submitAt === submitAt) return cached.claudeSessionId;
 
@@ -2341,9 +2353,13 @@ export function registerSessionRoutes(
   }
 
   interface ClaudeResponseMessage {
+    kind: 'prompt' | 'response';
+    label: 'Prompt' | 'Response';
     role: 'user' | 'assistant';
     text: string;
     timestamp?: string;
+    turn: number;
+    queued?: boolean;
   }
 
   interface ClaudeTranscriptEntry {
@@ -2353,6 +2369,19 @@ export function registerSessionRoutes(
     isSidechain?: boolean;
     isCompactSummary?: boolean;
     message?: { content?: unknown };
+    // A prompt typed while Claude is working is absorbed mid-turn and recorded
+    // ONLY here — the CLI never re-emits it as a `user` row. Every field stays
+    // optional and unvalidated: `queued_command` is not a documented CLI
+    // contract, so a missing/renamed field must mean "skip", which is also what
+    // the CLI's own non-human queue entries (commandMode 'task-notification',
+    // no `origin` key) require. Shape observed on Claude Code 2.1.220-2.1.251.
+    attachment?: {
+      type?: string;
+      prompt?: string;
+      commandMode?: string;
+      timestamp?: string;
+      origin?: { kind?: string };
+    };
   }
 
   function extractClaudeText(content: unknown, separator: string): string {
@@ -2378,10 +2407,17 @@ export function registerSessionRoutes(
   }
 
   /**
-   * Claude writes one logical turn as many JSONL rows: text, thinking and tool
-   * blocks share message ids, while tool results are represented as user rows.
-   * Build viewer cards from real user boundaries instead of treating every row
-   * as a separate chat message.
+   * Claude writes an append-only event log: tool results arrive as user rows,
+   * thinking/tool_use rows carry no text, and a prompt typed while the agent is
+   * working is only ever recorded as an `attachment/queued_command` row. But one
+   * assistant row IS one whole model message: measured across ~/.claude/projects
+   * (CLI 2.1.220-2.1.251) no assistant row carries more than one content block
+   * and no message id carries more than one text block, so there is nothing to
+   * reassemble. Emit one card per row and group them with `turn` instead of
+   * concatenating a human turn's replies into a single card (#169), which fused
+   * up to 74 distinct model messages into one card. Splitting is safe for
+   * markdown: no adjacent pair of assistant text rows in the corpus continues a
+   * table, a list, or an open code fence.
    */
   function parseClaudeResponseTranscript(
     content: string,
@@ -2390,8 +2426,23 @@ export function registerSessionRoutes(
     let lastText = '';
     let lastTimestamp = '';
     const messages: ClaudeResponseMessage[] = [];
-    let currentUserFragments = new Set<string>();
-    let currentAssistantFragments = new Set<string>();
+    // #169's replay guards, kept: they now SKIP a duplicated row instead of
+    // concatenating it into the previous card.
+    const currentUserFragments = new Set<string>();
+    const currentAssistantFragments = new Set<string>();
+    // Turn 0 is reserved for anything emitted before the first human prompt.
+    let turn = 0;
+
+    const pushUserMessage = (text: string, timestamp: string | undefined, queued: boolean): void => {
+      // A run of consecutive human inputs (a mid-turn queued burst) is ONE turn,
+      // so the viewer renders it under one badge instead of one badge per line.
+      if (messages.at(-1)?.role !== 'user') turn += 1;
+      const message: ClaudeResponseMessage = { kind: 'prompt', label: 'Prompt', role: 'user', text, timestamp, turn };
+      if (queued) message.queued = true;
+      messages.push(message);
+      currentUserFragments.add(text);
+      currentAssistantFragments.clear();
+    };
 
     for (const line of content.split('\n')) {
       if (!line) continue;
@@ -2405,25 +2456,37 @@ export function registerSessionRoutes(
       // rows include repeated image dimensions and other UI-generated context.
       if (entry.isSidechain) continue;
 
+      // A prompt typed while Claude is working is absorbed mid-turn and lives
+      // ONLY in an attachment row, so it was lost outright. `origin.kind` and
+      // `commandMode` separate the human's queue entries from the CLI's own:
+      // measured over 57 real transcripts on 2026-09-01, 322 queued_command rows
+      // split 163 `prompt`/`human` and 159 `task-notification`, and not one of
+      // those 159 carries an `origin` key. The 163 human rows become 162 user
+      // cards here — one is a verbatim repeat inside a still-unanswered user run
+      // and is collapsed by the dedup guard below — out of 353 user cards total.
+      if (entry.type === 'attachment') {
+        if (!full) continue;
+        const queued = entry.attachment;
+        if (!queued || queued.type !== 'queued_command') continue;
+        if (queued.origin?.kind !== 'human' || queued.commandMode !== 'prompt') continue;
+        const text = typeof queued.prompt === 'string' ? queued.prompt.trim() : '';
+        if (!text || isClaudeSyntheticUserMessage(entry, text)) continue;
+        if (currentUserFragments.has(text)) continue;
+        pushUserMessage(text, queued.timestamp || entry.timestamp, true);
+        continue;
+      }
+
       if (entry.type === 'user') {
         const text = extractClaudeText(entry.message?.content, '\n').trim();
         // A tool_result block has no text block and naturally drops out here.
         if (!text || isClaudeSyntheticUserMessage(entry, text)) continue;
         if (!full) continue;
-
-        const previous = messages.at(-1);
-        if (previous?.role === 'user') {
-          // Claude can replay the initial user row while restoring a transcript.
-          // Only collapse duplicates within the same unanswered user turn; the
-          // same prompt after an assistant response remains a legitimate turn.
-          if (currentUserFragments.has(text)) continue;
-          previous.text += `\n\n${text}`;
-          currentUserFragments.add(text);
-        } else {
-          messages.push({ role: 'user', text, timestamp: entry.timestamp });
-          currentUserFragments = new Set([text]);
-        }
-        currentAssistantFragments.clear();
+        // Claude replays the initial user row while restoring a transcript, and
+        // a CLI that also wrote an absorbed prompt as a user row would double it.
+        // Both collapse here. The same prompt sent again AFTER a reply is a
+        // legitimate second turn, because that reply cleared the set.
+        if (currentUserFragments.has(text)) continue;
+        pushUserMessage(text, entry.timestamp, false);
         continue;
       }
 
@@ -2434,18 +2497,10 @@ export function registerSessionRoutes(
       lastTimestamp = entry.timestamp || '';
       if (!full) continue;
 
-      const previous = messages.at(-1);
-      if (previous?.role === 'assistant') {
-        // Replayed snapshots sometimes repeat an identical text block. Distinct
-        // progress/final blocks are kept, but remain inside one Claude card.
-        if (currentAssistantFragments.has(text)) continue;
-        previous.text += `\n\n${text}`;
-        previous.timestamp = entry.timestamp || previous.timestamp;
-        currentAssistantFragments.add(text);
-      } else {
-        messages.push({ role: 'assistant', text, timestamp: entry.timestamp });
-        currentAssistantFragments = new Set([text]);
-      }
+      // Replayed snapshots repeat an identical text block inside one turn.
+      if (currentAssistantFragments.has(text)) continue;
+      messages.push({ kind: 'response', label: 'Response', role: 'assistant', text, timestamp: entry.timestamp, turn });
+      currentAssistantFragments.add(text);
       currentUserFragments.clear();
     }
 
@@ -3391,7 +3446,12 @@ export function registerSessionRoutes(
       effort,
       parentSessionId,
       tabGroupId,
+      agentOrigin,
     } = parseBody(QuickStartSchema, req.body);
+
+    // Resolved ONCE here: the same value labels a case directory this request creates
+    // (agent-case-marker.ts) and draws the tab lineage line on the session below.
+    const qsParentSessionId = resolveParentSessionId(ctx, req, parentSessionId, owner);
 
     // Multi-user: shell mode is arbitrary host-account execution, gated by the grant.
     // Resolve the owner's grant from the store so a GRANTED regular user is not wrongly denied.
@@ -3643,6 +3703,26 @@ export function registerSessionRoutes(
           await writeHooksConfig(resolvedCasePath);
         }
 
+        // Label a directory an AGENT asked us to create, so the scratch workspaces a
+        // long orchestration leaves behind can be told apart from the user's real
+        // projects later (see agent-case-marker.ts). This is the only branch that may
+        // write it: it is the only one that creates the directory, and a pre-existing
+        // case must never be labelled. Best-effort — a failed marker must not fail the
+        // spawn it decorates.
+        const qsAgentOrigin = resolveAgentCaseOrigin(req, agentOrigin, qsParentSessionId);
+        if (qsAgentOrigin) {
+          await writeAgentCaseMarker(
+            resolvedCasePath,
+            buildAgentCaseMarker({
+              createdBy: qsAgentOrigin,
+              parentSessionId: qsParentSessionId,
+              parentSessionName: qsParentSessionId ? ctx.sessions.get(qsParentSessionId)?.name : undefined,
+              mode,
+              owner,
+            })
+          );
+        }
+
         ctx.broadcast(SseEvent.CaseCreated, { name: caseName, path: resolvedCasePath });
       } catch (err) {
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to create case: ${getErrorMessage(err)}`);
@@ -3818,7 +3898,7 @@ export function registerSessionRoutes(
         maxBytes: qsTerminalHistoryConfig.terminalBufferMaxBytes,
         trimBytes: qsTerminalHistoryConfig.terminalBufferTrimBytes,
       },
-      parentSessionId: resolveParentSessionId(ctx, req, parentSessionId, owner),
+      parentSessionId: qsParentSessionId,
     });
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
@@ -4615,6 +4695,13 @@ export function registerSessionRoutes(
     // Persisted sessions (state.json). resumeSessionId is the Claude
     // conversation UUID a resumed session continues — feed it to the merge's
     // alias map so its transcript row folds into this session.
+    //
+    // codex keeps its thread id in `codexConfig` instead, and state.json stores
+    // that, so read it here as well. Without it a resumed codex session that has
+    // been demoted to a persisted-only record loses its alias and duplicates: the
+    // originator fallback below cannot rescue that one, because a RESUMED rollout
+    // keeps the original session_meta (see findActiveCodexFile) and so still
+    // names whichever pane first created the thread.
     const persisted: PersistedSessionInput[] = Object.values(ctx.store.getState().sessions).map((p) => ({
       id: p.id,
       name: p.name,
@@ -4623,9 +4710,9 @@ export function registerSessionRoutes(
       workingDir: p.workingDir,
       createdAt: p.createdAt,
       lastActivityAt: p.lastActivityAt,
+      claudeSessionId: p.resumeSessionId || p.codexConfig?.resumeSessionId,
       pinned: p.pinned,
       pinnedAt: p.pinnedAt,
-      claudeSessionId: p.resumeSessionId,
     }));
 
     // Lifecycle audit log (newest-first, capped).
@@ -4689,6 +4776,49 @@ export function registerSessionRoutes(
       }
     } catch {
       // Best-effort, same as the claude scan above.
+    }
+
+    // Codex's own rollout store (~/.codex/sessions) — the same treatment omp
+    // gets above, and for the same reason: codex writes no Claude transcript, so
+    // without this a codex conversation disappears from the list as soon as its
+    // session record does. `resumeId` is the rollout's own thread id, which is
+    // what `codex resume` takes; see codex-transcript.ts.
+    try {
+      const codexRows = await scanCodexSessionsHistory();
+      for (const h of codexRows) {
+        history.push({
+          sessionId: h.sessionId,
+          workingDir: h.workingDir,
+          sizeBytes: h.sizeBytes,
+          lastModified: h.lastModified,
+          firstPrompt: h.firstPrompt,
+          lastPrompt: h.lastPrompt,
+          mode: 'codex',
+          resumeId: h.sessionId,
+        });
+      }
+
+      // Fold a FRESH codex pane into its own rollout row. A resumed one already
+      // folds, because Session sets `claudeSessionId` from the resume id it was
+      // given; a fresh one has no thread id until codex writes the rollout, so
+      // the link has to come from the other side. Codeman spawns every codex pane
+      // with CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codeman_<sessionId>, and codex
+      // stamps that into session_meta.originator, so the rollout names the pane.
+      //
+      // Newest rollout wins: `/new` typed inside the TUI leaves several rollouts
+      // carrying the same originator, and the pane is on the most recent one.
+      // Rows arrive newest-first, so the first match is it.
+      //
+      // Never overwrites an id a session already knows — that one came from the
+      // resume path and is authoritative.
+      const codexThreads = codexThreadBySessionId(codexRows);
+      for (const row of [...live, ...persisted]) {
+        if (row.claudeSessionId && row.claudeSessionId !== row.id) continue;
+        const threadId = codexThreads.get(row.id);
+        if (threadId) row.claudeSessionId = threadId;
+      }
+    } catch {
+      // Best-effort, same as the two scans above.
     }
 
     // Mux process stats (best-effort; guard against mocks lacking the method).

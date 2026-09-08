@@ -663,11 +663,14 @@ describe('checkpoint prompt observations', () => {
       claudeSessionId: saved.claudeSessionId,
       claudeSessionIdentityAdopted: saved.claudeSessionIdentityAdopted,
     });
-    (
-      restored as unknown as {
-        _seedClaudeViewerIdentityAfterMuxAttach(isRestored: boolean): void;
-      }
-    )._seedClaudeViewerIdentityAfterMuxAttach(true);
+    // The old `_seedClaudeViewerIdentityAfterMuxAttach()` was called here with
+    // isRestored=true, where its whole body was guarded by `!isRestored` — so the
+    // call was already a no-op and pinned nothing. The upstream merge removed the
+    // helper: its write was dead, immediately overwritten in start() by an
+    // unconditional assignment that is a strict superset (restoredConversation ||
+    // resume || omp || codex || this.id). What this test actually proves is
+    // unchanged and still asserted below: a restart-recovered session keeps the
+    // persisted authoritative identity.
     expect(restored.toState().claudeSessionId).toBe('persisted-authoritative-id');
     restored.setCheckpoint(true, ['new']);
     expect(restored.requestCheckpoint({ mode: 'new' })).toEqual({

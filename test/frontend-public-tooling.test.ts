@@ -34,6 +34,15 @@ describe('frontend public asset tooling', () => {
 
     // The brief view builds its single message with _buildResponseViewerMessage.
     expect(appJs).toContain("body.appendChild(this._buildResponseViewerMessage(lastResponse, 'assistant'");
+    // ⚠️ A numeric `turn` gates continuation rendering. Only the Claude reader
+    // emits turns; Codex, the external-CLI pane parser and an older server emit
+    // adjacent same-role messages with none, and must keep one badge per card.
+    // Downstream renders the FULL view through _renderResponseViewerMessages
+    // (transcript blocks + per-message copy actions), so the continuation rule
+    // lives there rather than in an inline _buildResponseViewerMessage loop.
+    expect(appJs).toContain(
+      "!!previous && previous.role === msg.role && typeof msg.turn === 'number' && previous.turn === msg.turn"
+    );
     expect(appJs).toContain("div.className = 'rv-message ' + (isUser ? 'rv-msg-user' : 'rv-msg-assistant');");
     expect(appJs).toContain("renderedText.className = 'rv-text';");
 

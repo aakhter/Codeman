@@ -13,7 +13,7 @@
  */
 
 import { z } from 'zod';
-import { TOKEN_PATTERNS } from './patterns.js';
+import { compileVersionRegex, TOKEN_PATTERNS } from './patterns.js';
 import { isKnownCheckpointFrameProfile, isKnownLauncherProfile, isKnownSetenvProfile } from './profiles.js';
 
 /** A bare CLI id: lowercase, starts with a letter, at most 24 chars. Also used as a CSS/URL token. */
@@ -298,6 +298,23 @@ const capabilitiesSchema = z
     // answer that could be right for one: the Approvals Inbox has no ingestion path for a
     // CLI Codeman ships no hook bridge or turn-end parser for.
     approvals: z.boolean().default(false),
+    workDetect: z
+      .object({
+        promptGlyph: z.string().min(1).max(8),
+        // Config-supplied regex, so it goes through the same guard as `version.regex`:
+        // ~/.codeman/clis.json can set this, and the compiled pattern runs on the PTY
+        // hot path, where a nested quantifier would be a ReDoS against the event loop.
+        // A broken pattern must also fail at LOAD time rather than inside a data handler.
+        workingLine: z
+          .string()
+          .min(1)
+          .refine(
+            (src) => compileVersionRegex(src) !== null,
+            'workingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
+          ),
+      })
+      .strict()
+      .optional(),
     model: z
       .object({ source: z.enum(['flag', 'claude-settings-file', 'none']), param: z.string().optional() })
       .strict(),

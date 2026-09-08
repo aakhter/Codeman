@@ -229,7 +229,7 @@ describe('background-agent wait integration', () => {
   });
 
   it('models the screenshot without turning exact live agents into a human approval or autonomous idle', async () => {
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '2.1.237',
       source: noRoleProcessSource,
     });
@@ -534,7 +534,7 @@ describe('background-agent wait integration', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '2.1.237',
       source: processSource,
     });
@@ -605,7 +605,7 @@ describe('background-agent wait integration', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '2.1.237',
       source: processSource,
     });

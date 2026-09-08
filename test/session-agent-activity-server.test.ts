@@ -95,7 +95,7 @@ describe('WebServer agent activity ownership', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: 'future-test-runtime',
       matcherRegistry,
       source,
@@ -149,7 +149,7 @@ describe('WebServer agent activity ownership', () => {
     onFrameCapture?: (session: Session, ctx: ReturnType<ReturnType<typeof internals>['createRouteContext']>) => void;
     event?: 'idle_prompt' | 'stop';
   }) {
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: options.runtimeVersion ?? '2.1.237',
       matcherRegistry: options.matcherRegistry,
       source: options.processSource,
@@ -292,7 +292,7 @@ describe('WebServer agent activity ownership', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '9.9.9-test',
       matcherRegistry,
       source: processSource,
@@ -327,7 +327,7 @@ describe('WebServer agent activity ownership', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '2.1.237',
       source: processSource,
     });
@@ -381,7 +381,7 @@ describe('WebServer agent activity ownership', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '9.9.9-test',
       matcherRegistry,
       source: processSource,
@@ -484,7 +484,7 @@ describe('WebServer agent activity ownership', () => {
       statProcessCwd: async () => ({ dev: 1, ino: 1 }),
       statWorkingDirectory: async () => ({ dev: 1, ino: 1 }),
     };
-    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, {
+    const server = new WebServer(0, false, true, '127.0.0.1', undefined, false, '', {
       runtimeVersion: '2.1.237',
       matcherRegistry: negativeRegistry,
       source: negativeSource,

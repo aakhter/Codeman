@@ -1,5 +1,71 @@
 # aicodeman
 
+## 1.26.1
+
+### Patch Changes
+
+- Codex sessions no longer report idle for their entire life, and Codex conversations now appear in Past Sessions and can be resumed.
+
+  **Per-CLI work detection (#385, irisitymichaelgrundberg).** The composer glyph and the working status line are now registry data (`capabilities.workDetect`) rather than Claude constants. Claude keeps its exact current pair, Codex declares `›` plus its `esc to interrupt` footer, and any CLI that declares neither falls back to Claude's, which is what every session used before. Work detection had been gated Claude-mode-only on the reasoning that an external CLI has no `❯`, which was true and still left every Codex session reporting `idle` from the moment it started. `workingLine` is config-supplied and its compiled pattern runs on the PTY hot path, so it goes through `compileVersionRegex()` in both the schema refine and the runtime compile: a nested quantifier there would backtrack on the event loop for the whole server. The Codex footer is matched case-insensitively on the E, so a future version capitalising it cannot make the fix silently inert.
+
+  **Codex conversations in Past Sessions (#386, irisitymichaelgrundberg).** A bounded scanner reads codex's `~/.codex/sessions` rollout store, so the unified session list now merges three transcript stores rather than one (Claude's `~/.claude/projects`, omp's `~/.omp/agent/sessions`, codex's `~/.codex/sessions`). A scanned row carries a `resumeId`, the rollout's own thread id, which lets it resume through `codexConfig.resumeSessionId`; a live session never carries one, so a row without it stays a genuinely fresh session. Live and resumed Codex sessions fold into their rollout row through the existing alias map, including a `session_meta.originator` match for fresh panes, so a conversation never shows up twice. The phone overview carries `resumeId` through its own row projection, without which a tapped Codex past row started a fresh session on a thread already on disk.
+
+  ### Thanks
+  - @irisitymichaelgrundberg for both PRs (#385, #386), and for turning a full review round on #386 in a day.
+
+## 1.26.0
+
+### Minor Changes
+
+- Tag the case directories agent workers create, and clean up what they leave behind.
+
+  A long agent orchestration creates one case directory per worker, and deleting the
+  sessions never removed them, so `~/codeman-cases` filled with scratch folders that
+  looked exactly like real projects.
+  - A case directory `POST /api/quick-start` **creates** for an agent-driven spawn now
+    carries a `.codeman-agent-case.json` marker recording when it was made, by whom,
+    from which session, and in which mode. Only the branch that creates the directory
+    writes it, so a linked case, a cloned repo or any pre-existing path is never
+    labelled, and deleting the marker file adopts a scratch case as a real one.
+  - The label comes from the new `X-Codeman-Agent-Origin` header that the packaged agent
+    skill sets on its shared curl invocation (preamble 1.22.0), or an `agentOrigin` body
+    field, falling back to a resolved `parentSessionId` so workers spawned by an older
+    skill copy are still labelled.
+  - `GET /api/cases` publishes it as `agentCreated`, and the new read-only
+    `GET /api/cases/agent-created` lists the scratch cases with `inUse` (a live session
+    is still working in it) and `modifiedAt`.
+  - Add Case -> Manage badges every agent-created case and adds a sticky **Clean up**
+    entry point that names each directory in its confirmation and skips any case a
+    running session is using. Removal still goes through `DELETE /api/cases/:name`.
+  - The agent skill's per-session preamble cache (`~/.cache/codeman-agent-<id>.sh`) is
+    now removed with the session and swept at boot. One was written per Claude session
+    and nothing ever deleted them (236 orphans on a working machine); the sweep keeps
+    every live session's file and only takes orphans older than seven days.
+
+## 1.25.0
+
+### Minor Changes
+
+- Codeman can be mounted under a sub-path behind a reverse proxy (#381, @mtiller). `--base-url /codeman` (or `CODEMAN_BASE_URL`) makes the server strip the prefix on the way in, rebase redirects on the way out, inject `<base>` and `window.__CODEMAN_BASE__` into the shell, and route web-tab proxying and WebSocket upgrades under the mount, so one TLS name can front several apps. A root install is byte-identical to before. Applied on top: the crash-diag beacon stays under the mount (sendBeacon is not fetch, so the base-aware wrapper never saw it), the test suite strips `CODEMAN_BASE_URL`, and a wiring test boots a real server under a prefix.
+
+  A case can attach to a container that is already running (#357, @dignfei). `DockerCase.owned:false` mirrors the remote-SSH attach contract: Codeman only execs into such a container, never creates, starts, stops, removes, pauses or commits it, with the refusal enforced at string-construction time so no caller bug can reach `docker stop`. The Add Case dialog gets an attach panel with a container picker, the run menu takes its mode availability from the CLIs actually present in the container, and adoption is admin-only in multi-user mode. Three gaps closed after review: export no longer pauses or commits an adopted container, a freshly linked owned case no longer hides every agent mode behind a probe of a container that does not exist yet, and multi-user gating is explicit.
+
+  The Claude response viewer renders one message per model message (#369, @shenlvkang-collab). The reader used to fuse every assistant row between two human prompts into one card and never read the attachment rows that hold a prompt typed mid-turn; measured over 57 real transcripts it now shows 1,806 messages instead of 356 and recovers 162 absorbed user prompts, with the assistant text unchanged row for row.
+
+  A Claude pane learns its live conversation from the CLI's own `UserPromptSubmit` hook (#367, @shenlvkang-collab). The conversation id used to be re-derived by correlating `~/.claude/history.jsonl` against a stamp only Codeman's own input path set, so a pane driven straight from tmux stayed pinned to its launch conversation forever. The hook reports the id first-hand, addressed by the pane's own `$CODEMAN_SESSION_ID`, and the chain of conversations is persisted so a restart re-pins the right one. The new `hook:prompt_submitted` SSE event is registered (158 = 158), and it lands in the run summary only when the conversation actually moved.
+
+  The Add Case modal can be submitted from a phone again (#368, @shenlvkang-collab). Since 1.16.4 the layout below 860px hid the modal footer, which held the only Create/Clone/Link button. A header submit button now sits beside the close button, dims while a submit is pending, and a static test pins the contract so it cannot silently disappear again.
+
+  The Link Existing case picker opens in the Codeman Cases directory instead of Home (#383, @opticon454). Under Docker the two are unrelated trees and Home holds nothing but dot directories, so the picker showed no cases at all. The fallback chain is now Current Folder, then Codeman Cases, then `/mnt/d`, then the first root.
+
+  A PR review bot for the maintainer (`scripts/pr-bot/`, guide in `docs/pr-bot.md`). It reviews every open pull request in its own Codeman session inside a private clone and reports the verdict, ranked findings and a recommendation to Telegram with action buttons; merge, close, post-comment and approve-CI happen only from a confirmed tap. Maintainer tooling, not part of the server or the CLI.
+
+  ### Thanks
+  - @mtiller for the reverse-proxy base URL (#381).
+  - @dignfei for attaching cases to running containers (#357).
+  - @shenlvkang-collab for the response viewer fix (#369), the first-hand conversation hook (#367) and the phone Add Case fix (#368).
+  - @opticon454 for the case picker default (#383).
+
 ## 1.24.7
 
 ### Patch Changes

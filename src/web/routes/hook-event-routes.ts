@@ -119,7 +119,11 @@ export function registerHookEventRoutes(
     const activityEvent = activityKind ? ctx.agentActivity.allocateEvent(session, activityKind) : undefined;
     const sourceSequence = activityEvent?.sequence || undefined;
     const summaryTracker = ctx.runSummaryTrackers.get(sessionId);
-    if (summaryTracker && event !== 'stop') summaryTracker.recordHookEvent(event, safeData);
+    // `prompt_submitted` is excluded here and recorded at the tail instead: it
+    // fires on EVERY prompt of every Claude pane, and only the ones where the
+    // conversation actually moved carry information (see the tail block).
+    if (summaryTracker && event !== 'stop' && event !== 'prompt_submitted')
+      summaryTracker.recordHookEvent(event, safeData);
 
     // DeepSeek status-bridge ordering: drop a stale retried report (see
     // dshSeqBySession above). Success rather than an error, so the shim exits 0
@@ -213,6 +217,55 @@ export function registerHookEventRoutes(
       }
     }
 
+    // Sync Claude's current conversation id from any OTHER hook payload that
+    // carries one. `session_start` already ran through the authoritative branch
+    // at the top of this handler (which owns the coordinator generation reset),
+    // so it is excluded here rather than adopted twice.
+    // Interactive PTY mode never emits `session_id` on stdout, so hooks are the
+    // only reliable way to learn that the user ran `/clear` (which spins up a new
+    // conversation jsonl).
+    // NOTE: transcript watching is NOT repeated here — this fork starts it
+    // earlier in the handler ("Transcript discovery is identity evidence"), so
+    // upstream's copy of that block at this point would be a second call.
+    let conversationChanged = false;
+    if (event !== 'session_start' && data && typeof data.session_id === 'string' && data.session_id) {
+      const prevClaudeSessionId = session?.claudeSessionId;
+      const prevChainLength = session?.claudeSessionChain.length ?? 0;
+      // FIRST-HAND: this payload came from the CLI process itself and reached us
+      // because the pane's own $CODEMAN_SESSION_ID addressed it. No cwd, no
+      // timestamp, nothing a sibling pane on the same folder could win — so the
+      // response viewer can stop guessing entirely (see
+      // resolveActiveClaudeSessionIdFromHistory).
+      session?.adoptClaudeSessionId(data.session_id, { firstHand: true });
+      if (event === 'prompt_submitted') {
+        // Repairs `lastSubmitAt` for a pane driven straight from tmux: it was
+        // bumped only by input that flowed through Codeman's own write path, so
+        // it read 0 forever for those panes and every consumer of "when did this
+        // pane last submit" silently degraded.
+        session?.markPromptSubmitted();
+      }
+      // Persist when the conversation actually moved: `/clear` emits no
+      // completion event, so without this the successor id is lost on restart
+      // and recovery falls back to the launch conversation.
+      if (
+        session &&
+        (session.claudeSessionId !== prevClaudeSessionId || session.claudeSessionChain.length !== prevChainLength)
+      ) {
+        conversationChanged = true;
+        ctx.persistSessionState(session);
+      }
+      // Docker sessions: keep the case's resume seed following the LIVE
+      // conversation (post-/clear id switches), so a container stop/reboot
+      // relaunch resumes the right transcript.
+      if (session?.docker && session.claudeSessionId && session.claudeSessionId !== prevClaudeSessionId) {
+        void persistDockerCaseClaudeSessionId(
+          getDataDir(),
+          session.docker.containerName,
+          session.claudeSessionId
+        ).catch(() => {});
+      }
+    }
+
     // Sanitize forwarded data: only include known safe fields, limit size
     const sessionName = session?.name ?? sessionId.slice(0, 8);
 
@@ -274,6 +327,16 @@ export function registerHookEventRoutes(
       ...safeData,
       ...(approvalId && session?.mode !== 'deepseek' && { approvalId }),
     });
+
+    // Track a `prompt_submitted` in the run summary ONLY when the conversation
+    // actually moved (a /clear successor). It fires on EVERY prompt of every
+    // Claude pane, and recording the rest would push a row into the Summary
+    // timeline and /api/search per turn and evict useful rows from the
+    // 1000-event FIFO (#367 merge-time fix). Every other event was already
+    // recorded above, before the suppression/early-return paths.
+    if (summaryTracker && event === 'prompt_submitted' && conversationChanged) {
+      summaryTracker.recordHookEvent(event, safeData);
+    }
 
     return {};
   });
