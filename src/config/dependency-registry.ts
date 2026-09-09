@@ -9,6 +9,7 @@
 
 import { enabledClis } from './cli-registry/registry.js';
 import { compileVersionRegex } from './cli-registry/patterns.js';
+import { OFFICE_CONVERTER_BINS } from './office-converter.js';
 
 export type ProbeEnvironment = 'linux' | 'darwin' | 'win32' | 'wsl';
 
@@ -178,7 +179,9 @@ export function dependencyRegistry(): ToolDependency[] {
       resolvers: [
         {
           match: ['linux', 'darwin', 'wsl'],
-          resolver: { kind: 'path', bins: ['libreoffice', 'soffice'], versionArg: '--version' },
+          // Single-sourced with the converters (COD-426): doctor and the preview
+          // path must resolve the SAME binary, in the same order.
+          resolver: { kind: 'path', bins: [...OFFICE_CONVERTER_BINS], versionArg: '--version' },
         },
       ],
       installHint: { linux: 'sudo apt install libreoffice', darwin: 'brew install --cask libreoffice' },

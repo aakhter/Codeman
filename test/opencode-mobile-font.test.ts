@@ -343,13 +343,67 @@ describe('OpenCode device-local terminal font policy', () => {
     openCode.app.applyTerminalFontPolicyForActiveSession();
     openCode.app.decreaseFontSize();
     expect(openCode.app.terminal.options.fontSize).toBe(8);
-    expect(openCode.store.setItem).toHaveBeenLastCalledWith('codeman-font-size-mobile-opencode', 8);
+    expect(openCode.store.setItem).toHaveBeenLastCalledWith('codeman-font-size-session:session-1', 8);
 
     const codex = createApp('mobile', {}, 'codex');
     codex.app.applyTerminalFontPolicyForActiveSession();
     codex.app.decreaseFontSize();
     expect(codex.app.terminal.options.fontSize).toBe(10);
-    expect(codex.store.setItem).toHaveBeenLastCalledWith('codeman-font-size', 10);
+    expect(codex.store.setItem).toHaveBeenLastCalledWith('codeman-font-size-session:session-1', 10);
+  });
+
+  it('keeps font sizes independent when switching between sessions', () => {
+    const store = createStore();
+    const loaded = loadTerminalPolicy({ deviceType: 'desktop', store });
+    const app = Object.assign(Object.create(loaded.mixin), {
+      activeSessionId: 'session-a',
+      sessions: new Map([
+        ['session-a', { mode: 'codex' }],
+        ['session-b', { mode: 'codex' }],
+      ]),
+      terminal: { options: { fontSize: 14 } },
+      fitAddon: { fit: vi.fn() },
+    });
+
+    app.applyTerminalFontPolicyForActiveSession();
+    app.setFontSize(18);
+    expect(app.terminal.options.fontSize).toBe(18);
+
+    app.activeSessionId = 'session-b';
+    app.applyTerminalFontPolicyForActiveSession();
+    expect(app.terminal.options.fontSize).toBe(14);
+
+    app.setFontSize(12);
+    app.activeSessionId = 'session-a';
+    app.applyTerminalFontPolicyForActiveSession();
+
+    expect(app.terminal.options.fontSize).toBe(18);
+    expect(store.values.get('codeman-font-size-session:session-a')).toBe('18');
+    expect(store.values.get('codeman-font-size-session:session-b')).toBe('12');
+  });
+
+  it('uses the legacy global font value for an uncustomized session', () => {
+    const harness = createApp('desktop', { 'codeman-font-size': '16' }, 'codex');
+
+    harness.app.applyTerminalFontPolicyForActiveSession();
+
+    expect(harness.app.terminal.options.fontSize).toBe(16);
+    expect(harness.store.setItem).not.toHaveBeenCalled();
+  });
+
+  it('uses the legacy key when changing size before a session is active', () => {
+    const harness = loadTerminalPolicy({ deviceType: 'desktop' });
+    const app = Object.assign(Object.create(harness.mixin), {
+      activeSessionId: null,
+      sessions: new Map(),
+      terminal: { options: { fontSize: 14 } },
+      fitAddon: { fit: vi.fn() },
+    });
+
+    app.setFontSize(16);
+
+    expect(harness.store.setItem).toHaveBeenCalledWith('codeman-font-size', 16);
+    expect(harness.store.values.has('codeman-font-size-session:undefined')).toBe(false);
   });
 
   it('keeps the applied font, fit, and echo refresh when storage writes fail', () => {
@@ -747,6 +801,23 @@ describe('OpenCode device-local terminal font policy', () => {
     expect(app.terminal.options.fontSize).toBe(9);
     expect(order).toEqual(['policy:9', 'fit:9', 'activate:9', 'resize:9']);
     expect(fontStorageWrites(integrated.store)).toEqual([]);
+  });
+
+  it('restores the selected session font before the first fit', async () => {
+    const integrated = loadIntegratedApp(
+      createStore({
+        'codeman-font-size-session:s0': '18',
+        'codeman-font-size-session:s1': '12',
+      })
+    );
+    const order: string[] = [];
+    const app = makeSelectionApp(integrated.CodemanApp, order, 's0');
+    app.fitAddon.fit = vi.fn(() => order.push(`fit:${app.terminal.options.fontSize}`));
+
+    await app.selectSession('s1');
+
+    expect(app.terminal.options.fontSize).toBe(12);
+    expect(order).toContain('fit:12');
   });
 
   it('abandons a stale restored-session selection after its delayed attach resolves', async () => {

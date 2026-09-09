@@ -1147,6 +1147,16 @@ export const QuickStartSchema = z.object({
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
+  /**
+   * Who is spawning this worker (`codeman-skill` from the packaged agent skill), or,
+   * equivalently, the `X-Codeman-Agent-Origin` header; the body wins when both are
+   * present. Used ONLY to label a case directory this request CREATES as an agent
+   * scratch workspace, so it can be found and cleaned up later — see
+   * `src/agent-case-marker.ts`. Never a permission signal, and an unrecognised token
+   * is dropped rather than rejected. `POST /api/sessions` has no equivalent field
+   * because it takes an existing `workingDir` and so never creates a directory to label.
+   */
+  agentOrigin: z.string().max(64).optional(),
 });
 
 // ========== Hook Events ==========
@@ -1167,6 +1177,9 @@ export const HookEventSchema = z.object({
     'task_completed',
     'session_start',
     'checkpoint',
+    // Claude Code's UserPromptSubmit: a first-hand report of the pane's live
+    // conversation id. Keep in step with HookEventType in types/api.ts.
+    'prompt_submitted',
     // A turn STARTED. Unlike the others this one has no Claude Code hook behind
     // it: it is reported by the DeepSeek Harness status shim, and exists so a
     // dialog answered in the terminal resolves its Approvals Inbox item at once

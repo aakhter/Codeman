@@ -113,6 +113,7 @@ import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { getCli } from './config/cli-registry/registry.js';
 import { legacyResumeSlot } from './session-cli-registry-bridge.js';
+import { compileVersionRegex } from './config/cli-registry/patterns.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
   buildInteractiveArgs,
@@ -261,6 +262,11 @@ const GRACEFUL_SHUTDOWN_DELAY_MS = 100;
 function isNoSuchProcessError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ESRCH';
 }
+
+// Conversations kept in a pane's chain. A pane that /clears repeatedly would
+// otherwise grow state.json without bound; 32 covers any real session's history
+// and the oldest entries are the ones whose transcripts Claude Code has pruned.
+const MAX_CLAUDE_SESSION_CHAIN = 32;
 
 // Filter out terminal focus escape sequences (focus in/out reports)
 // ^[[I (focus in), ^[[O (focus out), and the enable/disable sequences
@@ -713,6 +719,17 @@ export class Session extends EventEmitter {
   private _claudeAuthoritativeSessionId: string | null = null;
   private _claudeSessionIdentityAdopted = false;
   private _claudeSessionStartHookReady: boolean;
+  // Set only when the id came from the CLI's own UserPromptSubmit/Stop hook
+  // payload, keyed on this pane's $CODEMAN_SESSION_ID. That binding is a fact,
+  // not a correlation: it never consults cwd, so a sibling pane on the same
+  // folder cannot steal it. Runtime-only — a restart must re-earn it from the
+  // next hook rather than trust a persisted claim.
+  private _claudeSessionIdIsFirstHand = false;
+  // Conversations this pane has been on, oldest first, current last. Grows only
+  // through a first-hand adoption, so it can never splice in a foreign
+  // conversation. Persisted, because `/clear` is otherwise unrecoverable: the
+  // predecessor id exists nowhere else once the pane moves on.
+  private _claudeSessionChain: string[] = [];
   private _totalCost: number = 0;
   private _messages: ClaudeMessage[] = [];
   private _lineBuffer: string = '';
@@ -773,6 +790,8 @@ export class Session extends EventEmitter {
   private _activityStreak: ActivityStreak | null = null; // Unbroken run of PTY repaints (working detection)
   private _lastPaneProbeAt = 0; // Throttle for the tmux screen probe
   private _lastPaneProbeWorking: boolean | null = null; // Its last verdict (null = could not read)
+  /** Lazily compiled `capabilities.workDetect.workingLine`. See _workingLinePattern(). */
+  private _workingLineRe: RegExp | undefined = undefined;
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
@@ -1002,6 +1021,8 @@ export class Session extends EventEmitter {
       tmuxHistoryLimit?: number;
       /** Restored wall-clock ms of the pane's last Enter (see `lastSubmitAt`). */
       lastSubmitAt?: number;
+      /** Restored conversation chain, oldest first (see `claudeSessionChain`). */
+      claudeSessionChain?: string[];
       /** Restored wall-clock ms of the pane's last output (recovery only; see `_wireActivityAt`). */
       lastActivityAt?: number;
       /** Remote execution metadata for sessions launched through SSH inside local tmux. */
@@ -1054,14 +1075,24 @@ export class Session extends EventEmitter {
     this._wireActivityAt = config.lastActivityAt || Date.now();
     this._wireActivitySettleUntil = config.lastActivityAt ? Date.now() + WIRE_ACTIVITY_SETTLE_MS : 0;
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
-    // For omp, `claudeSessionId` doubles as the generic "external transcript id"
-    // alias key mergeUnifiedSessions() folds a history row into its owning
-    // session by: omp mints its OWN uuid, unrelated to this Codeman id, so
-    // without this an omp conversation's Past-Sessions row (keyed by omp's
-    // id) would never merge with its own live/persisted row (keyed by this
-    // id) — it would just show up a second time.
+    // For omp and codex, `claudeSessionId` doubles as the generic "external
+    // transcript id" alias key mergeUnifiedSessions() folds a history row into
+    // its owning session by: each mints its OWN thread id, unrelated to this
+    // Codeman id, so without this the conversation's Past-Sessions row (keyed by
+    // that thread id) would never merge with its own live/persisted row (keyed
+    // by this id) — it would just show up a second time. For codex a duplicate
+    // is worse than cosmetic: the stale row still resumes, so clicking it starts
+    // a SECOND `codex resume` on a thread already open in another pane.
+    //
+    // This covers a RESUMED codex session, which knows its thread id up front. A
+    // fresh one learns its id only once codex writes the rollout, so it is folded
+    // from the other side — see the originator stamping in `gatherUnifiedInputs()`.
     this._claudeSessionId =
-      config.claudeSessionId ?? config.resumeSessionId ?? config.ompConfig?.resumeSessionId ?? this.id;
+      config.claudeSessionId ??
+      config.resumeSessionId ??
+      config.ompConfig?.resumeSessionId ??
+      config.codexConfig?.resumeSessionId ??
+      this.id;
     this._claudeAuthoritativeSessionId = config.claudeSessionId ?? config.resumeSessionId ?? null;
     this._claudeSessionIdentityAdopted = config.claudeSessionIdentityAdopted ?? Boolean(config.resumeSessionId);
     this._claudeSessionStartHookReady = config.claudeSessionStartHookReady ?? this.mode !== 'claude';
@@ -1074,6 +1105,13 @@ export class Session extends EventEmitter {
     this._restoredIdleAnchorAt = config.lastActivityAt
       ? Math.max(config.lastActivityAt, config.lastSubmitAt ?? 0)
       : undefined;
+    // Restored chain: its tail is the conversation the CLI was actually on when
+    // the server stopped, which outranks the launch id seeded just above. The
+    // FIRST-HAND flag is deliberately NOT restored — a persisted claim is not a
+    // fact, so the pane re-earns the guess-free path from its next hook.
+    this._claudeSessionChain = Array.isArray(config.claudeSessionChain) ? [...config.claudeSessionChain] : [];
+    const restoredConversation = this._claudeSessionChain[this._claudeSessionChain.length - 1];
+    if (restoredConversation) this._claudeSessionId = restoredConversation;
     this._mux = config.mux || null;
     this._useMux = config.useMux ?? (this._mux !== null && this._mux.isAvailable());
     this._muxSession = config.muxSession || null;
@@ -1332,6 +1370,20 @@ export class Session extends EventEmitter {
     return this._claudeSessionId;
   }
 
+  /**
+   * True when `claudeSessionId` came from the CLI's own hook payload rather than
+   * from the launch config or a history correlation. The response viewer uses it
+   * to skip guessing entirely — see resolveActiveClaudeSessionIdFromHistory().
+   */
+  get claudeSessionIdIsFirstHand(): boolean {
+    return this._claudeSessionIdIsFirstHand;
+  }
+
+  /** Conversations this pane has been on, oldest first, current last. */
+  get claudeSessionChain(): readonly string[] {
+    return this._claudeSessionChain;
+  }
+
   /** Docker execution metadata when this session runs inside a container, else undefined. */
   get docker(): SessionDocker | undefined {
     return this._docker;
@@ -1387,27 +1439,54 @@ export class Session extends EventEmitter {
 
   // Update Claude's best-effort viewer identity. This does not establish the
   // authoritative checkpoint baseline; only SessionStart may do that.
-  adoptClaudeSessionId(newId: string): void {
+  //
+  // In interactive PTY mode Claude CLI emits no JSON to stdout, so
+  // `_handleJsonMessage` never sees `session_id`; hooks are the only signal
+  // that conveys a post-/clear conversation switch.
+  //
+  // `firstHand` marks an id that came from the CLI process itself — a hook
+  // payload whose delivery was keyed on this pane's $CODEMAN_SESSION_ID. Only
+  // those extend the chain: a history-correlated guess must never be able to
+  // write a foreign conversation into this pane's permanent record.
+  adoptClaudeSessionId(newId: string, options: { firstHand?: boolean } = {}): void {
     if (!newId) return;
+    if (options.firstHand) {
+      this._claudeSessionIdIsFirstHand = true;
+      this._recordClaudeSessionInChain(newId);
+    }
     if (newId === this._claudeSessionId) return;
     this._claudeSessionId = newId;
   }
 
-  /** Adopt the authoritative identity delivered by Claude's SessionStart hook. */
+  /**
+   * Adopt the authoritative identity delivered by Claude's SessionStart hook.
+   *
+   * SessionStart is delivered to this pane on its own $CODEMAN_SESSION_ID, so it
+   * is first-hand by construction and extends the conversation chain.
+   */
   adoptClaudeSessionStartId(newId: string): void {
     if (!newId) return;
     this._claudeSessionStartHookReady = true;
     this._claudeSessionIdentityAdopted = true;
     this._claudeAuthoritativeSessionId = newId;
-    this.adoptClaudeSessionId(newId);
+    this.adoptClaudeSessionId(newId, { firstHand: true });
   }
 
-  private _seedClaudeViewerIdentityAfterMuxAttach(isRestored: boolean): void {
-    // `_pinOmpRespawnId()` (called inside `_setupOrAttachMuxSession()`'s dead-pane
-    // branch, just before this runs) may have JUST aliased the id to omp's own
-    // session uuid. That already-resolved id must win over the generic `this.id`
-    // fallback, or every respawn clobbers it back to the Codeman id.
-    if (!isRestored) this._claudeSessionId = this._resumeSessionId || this._ompConfig?.resumeSessionId || this.id;
+  /**
+   * Append to the conversation chain, oldest first. A repeat of the current tail
+   * is a no-op (every prompt in a conversation reports the same id), and an id
+   * already in the chain moves to the tail rather than duplicating, which is
+   * what a `/resume` back to an earlier conversation does.
+   */
+  private _recordClaudeSessionInChain(id: string): void {
+    if (this._claudeSessionChain[this._claudeSessionChain.length - 1] === id) return;
+    const existing = this._claudeSessionChain.indexOf(id);
+    if (existing !== -1) this._claudeSessionChain.splice(existing, 1);
+    this._claudeSessionChain.push(id);
+    // A pane that /clears in a loop must not grow this without bound.
+    if (this._claudeSessionChain.length > MAX_CLAUDE_SESSION_CHAIN) {
+      this._claudeSessionChain.splice(0, this._claudeSessionChain.length - MAX_CLAUDE_SESSION_CHAIN);
+    }
   }
 
   /** The tmux session name, if the session is running inside a mux */
@@ -2262,6 +2341,12 @@ export class Session extends EventEmitter {
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
       sources: this.getSourcesForPersist(),
       lastSubmitAt: this._lastSubmitAt || undefined,
+      // Only a chain the CLI's own hooks vouched for is persisted, and only when
+      // the pane actually moved conversation. Its LAST entry is the live one, so
+      // it is also what restores `claudeSessionId` across a restart — `start()`
+      // resets that field to the launch id at three separate points, which is
+      // why a recovered pane otherwise shows its pre-/clear transcript forever.
+      claudeSessionChain: this._claudeSessionChain.length > 0 ? [...this._claudeSessionChain] : undefined,
       // envOverrides intentionally NOT on the public SessionState type — they must not
       // leak into SSE / GET /api/sessions broadcasts (schema allows OPENCODE_*, which
       // can carry secrets). For disk persistence, session-manager calls
@@ -2919,6 +3004,11 @@ export class Session extends EventEmitter {
       }, REMOTE_CLI_VERSION_PROBE_DELAY_MS);
     }
 
+    // ⚠️ Hoisted, because the "third reset point" below runs unconditionally
+    // AFTER the mux branch and would otherwise stomp the restored conversation
+    // straight back to the launch id.
+    let restoredConversation: string | undefined;
+
     // If mux wrapping is enabled, create or attach to a mux session
     if (this._useMux && this._mux) {
       try {
@@ -2958,9 +3048,29 @@ export class Session extends EventEmitter {
           spawnErrLabel: 'mux attachment',
         });
 
-        // A restored mux retains the persisted viewer + authoritative identity.
-        // Only a newly spawned pane needs its viewer seed initialized here.
-        this._seedClaudeViewerIdentityAfterMuxAttach(isRestored);
+        // Set claudeSessionId — when resuming, the Claude conversation ID is the
+        // resumed one. `_pinOmpRespawnId()` (called just above, inside
+        // `_setupOrAttachMuxSession()`'s dead-pane branch) may have JUST aliased
+        // this to omp's own session uuid — that already-resolved id must win
+        // over the generic `this.id` fallback, or this line clobbers it back
+        // to the Codeman id
+        // on every single respawn. codex needs the same fallback for the same
+        // reason: its thread id lives in `_codexConfig`, so without it every
+        // respawn drops a resumed codex session's alias and its Past-Sessions
+        // row springs back as a duplicate that still resumes.
+        // ⚠️ A RESTORED mux session is the one case where the launch id is a
+        // lie: the CLI never stopped, so a `/clear` before the Codeman restart
+        // already moved it to a conversation `this.id` knows nothing about. The
+        // persisted chain's tail is that conversation, reported first-hand by
+        // the CLI's own hook, so it outranks every fallback here. A NEW pane has
+        // an empty chain and falls through to the resume/alias fallbacks.
+        restoredConversation = isRestored ? this._claudeSessionChain[this._claudeSessionChain.length - 1] : undefined;
+        this._claudeSessionId =
+          restoredConversation ||
+          this._resumeSessionId ||
+          this._ompConfig?.resumeSessionId ||
+          this._codexConfig?.resumeSessionId ||
+          this.id;
 
         // For NEW mux sessions: wait for readiness then clean buffer
         // For RESTORED mux sessions: don't do anything - client will fetch buffer on tab switch
@@ -3061,10 +3171,19 @@ export class Session extends EventEmitter {
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     // Mirrors the mux branch above and must not clobber it: this line runs
     // unconditionally after both the mux and direct-PTY paths, so it also needs
-    // the ompConfig fallback or it stomps the mux branch's correctly-resolved
-    // OMP alias back to this.id on every mux/plain-reattach boot recovery
-    // (the "third reset point" — see DECISIONS.md).
-    this._claudeSessionId = this._resumeSessionId || this._ompConfig?.resumeSessionId || this.id;
+    // the ompConfig and codexConfig fallbacks or it stomps the mux branch's
+    // correctly-resolved OMP/codex alias back to this.id on every mux/plain-
+    // reattach boot recovery (the "third reset point" — see DECISIONS.md).
+    // For the same reason it needs `restoredConversation`: on a RESTORED mux
+    // attach the CLI never stopped and may have `/clear`ed before the restart,
+    // so the launch id is a lie and the chain's tail is the live conversation.
+    // It is empty on every other path, so those paths keep the alias chain.
+    this._claudeSessionId =
+      restoredConversation ||
+      this._resumeSessionId ||
+      this._ompConfig?.resumeSessionId ||
+      this._codexConfig?.resumeSessionId ||
+      this.id;
 
     this._pid = this.ptyProcess.pid;
     console.log('[Session] Interactive PTY spawned with PID:', this._pid);
@@ -3320,12 +3439,14 @@ export class Session extends EventEmitter {
    */
   private _detectInteractiveActivity(data: string): void {
     this._noteDirectPtyCheckpointGeneration(data);
-    // The prompt line contains "❯" when Claude is waiting for input. It only ARMS
-    // the check and is NOT evidence the turn ended: Claude redraws the composer
-    // about once a second all the way through a turn, which is exactly how a
-    // working session used to flip to idle two seconds in. _confirmIdle() waits
-    // for the pane to actually go quiet before believing it.
-    if (data.includes('❯')) {
+    const workDetect = getCli(this.mode)?.capabilities.workDetect;
+    // The composer row carries this glyph when the CLI is waiting for input. It only
+    // ARMS the check and is NOT evidence the turn ended: a CLI redraws its composer
+    // about once a second all the way through a turn, which is exactly how a working
+    // session used to flip to idle two seconds in. _confirmIdle() waits for the pane to
+    // actually go quiet before believing it. A CLI that declares no glyph keeps Claude's,
+    // which is the glyph every such session has been armed by until now.
+    if (data.includes(workDetect?.promptGlyph ?? '❯')) {
       // Only start a new timeout if we're not already awaiting idle confirmation.
       // This prevents status bar redraws (which include the prompt) from resetting it.
       if (!this._awaitingIdleConfirmation) {
@@ -3358,9 +3479,10 @@ export class Session extends EventEmitter {
     // new status line does not rescue it either (tmux repaints partially, so the
     // complete line reaches the PTY only every few tens of seconds). An unbroken run
     // of repaints is the signal that survives. See session-activity.ts for the
-    // measurement. Claude only: an external CLI's TUI has no ❯, so nothing would
-    // ever arm the idle confirmation and such a session would latch busy forever.
-    if (!isExternalCliMode(this.mode)) {
+    // measurement. This needs a pane Codeman can read: without a glyph to arm the idle
+    // confirmation, a session latches busy forever. A CLI that declares work detection
+    // supplies its own glyph, and the non-external modes keep the run they always had.
+    if (workDetect || !isExternalCliMode(this.mode)) {
       this._activityStreak = trackActivityStreak(this._activityStreak, Date.now());
       // A streak is the TRIGGER to look, not the verdict: typing into the composer
       // also produces a steady stream of repaints. The screen settles it, and only
@@ -3395,8 +3517,28 @@ export class Session extends EventEmitter {
     if (now - this._lastPaneProbeAt < PANE_PROBE_MIN_INTERVAL_MS) return this._lastPaneProbeWorking;
     this._lastPaneProbeAt = now;
     const text = this._mux.capturePaneText?.(this._muxSession.muxName) ?? null;
-    this._lastPaneProbeWorking = text === null ? null : CLAUDE_WORKING_LINE_PATTERN.test(text);
+    this._lastPaneProbeWorking = text === null ? null : this._workingLinePattern().test(text);
     return this._lastPaneProbeWorking;
+  }
+
+  /**
+   * The regex matching this CLI's "a turn is running" status line.
+   *
+   * Compiled once per session and cached: `_probePaneWorking` runs it against a whole
+   * pane capture on a timer, and the throttled text detector runs it against every
+   * accumulated chunk. A CLI that declares no pattern falls back to Claude's, which is
+   * the pattern every session used before the registry carried one.
+   */
+  private _workingLinePattern(): RegExp {
+    if (this._workingLineRe === undefined) {
+      const src = getCli(this.mode)?.capabilities.workDetect?.workingLine;
+      // Same guard the schema applies, not a second opinion: `compileVersionRegex()` is
+      // what keeps a nested quantifier out of this pattern, and this one runs on the PTY
+      // hot path. It returns null rather than throwing, and Claude's pattern is the
+      // fallback every session used before the registry carried one.
+      this._workingLineRe = (src ? compileVersionRegex(src) : null) ?? CLAUDE_WORKING_LINE_PATTERN;
+    }
+    return this._workingLineRe;
   }
 
   /**
@@ -3488,10 +3630,6 @@ export class Session extends EventEmitter {
    * PTY data chunk. Receives accumulated raw data to process in one batch.
    */
   private _processExpensiveParsers(rawData: string): void {
-    // Skip Claude-specific parsers for external CLI sessions — Ralph tracker,
-    // BashToolParser, token parsing, and CLI info parsing all depend on Claude's output format.
-    if (isExternalCliMode(this.mode)) return;
-
     // Lazy ANSI strip: only compute cleanData when a consumer actually needs it.
     let _cleanData: string | null = null;
     const getCleanData = (): string => {
@@ -3500,6 +3638,19 @@ export class Session extends EventEmitter {
       }
       return _cleanData;
     };
+
+    // Work detection by status line, ahead of the external-CLI gate below. The pattern
+    // comes from the CLI's own registry entry, so this is the one parser here that is not
+    // Claude-specific — and it sat under that gate, which is why an external CLI reported
+    // itself idle through an entire turn. Guarded on the descriptor so a CLI without one
+    // still skips the ANSI strip the gate used to save it.
+    if (!this._isWorking && getCli(this.mode)?.capabilities.workDetect) {
+      if (this._workingLinePattern().test(getCleanData())) this._markWorking();
+    }
+
+    // Skip Claude-specific parsers for external CLI sessions (Ralph tracker,
+    // BashToolParser, token + CLI-info parsing all depend on Claude's output format).
+    if (isExternalCliMode(this.mode)) return;
 
     // Forward to Ralph tracker to detect Ralph loops and todos
     // (opencode sessions already returned early at line 1209)
@@ -3532,16 +3683,13 @@ export class Session extends EventEmitter {
       this.parseTaskDescriptionsFromTerminalData(getCleanData());
     }
 
-    // Work detection (text-based, needs clean data: the status line is coloured,
-    // so raw data has escape sequences between the `…` and the elapsed timer).
-    // Only check if a faster path didn't already trigger working state.
+    // Legacy gerunds, Claude-only. The status-line pattern above already ran for every
+    // CLI that declares one, so this adds only the older wording. Current Claude
+    // randomizes the word ("Actualizing…", "Finagling…"), so these catch a fraction of
+    // turns; the pattern above and the activity streak carry the rest.
     if (!this._isWorking) {
       const cleanData = getCleanData();
       if (
-        CLAUDE_WORKING_LINE_PATTERN.test(cleanData) ||
-        // Legacy gerunds. Current Claude randomizes the word ("Actualizing…",
-        // "Finagling…"), so these catch only a fraction of turns; the pattern
-        // above and the activity streak carry the rest.
         cleanData.includes('Thinking') ||
         cleanData.includes('Writing') ||
         cleanData.includes('Reading') ||
@@ -4471,6 +4619,16 @@ export class Session extends EventEmitter {
       // so codex panes additionally publish theirs to the shared map.
       if (this.mode === 'codex') Session.codexSubmitTimes.set(this.id, this._lastSubmitAt);
     }
+  }
+
+  /**
+   * A prompt was submitted, reported by the CLI's own UserPromptSubmit hook.
+   * `_trackSubmit` only sees input that flows through Codeman's write path, so
+   * a pane the user drives by attaching to tmux directly never stamped this and
+   * `lastSubmitAt` stayed 0 for its whole life.
+   */
+  markPromptSubmitted(): void {
+    this._lastSubmitAt = Date.now();
   }
 
   /**

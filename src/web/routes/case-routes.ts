@@ -13,7 +13,15 @@ import fs from 'node:fs/promises';
 import { basename, dirname, join, posix as posixPath, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import type { ApiResponse, CaseInfo, DockerHost, RemoteSessionInfo, SessionDocker, SessionMode } from '../../types.js';
+import type {
+  AgentCaseSummary,
+  ApiResponse,
+  CaseInfo,
+  DockerHost,
+  RemoteSessionInfo,
+  SessionDocker,
+  SessionMode,
+} from '../../types.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import {
   BrowseDirectoryQuerySchema,
@@ -45,6 +53,7 @@ import {
 } from '../../git-clone.js';
 import type { GitRemoteProbe, GitUrlParse } from '../../git-clone.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
+import { readAgentCaseMarker, type AgentCaseMarker } from '../../agent-case-marker.js';
 import { settingsWriteBlocker, writeHooksConfig } from '../../hooks-config.js';
 import {
   canAccessOwned,
@@ -227,6 +236,21 @@ function gitDiagnosticLine(stderr: string): string {
  */
 function repoShipsClaudeSettings(casePath: string): boolean {
   return ['settings.json', 'settings.local.json'].some((file) => existsSync(join(casePath, '.claude', file)));
+}
+
+/**
+ * Project a case's marker onto the wire shape `CaseInfo.agentCreated` carries.
+ * `owner` stays server-side: the listings are already owner-scoped, and it is not
+ * something the case list needs to publish.
+ */
+function agentCreatedInfo(marker: AgentCaseMarker): NonNullable<CaseInfo['agentCreated']> {
+  return {
+    createdAt: marker.createdAt,
+    createdBy: marker.createdBy,
+    ...(marker.parentSessionId ? { parentSessionId: marker.parentSessionId } : {}),
+    ...(marker.parentSessionName ? { parentSessionName: marker.parentSessionName } : {}),
+    ...(marker.mode ? { mode: marker.mode } : {}),
+  };
 }
 
 /** Read and parse linked-cases.json, returning empty object on missing/invalid file. */
@@ -580,12 +604,17 @@ export function registerCaseRoutes(
       const entries = await fs.readdir(listBase, { withFileTypes: true });
       for (const e of entries) {
         if (e.isDirectory() && SAFE_CASE_NAME.test(e.name)) {
+          const casePath = join(listBase, e.name);
+          // Only a directory Codeman scaffolded for an agent spawn carries a marker,
+          // so this stays absent for every human-created, linked or cloned case.
+          const marker = await readAgentCaseMarker(casePath);
           cases.push({
             name: e.name,
-            path: join(listBase, e.name),
-            hasClaudeMd: existsSync(join(listBase, e.name, 'CLAUDE.md')),
+            path: casePath,
+            hasClaudeMd: existsSync(join(casePath, 'CLAUDE.md')),
             location: 'local',
             codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), e.name),
+            ...(marker ? { agentCreated: agentCreatedInfo(marker) } : {}),
           });
         }
       }
@@ -687,6 +716,61 @@ export function registerCaseRoutes(
     }
 
     return cases;
+  });
+
+  // ========== Agent-created cases (cleanup listing) ==========
+
+  /**
+   * The scratch workspaces agent workers left behind, newest first.
+   *
+   * A long orchestration creates one case directory per worker, and deleting the
+   * sessions does not remove them, so without this the only way to tell an agent's
+   * `alpha`/`beta` from a real project was to remember which was which. Reads the same
+   * marker `GET /api/cases` exposes and adds the two facts a human needs before
+   * deleting a directory: whether a live session is still working in it, and when it
+   * was last touched.
+   *
+   * ⚠️ Read-only on purpose: removal goes through the existing `DELETE /api/cases/:name`,
+   * one name at a time, so this file keeps exactly one recursive-delete path. Scoped by
+   * construction — it only ever walks the caller's own case space.
+   */
+  app.get('/api/cases/agent-created', async (req): Promise<ApiResponse<{ cases: AgentCaseSummary[] }>> => {
+    const user = getAuthUser(req);
+    const listBase = resolveCasesDir(user);
+    const inUsePaths = new Set(
+      Array.from(ctx.sessions.values())
+        .filter((session) => canAccessOwned(user, session.owner))
+        .map((session) => session.workingDir)
+    );
+
+    let entries;
+    try {
+      entries = await fs.readdir(listBase, { withFileTypes: true });
+    } catch {
+      return { success: true, data: { cases: [] } }; // case space not created yet
+    }
+
+    const summaries: AgentCaseSummary[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !SAFE_CASE_NAME.test(entry.name)) continue;
+      const casePath = join(listBase, entry.name);
+      const marker = await readAgentCaseMarker(casePath);
+      if (!marker) continue;
+      const modifiedAt = await fs
+        .stat(casePath)
+        .then((stat) => stat.mtime.toISOString())
+        .catch(() => undefined);
+      summaries.push({
+        name: entry.name,
+        path: casePath,
+        ...agentCreatedInfo(marker),
+        inUse: inUsePaths.has(casePath),
+        ...(modifiedAt ? { modifiedAt } : {}),
+      });
+    }
+
+    summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return { success: true, data: { cases: summaries } };
   });
 
   app.post('/api/cases', async (req): Promise<ApiResponse<{ case: { name: string; path: string } }>> => {

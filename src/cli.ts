@@ -17,6 +17,7 @@ import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { dataPath } from './config/instance.js';
 import { casePath } from './config/cases-dir.js';
+import { assertValidBasePath } from './config/base-path.js';
 import { installAgentSkillInto, removeAgentSkillFrom, type AgentSkillApplyResult } from './hooks-config.js';
 import { getSessionManager } from './session-manager.js';
 import { getTaskQueue } from './task-queue.js';
@@ -1608,6 +1609,11 @@ function addWebLaunchOptions(cmd: Command): Command {
     .option('-H, --host <host>', 'Host to bind to', process.env.CODEMAN_HOST || '127.0.0.1')
     .option('-p, --port <port>', 'Port to listen on (env: CODEMAN_PORT)', process.env.CODEMAN_PORT || '3000')
     .option('--https', 'Enable HTTPS with self-signed certificate (only needed for remote access, not localhost)')
+    .option(
+      '--base-url <path>',
+      'Sub-path Codeman is mounted under behind a reverse proxy, e.g. /codeman (env: CODEMAN_BASE_URL)',
+      process.env.CODEMAN_BASE_URL || '/'
+    )
     .option('--title-hostname <hostname>', 'Override the hostname shown in the browser title')
     .option(
       '--allow-unauthenticated-network',
@@ -1624,6 +1630,7 @@ function toWebLaunchOptions(options: {
   host: string;
   port: string;
   https?: boolean;
+  baseUrl?: string;
   titleHostname?: string;
   allowUnauthenticatedNetwork?: boolean;
   multiuser?: boolean;
@@ -1633,10 +1640,18 @@ function toWebLaunchOptions(options: {
     console.error(palette.err(`✗ Invalid port: ${options.port}`));
     process.exit(1);
   }
+  let basePath: string;
+  try {
+    basePath = assertValidBasePath(options.baseUrl);
+  } catch (err) {
+    console.error(palette.err(`✗ ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+  }
   return {
     host: options.host,
     port,
     https: !!options.https,
+    basePath,
     titleHostname: options.titleHostname,
     allowUnauthenticatedNetwork: !!options.allowUnauthenticatedNetwork,
     multiuser: !!options.multiuser,
@@ -1726,14 +1741,21 @@ webCmd.action(async (options) => {
   const https = launch.https;
   const titleHostname = options.titleHostname;
   const allowUnauthenticatedNetwork = launch.allowUnauthenticatedNetwork ?? false;
+  const basePath = launch.basePath ?? '';
+  // Single source of truth for subsystems that read it directly (e.g. renderers).
+  if (basePath) process.env.CODEMAN_BASE_URL = basePath;
   const displayHost = host === '0.0.0.0' ? 'localhost' : host;
 
-  console.log(palette.info(`Starting Codeman web interface on ${displayHost}:${port}${https ? ' (HTTPS)' : ''}...`));
+  console.log(
+    palette.info(
+      `Starting Codeman web interface on ${displayHost}:${port}${basePath ? basePath + '/' : ''}${https ? ' (HTTPS)' : ''}...`
+    )
+  );
 
   try {
     // The server prints its own "running at" line (it also covers the daemon and
     // service launch paths), so this one used to be a duplicate of it.
-    const server = await startWebServer(port, https, false, host, titleHostname, allowUnauthenticatedNetwork);
+    const server = await startWebServer(port, https, false, host, titleHostname, allowUnauthenticatedNetwork, basePath);
     if (https) {
       console.log(palette.warn('  Note: Accept the self-signed certificate in your browser on first visit'));
     }
@@ -2021,7 +2043,8 @@ program
   .option('--category <name>', 'Only check one category (core|office|other)')
   .action(async (options) => {
     const { createRealHost, checkAll } = await import('./utils/dependency-checker.js');
-    const { renderTable, renderJson, computeExitCode } = await import('./utils/dependency-report.js');
+    const { renderTable, renderJson, computeExitCode, applyOfficeConverterProbe } =
+      await import('./utils/dependency-report.js');
     const { dependencyRegistry, TOOL_CATEGORIES } = await import('./config/dependency-registry.js');
 
     if (options.category && !(TOOL_CATEGORIES as readonly string[]).includes(options.category)) {
@@ -2032,7 +2055,20 @@ program
     const host = createRealHost();
     const allTools = dependencyRegistry();
     const registry = options.category ? allTools.filter((t) => t.category === options.category) : allTools;
-    const results = checkAll(registry, host);
+    const rawResults = checkAll(registry, host);
+
+    // COD-426: presence + `--version` is not capability. A LibreOffice that
+    // prints a version but cannot convert anything used to report green here
+    // while every document preview failed, so refine that one row with the SAME
+    // capability probe the converters consult (cached, so this is also what
+    // warms the gate). Only worth spawning when the row is otherwise green.
+    const libreOfficeRow = rawResults.find((r) => r.id === 'libreoffice');
+    let officeProbe = null;
+    if (libreOfficeRow?.status === 'ok') {
+      const { probeOfficeConverter } = await import('./office-converter-runtime.js');
+      officeProbe = await probeOfficeConverter();
+    }
+    const results = applyOfficeConverterProbe(rawResults, officeProbe);
 
     if (options.json) {
       // Raw JSON, never styled: this output is parsed, not read.

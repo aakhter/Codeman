@@ -578,17 +578,18 @@ A saved dashboard URL renders as a tab, served through Codeman's own origin at `
 
 ## 11. Quick reference
 
-| Env / flag                                                                  | Effect                                                                                                                                                           |
-| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CODEMAN_PASSWORD` (+ `CODEMAN_USERNAME`)                                   | Enable HTTP Basic auth                                                                                                                                           |
-| `--host` / `CODEMAN_HOST`                                                   | Bind host (default `127.0.0.1`)                                                                                                                                  |
-| `CODEMAN_ALLOWED_HOSTS`                                                     | Extra `Host`/`Origin` allowlist entries for reverse proxies (comma‑separated; exact host, or leading‑dot `.suffix` for subdomains) — see §3                      |
-| `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledge an unauthenticated non‑loopback bind (downgrades the warning)                                                                                        |
-| `--https`                                                                   | Enable TLS (adds HSTS)                                                                                                                                           |
-| `CODEMAN_INSTANCE`                                                          | Scope tmux socket + data dir for isolation                                                                                                                       |
-| `CODEMAN_GESTURE=1`                                                         | Make the gesture overlay available (widens CSP)                                                                                                                  |
-| `CODEMAN_DOCKER_BRIDGE_HOOKS=1`                                             | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
-| `CODEMAN_DOCKER_BRIDGE_HOST`                                                | Override the bridge gateway IP the hooks listener binds (default: auto‑detect)                                                                                   |
+| Env / flag | Effect |
+|------------|--------|
+| `CODEMAN_PASSWORD` (+ `CODEMAN_USERNAME`) | Enable HTTP Basic auth |
+| `--host` / `CODEMAN_HOST` | Bind host (default `127.0.0.1`) |
+| `CODEMAN_ALLOWED_HOSTS` | Extra `Host`/`Origin` allowlist entries for reverse proxies (comma‑separated; exact host, or leading‑dot `.suffix` for subdomains) — see §3 |
+| `--base-url` / `CODEMAN_BASE_URL` | Sub‑path prefix Codeman is mounted under behind a reverse proxy, e.g. `/codeman` (default `/`); the proxy must forward the prefix unchanged. Independent of `CODEMAN_ALLOWED_HOSTS` |
+| `--allow-unauthenticated-network` / `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledge an unauthenticated non‑loopback bind (downgrades the warning) |
+| `--https` | Enable TLS (adds HSTS) |
+| `CODEMAN_INSTANCE` | Scope tmux socket + data dir for isolation |
+| `CODEMAN_GESTURE=1` | Make the gesture overlay available (widens CSP) |
+| `CODEMAN_DOCKER_BRIDGE_HOOKS=1` | Serve the hook endpoints on the docker bridge gateway (host‑internal, hooks‑only, `403` elsewhere) so in‑container hooks reach a loopback‑bound server — see §10 |
+| `CODEMAN_DOCKER_BRIDGE_HOST` | Override the bridge gateway IP the hooks listener binds (default: auto‑detect) |
 | `CODEMAN_TRUSTED_ATTACHMENT_ROOTS`                                          | Comma‑separated **exact** directories an admin may point a `.codeman-attachments` symlink at. Env‑only (never browser‑settable), read once at startup — see below |
 
 **Audit log:** session lifecycle and server start are recorded in

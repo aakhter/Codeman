@@ -64,6 +64,7 @@ import { MAX_PASTE_IMAGE_BYTES } from '../../config/buffer-limits.js';
 import { buildExternalAttachmentHistoryItem, sanitizeAttachmentHistoryItem } from '../../session-attachment-history.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
 import { getOfficePreviewPdfPath, getPreviewPdfDownloadName } from '../../document-preview-cache.js';
+import { probeOfficeConverter } from '../../office-converter-runtime.js';
 import {
   buildTextExportHtml,
   classifyExportBranch,
@@ -350,7 +351,12 @@ async function serveConvertedPreview(
   try {
     const previewPath = await getOfficePreviewPdfPath(resolvedPath, extension);
     if (!previewPath) {
-      reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Document preview conversion failed'));
+      // COD-426: distinguish "this host cannot convert anything" from "this
+      // document failed to convert". The verdict is cached by the gate the
+      // conversion itself just consulted, so this costs no extra spawn.
+      const verdict = await probeOfficeConverter();
+      const message = verdict.usable ? 'Document preview conversion failed' : verdict.reason;
+      reply.code(500).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, message));
       return;
     }
 
@@ -682,8 +688,21 @@ async function resolveFilesystemPickerPath(
     throwFilesystemPickerError(403, ApiErrorCode.INVALID_INPUT, 'No filesystem browse roots are available');
   }
 
+  // With no explicit path (the "Link Existing" case picker, which passes no
+  // sessionId and an empty initialPath until the user has typed something),
+  // land on the shared cases root rather than falling through to whichever
+  // root happens to be first. `Codeman Cases` sits inside `Home` only on the
+  // native default (~/codeman-cases); a Docker deployment binds them at
+  // unrelated host paths (CODEMAN_APPDATA_PATH vs CODEMAN_CASES_PATH), so a
+  // Home-first fallback opened the picker somewhere with no cases in sight —
+  // and, worse, made an OLD case folder left behind by a since-changed
+  // CODEMAN_CASES_PATH look like a normal thing to stumble across while
+  // browsing for one to link.
   const fallbackRoot =
-    roots.find((root) => root.label === 'Current Folder') ?? roots.find((root) => root.path === '/mnt/d') ?? roots[0];
+    roots.find((root) => root.label === 'Current Folder') ??
+    roots.find((root) => root.label === 'Codeman Cases') ??
+    roots.find((root) => root.path === '/mnt/d') ??
+    roots[0];
   const candidatePath = resolve(requestedPath ?? fallbackRoot.path);
 
   let resolvedPath: string;

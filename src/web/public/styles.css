@@ -946,6 +946,10 @@ html[data-tab-orientation='vertical'] .tab-ref-drag-handle {
   border-radius: 3px;
 }
 
+.tab-focus-drop-zone {
+  min-height: 4px;
+}
+
 .tab-layout-drop-active {
   min-height: 8px;
   background: var(--accent);
@@ -6670,6 +6674,57 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   background: rgba(97, 175, 239, 0.15);
   border-color: rgba(97, 175, 239, 0.3);
   color: var(--accent);
+}
+
+/* Agent-created cases: the badge on a scratch case, and the bulk cleanup bar above
+   the list. Tokens only (no hardcoded ink), so the light skins repaint with the rest. */
+.case-manage-tag-agent {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--control-border);
+  border-radius: 3px;
+  background: var(--control-bg);
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+
+.case-manage-agent-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  /* Sticky, and therefore OPAQUE: it is the first child of the scrolling list
+     (.case-manage-list is a 320px-tall flex scroller), so a translucent bar would
+     have case rows sliding visibly under it, and a static one would put the cleanup
+     button out of reach the moment a long case list is scrolled. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-card);
+}
+
+.case-manage-agent-count {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The shared .case-manage-btn is a 26px icon square; this one carries a word. */
+.case-manage-btn-cleanup {
+  width: auto;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .toolbar-input {
@@ -15443,6 +15498,42 @@ kbd {
 
 .rv-message-copy.rv-copy-failed::before { content: '\2715'; }
 
+/* Consecutive messages from one speaker inside one turn are segments of a
+   single utterance, not separate cards: no repeated badge, a hairline seam.
+   The role accent survives because the colour rules above match on BOTH
+   :has(.rv-role-*) and .rv-msg-* — a badge-less continuation still hits the
+   class arm. Do not drop either arm. */
+.rv-message.rv-msg-cont {
+  margin-top: -18px;
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  padding-top: 0;
+}
+
+.rv-message.rv-msg-cont > .rv-text {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.rv-message:has(+ .rv-msg-cont) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  padding-bottom: 0;
+}
+
+/* A prompt the user typed while the agent was working (absorbed mid-turn).
+   A pseudo-element, not a text node, so the i18n MutationObserver cannot
+   rewrite it. */
+.rv-message[data-queued='1'] .rv-role::after {
+  content: ' ⏱';
+}
+
+.rv-notice {
+  opacity: 0.7;
+  font-style: italic;
+  margin-top: 12px;
+}
 /* Markdown rendered content inside response viewer.
    Prose uses a proportional font for readability; code keeps monospace. */
 .rv-text,

@@ -1117,11 +1117,9 @@ describe('COD-319 Focus smart group rendering', () => {
     expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')).not.toBeNull();
     expect(focus.querySelector('[data-tab-focus-shortcut="webview:web"]')).not.toBeNull();
     // COD-372 (`044f7749`, "number Focus shortcuts first") deliberately gave Focus
-    // shortcuts their own Alt numbering — it updated tab-layout-app.test.ts and
-    // keyboard-shortcuts.test.ts but missed this older COD-319 assertion, which had
-    // been written when shortcuts carried no number at all (COD-385). The rest of
-    // COD-319's rule still holds: no drag handles, no tab semantics.
-    expect(focus.querySelector('[data-tab-ref-drag]')).toBeNull();
+    // shortcuts their own Alt numbering. Focus shortcuts keep tree semantics while
+    // exposing the same dedicated drag handle as canonical rows.
+    expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"] [data-tab-ref-drag]')).not.toBeNull();
     expect(focus.querySelector('.tab-number')?.textContent).toBe('1');
     expect(focus.querySelector('[aria-selected]')).toBeNull();
     expect(focus.querySelector('[data-tab-focus-shortcut="session:parent"]')?.hasAttribute('oncontextmenu')).toBe(
@@ -2225,7 +2223,7 @@ describe('COD-307 delegated pointer behavior', () => {
     expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
   });
 
-  it('does not advertise Focus shortcuts as drag destinations', () => {
+  it('does not let canonical reference drags use Focus shortcuts as destinations', () => {
     const app = makeInteractionApp();
     app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
     app._fullRenderSessionTabs();
@@ -2246,6 +2244,44 @@ describe('COD-307 delegated pointer behavior', () => {
     container.dispatchEvent(
       pointerEvent('pointercancel', { pointerId: 72, pointerType: 'mouse', clientX: 20, clientY: 20 })
     );
+  });
+
+  it('drag-reorders Focus shortcuts through moveFocus without changing canonical placement', () => {
+    const app = makeInteractionApp();
+    app.tabLayout.groups[0].refs[0] = { kind: 'session', id: 'parent', focus: true };
+    app.tabLayout.groups[1].refs[0] = { kind: 'session', id: 'other', focus: true };
+    app.tabLayout.ungrouped[0] = { kind: 'webview', id: 'web', focus: true };
+    app.editTabLayout = vi.fn(() => true);
+    app._fullRenderSessionTabs();
+    const container = document.getElementById('sessionTabs') as HTMLElement & {
+      setPointerCapture: ReturnType<typeof vi.fn>;
+    };
+    container.setPointerCapture = vi.fn();
+    const handle = container.querySelector<HTMLElement>(
+      '[data-tab-focus-shortcut="session:parent"] [data-tab-ref-drag]'
+    )!;
+    const endZone = container.querySelector<HTMLElement>('[data-tab-focus-drop-index="3"]')!;
+    (document as any).elementFromPoint = vi.fn(() => endZone);
+
+    handle.dispatchEvent(pointerEvent('pointerdown', { pointerId: 73, pointerType: 'mouse', clientX: 1, clientY: 1 }));
+    container.dispatchEvent(
+      pointerEvent('pointermove', { pointerId: 73, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+
+    expect(endZone.classList.contains('tab-layout-drop-active')).toBe(true);
+    container.dispatchEvent(
+      pointerEvent('pointerup', { pointerId: 73, pointerType: 'mouse', clientX: 20, clientY: 20 })
+    );
+
+    expect(app.editTabLayout).toHaveBeenCalledOnce();
+    expect(app.editTabLayout.mock.calls[0][0]).toEqual({
+      type: 'moveFocus',
+      ref: { kind: 'session', id: 'parent' },
+      index: 2,
+    });
+    expect(app.editTabLayout.mock.calls[0][1]).toBe('session:parent');
+    expect(app._tabPointerDrag).toBeNull();
+    expect(container.querySelector('.tab-layout-drop-active')).toBeNull();
   });
 
   it('starts reference dragging only from the dedicated handle', () => {

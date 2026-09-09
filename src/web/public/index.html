@@ -2877,10 +2877,19 @@
          rail switches panels (switchCaseModalTab in session-ui.js). -->
     <div class="modal" id="createCaseModal">
       <div class="modal-backdrop" onclick="app.closeCreateCaseModal()"></div>
-      <div class="modal-content modal-lg">
-        <div class="modal-header">
+      <div class="modal-content modal-lg set-shell">
+        <div class="modal-header set-shell-head">
           <h3 id="caseModalTitle">Add Case</h3>
-          <button class="modal-close" onclick="app.closeCreateCaseModal()" aria-label="Close create case">&times;</button>
+          <!-- mobile.css hides this modal's .set-foot, so on a phone the footer's
+               Create/Link button is unreachable and the modal cannot be submitted
+               at all. Mirrors the Settings modal's header Save: close first in the
+               DOM so the focus trap still lands on it, row-reverse puts this to
+               its left. Both buttons are driven together by switchCaseModalTab()
+               and submitCaseModal(). -->
+          <div class="set-head-actions">
+            <button class="modal-close" onclick="app.closeCreateCaseModal()" aria-label="Close create case">&times;</button>
+            <button class="set-head-save" id="caseModalSubmitMobile" onclick="app.submitCaseModal()">Create</button>
+          </div>
         </div>
         <div class="set-body">
           <nav class="set-rail" id="createCaseRail" aria-label="Add case sections">

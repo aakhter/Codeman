@@ -283,6 +283,7 @@ than into an existing checkout.
 | create a session in an arbitrary directory (no case, **no PTY**, id at `.data.session.id`) | `POST /api/v1/sessions`, then `POST /api/v1/sessions/:id/interactive` or `.../shell` to start it, see [Starting a worker](#starting-a-worker) |
 | send input | `POST /api/v1/sessions/:id/input` |
 | **read a worker's answer** (claude/codex/deepseek) | `GET /api/v1/sessions/:id/last-response` → `.data.{text,timestamp}`, clean transcript text, no TUI noise. ⚠️ **Poll it**, see [symptom 7](#7-last-response-returns-an-empty-string-right-after-stop) |
+| read the whole conversation | `GET /api/v1/sessions/:id/last-response?context=full` → `.data.messages[]`. ⚠️ **Only `{role,text}` is present for every mode.** `kind`/`label` come from claude (`prompt`/`response`), deepseek and the pane parser (which also emit `status`/`tool`) but NOT from codex; `timestamp` from claude and codex but not deepseek/pane; `turn` and `queued:true` (a prompt typed while the agent was working) from claude only. `.data.text` is unchanged by `context=full` — it stays the last assistant message, never `messages[-1]` |
 | read terminal (tail is in **BYTES**, raw ANSI) | `GET /api/v1/sessions/:id/terminal?tail=3000` → `.data.terminalBuffer`, for *diagnosis* (unsubmitted prompt?), not for reading answers |
 | full tmux scrollback (context bomb; post-mortems only) | `GET /api/v1/sessions/:id/terminal?full=1` |
 | background agents, one session | `GET /api/v1/sessions/:id/subagents` |
@@ -362,6 +363,15 @@ the global 50, or the per-user 25 in multi-user mode, never the waiter cap),
 `NOT_FOUND` (an unknown remote host or docker host named by the case), `FORBIDDEN`,
 `CONFLICT`, `OPERATION_FAILED` and `INVALID_INPUT`. None of them are retryable in a
 loop.
+
+⚠️ A case directory quick-start **creates** for you is labelled agent-created (a
+`.codeman-agent-case.json` marker, written because the §0 preamble sends
+`X-Codeman-Agent-Origin`), which is what lets the user find it afterwards:
+`GET /api/v1/cases/agent-created` returns `.data.cases[]` of
+`{name, path, createdAt, createdBy, parentSessionId, inUse, modifiedAt}`, newest first,
+read-only, scoped to the caller's own case space. Report it when you finish; deleting is
+`DELETE /api/v1/cases/:name` and is the user's call by name ([§5.14](verbs.md#514-clean-up)).
+A directory that already existed is never labelled.
 
 ⚠️ `caseName` resolves through the linked-cases registry first, so a name that happens
 to match a case the user linked in lands in that **real repo**, not a fresh scratch

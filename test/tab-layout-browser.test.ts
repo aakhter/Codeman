@@ -438,7 +438,8 @@ describe('COD-306 structure and activation policy', () => {
     expect(focus.querySelector('[data-tab-focus-toggle]')?.getAttribute('aria-expanded')).toBe('true');
     expect(focus.querySelector('.tab-layout-group-count')?.textContent).toBe('2');
     expect(focus.querySelectorAll('[data-tab-focus-shortcut]')).toHaveLength(2);
-    expect(focus.querySelector('[data-tab-group-drag], .tab-layout-group-menu, .tab-layout-drop-zone')).toBeNull();
+    expect(focus.querySelector('[data-tab-group-drag], .tab-layout-group-menu')).toBeNull();
+    expect(focus.querySelectorAll('.tab-focus-drop-zone')).toHaveLength(3);
     expect(dom.window.document.querySelector('[data-canonical="canonical"]')).not.toBeNull();
 
     projection.focusCollapsed = true;

@@ -13,6 +13,16 @@
  * @loadorder 11 of 15 — loaded after settings-ui.js, before session-ui.js
  */
 
+// Reverse-proxy mount prefix for the root-absolute app routes this module puts in
+// href/src attributes, window.open() and EventSource (fetch is prefixed globally by
+// constants.js, these are not). Guarded rather than calling CodemanBase.url directly:
+// several unit harnesses eval this module WITHOUT constants.js, where no base exists
+// and the correct answer is the unprefixed path.
+const withBasePath = (path) =>
+  typeof window !== 'undefined' && window.CodemanBase && typeof window.CodemanBase.url === 'function'
+    ? window.CodemanBase.url(path)
+    : path;
+
 const AWAY_DIGEST_LAST_VIEWED_KEY = 'codeman-away-digest-last-viewed';
 const FILE_BROWSER_SHOW_HIDDEN_KEY = 'codeman:fileBrowserShowHidden';
 // Bounds for the by-id text preview, mirroring what the workspace text preview
@@ -1327,7 +1337,13 @@ Object.assign(CodemanApp.prototype, {
             } else if (record.workingDir) {
               // History rows are keyed by the Claude conversation UUID; resumed
               // sessions carry theirs separately as claudeSessionId.
-              void this.resumeHistorySession(s.claudeSessionId || s.sessionId, record.workingDir, undefined, s.mode);
+              void this.resumeHistorySession(
+                s.claudeSessionId || s.sessionId,
+                record.workingDir,
+                undefined,
+                s.mode,
+                s.resumeId
+              );
             }
           },
         });
@@ -3789,7 +3805,7 @@ Object.assign(CodemanApp.prototype, {
       // server error surfaces as a toast instead of navigating the SPA to the raw
       // JSON error body. data-path drives the interceptor.
       const downloadBtn = !isDir
-        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
+        ? `<a class="file-tree-download" href="${escapeHtml(withBasePath(`/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true`))}" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
       const renameBtn = `<button class="file-tree-rename" data-path="${escapeHtml(node.path)}" title="Rename" aria-label="Rename">✎</button>`;
       const deleteBtn = `<button class="file-tree-delete" data-path="${escapeHtml(node.path)}" title="Delete" aria-label="Delete">🗑</button>`;
@@ -4371,7 +4387,7 @@ Object.assign(CodemanApp.prototype, {
       // COD-233: keep a real href for graceful fallback, but the click is
       // intercepted below and routed through a guarded fetch.
       const downloadBtn = !isDir
-        ? `<a class="file-tree-download" href="/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
+        ? `<a class="file-tree-download" href="${escapeHtml(withBasePath(`/api/sessions/${encodeURIComponent(fileBrowserSessionId)}/file-raw?path=${encodeURIComponent(node.path)}&download=true`))}" data-path="${escapeHtml(node.path)}" title="Download" role="button">&#x2B07;</a>`
         : '';
       const renameBtn = `<button class="file-tree-rename" data-path="${escapeHtml(node.path)}" title="Rename" aria-label="Rename">✎</button>`;
       const deleteBtn = `<button class="file-tree-delete" data-path="${escapeHtml(node.path)}" title="Delete" aria-label="Delete">🗑</button>`;
@@ -5137,7 +5153,12 @@ Object.assign(CodemanApp.prototype, {
     const bodyEl = this.$('filePreviewBody');
     const footerEl = this.$('filePreviewFooter');
     if (!bodyEl) return false;
-    const bust = (url) => (data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url);
+    // withBasePath: every URL here is a root-absolute app route, which ignores
+    // <base href> — it must carry the reverse-proxy mount prefix (idempotent, no-op at root).
+    const bust = (rawUrl) => {
+      const url = withBasePath(rawUrl);
+      return data.mtimeMs ? `${url}${url.includes('?') ? '&' : '?'}_t=${data.mtimeMs}` : url;
+    };
     const st = this.filePreviewState;
     this._disposeSpreadsheetPreview?.(expectedState || st);
     if (st) {
@@ -5201,10 +5222,10 @@ Object.assign(CodemanApp.prototype, {
       // playsinline: iOS otherwise hijacks playback into its fullscreen
       // player, which leaves the overlay behind it and its own close button
       // as the only way back.
-      bodyEl.innerHTML = `<video src="${escapeHtml(data.url)}" controls autoplay playsinline preload="metadata"></video>`;
+      bodyEl.innerHTML = `<video src="${escapeHtml(withBasePath(data.url))}" controls autoplay playsinline preload="metadata"></video>`;
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'audio') {
-      bodyEl.innerHTML = `<audio src="${escapeHtml(data.url)}" controls autoplay preload="metadata"></audio>`;
+      bodyEl.innerHTML = `<audio src="${escapeHtml(withBasePath(data.url))}" controls autoplay preload="metadata"></audio>`;
       footerEl.textContent = `${this.formatFileSize(data.size)} \u2022 ${data.extension}`;
     } else if (data.type === 'pdf' || data.type === 'document' || data.type === 'presentation') {
       const st = this.filePreviewState;
@@ -6350,9 +6371,11 @@ Object.assign(CodemanApp.prototype, {
   },
 
   openAttachmentInNewTab(sessionId, filePath, attachmentId = null) {
-    const url = attachmentId
-      ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
-      : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+    const url = withBasePath(
+      attachmentId
+        ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
+        : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`
+    );
     window.open(url, '_blank');
   },
 
@@ -6919,7 +6942,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Connect to SSE stream
     const eventSource = new EventSource(
-      `/api/sessions/${sessionId}/tail-file?path=${encodeURIComponent(filePath)}&lines=50`
+      withBasePath(`/api/sessions/${sessionId}/tail-file?path=${encodeURIComponent(filePath)}&lines=50`)
     );
 
     eventSource.onmessage = (e) => {
@@ -7199,7 +7222,7 @@ Object.assign(CodemanApp.prototype, {
       item.missing ? 'missing' : '',
     ].filter(Boolean).join(' \u2022 ');
     const thumb = item.thumbnailUrl && !item.missing
-      ? `<img class="attachment-history-thumb-img" src="${escapeHtml(item.thumbnailUrl)}" alt="">`
+      ? `<img class="attachment-history-thumb-img" src="${escapeHtml(withBasePath(item.thumbnailUrl))}" alt="">`
       : '';
     const disabled = item.missing ? 'disabled aria-disabled="true"' : '';
     // COD-241 unit 3: only Codeman-uploaded copies (inside .codeman-attachments/)
@@ -7249,7 +7272,7 @@ Object.assign(CodemanApp.prototype, {
     const item = this.getAttachmentHistoryItem(itemId);
     if (!item || item.missing) return;
     if (item.rawUrl || item.url) {
-      window.open(item.rawUrl || item.url, '_blank');
+      window.open(withBasePath(item.rawUrl || item.url), '_blank');
       return;
     }
     this.openAttachmentInNewTab(item.sessionId, item.relativePath || item.fileName, item.attachmentId || null);
@@ -7258,7 +7281,7 @@ Object.assign(CodemanApp.prototype, {
   downloadAttachmentHistoryItem(itemId) {
     const item = this.getAttachmentHistoryItem(itemId);
     if (!item || item.missing || !item.downloadUrl) return;
-    window.open(item.downloadUrl, '_blank');
+    window.open(withBasePath(item.downloadUrl), '_blank');
   },
 
   reshowAttachmentCard(itemId) {
@@ -7323,15 +7346,15 @@ Object.assign(CodemanApp.prototype, {
     const stack = this.ensureAttachmentCardStack();
     const session = this.sessions.get(sessionId);
     const sessionName = session?.name || sessionId.substring(0, 8);
-    const attachmentRawUrl = rawUrl || (attachmentId
+    const attachmentRawUrl = withBasePath(rawUrl || (attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/raw`
-      : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`);
-    const attachmentPreviewUrl = previewUrl || (attachmentId
+      : `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`));
+    const attachmentPreviewUrl = withBasePath(previewUrl || (attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/preview`
-      : null);
-    const attachmentThumbnailUrl = thumbnailUrl || (attachmentId
+      : null));
+    const attachmentThumbnailUrl = withBasePath(thumbnailUrl || (attachmentId
       ? `/api/sessions/${sessionId}/attachments/${encodeURIComponent(attachmentId)}/thumbnail`
-      : `/api/sessions/${sessionId}/file-thumbnail?path=${encodeURIComponent(filePath)}`);
+      : `/api/sessions/${sessionId}/file-thumbnail?path=${encodeURIComponent(filePath)}`));
     const downloadUrl = attachmentId ? `${attachmentRawUrl}?download=true` : `${attachmentRawUrl}&download=true`;
     const typeLabel = (extension || attachmentType || 'file').toUpperCase();
 
@@ -7489,7 +7512,7 @@ Object.assign(CodemanApp.prototype, {
 
     // Build image URL using the existing file-raw endpoint
     // Use relativePath (path from working dir) instead of fileName (basename) for subdirectory images
-    const imageUrl = `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(relativePath || fileName)}`;
+    const imageUrl = withBasePath(`/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(relativePath || fileName)}`);
 
     // Create window element
     const win = document.createElement('div');
