@@ -747,6 +747,15 @@ export function formatFullHistoryCapture(
   if (!geometry || geometry.cols <= 0 || geometry.rows <= 0) return normalized;
   const cursorX = Math.max(0, Math.min(geometry.cols - 1, geometry.cursorX));
   const cursorY = Math.max(0, Math.min(geometry.rows - 1, geometry.cursorY));
+  // Full captures retain the final screen's blank rows. Anchor to that tail:
+  // an absolute source-pane row clamps to the browser's last row when its
+  // viewport is shorter (COD-433), placing input on the footer. CR also clears
+  // pending autowrap when the last captured row fills the terminal width.
+  // Incomplete captures cannot establish that anchor; retain the legacy fallback.
+  if (normalized.split('\n').length >= geometry.rows) {
+    const rowsBelowCursor = geometry.rows - 1 - cursorY;
+    return `${normalized}\r${rowsBelowCursor ? `\x1b[${rowsBelowCursor}A` : ''}\x1b[${cursorX + 1}G`;
+  }
   return `${normalized}\x1b[${cursorY + 1};${cursorX + 1}H`;
 }
 
