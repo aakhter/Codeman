@@ -192,7 +192,7 @@ Run:
 npm test -- test/terminal-document-link-provider.test.ts
 ```
 
-Expected result: 117 tests pass with 0 failures, including the two new COD-434
+Expected result: 119 tests pass with 0 failures, including the four new COD-434
 tests.
 
 - [ ] **Step 2: Run repository static checks.**
