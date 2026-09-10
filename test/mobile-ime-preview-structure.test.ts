@@ -532,7 +532,13 @@ describe('mobile IME prediction wiring', () => {
 });
 
 describe('mobile IME actual terminal onData routing', () => {
-  function onDataApp(options: { localEcho: boolean; appendThrows?: boolean; addThrows?: boolean; tagged?: boolean }) {
+  function onDataApp(options: {
+    localEcho: boolean;
+    appendThrows?: boolean;
+    addThrows?: boolean;
+    overlayMissing?: boolean;
+    tagged?: boolean;
+  }) {
     const { mixin } = loadMixin();
     const sent: string[] = [];
     const controller = {
@@ -563,7 +569,7 @@ describe('mobile IME actual terminal onData routing', () => {
       _viewMode: 'live',
       _localEchoEnabled: options.localEcho,
       _localEchoPolicy: 'predict',
-      _localEchoOverlay: overlay,
+      _localEchoOverlay: options.overlayMissing ? null : overlay,
       _echoPassthroughSessions: new Set(),
       _flushedOffsets: new Map(),
       _flushedTexts: new Map(),
@@ -635,6 +641,31 @@ describe('mobile IME actual terminal onData routing', () => {
     expect(overlay.pendingText).toBe('plain paste');
     expect(controller.completeCommit).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
+  });
+
+  it('sends ordinary printable input when the local echo overlay throws', () => {
+    const { app, controller, overlay, sent, handler } = onDataApp({
+      localEcho: true,
+      addThrows: true,
+      tagged: false,
+    });
+
+    expect(() => handler.call(app, 'x')).not.toThrow();
+    expect(controller.consumeTerminalData).toHaveBeenCalledTimes(1);
+    expect(overlay.addChar).toHaveBeenCalledWith('x');
+    expect(sent).toEqual(['x']);
+  });
+
+  it('sends ordinary printable input when the local echo overlay is unavailable', () => {
+    const { app, controller, sent, handler } = onDataApp({
+      localEcho: true,
+      overlayMissing: true,
+      tagged: false,
+    });
+
+    handler.call(app, 'x');
+    expect(controller.consumeTerminalData).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual(['x']);
   });
 
   it('consumes the tag once at the registered entry and predicts/sends normal Codex input exactly once', () => {

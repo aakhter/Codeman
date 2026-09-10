@@ -2242,9 +2242,26 @@ Object.assign(CodemanApp.prototype, {
               flushInput();
               return;
             }
-            // Printable char: add to overlay only (sent on Enter)
-            this._localEchoOverlay?.addChar(data);
-            return;
+            // Printable char: add to overlay only (sent on Enter). An unavailable
+            // or broken overlay must never swallow terminal input: turn off the
+            // optional optimization for this page and fall through to the normal
+            // durable send path below.
+            try {
+              if (typeof this._localEchoOverlay?.addChar === 'function') {
+                this._localEchoOverlay.addChar(data);
+                return;
+              }
+            } catch {
+              // Fall through after disabling the failed overlay.
+            }
+            this._localEchoEnabled = false;
+            this._localEchoPolicy = 'off';
+            try {
+              this._localEchoOverlay?.clear?.();
+              this.showToast?.('Local Echo unavailable; sending input directly.', 'warning');
+            } catch {
+              // The normal input path below remains authoritative.
+            }
           }
         }
 
