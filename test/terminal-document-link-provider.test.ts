@@ -173,6 +173,43 @@ describe('COD-232 terminal document link provider', () => {
     expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
   });
 
+  it('links only the final relative path in descriptive marker prose', () => {
+    const path = 'out/cisco-my-agent-learning-lab-2026-09/deliverables/cisco-my-agent-learning-lab-overall-plan.docx';
+    const line = `• Updated ${path}.`;
+    const { provide, previewSpy, originalSessionId } = makeHarness(line);
+
+    const links = provide();
+    expect(links).toHaveLength(1);
+    const [link] = links;
+
+    expect(link.text).toBe(path);
+    expect(link.range.start).toEqual({ x: line.indexOf(path) + 1, y: 1 });
+    expect(link.range.end).toEqual({ x: line.indexOf(path) + path.length, y: 1 });
+    link.activate(null, link.text);
+    expect(previewSpy).toHaveBeenCalledWith(path, originalSessionId);
+  });
+
+  it('does not select a final suffix when marker prose contains an earlier path-like segment', () => {
+    const line = '• Compared out/previous/report.docx with out/current/report.docx.';
+    const { provide } = makeHarness(line);
+
+    expect(provide()).toEqual([]);
+  });
+
+  it('preserves an unwrapped spaced marker path as a complete path', () => {
+    const path = 'My Big Docs/report.docx';
+    const { provide } = makeHarness(`• ${path}.`);
+
+    expect(provide().map((link) => link.text)).toEqual([path]);
+  });
+
+  it('does not select a final suffix after an earlier bare filename in marker prose', () => {
+    const line = '• Compared report.docx with docs/current/report.docx.';
+    const { provide } = makeHarness(line);
+
+    expect(provide()).toEqual([]);
+  });
+
   it('preserves spaces inside a bounded bullet path', () => {
     const path = 'out/My Big Docs/report.docx';
     const { provide } = makeHarness(`- Report (${path})`);
