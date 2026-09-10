@@ -85,7 +85,14 @@ After `trailingBoundedRelativePath`, add:
         if (!match) return null;
         const prefix = match[1].trim();
         const path = match[2];
-        if (!prefix || prefix.includes('/') || !path.includes('/')) return null;
+        const prefixTokens = prefix.split(/\s+/);
+        if (
+          prefixTokens.length !== 1 ||
+          prefix.includes('/') ||
+          /\.[a-z0-9]{1,10}$/i.test(prefix) ||
+          !path.includes('/')
+        )
+          return null;
         return {
           path,
           offset: match[0].length - path.length,
@@ -93,11 +100,12 @@ After `trailingBoundedRelativePath`, add:
       };
 ```
 
-The helper must only return a final non-space token when the prefix is
-non-empty and contains no slash. That makes the branch work for `Updated
-out/report.docx` while rejecting a marker whose prose already contains another
-path or URL. It must not attempt to handle spaced paths; those remain covered
-by the existing explicit wrapper and label branches.
+The helper must only return a final non-space token when the prefix is exactly
+one non-space token with no slash or filename-like extension. That makes the
+branch work for `Updated out/report.docx` while rejecting a marker whose prose
+already contains another path, URL, or bare filename. It must not shorten
+unwrapped spaced paths; those remain on the existing complete-marker behavior,
+while explicitly wrapped and labeled spaced paths retain their current branch.
 
 - [ ] **Step 2: Prefer the new extraction after existing explicit bounds.**
 
@@ -218,4 +226,3 @@ git log -3 --oneline
 Expected result: only the COD-434 spec, focused regression tests, and the
 terminal provider implementation are present; the branch is
 `COD-434-descriptive-preview-path` and the worktree is clean.
-

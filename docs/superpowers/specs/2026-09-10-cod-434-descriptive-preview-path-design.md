@@ -25,17 +25,19 @@ that token as a candidate only when all of the following are true:
   by the existing preview-extension allowlist;
 - the token passes the existing relative-path normalization and validation
   gates after sentence punctuation is trimmed;
-- the prose before the token contains no other path-like segment, so an
-  ambiguous line with multiple document references does not silently select a
-  suffix;
+- the prose before the token is exactly one non-space descriptor token, with no
+  slash or filename-like extension, so an ambiguous line with multiple
+  document references does not silently select a suffix;
 - the extracted range is non-empty and remains within the marker remainder.
 
 The extraction is deliberately deterministic: trim the same sentence
 punctuation already accepted by the marker scanner, split at the final
 whitespace boundary, and use the suffix only when it contains `/` and passes
-`isSingleRelativePath(candidate, true)`. The prefix must be non-empty and
-contain no `/`; this rejects earlier paths and URL-like prose without trying to
-classify arbitrary natural language.
+`isSingleRelativePath(candidate, true)`. The prefix must be one non-space token,
+must contain no `/`, and must not look like a filename; this rejects earlier
+paths, bare filenames, and URL-like prose without trying to classify arbitrary
+natural language. Unwrapped spaced paths remain on the existing complete-marker
+branch rather than being shortened to a suffix.
 
 The existing wrapper and `Label: path` branches retain priority. If the new
 candidate fails any gate, the current complete-marker behavior remains in force
@@ -83,6 +85,10 @@ Add focused provider coverage for:
 - an ambiguous marker containing an earlier path-like segment, asserting that
   the new branch does not manufacture a link whose text is only the final
   suffix;
+- an unwrapped spaced marker path, asserting that it remains a complete path
+  rather than being shortened to its final component;
+- an earlier bare filename in marker prose, asserting that it does not permit a
+  later suffix target;
 - existing bounded-marker, labeled-path, and complete-marker regressions.
 
 Run the focused provider suite first, followed by typecheck, lint, format,
