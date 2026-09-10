@@ -2478,6 +2478,26 @@ Object.assign(CodemanApp.prototype, {
         };
       };
 
+      const trailingDescriptiveRelativePath = (value) => {
+        const trimmed = trimTrailingPunctuation(value);
+        const match = /^(.*?)\s+(\S+)$/.exec(trimmed);
+        if (!match) return null;
+        const prefix = match[1].trim();
+        const path = match[2];
+        const prefixTokens = prefix.split(/\s+/);
+        if (
+          prefixTokens.length !== 1 ||
+          prefix.includes('/') ||
+          /\.[a-z0-9]{1,10}$/i.test(prefix) ||
+          !path.includes('/')
+        )
+          return null;
+        return {
+          path,
+          offset: match[0].length - path.length,
+        };
+      };
+
       // Numbered and bulleted list items are the one safe embedded form for an
       // unquoted path with spaces. Reserve the full path range even when it is
       // rejected so later token/log scanners cannot manufacture a misleading
@@ -2514,11 +2534,14 @@ Object.assign(CodemanApp.prototype, {
             trailingBoundedRelativePath(sentenceTrimmedRawCandidate) ||
             trailingBoundedRelativePath(trimmedRawCandidate)
           : null;
+        const trailingDescriptivePath = !descriptionPathMatch && !boundedRelativePath
+          ? trailingDescriptiveRelativePath(rawCandidate)
+          : null;
         const candidate = trimTrailingPunctuation(
           sourceLocatedAbsolutePath ||
             (descriptionPathMatch
               ? descriptionPathMatch[1]
-              : boundedRelativePath?.path || trimmedRawCandidate)
+              : boundedRelativePath?.path || trailingDescriptivePath?.path || trimmedRawCandidate)
         );
         const startIndex = sourceLocatedAbsolutePath
           ? rawStartIndex + absoluteSourceMatch.index
@@ -2527,7 +2550,9 @@ Object.assign(CodemanApp.prototype, {
               ? descriptionPathMatch[0].length - descriptionPathMatch[1].length
               : boundedRelativePath
                 ? boundedRelativePath.offset
-                : 0);
+                : trailingDescriptivePath
+                  ? trailingDescriptivePath.offset
+                  : 0);
         const endIndex = startIndex + candidate.length;
         if (candidate.startsWith('/')) {
           if (!isSingleAbsolutePath(candidate)) {
@@ -2558,7 +2583,7 @@ Object.assign(CodemanApp.prototype, {
         }
 
         const relativeBase = relativeResolutionBase(workingDir, session);
-        if (!candidate || !isSingleRelativePath(candidate, Boolean(descriptionPathMatch || boundedRelativePath))) {
+        if (!candidate || !isSingleRelativePath(candidate, Boolean(descriptionPathMatch || boundedRelativePath || trailingDescriptivePath))) {
           suppress(rawStartIndex, rawStartIndex + rawCandidate.length);
           continue;
         }

@@ -196,6 +196,20 @@ describe('COD-232 terminal document link provider', () => {
     expect(provide()).toEqual([]);
   });
 
+  it('preserves an unwrapped spaced marker path as a complete path', () => {
+    const path = 'My Big Docs/report.docx';
+    const { provide } = makeHarness(`• ${path}.`);
+
+    expect(provide().map((link) => link.text)).toEqual([path]);
+  });
+
+  it('does not select a final suffix after an earlier bare filename in marker prose', () => {
+    const line = '• Compared report.docx with docs/current/report.docx.';
+    const { provide } = makeHarness(line);
+
+    expect(provide()).toEqual([]);
+  });
+
   it('preserves spaces inside a bounded bullet path', () => {
     const path = 'out/My Big Docs/report.docx';
     const { provide } = makeHarness(`- Report (${path})`);
