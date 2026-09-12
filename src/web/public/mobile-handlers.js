@@ -160,6 +160,22 @@ const MobileDetection = {
     const vv = window.visualViewport;
     const h = vv ? vv.height : window.innerHeight;
     document.documentElement.style.setProperty('--app-height', `${h}px`);
+    // How far the layout viewport (which anchors position: fixed) extends below
+    // the visual viewport, i.e. behind the browser's bottom bar. 0 on iPhone
+    // Safari, where fixed elements already stop above the bar; the overlap
+    // where they do not. mobile.css lifts the toolbar by this rather than by
+    // (100vh - --app-height), which on iPhone measures the collapsible chrome
+    // instead and left an empty band between the toolbar and the bar.
+    // ⚠️ While the on-screen keyboard is up the visual viewport is the shrunken
+    // area ABOVE it, which is not browser chrome — reporting that as overlap
+    // would lift the toolbar by the keyboard's height on top of KeyboardHandler's
+    // own translate, so it reads 0 there (COD-283 keeps --app-height itself live
+    // in that state, which is why this cannot simply return early).
+    const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
+    document.documentElement.style.setProperty(
+      '--chrome-overlap',
+      keyboardUp ? '0px' : `${Math.max(0, window.innerHeight - h)}px`
+    );
     if (typeof logViewport === 'function') logViewport('updateAppHeight');
   },
 

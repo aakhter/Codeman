@@ -804,12 +804,11 @@ describe('file-routes', () => {
       expect(res.statusCode).toBe(404);
     });
 
-    it('streams a large workspace file rather than refusing it', async () => {
-      // The workspace-scoped file-raw route deliberately has NO app-level size
-      // cap: it streams and answers Range requests, which is what makes a large
-      // video seekable in the preview. The cap (413) lives on the attachment-id
-      // routes, where the path is attacker-influenceable.
-      mockedStat.mockResolvedValue({ size: 100 * 1024 * 1024 } as never); // 100MB
+    it('serves a file past the historical 50MB cap, streamed and seekable', async () => {
+      // The body is streamed and Range-aware, so size costs a read stream, not
+      // RSS. The old 50MB refusal only blocked legitimate artifact downloads,
+      // and `Accept-Ranges` is what makes a large video seekable in the preview.
+      mockedStat.mockResolvedValue({ size: 100 * 1024 * 1024, isFile: () => true } as never); // 100MB
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -817,6 +816,17 @@ describe('file-routes', () => {
       });
       expect(res.statusCode).toBe(200);
       expect(res.headers['accept-ranges']).toBe('bytes');
+    });
+
+    it('still refuses a file past the configured download cap', async () => {
+      mockedStat.mockResolvedValue({ size: 3 * 1024 * 1024 * 1024, isFile: () => true } as never); // 3GB > 2GB default
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=enormous.bin`,
+      });
+      expect(res.statusCode).toBe(413);
+      expect(JSON.parse(res.body).error).toContain('CODEMAN_MAX_DOWNLOAD_BYTES');
     });
   });
 
@@ -870,9 +880,11 @@ describe('file-routes', () => {
     });
 
     it('downloads files scoped to the session working directory', async () => {
-      const content = Buffer.from('download content');
-      // The body is STREAMED (range-aware `sendRawStream`), so the readFile stub
-      // alone leaves it empty — the download path never calls readFile.
+      // The body is STREAMED (shared range-aware `sendFileBody`), so the bytes
+      // come from the createReadStream mock; the download path never calls
+      // readFile. Set both mocks explicitly rather than leaning on the module
+      // default, since vi.clearAllMocks() keeps implementations between tests.
+      const content = Buffer.from('fake file bytes');
       mockedReadFile.mockResolvedValue(content as never);
       mockedCreateReadStream.mockReturnValue(Readable.from([content]) as never);
       mockedStat.mockResolvedValue({ size: content.length, isFile: () => true } as never);
@@ -884,13 +896,23 @@ describe('file-routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.headers['content-disposition']).toContain('filename="report.txt"');
-      // The body itself is unobservable here: the raw-serving helper answers via
-      // reply.hijack() straight onto reply.raw, which app.inject() does not
-      // capture. What IS observable, and what this test is really about, is that
-      // the route resolved the requested path inside the workspace and streamed
-      // THAT file rather than any other.
+      expect(res.headers['accept-ranges']).toBe('bytes');
+      expect(res.body).toBe('fake file bytes');
+      // Also pin that the route resolved the requested path inside the workspace
+      // and streamed THAT file rather than any other.
       expect(mockedCreateReadStream).toHaveBeenCalled();
       expect(String(mockedCreateReadStream.mock.calls.at(-1)?.[0])).toContain('report.txt');
+    });
+
+    it('refuses a download past the configured cap', async () => {
+      mockedStat.mockResolvedValue({ size: 3 * 1024 * 1024 * 1024, isFile: () => true } as never); // 3GB > 2GB default
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/download?sessionId=${harness.ctx._sessionId}&path=enormous.bin`,
+      });
+
+      expect(res.statusCode).toBe(413);
     });
 
     it('rejects absolute paths outside the session working directory', async () => {

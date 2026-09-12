@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Session } from '../src/session.js';
 import { TmuxManager } from '../src/tmux-manager.js';
-import type { MuxSession } from '../src/types.js';
+import type { MuxSession, SessionRemote } from '../src/types.js';
 
 describe('OMP: fresh session vs. reattach must not share resumeSessionId resolution', () => {
   const workingDir = join(homedir(), 'codeman-cases', 'resume-test');
@@ -125,5 +125,92 @@ describe('OMP: fresh session vs. reattach must not share resumeSessionId resolut
 
     expect(session.toState().ompConfig?.resumeSessionId).toBe('real-omp-uuid');
     expect(session.claudeSessionId).toBe('real-omp-uuid');
+  });
+
+  it("a remote session never resolves --resume from this host's local ~/.omp, even when a same-named local session file exists", () => {
+    // Seed a LOCAL session file whose directory mangle happens to match this
+    // remote session's remotePath. If _pinOmpRespawnId() ever fell through to
+    // resolveAndClaimOmpSessionId() for a remote session, it would wrongly
+    // claim/pin this unrelated local conversation's id onto the remote respawn.
+    seedOmpSessionFile('wrong-local-conversation-id');
+
+    const remote: SessionRemote = {
+      hostId: 'remote-box',
+      label: 'remote-box',
+      host: 'remote-box',
+      username: 'someone',
+      remotePath: workingDir,
+      owned: true,
+    };
+
+    const muxSession: MuxSession = {
+      sessionId: 'placeholder',
+      muxName: 'codeman-deadbeef',
+      pid: 1,
+      createdAt: Date.now(),
+      workingDir,
+      mode: 'omp',
+      attached: false,
+    };
+
+    const session = new Session({
+      workingDir,
+      mode: 'omp',
+      mux: new TmuxManager(),
+      useMux: true,
+      muxSession,
+      remote,
+    });
+    sessions.push(session);
+
+    (session as unknown as { _pinOmpRespawnId(): void })._pinOmpRespawnId();
+
+    const state = session.toState();
+    expect(state.ompConfig?.resumeSessionId).toBeUndefined();
+    expect(state.ompConfig?.continueSession).toBe(true);
+    expect(session.claudeSessionId).toBe(session.id);
+  });
+
+  it('_maybeCaptureOmpSessionId() is subject to the same remote guard, so a first idle turn cannot alias a remote session onto a local conversation', () => {
+    // The sibling guard in _pinOmpRespawnId has the test above; this one runs on
+    // the FIRST turn going idle, before any respawn, and reads the same local
+    // ~/.omp tree. Without the `this._remote` early return it would claim this
+    // unrelated local conversation's uuid as the remote session's identity, and
+    // every later respawn would then inherit the wrong pin.
+    seedOmpSessionFile('wrong-local-conversation-id');
+
+    const remote: SessionRemote = {
+      hostId: 'remote-box',
+      label: 'remote-box',
+      host: 'remote-box',
+      username: 'someone',
+      remotePath: workingDir,
+      owned: true,
+    };
+
+    const muxSession: MuxSession = {
+      sessionId: 'placeholder',
+      muxName: 'codeman-deadbeef',
+      pid: 1,
+      createdAt: Date.now(),
+      workingDir,
+      mode: 'omp',
+      attached: false,
+    };
+
+    const session = new Session({
+      workingDir,
+      mode: 'omp',
+      mux: new TmuxManager(),
+      useMux: true,
+      muxSession,
+      remote,
+    });
+    sessions.push(session);
+
+    (session as unknown as { _maybeCaptureOmpSessionId(): void })._maybeCaptureOmpSessionId();
+
+    expect(session.claudeSessionId).toBe(session.id);
+    expect(session.toState().ompConfig?.resumeSessionId).toBeUndefined();
   });
 });

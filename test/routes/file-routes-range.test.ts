@@ -190,14 +190,10 @@ describe('file-raw range requests', () => {
     expect(res.rawPayload.toString()).toBe('ABCDE');
   });
 
-  it('serves a slice of a file past the old 50MB cap, which streaming retired (COD-18)', async () => {
-    // Upstream answers 400 here. The workspace-scoped file-raw route carries no
-    // app-level cap downstream: the cap existed because the route read the WHOLE
-    // file into memory, and COD-18 replaced that with createReadStream. A range
-    // request makes the read smaller still — a 100MB video costs 100 bytes here.
-    // The capped surface is the by-id attachment route (attacker-influenceable id
-    // → arbitrary host file), which keeps its 413 via serveRawFile's maxSizeBytes.
-    mockedStat.mockResolvedValue({ size: 100 * 1024 * 1024, isFile: () => true } as never);
+  it('still refuses files past the raw size cap before looking at Range', async () => {
+    // 3GB, past the 2GB CODEMAN_MAX_DOWNLOAD_BYTES default. The cap is checked
+    // before the range, so a small slice of an oversized file is refused too.
+    mockedStat.mockResolvedValue({ size: 3 * 1024 * 1024 * 1024, isFile: () => true } as never);
 
     const res = await harness.app.inject({
       method: 'GET',
@@ -205,9 +201,24 @@ describe('file-raw range requests', () => {
       headers: { range: 'bytes=0-9' },
     });
 
+    expect(res.statusCode).toBe(413);
+  });
+
+  it('serves a bounded slice of a 100MB file that the historical 50MB cap refused (COD-18)', async () => {
+    // The old hardcoded 50MB cap existed because the route read the WHOLE file
+    // into memory; COD-18 replaced that with createReadStream and upstream then
+    // raised the cap to 2GB, so a 100MB video is served — and a range request
+    // makes the read smaller still: 100 bytes here, not 100MB sliced afterwards.
+    mockedStat.mockResolvedValue({ size: 100 * 1024 * 1024, isFile: () => true } as never);
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: rawUrl('big.mp4'),
+      headers: { range: 'bytes=0-99' },
+    });
+
     expect(res.statusCode).toBe(206);
-    expect(res.headers['content-range']).toBe(`bytes 0-9/${100 * 1024 * 1024}`);
-    // A bounded read, not a 100MB read that is then sliced.
-    expect(mockedCreateReadStream).toHaveBeenCalledWith(expect.any(String), { start: 0, end: 9 });
+    expect(res.headers['content-range']).toBe(`bytes 0-99/${100 * 1024 * 1024}`);
+    expect(mockedCreateReadStream).toHaveBeenCalledWith(expect.any(String), { start: 0, end: 99 });
   });
 });

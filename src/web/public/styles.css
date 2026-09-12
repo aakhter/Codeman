@@ -1402,6 +1402,28 @@ html[data-tab-anim="flip"] .session-tab.tab-enter {
   100% { opacity: 1; transform: perspective(700px) rotateX(0deg); }
 }
 
+/* Blur, iOS-style focus pull: the tab arrives out of focus and the blur fades
+   OFF it as the opacity comes up, so it reads as resolving rather than moving.
+   Opacity leads the blur (full opacity around 45%, blur still lifting) - that
+   offset is what separates it from a plain cross-fade.
+
+   `filter` here, not on ::before: the tab's own box-shadow and border have to
+   blur with it or the shape stays sharp inside a blurred fill, and unlike
+   background/box-shadow (which .session-tab.active sets !important) nothing
+   overrides filter. */
+html[data-tab-anim="blur"] .session-tab.tab-enter {
+  animation-name: tab-enter-blur;
+  animation-duration: calc(440ms * var(--anim-enter-scale, 1));
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+  will-change: transform, opacity, filter;
+}
+
+@keyframes tab-enter-blur {
+  0%   { opacity: 0; filter: blur(10px); transform: scale(0.94); }
+  45%  { opacity: 1; }
+  100% { opacity: 1; filter: blur(0px); transform: none; }
+}
+
 /* ── Entrance lab (?animlab=1) ───────────────────────────────────────────── */
 
 .anim-lab {
@@ -1683,6 +1705,25 @@ html[data-win-anim="pop"] .ultracode-window.win-enter {
   100% { opacity: 1; transform: scale(1); }
 }
 
+/* Blur, iOS-style focus pull. `materialize` is the noisy cousin: it glitches the
+   opacity and rides a brightness boost. This one only defocuses, so it stays
+   readable next to a terminal. The scale is deliberately small (0.96): the
+   connection line is aimed at getBoundingClientRect(), which reports the
+   TRANSFORMED box, so a big scale would swing the line's target while it draws.
+   applyWindowEntrance() redraws the lines once the animation ends. */
+html[data-win-anim="blur"] .subagent-window.win-enter,
+html[data-win-anim="blur"] .ultracode-window.win-enter {
+  animation-name: win-enter-blur;
+  animation-duration: calc(560ms * var(--anim-enter-scale, 1));
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes win-enter-blur {
+  0%   { opacity: 0; filter: blur(18px); transform: scale(0.96); }
+  50%  { opacity: 1; }
+  100% { opacity: 1; filter: blur(0px); transform: none; }
+}
+
 /* ── Main terminal pane entrance animations ────────────────────────────────
    ⚠ transform / opacity / clip-path ONLY. xterm's FitAddon derives rows+cols
    from getComputedStyle(parent).width/height, the untransformed layout box -
@@ -1824,6 +1865,47 @@ html[data-term-anim="fade"] .terminal-container.term-enter {
   100% { opacity: 1; transform: none; }
 }
 
+/* Blur, iOS-style focus pull.
+
+   ⚠ THE ONE PLACE A `filter` GOES ON THE TERMINAL CONTAINER, and it is a
+   deliberate exception to the rule above, not an oversight. Every other way of
+   blurring this pane was tried against a real xterm and does not work:
+
+     - `backdrop-filter` on ::before blurs perfectly while it is STATIC, and
+       Chrome silently drops the backdrop the moment ANY animation runs on that
+       pseudo-element (measured: the veil computes `blur(15.3px)` and the text
+       behind it stays razor sharp). Animating the container instead keeps the
+       backdrop, so the veil would have to hold one fixed radius, which is a
+       frosted pane that snaps off rather than a focus pull.
+     - Driving the radius from rAF avoids the compositor promotion, at the cost
+       of the same full-screen blur per frame plus main-thread work.
+
+   So the cost the rule exists to avoid is inherent to blurring a terminal at
+   all, and this style buys it knowingly: it is opt-in, OFF by default, bounded
+   to one ~520ms run when a session is opened (or switched to, with `Also on
+   every tab switch`), and the class comes straight back off. `will-change` is
+   still deliberately unset, per the base rule. Measured price on a headless
+   SwiftShader rasterizer with no GPU at all, i.e. the worst case: frame deltas
+   go 16.7ms -> 33.3ms for the length of the run, against 16.7ms flat for `fade`.
+
+   The blur must not change layout, or FitAddon would feed wrong dimensions into
+   resize() and through to the PTY. `filter` is paint-only (measured live: 178x38
+   before, during and after a run), and the property allowlist for every one of
+   these keyframes is pinned by test/entrance-animations.test.ts. */
+html[data-term-anim="blur"] .terminal-container.term-enter {
+  animation-name: term-enter-blur;
+  animation-duration: calc(520ms * var(--anim-enter-scale, 1));
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Opacity leads the blur - full opacity around 45%, blur still lifting - which
+   is what separates the effect from a plain cross-fade. */
+@keyframes term-enter-blur {
+  0%   { opacity: 0; filter: blur(14px); transform: scale(1.008); }
+  45%  { opacity: 1; }
+  100% { opacity: 1; filter: blur(0px); transform: none; }
+}
+
 /* ── Connection-line entrance animations ───────────────────────────────────
    `--line-len` is the measured path length, stamped inline by
    _applyLineEntrances(); `--line-enter-delay` is negative when an entrance is
@@ -1888,6 +1970,26 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   12%  { opacity: 1; }
   85%  { opacity: 1; }
   100% { stroke-dashoffset: calc(-1 * var(--line-len)); opacity: 0; }
+}
+
+/* Blur, the line focuses in alongside a blurred tab and window. `filter` on an
+   SVG path takes CSS filter functions, so the blur simply rides in front of the
+   line's own glow (see --line-glow on .connection-line).
+
+   ⚠ The 100% frame deliberately omits `opacity`, which makes the browser take
+   the endpoint from the element's own computed value: a subagent line rests at
+   0.9, a lineage line at 0.72, and a WORKING lineage line at 0.95. Pinning 0.9
+   here - as `line-enter-fade` above still does - lands every lineage line on the
+   wrong opacity and snaps it when the class comes off. */
+html[data-line-anim="blur"] .connection-line.line-enter {
+  animation-name: line-enter-blur;
+  animation-duration: calc(380ms * var(--anim-enter-scale, 1));
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes line-enter-blur {
+  0%   { opacity: 0; filter: blur(5px) var(--line-glow); }
+  100% { filter: blur(0px) var(--line-glow); }
 }
 
 .anim-lab-check {
@@ -11678,10 +11780,17 @@ kbd {
   stroke-dasharray: 5 3;
   fill: none;
   opacity: 0.9;
-  /* Dark outline for contrast, vibrant blue glow */
-  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8))
-          drop-shadow(0 0 4px rgba(59, 130, 246, 0.8))
-          drop-shadow(0 0 8px rgba(59, 130, 246, 0.5));
+  /* Dark outline for contrast, vibrant blue glow. Held in a variable because the
+     `blur` line entrance animates `filter`: a keyframe listing only the blur would
+     drop the glow for the length of the run and pop it back at the end, and the
+     lineage lines below - whose glow is a different colour entirely, set per
+     element - make that obvious. Both of its keyframes say
+     `blur(N) var(--line-glow)`, so the function lists match and interpolate while
+     each kind of line keeps its own glow. */
+  --line-glow: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8))
+    drop-shadow(0 0 4px rgba(59, 130, 246, 0.8))
+    drop-shadow(0 0 8px rgba(59, 130, 246, 0.5));
+  filter: var(--line-glow);
   transition: opacity 0.2s, stroke-width 0.2s, filter 0.2s;
 }
 
@@ -11776,8 +11885,13 @@ kbd {
   stroke-dasharray: 5 5;
   stroke-linecap: round;
   opacity: 0.72;
-  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-effective-color))
+  /* Held in --line-glow so the `blur` entrance keyframes can say
+     `blur(N) var(--line-glow)` and interpolate against the resting filter
+     instead of dropping the glow for the length of the run. The colour is the
+     ACTIVITY-aware one, so a waiting/checking arc keeps its purple glow. */
+  --line-glow: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-effective-color))
     drop-shadow(0 0 11px var(--lineage-effective-color));
+  filter: var(--line-glow);
 }
 
 /* ⚠ OUTSIDE the reduced-motion block below on purpose. A working child is the case
@@ -20779,6 +20893,172 @@ html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail
 html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-number,
 html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-status {
   margin-top: 0.15rem;
+}
+
+/* --- Detailed rail rows wear the HOME SCREEN's card language -------------- */
+/* The desktop home rail (.home-sessions, home-sessions.js) and this rail list
+   the same sessions with the same three lines — name, project, "created 3d ago
+   · working 12m" + pill — so they now LOOK the same too: a bordered card per
+   session instead of a flat strip row, a 9px state dot (pulsing and ringed
+   while the session works), the name at full weight, and the stamps line
+   wrapped onto its own full-width row with the pill parked at its right end.
+
+   ⚠ RAIL ONLY, never the shared comma-grouped selectors above. The detailed
+   SIDEBAR draws the same meta line and is deliberately left flat: it is a
+   permanently-docked navigation column that sits next to the terminal all day,
+   and 20 stacked cards there read as a wall. Widening one of those grouped
+   rules instead of adding this block is what would silently restyle it.
+
+   ⚠ The paint rules here are (0,5,1)-(0,6,1), so they outrank the plain
+   `.session-tab .tab-status.idle` class rules (0,2,0) — which is the point —
+   but they must NOT outrank the alert rules that turn a dot red or yellow when
+   a session is blocked on a human. Those are (0,3,0), so every dot rule below
+   excludes the two alert classes by hand rather than relying on the cascade.
+   State and alert normally agree (_mobileOverviewState reads the same pending
+   hooks the alert does), so this is a guard against them drifting, not a fix
+   for a known disagreement. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tabs {
+  gap: 0.35rem;
+  padding-top: 0.5rem;
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab {
+  /* The stamps line rides a wrapped full-width row, exactly as on the home rail:
+     that hands the whole width of the card to the session name, which is what
+     stops a `w34-claudeman: mindreading` ellipsizing into `w34-claudeman: …`. */
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab:hover {
+  background: var(--bg-hover);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: var(--text);
+}
+
+/* The name is what tells one card from another, so it carries the weight the
+   home rail gives it rather than the strip's dim 0.75rem label. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-name {
+  color: var(--text);
+  font-weight: 600;
+  /* One step up from the shared vertical-list size, which is 12px because that
+     is what the SIDEBAR has always been; a card row has the height for the
+     ~13px the home rail renders at. Still driven by the same setting (App
+     Settings → Session Name Font Size), so it moves with it. */
+  font-size: calc(var(--session-sidebar-name-font-size, 12px) + 1px);
+  /* Three lines rather than two: the card is wrapped, so a long name costs
+     height instead of pushing the pill or the stamps off the row. */
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-folder {
+  font-size: 0.66rem;
+  margin-top: 0.1rem;
+}
+
+/* The state line gets the full width of the card (`flex: 0 0 100%` wraps it),
+   so the stamps stop competing with the gear/close column for the sliver of
+   room left beside the name. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-meta {
+  flex: 0 0 100%;
+  margin-top: 0;
+  font-size: 0.64rem;
+  opacity: 0.75;
+}
+
+/* Bigger than the strip's 6px pip, because a card row has the room and the dot
+   is the one thing on it readable at a glance. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-status {
+  width: 9px;
+  height: 9px;
+  margin-top: 0.3rem;
+}
+
+/* Idle is green, but a MUTED green — same mix the home rail uses, for the same
+   reason: a glance down the rail must separate "running right now" from
+   "sitting there" without reading a word. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
+  .tab-rail
+  .session-tab.tab-state-idle:not(.tab-alert-action):not(.tab-alert-idle)
+  .tab-status {
+  background: color-mix(in srgb, var(--green) 42%, var(--text-muted));
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
+  .tab-rail
+  .session-tab.tab-state-done:not(.tab-alert-action):not(.tab-alert-idle)
+  .tab-status {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+/* The working halo. The orbiting ring is the shared `.tab-status.busy::after`
+   already declared above — only its inset moves, to clear the wider dot. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
+  .tab-rail
+  .session-tab.tab-state-working:not(.tab-alert-action):not(.tab-alert-idle)
+  .tab-status {
+  background: var(--green);
+  box-shadow: 0 0 8px 2px color-mix(in srgb, var(--green) 55%, transparent);
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
+  .tab-rail
+  .session-tab
+  .tab-status.busy::after {
+  inset: -4px;
+  border-width: 2px;
+}
+
+/* Card accents: the same three colours as every other session surface, and the
+   same two blinks the home rail runs. `tab-alert-*` draws its own ::before ring
+   on top of this for the sessions that are genuinely blocked on a human; these
+   border accents are the calmer, always-on half. */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab.tab-state-needs,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab.tab-state-error {
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
+  animation: home-sessions-blink-red 2.5s ease-in-out infinite;
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab.tab-state-waiting {
+  border-color: color-mix(in srgb, var(--yellow) 50%, transparent);
+  animation: home-sessions-blink-yellow 3.5s ease-in-out infinite;
+}
+
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab.tab-state-working {
+  border-color: color-mix(in srgb, var(--green) 35%, transparent);
+}
+
+/* No `.active` rule here on purpose: `.session-tab.active` (and its per-skin
+   twin) already paints background, border and box-shadow with !important, so a
+   card rule would be dead weight that reads as if it were doing something. The
+   selected card keeps the accent its skin gives every selected tab, which is
+   what makes it legible against the card background the state accents above
+   paint on. */
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab {
+    animation: none !important;
+  }
+}
+
+/* --- Activity-sorted rail (tabRailSort) ---------------------------------- */
+/* Visual order only: the DOM stays in the user's tab order, so drag-reorder,
+   Alt+N badges, the arrow-key walk and the sidebar filter all keep reading the
+   list they always read. `order` is set inline per tab by the render paths
+   (app.js `_tabRailSortOrder`).
+
+   Web tabs carry no session state to sort by and keep their place at the end of
+   the list, so they are pinned past every session card rather than being given
+   an inline order of their own — `renderWebviewTabs()` emits the same markup for
+   every layout and must stay that way. */
+html[data-tab-orientation='vertical'][data-tab-rail-sort='activity'] .tab-rail .session-tab[data-webview-id] {
+  order: 9999;
 }
 
 /* --- Collapsed rail ---------------------------------------------------- */

@@ -39,6 +39,7 @@ export const BROWSER_TEST_GLOBS = [
   'test/opencode-resize.test.ts',
   'test/webgl-fallback.test.ts',
   'test/terminal-copy-shortcut.test.ts',
+  'test/terminal-keycode229-recovery.browser.test.ts',
   'test/codex-predictive-echo.test.ts', // also needs a real codex binary
   'test/codex-command-profiles.browser.test.ts',
   // The `.browser.test.ts` convention post-dates the five above. Membership is

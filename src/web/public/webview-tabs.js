@@ -19,7 +19,170 @@
  * @loadorder 12.5 of 16, after session-ui.js (needs the tab strip), before api-client.js
  */
 
+// ── Loopback links ──────────────────────────────────────────────────────────
+//
+// An agent prints `http://localhost:5173/` and the user taps it on a phone.
+// That link can only ever resolve on the Codeman box itself, so opening it in
+// the browser is a guaranteed connection error from anywhere else — while the
+// proxied web tab fetches from the server, where it works. Only loopback is
+// routed this way: a LAN or tailnet address may well be reachable from the
+// device (a VPN, the same Wi-Fi), and a direct open is the cheaper, richer path.
+
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '0.0.0.0', '::1', '[::1]', '::', '[::]']);
+
+function normalizeHostname(hostname) {
+  return String(hostname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, '');
+}
+
+/**
+ * `localhost`, 127.0.0.0/8, 0.0.0.0 and the IPv6 loopback forms: names that can
+ * only ever mean this box.
+ *
+ * ⚠️ `*.localhost` is deliberately NOT here. The link source is agent-written
+ * terminal output and response-viewer markdown, i.e. prompt-injectable, and
+ * this set is the whole confinement on a tap that makes Codeman fetch a URL
+ * server-side and persist it. Every other member is an address literal; a
+ * `*.localhost` DNS name is not one: on a resolver that does not synthesise it
+ * locally and has a search domain configured, `evil.localhost` NXDOMAINs as
+ * absolute and is retried as `evil.localhost.<search domain>`, which an
+ * attacker can control. A user who really runs `api.localhost` dev hosts can
+ * still save that dashboard by hand, which is an explicit action.
+ */
+function isLoopbackHostname(hostname) {
+  const host = normalizeHostname(hostname);
+  if (!host) return false;
+  if (LOOPBACK_HOSTNAMES.has(host)) return true;
+  const ipv4 = /^(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.exec(host);
+  return !!ipv4 && Number(ipv4[1]) === 127;
+}
+
+/**
+ * Whether the PAGE is being viewed on the box itself. Broader than the
+ * auto-route set on purpose, and safe in the opposite direction: a false
+ * positive here only ever DECLINES to proxy, leaving the caller's direct open.
+ */
+function isOnBoxHostname(hostname) {
+  const host = normalizeHostname(hostname);
+  return isLoopbackHostname(host) || host.endsWith('.localhost');
+}
+
+/**
+ * One key per dev server, so `localhost:5173` and `127.0.0.1:5173` reuse a
+ * single saved dashboard and a single tab instead of one per host spelling.
+ */
+function webTabOriginKey(url) {
+  return isLoopbackHostname(url.hostname) ? `${url.protocol}//loopback:${url.port}` : url.origin;
+}
+
+/**
+ * Whether a link should open through a proxied web tab rather than directly:
+ * an http(s) URL on a loopback host, viewed from a page that is NOT itself on
+ * that host (on the box, the browser can reach localhost and the direct open
+ * keeps devtools, extensions and the real origin).
+ */
+function linkNeedsWebTabProxy(rawUrl, pageHostname) {
+  let url;
+  try {
+    url = new URL(String(rawUrl || ''));
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  if (!isLoopbackHostname(url.hostname)) return false;
+  return !isOnBoxHostname(pageHostname);
+}
+
+if (typeof window !== 'undefined') {
+  window.CodemanWebviewLinks = { isLoopbackHostname, isOnBoxHostname, webTabOriginKey, linkNeedsWebTabProxy };
+}
+
 Object.assign(CodemanApp.prototype, {
+  // ── Loopback links ────────────────────────────────────────────────────────
+
+  /**
+   * Take a link the device cannot reach and open it through a proxied web tab.
+   * Returns true when it took the link; false leaves the caller's own opening
+   * path (window.open, an anchor's default) untouched.
+   */
+  openLinkThroughWebTabIfLoopback(rawUrl) {
+    if (!linkNeedsWebTabProxy(rawUrl, window.location?.hostname)) return false;
+    void this.openUrlInWebTab(rawUrl);
+    return true;
+  },
+
+  /**
+   * Open an arbitrary URL as a proxied web tab, deep path included. A saved
+   * proxied dashboard on the same origin is reused (one tab per dev server,
+   * not one per link); otherwise one is saved under the host:port name so it
+   * is there in the Run dropdown next time.
+   */
+  async openUrlInWebTab(rawUrl) {
+    let url;
+    try {
+      url = new URL(String(rawUrl || ''));
+    } catch {
+      return;
+    }
+    // ⚠️ "is `this.webviews` set" does NOT answer "is it loaded": initWebviews()
+    // assigns a truthy EMPTY map synchronously and only then awaits the list, so
+    // a tap during page load used to find nothing to reuse and POST a duplicate
+    // record for an origin that already exists server-side. Join an in-flight
+    // load; start one only when none has ever run.
+    if (this._webviewsRefresh) await this._webviewsRefresh;
+    else if (!this._webviewsLoaded) await this.refreshWebviews();
+    if (!this.webviews) {
+      this.showToast?.('Could not open URL', 'error');
+      return;
+    }
+
+    const wantedKey = webTabOriginKey(url);
+    let existing = null;
+    for (const webview of this.webviews.values()) {
+      // ⚠️ `trusted` is excluded alongside `managed` and direct-mode records: a
+      // trusted frame runs with `allow-same-origin`, i.e. on Codeman's origin with
+      // the user's cookie, and the link being followed came from agent output. An
+      // agent that can write into the dev server's tree (it IS the workspace) could
+      // otherwise print a path that one tap navigates that privileged frame to.
+      // Opening such a dashboard from the Run dropdown is still an explicit action.
+      if (webview.managed || webview.trusted || (webview.embedMode ?? 'proxy') !== 'proxy') continue;
+      try {
+        if (webTabOriginKey(new URL(webview.url)) === wantedKey) {
+          existing = webview;
+          break;
+        }
+      } catch {
+        /* a saved URL that no longer parses is not a match */
+      }
+    }
+
+    let id = existing?.id;
+    if (!id) {
+      const created = await this._apiJson('/api/webviews', {
+        method: 'POST',
+        body: { name: url.host.slice(0, 60), url: `${url.origin}/`, embedMode: 'proxy', trusted: false },
+      });
+      if (!created?.id) {
+        this.showToast?.('Could not open URL', 'error');
+        return;
+      }
+      await this.refreshWebviews();
+      id = created.id;
+      // The create is a persisted record: it writes webviews.json, broadcasts
+      // over SSE, adds a Run-dropdown row on every device this owner is signed
+      // in on and counts toward MAX_WEBVIEWS. Adding one by hand goes through a
+      // modal; a tap should not do all that with a new tab as its only signal.
+      this.showToast?.(`Saved ${url.host} as a web tab`, 'success');
+    }
+    // `/` is passed through rather than flattened to '': openWebview reads an
+    // empty path as "no deep link" and leaves an already-open frame on whatever
+    // page it was showing, so a link to the origin root did nothing visible.
+    const path = `${url.pathname}${url.search}${url.hash}`;
+    await this.openWebview(id, { path: path || '/' });
+  },
+
   // ── State ─────────────────────────────────────────────────────────────────
 
   /** Load the saved list and restore which tabs were open. */
@@ -69,7 +232,25 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /**
+   * Fetch the saved list.
+   *
+   * The in-flight promise is published on `_webviewsRefresh` (and the
+   * ever-loaded flag on `_webviewsLoaded`) so a loopback link tapped during page
+   * load can JOIN this load instead of finding an empty map and POSTing a
+   * duplicate record for an origin that already exists — see openUrlInWebTab().
+   */
   async refreshWebviews() {
+    const inFlight = this._refreshWebviewsOnce();
+    this._webviewsRefresh = inFlight;
+    try {
+      return await inFlight;
+    } finally {
+      if (this._webviewsRefresh === inFlight) this._webviewsRefresh = null;
+    }
+  },
+
+  async _refreshWebviewsOnce() {
     const generation = (this._webviewListRefreshGeneration || 0) + 1;
     this._webviewListRefreshGeneration = generation;
     let data;
@@ -88,6 +269,7 @@ Object.assign(CodemanApp.prototype, {
     const deletedIds = this._webviewDeletedIds || new Set();
     this.webviews = new Map(data.webviews.filter((w) => !deletedIds.has(w.id)).map((w) => [w.id, w]));
     if (typeof data.maxLiveFrames === 'number') this._webviewMaxFrames = data.maxLiveFrames;
+    this._webviewsLoaded = true;
     this.renderWebviewMenuItems();
     if (!this._webviewOpenStateLoaded) {
       // Restore the device-local OPEN SET only after the authoritative saved list
@@ -307,7 +489,14 @@ Object.assign(CodemanApp.prototype, {
    * memory-only and expire, so a tab reopened after a server restart must not reuse
    * the dead URL from the previous run.
    */
-  async openWebview(id) {
+  /**
+   * @param {string} id
+   * @param {{path?: string}} [options] `path` (pathname+search+hash) opens a
+   *   deep link inside the dashboard: appended to the proxy prefix, or resolved
+   *   against the real URL in direct mode. A mounted frame is navigated there
+   *   rather than left on whatever page it was showing.
+   */
+  async openWebview(id, options = {}) {
     const webview = this.webviews.get(id);
     if (!webview) return;
     const intent = this._beginWebviewOpenIntent(id);
@@ -335,8 +524,18 @@ Object.assign(CodemanApp.prototype, {
     }
     this._webviewNavigationId = null;
 
-    const src = data.embedUrl || data.webview?.url || webview.url;
-    this._mountWebviewFrame(id, src, data.webview || webview);
+    let src = data.embedUrl || data.webview?.url || webview.url;
+    const path = typeof options.path === 'string' ? options.path : '';
+    if (path) {
+      // The proxy prefix is `/webview/<cap>/`; a wildcard rides after it. In
+      // direct mode the deep link resolves against the dashboard's own origin.
+      src = data.embedUrl ? `${data.embedUrl.replace(/\/?$/, '/')}${path.replace(/^\//, '')}` : new URL(path, src).href;
+    }
+    // The options object is passed ONLY for a deep link: `navigate` defaults to
+    // false, so an ordinary open stays a 3-argument call and keeps the mount
+    // signature every other caller (and the open-state tests) already sees.
+    if (path) this._mountWebviewFrame(id, src, data.webview || webview, { navigate: true });
+    else this._mountWebviewFrame(id, src, data.webview || webview);
     this.activeWebviewId = id;
     this.hideWelcome?.();
     document.querySelector('.main')?.classList.add('webview-active');
@@ -348,11 +547,17 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /** Create the frame if absent, then reveal it and hide its siblings. */
-  _mountWebviewFrame(id, src, webview) {
+  _mountWebviewFrame(id, src, webview, { navigate = false } = {}) {
     const layer = document.getElementById('webviewLayer');
     if (!layer) return;
 
     let wrap = layer.querySelector(`.webview-frame[data-webview-id="${CSS.escape(id)}"]`);
+    if (wrap && navigate) {
+      // A deep link into an already-mounted dashboard: navigate the live frame
+      // instead of tearing it down, so its login and state survive.
+      const frame = wrap.querySelector('iframe');
+      if (frame) frame.src = CodemanBase.url(src);
+    }
     if (!wrap) {
       wrap = document.createElement('div');
       wrap.className = 'webview-frame';

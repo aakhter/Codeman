@@ -972,6 +972,11 @@ describe('OpenCode device-local terminal font policy', () => {
     mobile.setAppHeight.mockClear();
     mobile.visualViewport.dispatch('resize');
     expect(apply).toHaveBeenCalledOnce();
-    expect(mobile.setAppHeight).toHaveBeenCalledOnce();
+    // setAppHeight is the documentElement.style.setProperty spy, so it counts
+    // EVERY property updateAppHeight writes. The 1.27.0 merge added upstream's
+    // `--chrome-overlap` alongside `--app-height`, making two calls per handler
+    // run. What this case pins is that the handler ran ONCE, so count the
+    // app-height write specifically rather than every setProperty.
+    expect(mobile.setAppHeight.mock.calls.filter((c: unknown[]) => c[0] === '--app-height')).toHaveLength(1);
   });
 });

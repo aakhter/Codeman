@@ -154,6 +154,7 @@ import {
   getLastTranscriptResponse,
   isExternalCliTranscriptMode,
   parseExternalCliTranscript,
+  selectLastAnsweredTurn,
 } from '../response-viewer-transcript.js';
 import { findActiveCodexConversation } from '../../checkpoint-conversation-identity.js';
 import { parseCodexRollout } from '../../codex-rollout-reader.js';
@@ -2678,10 +2679,15 @@ export function registerSessionRoutes(
       }
     }
 
+    // `turn` is the brief view's context: the last ANSWERED turn's assistant
+    // messages, so a multi-row answer is not reduced to its final row. `text`
+    // stays the last assistant row in every mode (agent pollers hash it).
+    // (`query` is already destructured at the top of this handler downstream.)
+    const wantsMessages = query.context === 'full' || query.context === 'turn';
     const claudeSessionId = session.claudeSessionId || session.id;
     const transcript = await findClaudeTranscript(projectsDir, claudeSessionId, session.id);
     if (!transcript) {
-      return query.context === 'full' ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
+      return wantsMessages ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
     }
 
     if (transcript.sessionId !== session.claudeSessionId && transcript.sessionId !== session.id) {
@@ -2698,9 +2704,17 @@ export function registerSessionRoutes(
 
     try {
       const content = await fs.readFile(transcript.path, 'utf8');
-      return parseClaudeResponseTranscript(content, query.context === 'full');
+      const parsed = parseClaudeResponseTranscript(content, wantsMessages);
+      if (query.context === 'turn') {
+        return {
+          text: parsed.text,
+          timestamp: parsed.timestamp,
+          messages: selectLastAnsweredTurn(parsed.messages ?? []),
+        };
+      }
+      return parsed;
     } catch {
-      return query.context === 'full' ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
+      return wantsMessages ? { text: '', timestamp: '', messages: [] } : { text: '', timestamp: '' };
     }
   });
 
@@ -2993,6 +3007,11 @@ export function registerSessionRoutes(
       session.mode === 'opencode' ||
       session.mode === 'antigravity';
     const muxName = session.muxName;
+    // Resolved BEFORE the capture: the full-history capture is bounded by the
+    // configured tmux history limit and sizes its stdout buffer from the byte
+    // cap the consumer will keep, or a multi-MB scrollback dump dies on
+    // execSync's 1MB default (ENOBUFS).
+    const { tmuxHistoryLimit, terminalBufferMaxBytes } = await ctx.getTerminalHistoryConfig();
     const captureStartedAt = performance.now();
     // COD-180: a remote session's canonical scrollback lives ONLY on the remote
     // tmux server — the local wrapper is a nested-tmux client repainted in
@@ -3015,7 +3034,14 @@ export function registerSessionRoutes(
     if (liveMuxBuffer === null && muxName && typeof ctx.mux.captureActivePaneBuffer === 'function') {
       liveMuxBuffer = ctx.mux.captureActivePaneBuffer(
         muxName,
-        isFullReload || isCaptureOnlyTuiMode ? { fullHistory: true, lastLines } : undefined
+        isFullReload || isCaptureOnlyTuiMode
+          ? {
+              fullHistory: true,
+              lastLines,
+              historyLimitLines: tmuxHistoryLimit,
+              maxCaptureBytes: terminalBufferMaxBytes,
+            }
+          : undefined
       );
     }
     const captureFinishedAt = performance.now();
@@ -3027,11 +3053,18 @@ export function registerSessionRoutes(
     const isShellFullReload = session.mode === 'shell' && isFullReload;
     // COD-187 claude expansion: the history view's requests (`lines=N` first
     // page, `capture=1` full expansion) are capture-only for EVERY mode —
-    // tailing byte history by "lines" is meaningless, and claude's legacy
-    // no-param full reload keeps its byte-history+capture concat untouched.
+    // tailing byte history by "lines" is meaningless.
     const isCaptureRequest = lastLines !== undefined || query.capture === '1';
+    // ⚠️ An EXPLICIT `?full=1` is capture-only too: that capture is the RENDERED
+    // form of everything already in the byte buffer, so prepending the byte
+    // history replays the whole conversation twice (`\x1b[2J` clears only the
+    // viewport, not xterm scrollback). Deliberately NOT `isFullReload`, which
+    // downstream also sets for a bare tail-less `/terminal` — claude's legacy
+    // no-param reload keeps its byte-history+capture concat untouched.
+    const isExplicitFullReload = query.full === '1' || query.full === 'true';
     const captureOnly =
-      (isCaptureOnlyTuiMode || isShellFullReload || isCaptureRequest) && !(session.remote && remoteCaptureFailed);
+      (isExplicitFullReload || isCaptureOnlyTuiMode || isShellFullReload || isCaptureRequest) &&
+      !(session.remote && remoteCaptureFailed);
     // `source` doubles as the frontend's reconcile safety gate: only a
     // 'mux-full-history' response may REPLACE a terminal's contents
     // (_reconcileForeignResize). A remote session degraded to the local wrapper
@@ -3042,13 +3075,20 @@ export function registerSessionRoutes(
           ? 'mux-full-history'
           : 'mux-visible'
         : 'history';
-    const { terminalBufferMaxBytes } = await ctx.getTerminalHistoryConfig();
     let rawBuffer =
       liveMuxBuffer !== null && liveMuxBuffer.length > 0
         ? captureOnly || session.terminalBufferLength === 0
           ? liveMuxBuffer
           : `${session.terminalBuffer}\x1b[H\x1b[2J${liveMuxBuffer}`
         : session.terminalBuffer;
+    // What the row-preserving skips below key on. NOT `isFullReload`, which is
+    // only what the CLIENT ASKED FOR: when the capture comes back null — ENOBUFS,
+    // a timeout, a vanished pane, a session with no mux — rawBuffer falls back to
+    // the byte history, a stream of successive frames with no row alignment to
+    // protect. It is also false for the concat path (byte history + clear +
+    // capture), where the capture is not the whole buffer and its trailing
+    // relative cursor move is not what the rows are counted from.
+    const isFullCapture = source === 'mux-full-history' && (captureOnly || session.terminalBufferLength === 0);
     const fullSize = rawBuffer.length;
     let truncated = false;
     // WHY the reason and not just the boolean (#258): `truncated` is set at two
@@ -3080,8 +3120,16 @@ export function registerSessionRoutes(
     // During long thinking phases, Ink rewrites the same rows thousands of times
     // (500KB+). Without stripping, tail mode returns only spinner frames and
     // the terminal appears empty when switching tabs.
+    // A full reload's buffer IS the rendered pane, one line per screen row, and
+    // it ends with an absolute cursor move back to the pane's own position.
+    // Every transform below that can DELETE A LINE would shift the rows out from
+    // under that position, leaving the caret a row off — on the composer's
+    // border rather than its input line. Redraw-bloat stripping exists for a
+    // byte stream of successive frames; a capture holds no successive frames.
     let strippedBuffer =
-      getCli(session.mode)?.capabilities.stripInkBloat === false ? rawBuffer : stripInkRedrawBloat(rawBuffer);
+      isFullCapture || getCli(session.mode)?.capabilities.stripInkBloat === false
+        ? rawBuffer
+        : stripInkRedrawBloat(rawBuffer);
 
     // Strip alt-screen toggles and scrollback-erase from Codex/Claude byte
     // streams. xterm.js obeys them by switching to its scrollback-less alt
@@ -3119,7 +3167,10 @@ export function registerSessionRoutes(
       cleanBuffer = strippedBuffer;
 
       // Find where Claude banner starts (has color codes before "Claude")
-      const claudeMatch = cleanBuffer.match(CLAUDE_BANNER_PATTERN);
+      // Skipped for a full reload: the banner sits at whatever row the pane has
+      // it, and cutting to it would drop the blank rows above and move every
+      // row up by that many.
+      const claudeMatch = isFullCapture ? null : cleanBuffer.match(CLAUDE_BANNER_PATTERN);
       if (claudeMatch && claudeMatch.index !== undefined && claudeMatch.index > 0) {
         let lineStart = claudeMatch.index;
         while (lineStart > 0 && cleanBuffer[lineStart - 1] !== '\n') {
@@ -3130,7 +3181,11 @@ export function registerSessionRoutes(
     }
 
     // Remove Ctrl+L and leading whitespace (cheap on tailed subset)
-    cleanBuffer = cleanBuffer.replace(CTRL_L_PATTERN, '').replace(LEADING_WHITESPACE_PATTERN, '');
+    // Leading whitespace goes too, except on a full reload where a leading
+    // blank line is the pane's own first row and dropping it shifts every row
+    // up by one.
+    cleanBuffer = cleanBuffer.replace(CTRL_L_PATTERN, '');
+    if (!isFullCapture) cleanBuffer = cleanBuffer.replace(LEADING_WHITESPACE_PATTERN, '');
 
     // COD-187: a `lines=N` capture that came back with >= N lines almost
     // certainly has older history above it — the frontend shows a
