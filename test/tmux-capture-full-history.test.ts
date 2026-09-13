@@ -10,9 +10,15 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { formatCursorRestore, hasVisibleContent } from '../src/tmux-manager.js';
 
 describe('tmux full-history pane capture (COD-47)', () => {
   const source = readFileSync(resolve(import.meta.dirname, '../src/tmux-manager.ts'), 'utf8');
+  const methodStart = source.indexOf('capturePaneBuffer(muxName: string');
+  // Bounded at the next method so `methodBody` really is one method: the
+  // ordering assertions below would otherwise be satisfiable by a neighbour.
+  const methodEnd = source.indexOf('captureActivePaneBuffer(muxName: string', methodStart);
+  const methodBody = source.slice(methodStart, methodEnd);
 
   it('capturePaneBuffer accepts a fullHistory option', () => {
     const sig = source.indexOf('capturePaneBuffer(');
@@ -41,15 +47,42 @@ describe('tmux full-history pane capture (COD-47)', () => {
   });
 
   it('returns full-history capture as raw scrollback (skips the single-screen repaint)', () => {
-    const sig = source.indexOf('capturePaneBuffer(');
-    const body = source.slice(sig, sig + 3400);
-    // When fullHistory, return the raw buffer BEFORE the formatPaneSnapshot
-    // repaint (which is single-screen and would clip a multi-screen history).
-    const earlyReturn = body.indexOf('if (fullHistory)');
-    const snapshot = body.indexOf('formatPaneSnapshot(');
-    expect(earlyReturn).toBeGreaterThan(-1);
+    // The fullHistory branch returns before the formatPaneSnapshot repaint,
+    // which is single-screen and would clip a multi-screen history.
+    const branch = methodBody.indexOf('if (fullHistory) {\n        // COD-190');
+    const snapshot = methodBody.indexOf('formatPaneSnapshot(');
+    expect(branch).toBeGreaterThan(-1);
     expect(snapshot).toBeGreaterThan(-1);
-    expect(earlyReturn).toBeLessThan(snapshot);
+    expect(branch).toBeLessThan(snapshot);
+    // …and what it returns is linear scrollback (CRLF-normalized inside
+    // formatFullHistoryCapture), not a repaint.
+    expect(methodBody.slice(branch, snapshot)).toContain('formatFullHistoryCapture(');
+  });
+
+  it('appends the pane cursor to the full-history capture', () => {
+    // A linear replay leaves the caret wherever the last character landed — the
+    // status line, for an agent CLI — and every cursor-relative update the CLI
+    // sends afterwards is then measured from the wrong row. COD-433 anchors that
+    // move to the captured tail, which is what formatFullHistoryCapture does.
+    const restore = methodBody.indexOf('formatFullHistoryCapture(trimmed, geometry)');
+    const snapshot = methodBody.indexOf('formatPaneSnapshot(');
+    expect(restore).toBeGreaterThan(-1);
+    expect(restore).toBeLessThan(snapshot);
+  });
+
+  it('keeps the trailing rows, and queries the cursor before deciding anything', () => {
+    // COD-190: trailing blank rows are the bottom of the screen and the cursor
+    // move counts up from them, so only the line terminator comes off. The
+    // geometry has to be in hand before that branch runs, since it is what the
+    // move is computed from.
+    expect(methodBody).toContain("rawCapture.replace(/\\n$/, '')");
+    const cursorQuery = methodBody.indexOf('queryPaneCursor(');
+    expect(cursorQuery).toBeGreaterThan(-1);
+    expect(cursorQuery).toBeLessThan(methodBody.indexOf('if (fullHistory) {\n        // COD-190'));
+  });
+
+  it('defers to the byte history when the pane holds nothing visible', () => {
+    expect(methodBody).toContain("if (!hasVisibleContent(trimmed)) return ''");
   });
 
   it('captureActivePaneBuffer forwards the fullHistory option', () => {
@@ -101,5 +134,39 @@ describe('COD-189 local history-limit ordering', () => {
     expect(globalSet).toBeLessThan(newSession);
     // Same shell invocation (tmux command separator), not a follow-up call.
     expect(legacyBranch.slice(globalSet, newSession)).toContain(';');
+  });
+});
+
+describe('full-history cursor restore', () => {
+  it('counts up from the last replayed row rather than down from the top', () => {
+    // Relative, not `CUP`: absolute row addressing is only correct while the
+    // browser's row count equals the pane's, and resizeWindow does not wait for
+    // tmux, so a capture can be taken before a requested resize has applied.
+    expect(formatCursorRestore({ cols: 80, rows: 24, cursorX: 2, cursorY: 20 })).toBe('\x1b[3A\r\x1b[2C');
+  });
+
+  it('emits no row move when the caret is already on the last row', () => {
+    expect(formatCursorRestore({ cols: 80, rows: 24, cursorX: 5, cursorY: 23 })).toBe('\r\x1b[5C');
+  });
+
+  it('emits no column move for column zero', () => {
+    expect(formatCursorRestore({ cols: 80, rows: 10, cursorX: 0, cursorY: 0 })).toBe('\x1b[9A\r');
+  });
+});
+
+describe('hasVisibleContent', () => {
+  it('is false for a pane of blank rows', () => {
+    expect(hasVisibleContent('\n'.repeat(23))).toBe(false);
+  });
+
+  it('is false for blank rows carrying only SGR attributes', () => {
+    // `capture-pane -e` styles every row, so an all-blank pane is not an empty
+    // string. Treating it as content would replace the byte history with a
+    // blank screen.
+    expect(hasVisibleContent('\x1b[m   \x1b[0m\n\x1b[m   \x1b[0m')).toBe(false);
+  });
+
+  it('is true as soon as one row carries a character', () => {
+    expect(hasVisibleContent('\x1b[m   \x1b[0m\n\x1b[m x \x1b[0m')).toBe(true);
   });
 });

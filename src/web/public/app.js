@@ -1676,7 +1676,11 @@ class CodemanApp {
     this._redock(id);
   }
 
-  /** Clear all dashboard-side detached state/timers for a session. */
+  /** Clear all dashboard-side detached state/timers for a session, and take its
+   *  sizing back: the popup owned the pane while it was open, so the dashboard's
+   *  record of it is stale and the session it is showing needs re-measuring.
+   *  ⚠️ Not idempotent — each call re-asserts, so a path that redocks twice for
+   *  one close sends two SIGWINCHs. */
   _redock(id) {
     const t = this._detachWatchTimers.get(id);
     if (t) { clearInterval(t); this._detachWatchTimers.delete(id); }
@@ -1684,6 +1688,21 @@ class CodemanApp {
     this._detachOrphanStrikes.delete(id);
     this.detachedWindows.delete(id);
     this._markDetached(id, false);
+    // While the popup owned this session the dashboard sent no resizes, so
+    // `_lastResizeDims` — one value for the whole window — no longer describes
+    // the PTY, which the popup has been sizing. Clearing it makes the next
+    // sendResize report truthfully, on every redock path rather than only the
+    // active one: `selectSession` reads that answer to decide whether to wait
+    // for the TUI's redraw, and a false "unchanged" makes it fetch the frame
+    // before the redraw lands.
+    this._lastResizeDims = null;
+    // Sizing comes back with the session. `force` buys a guaranteed repaint for
+    // the case where popup and dashboard happened to agree on a size; the server
+    // already resizes on its own comparison against the real pane whenever the
+    // two differ.
+    if (this.sessions.has(id) && id === this.activeSessionId) {
+      this.sendResize(id, { force: true })?.catch?.(() => {});
+    }
   }
 
   /** Defer a channel-driven redock briefly. A popup *reload* emits 'redocked'
@@ -2838,6 +2857,16 @@ class CodemanApp {
         return;
       }
 
+      // A `localhost` URL in the agent's answer: from another device that can
+      // only load through the server, so hand it to a proxied web tab
+      // (webview-tabs.js). Every other link keeps its new-tab default.
+      const urlLink = ev.target.closest('a[href]');
+      if (urlLink && this.openLinkThroughWebTabIfLoopback?.(urlLink.href)) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
+
       // One-click copy: lift the raw source from the sibling <pre><code>, or —
       // COD-263 — the rendered text of the sibling <blockquote>.
       const copyBtn = ev.target.closest('.rv-copy-btn');
@@ -3373,10 +3402,19 @@ class CodemanApp {
     try {
       const session = this.sessions?.get?.(responseSessionId);
       const mode = session?.mode || '';
-      // Source 1: Transcript JSONL (best quality — clean structured text from Claude)
-      const res = await fetch(`/api/sessions/${responseSessionId}/last-response`);
+      // Source 1: Transcript JSONL (best quality — clean structured text from Claude).
+      // `context=turn` asks for the last ANSWERED turn as messages: a Claude
+      // answer is a median of 3 model messages (p90 11), and `text` alone is
+      // only the final one — usually a "Done." tail with the substance in the
+      // rows before it. Readers that know no `turn` context (Codex, the pane
+      // parser, an older server) answer with `text` only, and that path is
+      // unchanged below.
+      const res = await fetch(`/api/sessions/${responseSessionId}/last-response?context=turn`);
       const data = (await res.json())?.data ?? {};
       let lastResponse = data.text || '';
+      const turnMessages = (Array.isArray(data.messages) ? data.messages : []).filter(
+        (msg) => msg && msg.role === 'assistant' && typeof msg.text === 'string' && msg.text.trim()
+      );
 
       // Source 2: Terminal buffer fallback — strip ANSI, drop Claude CLI chrome.
       // Claude + shell only: _cleanTerminalBuffer knows Claude CLI's output, and
@@ -3397,7 +3435,20 @@ class CodemanApp {
       this._responseViewerMarkdown = lastResponse;
 
       const body = document.getElementById('responseViewerBody');
-      if (lastResponse) {
+      if (turnMessages.length > 0) {
+        // The whole last turn, rendered exactly as the full view renders that
+        // turn: one badge, then badge-less continuation segments. The same
+        // numeric-`turn` gate as loadFullContext, never same-role adjacency.
+        const agentLabel = this._getResponseViewerAgentLabel();
+        body.innerHTML = '';
+        let previous = null;
+        for (const msg of turnMessages) {
+          const continuation = !!previous && typeof msg.turn === 'number' && previous.turn === msg.turn;
+          body.appendChild(this._buildResponseViewerMessage(msg.text, 'assistant', agentLabel, { ...msg, continuation }));
+          previous = msg;
+        }
+        this._bindResponseViewerInteractions(body, responseSessionId);
+      } else if (lastResponse) {
         // Keep the brief view inside the same message wrapper as the full
         // conversation view. The wrapper supplies the card, role badge and
         // descendant markdown styles that direct body children do not get.
@@ -3423,7 +3474,12 @@ class CodemanApp {
 
       viewer.classList.add('visible');
       backdrop.classList.add('visible');
-      body.scrollTop = 0;
+      // A multi-row turn opens at its NEWEST text, matching loadFullContext's
+      // "scroll to bottom (latest message)". `scrollTop = 0` was right when the
+      // brief view was a single card holding the last row; with the whole turn
+      // rendered, the top is the turn's first narration line and the answer the
+      // eye button exists to show can be several screens down.
+      body.scrollTop = turnMessages.length > 1 ? body.scrollHeight : 0;
     } catch (err) {
       console.error('Failed to load response:', err);
     }
@@ -6689,6 +6745,71 @@ class CodemanApp {
   }
 
   /**
+   * True when the VERTICAL TAB RAIL orders its cards the way both home screens
+   * do — blocked on you first, then running longest-first, then quiet
+   * most-recently-quiet first (`CodemanSessionOrder`, constants.js) — instead of
+   * leaving them in the user's tab order.
+   *
+   * Read off <html> like the other two rail gates, because the render loop asks
+   * it once per pass and getSessionListLayout() re-parses localStorage.
+   * `tabRailSort: 'manual'` is the opt-out, and it is what a user who reorders
+   * by hand wants: a self-sorting list cannot also be drag-reorderable, so
+   * setupTabDragHandlers() drops the drag affordance while this is on rather
+   * than letting a card snap back to where the sort puts it.
+   *
+   * Deliberately NOT gated on `isTabRailRich()`: a simple rail lists the same
+   * sessions and answers the same question, it just says less about each one.
+   */
+  isTabRailSorted() {
+    const root = document.documentElement;
+    return root.getAttribute('data-tab-orientation') === 'vertical' && root.dataset.tabRailSort === 'activity';
+  }
+
+  /**
+   * Visual position per session id for the sorted rail, or null when the rail is
+   * not sorting.
+   *
+   * The sort is applied as the flex `order` property, NOT by reordering the DOM.
+   * That is the whole design: `#sessionTabs` stays in `sessionOrder`, so
+   * drag-and-drop, the Alt+N badges, the arrow-key walk, the sidebar filter and
+   * `_scrollActiveTabIntoView()` all keep reading the list they have always
+   * read, and a session changing state moves one inline style instead of
+   * forcing the full rebuild that would restart every card's animation.
+   *
+   * Rows are classified by `_mobileOverviewState()` and compared by
+   * `CodemanSessionOrder` — the same two helpers both home screens use, so the
+   * rail cannot disagree with them about what "working" means or what sorts
+   * first. `orderIndex` is the tab-strip position, which the comparator uses as
+   * its deterministic final tiebreak.
+   *
+   * Guarded like every other cross-file consumer: a stale cached constants.js or
+   * mobile-overview.js degrades to tab order rather than taking the strip down.
+   *
+   * @param {Array<string>} ids live session ids, in tab order
+   * @returns {Map<string, number>|null}
+   */
+  _tabRailSortOrder(ids) {
+    if (!this.isTabRailSorted()) return null;
+    if (!window.CodemanSessionOrder || typeof this._mobileOverviewState !== 'function') return null;
+    const rows = [];
+    for (let i = 0; i < ids.length; i++) {
+      const session = this.sessions.get(ids[i]);
+      if (!session) continue;
+      rows.push({
+        id: ids[i],
+        state: this._mobileOverviewState(session, this.pendingHooks?.get(ids[i])),
+        lastActivityAt: Number(session.lastActivityAt) || 0,
+        lastSubmitAt: Number(session.lastSubmitAt) || 0,
+        orderIndex: i,
+      });
+    }
+    const sorted = window.CodemanSessionOrder.sort(rows);
+    const out = new Map();
+    for (let i = 0; i < sorted.length; i++) out.set(sorted[i].id, i);
+    return out;
+  }
+
+  /**
    * True where the sidebar is a MODAL off-canvas drawer over the terminal
    * instead of a docked column.
    *
@@ -7330,10 +7451,20 @@ class CodemanApp {
       // Read once for the whole pass, like the full-rebuild path: this touches
       // the DOM and the loop below runs for every session on every SSE tick.
       const richRows = this.isRichTabRows();
+      // Sorted vertical rail: a state change moves a card, and this is the path
+      // that sees one — a session going working→idle never adds or removes a
+      // tab, so the full rebuild below is not reached. Recomputed per pass for
+      // the same reason the rich meta line is: the order IS the state.
+      const railSortOrder = this._tabRailSortOrder(this.sessionOrder.filter((sid) => this.sessions.has(sid)));
       // Incremental update - only modify changed properties
       for (const [id, session] of this.sessions) {
         const tab = container.querySelector(`.session-tab[data-id="${id}"]`);
         if (!tab) continue;
+
+        // An empty string clears the property, which is also what un-sorts the
+        // rail when the setting (or the layout) flips without a full rebuild.
+        const railOrder = railSortOrder?.has(id) ? String(railSortOrder.get(id)) : '';
+        if (tab.style.order !== railOrder) tab.style.order = railOrder;
 
         // A web tab owns the active state while one is open. activeSessionId stays
         // set (the terminal keeps streaming underneath, and switching back is
@@ -7793,6 +7924,18 @@ class CodemanApp {
     // Read once, not per session: isSessionSidebarRich() touches the DOM and
     // this loop runs for every tab on every full rebuild.
     const richRows = this.isRichTabRows();
+    // The sorted vertical rail (tabRailSort) moves cards with the flex `order`
+    // property and leaves this loop iterating tab order, so the Alt+N badge
+    // below still counts the strip, not the sorted list. Null in every other
+    // layout, and the tabs then carry no inline order at all — the header
+    // strip's markup is byte-identical to before.
+    // ⚠️ `tabOrder` here is a list of REFS ({kind, id}), not ids (the grouped tab
+    // layout projects both sessions and web tabs into it), so the ids have to be
+    // pulled out — passing refs straight through made every `sessions.has()`
+    // false and handed the sorter an empty list, i.e. a silently unsorted rail.
+    const railSortOrder = this._tabRailSortOrder(
+      tabOrder.filter((ref) => ref.kind !== 'webview' && this.sessions.has(ref.id)).map((ref) => ref.id)
+    );
     let _tabIdx = 0;
     for (const ref of tabOrder) {
       if (ref.kind === 'webview') {
@@ -7807,6 +7950,7 @@ class CodemanApp {
       const id = ref.id;
       const session = this.sessions.get(id);
       if (!session) continue; // Skip if session was removed
+      const railOrderStyle = railSortOrder?.has(id) ? ` style="order:${railSortOrder.get(id)}"` : '';
 
       // See the note in the incremental path: a web tab owns the active highlight
       // while one is open, even though activeSessionId stays set.
@@ -7873,7 +8017,7 @@ class CodemanApp {
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" data-activity-status="${escapeHtml(status)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${this.detachedSessions.has(id) ? ' detached' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${escapeHtml(id)}" data-color="${escapeHtml(color)}" data-activity-status="${escapeHtml(status)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(accessibleName)}" ${completeTooltip ? `title="${escapeHtml(completeTooltip)}"` : ''}>
 
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
@@ -7994,6 +8138,25 @@ class CodemanApp {
       const items = vertical
         ? [...container.querySelectorAll('[role="treeitem"]:not(.tab-filtered-out)')]
         : [...container.querySelectorAll('.session-tab[role="tab"]:not(.tab-filtered-out)')];
+      // ⚠️ A sorted rail paints its rows with the flex `order` property while the
+      // DOM stays in `sessionOrder` (that is what keeps the Alt+N badge and the
+      // drag model honest), so a DOM-order walk steps around the screen instead of
+      // down it: ArrowDown from the top card lands wherever that session happens to
+      // sit in the tab order. Walk what the eye sees. Read the COMPUTED order, not
+      // the inline one, or web tabs (pinned past the cards by a CSS `order: 9999`
+      // rather than an inline style) read as 0 and the walk starts on them. Array
+      // sort is stable, so equal orders keep DOM order, which is the unsorted case.
+      // Only for a FLAT rail: a grouped layout puts headers and their children in
+      // one tree whose reading order is structural, and re-sorting that list by a
+      // flex order group headers never carry would interleave them.
+      if (
+        this.isTabRailSorted?.() &&
+        items.length > 0 &&
+        items.every((el) => el.classList?.contains('session-tab'))
+      ) {
+        const orderOf = (el) => Number(getComputedStyle(el).order) || 0;
+        items.sort((a, b) => orderOf(a) - orderOf(b));
+      }
       const active = document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]');
       const currentIndex = items.indexOf(active);
       if (currentIndex < 0) return;
@@ -8254,6 +8417,22 @@ class CodemanApp {
       const tab = event.target.closest?.('.session-tab');
       const focusShortcut = tab?.classList.contains('tab-focus-shortcut') === true;
       if (!handle && !refHandle) return;
+      // A self-sorting list cannot also be hand-ordered: the drop rewrites
+      // sessionOrder correctly, the sort then puts the card straight back where
+      // it was, and the user is left dragging a row that refuses to move. Refuse
+      // the gesture instead of lying about it — `tabRailSort: 'manual'` is the
+      // way back to drag-reordering, and Alt+N / Ctrl+Shift+{ } still walk the
+      // strip order this list is no longer showing. Only when the list is FLAT:
+      // with groups defined, a ref drag also moves a tab BETWEEN groups, which
+      // the sort does not undo, and a Focus-shortcut drag orders its own list.
+      if (
+        this.isTabRailSorted?.() &&
+        !focusShortcut &&
+        !handle &&
+        (this.tabLayout?.groups?.length ?? 0) === 0
+      ) {
+        return;
+      }
       const ref = tab
         ? tab.dataset.webviewId
           ? { kind: 'webview', id: tab.dataset.webviewId }
@@ -9154,8 +9333,20 @@ class CodemanApp {
       }
     }
 
-    // A restored-session attach can outlive a newer tab selection. Do not let
-    // its continuation measure or resize the winner's shared terminal.
+    // Hold for the terminal font before measuring anything. A cell measured
+    // against a fallback font gives the wrong column and row count, and the
+    // correction would land after the replay, leaving the CLI drawing against a
+    // frame the terminal no longer shows. Resolves immediately once the font is
+    // in, so this costs a tab switch nothing after the first load, and it is
+    // bounded, so a font that never arrives cannot strand the session.
+    // ⚠️ BEFORE `_beginBufferLoad` on purpose: inside it, every live SSE event
+    // for this session queues instead of painting, so a slow font would hold
+    // output back rather than merely mis-measuring the grid.
+    if (this._terminalFontReady) await this._terminalFontReady;
+
+    // A restored-session attach can outlive a newer tab selection (and the font
+    // wait above is one more place it can lose the race). Do not let its
+    // continuation measure or resize the winner's shared terminal.
     if (this._isStaleSelect(selectGen)) {
       this._clearTerminalLoadState(sessionId, selectGen);
       return;

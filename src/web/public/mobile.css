@@ -566,11 +566,13 @@ html.mobile-init .file-browser-panel {
     min-height: calc(var(--app-height, 100dvh) - 42px - var(--safe-area-top) - var(--safe-area-bottom));
   }
 
-  /* iOS Safari: toolbar is pushed up by (100dvh - --app-height) to clear the
-     browser's bottom bar. Match that offset in main's padding so the terminal
-     doesn't extend behind the toolbar. */
+  /* iOS Safari: the toolbar is lifted by --chrome-overlap where the browser's
+     bottom bar would otherwise cover it. Match that offset in main's padding so
+     the terminal doesn't extend behind the toolbar. The accessory-bar term stays
+     on top of it: the two clear different things (browser chrome vs Codeman's
+     own keyboard bar) and can be present at the same time. */
   .ios-device.safari-browser .main {
-    padding-bottom: calc(40px + var(--safe-area-bottom) + var(--keyboard-accessory-height, 0px) + max(0px, 100dvh - var(--app-height)));
+    padding-bottom: calc(40px + var(--safe-area-bottom) + var(--keyboard-accessory-height, 0px) + var(--chrome-overlap, 0px));
   }
 
   /* Mobile Tab Sheet pill — shown when >8 tabs on phone */
@@ -909,11 +911,14 @@ html.mobile-init .file-browser-panel {
     will-change: transform;
   }
 
-  /* iOS Safari with tab bar: position: fixed uses the layout viewport which
-     extends behind the browser chrome. Offset the toolbar upward by the delta
-     between 100dvh (layout) and --app-height (visual). COD-283: clamp to 0 to avoid negative offset. */
+  /* iOS Safari: where position: fixed anchors to a layout viewport that
+     extends behind the browser's bottom bar, lift the toolbar by that overlap.
+     --chrome-overlap is innerHeight minus the visual viewport height, set in
+     mobile-handlers.js. On iPhone Safari it is 0 because fixed elements already
+     stop above the bar; the previous (100vh - --app-height) lift measured the
+     collapsible chrome instead and left an empty band above the bar. */
   .ios-device.safari-browser .toolbar {
-    bottom: calc(var(--safe-area-bottom) + max(0px, 100dvh - var(--app-height)));
+    bottom: calc(var(--safe-area-bottom) + var(--chrome-overlap, 0px));
   }
 
   /* When keyboard is visible the JS translateY already accounts for the full

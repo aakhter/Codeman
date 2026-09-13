@@ -438,6 +438,8 @@ Object.assign(CodemanApp.prototype, {
     if (tabRailWidthSelect) this.syncTabRailWidthSetting?.(tabRailWidth);
     const tabRailDetailSelect = document.getElementById('appSettingsTabRailDetail');
     if (tabRailDetailSelect) tabRailDetailSelect.value = settings.tabRailDetail ?? defaults.tabRailDetail ?? 'rich';
+    const tabRailSortSelect = document.getElementById('appSettingsTabRailSort');
+    if (tabRailSortSelect) tabRailSortSelect.value = settings.tabRailSort ?? defaults.tabRailSort ?? 'activity';
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     document.getElementById('appSettingsSessionListLayout').value =
@@ -2267,6 +2269,7 @@ Object.assign(CodemanApp.prototype, {
       tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
       tabRailDetail: document.getElementById('appSettingsTabRailDetail').value,
+      tabRailSort: document.getElementById('appSettingsTabRailSort').value,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       sessionSidebarFontSize: this.resolveSessionSidebarFontSize(
@@ -2791,6 +2794,7 @@ Object.assign(CodemanApp.prototype, {
         tabOrientation: 'horizontal',
         tabRailWidth: 256,
         tabRailDetail: 'rich',
+        tabRailSort: 'activity',
         sessionListLayout: 'header',
         sessionSidebarFontSize: 12,
         cjkInputEnabled: false,
@@ -3156,6 +3160,14 @@ Object.assign(CodemanApp.prototype, {
     const detail = (settings.tabRailDetail ?? defaults.tabRailDetail ?? 'rich') === 'simple' ? 'simple' : 'rich';
     root.dataset.tabRailDetail = detail;
 
+    // Row ORDER rides on a third attribute, for the same reason detail rides on
+    // its own: a sort flip leaves orientation on 'vertical' both times, and the
+    // order is applied as an inline `order` the render paths emit, not by CSS
+    // that could just re-match. `isTabRailSorted()` (app.js) reads this.
+    const previousSort = root.dataset.tabRailSort || 'activity';
+    const sort = (settings.tabRailSort ?? defaults.tabRailSort ?? 'activity') === 'manual' ? 'manual' : 'activity';
+    root.dataset.tabRailSort = sort;
+
     const tabsEl = document.getElementById('sessionTabs');
     const rail = document.getElementById('tabRail');
     const header = document.querySelector('.header');
@@ -3190,7 +3202,7 @@ Object.assign(CodemanApp.prototype, {
     // the row template, not toggled by CSS — same reasoning as the sidebar's
     // detail half in applySessionListLayout(). Taller rows also move every
     // connector anchored to a tab rect.
-    const changed = orientationChanged || previousDetail !== detail;
+    const changed = orientationChanged || previousDetail !== detail || previousSort !== sort;
     if (orientationChanged) {
       this.updateTabOverflowMode?.();
       if (!settleRailWidth) this.fitAddon?.fit();
@@ -3520,7 +3532,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'sessionListLayout',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'tabRailSort', 'sessionListLayout',
           'sessionSidebarFontSize',
           'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',

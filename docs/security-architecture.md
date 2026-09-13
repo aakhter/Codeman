@@ -310,12 +310,12 @@ escapes the session working directory (`..`, absolute paths, and symlinks that
 resolve outside). The realpath‑before‑check ordering closes the validation‑time
 TOCTOU window.
 
-| Route                    | Cap   | Notes                                                                                                                                                                        |
-| ------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `file-content`           | 10 MB | text preview                                                                                                                                                                 |
-| `file-raw`               | —     | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses**; streamed, `Range`-aware (206 slices come from the same validated path). No app‑level cap: COD‑18 replaced the whole‑file `readFile` with `createReadStream`, which is what the cap existed to bound, and it is workspace‑scoped |
+| Route | Cap | Notes |
+|-------|-----|-------|
+| `file-content` | 10 MB | text preview |
+| `file-raw` | 2 GB (`CODEMAN_MAX_DOWNLOAD_BYTES`, `0` = unlimited) | inline MIME map; **`X-Content-Type-Options: nosniff` on all responses**; streamed, `Range`-aware (206 slices come from the same validated path, and the cap is checked before the range) |
+| `GET /api/download` | same cap | forced `attachment`; sensitive‑path blocklist; streamed, `Range`-aware |
 | attachment `…/:id/raw`   | 50 MB | 413 past the cap, checked before the range. Capped because an attacker‑influenceable registry id resolves to an arbitrary host file                                          |
-| `POST /api/download`     | 50 MB | forced `attachment`; sensitive‑path blocklist                                                                                                                                |
 
 ### SVG / content‑type XSS
 
@@ -342,8 +342,8 @@ the attachment guard below.
 
 Live external attachments (`src/attachment-registry.ts`) mint an `att_<uuid>` id
 for a host file so browser requests carry the id, never an absolute path. Serving
-is by id (`GET /api/sessions/:id/attachments/:attachmentId/raw`, 50 MB cap,
-`nosniff`) and re‑resolves the symlink + re‑checks the **attachment guard**
+is by id (`GET /api/sessions/:id/attachments/:attachmentId/raw`, its OWN 50 MB cap
+checked before the global download bound and before the range, `nosniff`) and re‑resolves the symlink + re‑checks the **attachment guard**
 (`src/config/attachment-guard.ts`: the shared sensitive‑path blocklist **plus**
 the `/root` and `/etc` trees, extendable via `attachmentBlockedPaths` /
 `CODEMAN_ATTACHMENT_BLOCKED_PATHS`) on every request. Unlike the workspace file

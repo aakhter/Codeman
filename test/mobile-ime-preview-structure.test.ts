@@ -157,7 +157,11 @@ function loadRegisteredOnDataHandler(globals: Record<string, unknown> = {}) {
   // every case here failed with "registration not found" rather than an
   // assertion. Anchor on the extracted function instead, which is what actually
   // holds the routing logic under test.
-  const marker = 'const handleTerminalData = (data, { recovered = false } = {}) => {';
+  const marker = 'const handleTerminalData = (data) => {';
+  // Re-anchored again after the upstream merge of 1.27.0: the keyCode-229
+  // recovery rewrite forwards the orphaned input event instead of replaying a
+  // guessed key, so the `{ recovered }` dedupe option this used to anchor on no
+  // longer exists. The routing under test is unchanged.
   const start = terminalSource.indexOf(marker);
   if (start < 0) throw new Error('terminal handleTerminalData definition not found');
   const bodyStart = start + marker.length;

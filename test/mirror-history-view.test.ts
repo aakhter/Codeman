@@ -220,8 +220,13 @@ describe('COD-187 live-mirror structural guards', () => {
 
   it('liveMirrorEnabled is per-device: stripped from the server PUT and in displayKeys', () => {
     expect(settingsUi).toContain('liveMirrorEnabled: _lmr,');
+    // Slice to the END of the Set literal rather than a fixed 600-char window:
+    // the upstream merge added a key, which pushed this past the old window while
+    // membership was unchanged. The window length was never the thing under test.
     const dk = settingsUi.indexOf('const displayKeys = new Set([');
-    expect(settingsUi.slice(dk, dk + 600)).toContain("'liveMirrorEnabled'");
+    const dkEnd = settingsUi.indexOf('])', dk);
+    expect(dkEnd).toBeGreaterThan(dk);
+    expect(settingsUi.slice(dk, dkEnd)).toContain("'liveMirrorEnabled'");
     expect(settingsUi).toContain('liveMirrorEnabled: true,');
   });
 });

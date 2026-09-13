@@ -89,6 +89,7 @@ import {
   parseBody,
   validateSessionFilePath,
 } from '../route-helpers.js';
+import { downloadTooLargeMessage, exceedsDownloadLimit } from '../../config/buffer-limits.js';
 import { parseByteRange } from '../http-range.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import {
@@ -287,9 +288,11 @@ async function serveRawFile(
   onClose?: () => void
 ): Promise<void> {
   const stat = await fs.stat(resolvedPath);
-  // Optional cap: the by-id attachment raw route bounds its response (an
-  // attacker-influenceable registry id resolves to an arbitrary host file), but
-  // the workspace-scoped file-raw route streams without an app-level cap.
+  // Optional per-route cap, checked BEFORE the global one: the by-id attachment
+  // raw route bounds its response (an attacker-influenceable registry id
+  // resolves to an arbitrary host file), and the xlsx browser preview bounds
+  // what it will hand the parser. The workspace-scoped file-raw route passes
+  // none and falls through to the global sanity bound below.
   if (maxSizeBytes !== undefined && stat.size > maxSizeBytes) {
     reply
       .code(413)
@@ -299,6 +302,12 @@ async function serveRawFile(
           `File too large (${Math.round(stat.size / 1024 / 1024)}MB > ${maxSizeBytes / 1024 / 1024}MB limit)`
         )
       );
+    return;
+  }
+  // Global sanity bound only (CODEMAN_MAX_DOWNLOAD_BYTES, 0 = unlimited): the
+  // body below is streamed and Range-aware, so size does not become RSS.
+  if (exceedsDownloadLimit(stat.size)) {
+    reply.code(413).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, downloadTooLargeMessage(stat.size)));
     return;
   }
   // Markup is download-only: served with a renderable type on our own origin it
@@ -3903,6 +3912,13 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         return;
       }
 
+      // Sanity bound only: the body below is streamed and Range-aware, so size
+      // does not translate into resident memory. Configurable, 0 = unlimited.
+      if (exceedsDownloadLimit(stat.size)) {
+        reply.code(413).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, downloadTooLargeMessage(stat.size)));
+        return;
+      }
+
       const ext = filePath.split('.').pop()?.toLowerCase() || '';
       const mimeTypes: Record<string, string> = {
         png: 'image/png',
@@ -3922,12 +3938,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         tar: 'application/x-tar',
       };
 
-      const filename = sanitizeDownloadName(pathBasename(resolvedPath));
-      const content = createReadStream(resolvedPath);
+      const filename = pathBasename(resolvedPath);
+      // Streamed rather than read into memory, and Range-aware, so a multi-GB
+      // artifact costs one read stream and can be resumed. sendFileBody()
+      // hijacks the reply, which also keeps Fastify's compression out of it.
       reply.header('Content-Type', mimeTypes[ext] || 'application/octet-stream');
-      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-      reply.header('Content-Length', stat.size);
-      reply.send(content);
+      reply.header('Content-Disposition', buildContentDisposition('attachment', filename));
+      reply.header('X-Content-Type-Options', 'nosniff');
+      sendFileBody(reply, resolvedPath, stat.size, req.headers.range);
       return;
     } catch (err) {
       reply

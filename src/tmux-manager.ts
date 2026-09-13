@@ -719,6 +719,65 @@ export function normalizeScrollbackEol(buffer: string): string {
   return buffer.replace(/\r?\n/g, '\r\n');
 }
 
+/** Pane geometry and caret position, as `display-message` reports them. */
+interface PaneCursorGeometry {
+  cols: number;
+  rows: number;
+  cursorX: number;
+  cursorY: number;
+}
+
+/**
+ * Read the pane's cursor and size, or null when tmux cannot say.
+ *
+ * Every field is validated together: a caller that gets a value back can place
+ * a caret with it, and one that gets null must not try.
+ */
+export function queryPaneCursor(run: () => string): PaneCursorGeometry | null {
+  let raw: string;
+  try {
+    raw = run().trim();
+  } catch (cursorErr) {
+    console.error('[TmuxManager] Failed to query pane cursor after capture:', cursorErr);
+    return null;
+  }
+  return parsePaneGeometry(raw);
+}
+
+/** SGR attributes, which is all `capture-pane -e` emits. */
+// eslint-disable-next-line no-control-regex
+const CAPTURE_STYLE_SEQUENCE = /\x1b\[[0-9;:]*m/g;
+
+/** Whether a capture holds anything a reader would see, styles discounted. */
+export function hasVisibleContent(capture: string): boolean {
+  return /\S/.test(capture.replace(CAPTURE_STYLE_SEQUENCE, ''));
+}
+
+/**
+ * Put the caret back where the pane has it, counting UP from the bottom of what
+ * was just replayed.
+ *
+ * Relative rather than absolute (`CUP`) on purpose. `\x1b[<row>;<col>H` numbers
+ * rows from the top of the browser's screen, so it only lands correctly while
+ * the browser's row count equals the pane's — and it need not, because
+ * `resizeWindow` fires its tmux resize without waiting, so a capture can be
+ * taken before a requested resize has been applied. Counting up from the last
+ * replayed row is anchored to the content instead, which is the thing both ends
+ * genuinely share.
+ *
+ * ⚠️ The LIVE full-history path goes through `formatFullHistoryCapture` below,
+ * which is COD-433's tail-anchored variant of this same idea (it additionally
+ * falls back to absolute addressing when the capture is too short to establish
+ * the tail anchor). This one stays as the minimal, separately-pinned primitive.
+ */
+export function formatCursorRestore(geometry: PaneCursorGeometry): string {
+  const up = Math.max(0, geometry.rows - 1 - geometry.cursorY);
+  const right = Math.max(0, geometry.cursorX);
+  // `\r` first so the column is known: the replay leaves the caret wherever the
+  // last row's text ended.
+  return `${up > 0 ? `\x1b[${up}A` : ''}\r${right > 0 ? `\x1b[${right}C` : ''}`;
+}
+
 function parsePaneGeometry(output: string): { cols: number; rows: number; cursorX: number; cursorY: number } | null {
   const [cursorX, cursorY, cols, rows] = output
     .trim()
@@ -1199,6 +1258,9 @@ export function buildRemoteLaunchCommand(options: {
   allowedTools?: string;
   /** Remote tmux history-limit (COD-180). Set BEFORE new-session so the initial pane gets it. */
   historyLimit?: number;
+  /** OMP only — resume/continue overrides for the remote omp relaunch (dead-pane respawn). */
+  ompConfig?: OmpConfig;
+  resumeSessionId?: string;
 }): string {
   const {
     mode,
@@ -1211,6 +1273,8 @@ export function buildRemoteLaunchCommand(options: {
     claudeMode,
     allowedTools,
     historyLimit,
+    ompConfig,
+    resumeSessionId,
   } = options;
   // §6.3: honor the session's EFFECTIVE claude permission mode on remote instead of
   // hardcoding --dangerously-skip-permissions, so a non-granted multi-user user's
@@ -1234,10 +1298,12 @@ export function buildRemoteLaunchCommand(options: {
   // list of WHICH CLIs get their session config on a remote host is now `overlays.remote
   // .fromLaunchSpec` rather than four arms of a conditional.
   //
-  // ⚠️ That flag is descriptive, not a widening: the CLIs without it (pi, grok, deepseek, omp)
-  // still reach a remote host through `defaultRemoteCommandForMode`, i.e. with their model /
-  // resume / permission flags dropped. That is pre-registry behaviour and this change preserves
-  // it deliberately rather than quietly fixing it on a path no test and no beta can exercise.
+  // ⚠️ That flag is descriptive, not a widening: the CLIs without it (pi, grok, deepseek) still
+  // reach a remote host through `defaultRemoteCommandForMode`, i.e. with their model / resume /
+  // permission flags dropped. That is pre-registry behaviour and this change preserves it
+  // deliberately rather than quietly fixing it on a path no test and no beta can exercise.
+  // (omp is the exception: it has its own arm below, added upstream for dead-pane respawn, which
+  // renders through the registry directly rather than through `overlays.remote.fromLaunchSpec`.)
   const perSessionRemote = renderRemoteCliCommand(mode, {
     mode,
     sessionId,
@@ -1246,16 +1312,70 @@ export function buildRemoteLaunchCommand(options: {
     geminiConfig,
     antigravityConfig,
   });
-  const modeCommand =
-    codexRecovery?.kind === 'template'
-      ? codexRecovery.command
-      : override
-        ? override
-        : perSessionRemote !== undefined
-          ? remoteLoginShellCommand(perSessionRemote)
-          : mode === 'claude'
-            ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-            : defaultRemoteCommandForMode(mode);
+  let modeCommand: string;
+  if (codexRecovery?.kind === 'template') {
+    modeCommand = codexRecovery.command;
+  } else if (override) {
+    modeCommand = override;
+  } else if (perSessionRemote !== undefined) {
+    modeCommand = remoteLoginShellCommand(perSessionRemote);
+  } else if (mode === 'claude') {
+    // Deterministic conversation pinning for SSH-remote claude (mirrors the
+    // docker-claude shape in claudeDockerPaneCommand, INCLUDING the distinct
+    // resumeId branch it declares — this used to only mirror the same-id
+    // fallback shape, silently dropping an explicit resumeSessionId that
+    // differs from sessionId, e.g. a resume-from-history launch): the FIRST
+    // run creates the conversation under --session-id <sessionId>; a respawn
+    // / reattach re-runs the same idempotent command, --session-id exits
+    // non-zero ("already in use"), and the `||` fallback RESUMES that same
+    // conversation. Without a pinned id, every reattach relaunched a bare
+    // `claude` and started a NEW conversation (found live 2026-08-29: remote
+    // claude ctrl-d / ctrl-c relaunched a fresh session). A per-host
+    // `commands.claude` override stays authoritative (admin's explicit
+    // choice) and skips this entirely.
+    const permFlags = buildClaudePermissionFlags(claudeMode, allowedTools);
+    const cmd = `claude${permFlags}`;
+    // Defense in depth, mirroring claudeDockerPaneCommand's own belt-and-braces check:
+    // sessionId is server-minted and always safe in practice, but this command is built
+    // as a single shellescaped string and then executed as shell code on the remote
+    // host, so an unsafe value here is validated rather than trusted.
+    if (!RESUME_ID_SAFE.test(sessionId)) {
+      modeCommand = remoteLoginShellCommand(cmd);
+    } else {
+      const rid = resumeSessionId && RESUME_ID_SAFE.test(resumeSessionId) ? resumeSessionId : undefined;
+      modeCommand = remoteLoginShellCommand(
+        rid && rid !== sessionId
+          ? `${cmd} --resume ${rid} || ${cmd} --session-id ${sessionId}`
+          : `${cmd} --session-id ${sessionId} || ${cmd} --resume ${sessionId}`
+      );
+    }
+  } else if (mode === 'omp') {
+    // Remote OMP respawn must RESUME the same conversation instead of
+    // relaunching fresh (found live 2026-08-29: remote ctrl-c/ctrl-d relaunched
+    // a brand-new omp session). The pinned id, when known, is passed as an
+    // explicit --resume; otherwise fall back to omp's own "most recent"
+    // --continue so a dead-pane respawn still lands back in the conversation.
+    // Rendered through the CLI registry (buildSpawnCommandFromRegistry), the
+    // SAME mode-agnostic path local/docker spawns use — not appendResumeFlag(),
+    // which would hand the id to the login shell as $0 after the quoted `-c
+    // 'omp'`, and not a raw buildOmpCommand() call, which the registry refactor
+    // (#347) deleted. Gives every registry CLI with a resume form this
+    // behaviour for free, and the flags can't drift from the local builder.
+    const ompEntry = getCli('omp');
+    const ompCmd = ompEntry
+      ? (buildSpawnCommandFromRegistry(ompEntry, {
+          mode: 'omp',
+          sessionId,
+          ompConfig: {
+            ...ompConfig,
+            resumeSessionId: resumeSessionId || ompConfig?.resumeSessionId,
+          },
+        }) ?? 'omp')
+      : 'omp';
+    modeCommand = remoteLoginShellCommand(ompCmd);
+  } else {
+    modeCommand = defaultRemoteCommandForMode(mode);
+  }
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1394,6 +1514,10 @@ function buildRemoteSessionCommand(
     historyLimit?: number;
     claudeMode?: ClaudeMode;
     allowedTools?: string;
+    /** OMP only — resume/continue overrides for the remote omp relaunch (dead-pane respawn). */
+    ompConfig?: OmpConfig;
+    /** Pins the remote claude/omp conversation across a respawn or reattach. */
+    resumeSessionId?: string;
   } = {}
 ): string {
   if (remote.owned === false || remote.remoteSessionName) {
@@ -1411,6 +1535,8 @@ function buildRemoteSessionCommand(
     claudeMode: options.claudeMode,
     allowedTools: options.allowedTools,
     historyLimit: options.historyLimit,
+    ompConfig: options.ompConfig,
+    resumeSessionId: options.resumeSessionId,
   });
 }
 
@@ -2419,6 +2545,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
                 claudeMode,
                 allowedTools,
                 historyLimit,
+                ompConfig,
+                resumeSessionId,
               })
           : undefined,
         docker: docker
@@ -2727,6 +2855,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
               claudeMode,
               allowedTools,
               historyLimit,
+              ompConfig,
+              resumeSessionId,
             })
         : undefined,
       docker: docker
@@ -4046,12 +4176,17 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    *   then `formatPaneSnapshot` repaints each row at its absolute position so
    *   the browser xterm reproduces the live frame. Used for fast tab switches.
    * - Full history (`opts.fullHistory`): `capture-pane -p -e -S -` grabs the
-   *   ENTIRE tmux scrollback (COD-47), returned as linear scrollback text with
-   *   SGR codes preserved. Multi-screen history cannot be repainted row-by-row
-   *   into one visible frame, so we replay it linearly, then append the live
-   *   pane cursor position so xterm does not leave the cursor at the end of the
-   *   final captured status row (COD-185). Caveat: lines tmux has already
-   *   evicted past its history-limit are gone.
+   *   ENTIRE tmux scrollback (COD-47; `captureStartFlag` bounds it to the last
+   *   N lines for the history view's fast first page, COD-187), returned as
+   *   linear scrollback text with SGR codes preserved. Rows are not repainted
+   *   at absolute positions — a multi-screen history can't be painted into a
+   *   single visible frame — but the capture DOES end with a cursor move
+   *   putting the caret back where the pane has it, anchored to the captured
+   *   tail (COD-185/COD-433, `formatFullHistoryCapture`), so xterm does not
+   *   leave the cursor at the end of the final captured status row. Returns ''
+   *   for a pane holding nothing visible, so the caller keeps whatever history
+   *   it already had.
+   *   Caveat: lines tmux has already evicted past its history-limit are gone.
    */
   /**
    * Plain visible-frame text for the working/idle probe (see `session.ts`).
@@ -4136,47 +4271,43 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           (opts?.maxCaptureBytes ?? DEFAULT_TERMINAL_BUFFER_MAX_BYTES) + FULL_HISTORY_CAPTURE_SLACK_BYTES;
       }
       const rawCapture = execSync(`${this.tmux()} ${captureFlags} -t ${shellescape(target)}`, execOpts);
-      // COD-190: fullHistory keeps the final screen's trailing blank rows so a
-      // replayed buffer reproduces the exact tmux screen geometry (the
-      // history-view no-jump landing and the appended cursor CSI both depend
-      // on it); only the terminating newline is trimmed. Visible-frame mode is
-      // row-positioned by formatPaneSnapshot and never needed the blanks.
-      const buffer = fullHistory ? rawCapture.replace(/\n$/, '') : rawCapture.replace(/\n+$/g, '');
-      // Full-history spans many screens — return it as raw linear scrollback
-      // rather than repainting rows at single-screen absolute positions. tmux
-      // joins scrollback rows with a bare `\n`; normalize to `\r\n` so a fresh
-      // xterm (convertEol:false) starts each replayed line at column 0 instead
-      // of staircasing diagonally (COD-138).
-      if (fullHistory) {
-        try {
-          const cursor = execSync(
-            `${this.tmux()} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`,
-            {
-              encoding: 'utf-8',
-              timeout: EXEC_TIMEOUT_MS,
-            }
-          );
-          return formatFullHistoryCapture(buffer, parsePaneGeometry(cursor));
-        } catch (cursorErr) {
-          console.error('[TmuxManager] Failed to query pane cursor after full-history capture:', cursorErr);
-          return formatFullHistoryCapture(buffer);
-        }
-      }
-      try {
-        const cursor = execSync(
+      // Query the cursor BEFORE deciding anything else. On the full-history path
+      // it settles both how the capture is trimmed and whether a cursor move is
+      // appended, and those two have to agree: trailing blank rows are only safe
+      // to keep when a move follows to put the caret back above them.
+      const geometry = queryPaneCursor(() =>
+        execSync(
           `${this.tmux()} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`,
-          {
-            encoding: 'utf-8',
-            timeout: EXEC_TIMEOUT_MS,
-          }
-        ).trim();
-        const geometry = parsePaneGeometry(cursor);
-        if (geometry) {
-          return formatPaneSnapshot(buffer.split('\n'), geometry);
-        }
-      } catch (cursorErr) {
-        console.error('[TmuxManager] Failed to query pane cursor after capture:', cursorErr);
+          { encoding: 'utf-8', timeout: EXEC_TIMEOUT_MS }
+        )
+      );
+
+      if (fullHistory) {
+        // COD-190: fullHistory keeps the final screen's trailing blank rows so a
+        // replayed buffer reproduces the exact tmux screen geometry (the
+        // history-view no-jump landing and the appended cursor CSI both depend
+        // on it); only the terminating newline is trimmed. Visible-frame mode is
+        // row-positioned by formatPaneSnapshot and never needed the blanks.
+        const trimmed = rawCapture.replace(/\n$/, '');
+        // An all-blank pane has to keep reading as "nothing to replay". The caller
+        // treats an empty string as "capture unavailable" and keeps the byte
+        // history; blank rows plus a cursor move are not empty, so without this a
+        // blank pane REPLACES that history with a blank screen — the downgrade
+        // `_replayWouldShrinkBuffer` exists to refuse, arriving from the server
+        // side where that guard cannot see it.
+        if (!hasVisibleContent(trimmed)) return '';
+        // Full-history spans many screens — return it as raw linear scrollback
+        // rather than repainting rows at single-screen absolute positions. tmux
+        // joins scrollback rows with a bare `\n`; normalize to `\r\n` so a fresh
+        // xterm (convertEol:false) starts each replayed line at column 0 instead
+        // of staircasing diagonally (COD-138), then anchor the caret to the
+        // captured tail (COD-433). With no geometry that anchor is unavailable
+        // and the normalized scrollback is returned as-is.
+        return formatFullHistoryCapture(trimmed, geometry);
       }
+
+      const buffer = rawCapture.replace(/\n+$/g, '');
+      if (geometry) return formatPaneSnapshot(buffer.split('\n'), geometry);
       // Cursor query failed or geometry was invalid, so we skip the absolute-
       // positioned snapshot repaint and fall back to the raw capture. Normalize
       // its bare `\n` line endings to `\r\n` so the replay doesn't staircase

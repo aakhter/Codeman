@@ -861,6 +861,11 @@ Object.assign(CodemanApp.prototype, {
     // the helper textarea and emit the committed Unicode text.
     this.terminal.attachCustomKeyEventHandler((ev) => {
       try {
+        // Deliberately runs for EVERY keydown, not just keyCode 229: the
+        // controller snapshots a counter and reads nothing off the event, and
+        // the devices this exists for report `key: 'Unidentified'` with no
+        // reliable identity to gate on. Gating it would make recovery inert
+        // exactly where it is needed. Cost is one assignment.
         this._keyCode229Recovery?.handleKeyEvent?.(ev);
       } catch {
         // The fallback must never interfere with xterm's canonical handler.
@@ -1170,6 +1175,11 @@ Object.assign(CodemanApp.prototype, {
     } else {
       this.fitAddon.fit();
     }
+    // Whenever that first fit runs — on this line, or a frame or two later on
+    // the mobile-Safari branch above — it measures whatever font the browser has
+    // painted with so far, which is not necessarily the terminal font. Start the
+    // wait now so the buffer load can hold for it.
+    this._terminalFontReady = this._awaitTerminalFont();
 
     // Register link provider for clickable file paths in Bash tool output
     this.registerFilePathLinkProvider();
@@ -1791,7 +1801,10 @@ Object.assign(CodemanApp.prototype, {
         // causes Ink to re-render at the new row count, garbling terminal output.
         // Local fit() still runs so xterm knows the viewport size for scrolling.
         const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
-        if (this.activeSessionId && !keyboardUp && document.visibilityState !== 'hidden') {
+        // Same yield as sendResize: never resize a PTY whose session is showing
+        // in its own window. Dragging the dashboard's border must not reshape it.
+        const detachedElsewhere = !this.isSoloWindow && this.detachedSessions?.has(this.activeSessionId);
+        if (this.activeSessionId && !keyboardUp && !detachedElsewhere && document.visibilityState !== 'hidden') {
           const dims = this.fitAddon.proposeDimensions();
           // Enforce minimum dimensions to prevent layout issues
           const cols = dims ? Math.max(dims.cols, MIN_COLS) : MIN_COLS;
@@ -1871,14 +1884,7 @@ Object.assign(CodemanApp.prototype, {
     // mobile connections.  The overlay + localStorage persistence ensure input
     // survives tab switches and reconnects.
 
-    const handleTerminalData = (data, { recovered = false } = {}) => {
-      if (!recovered) {
-        try {
-          if (this._keyCode229Recovery?.consumeTerminalData?.(data)) return;
-        } catch {
-          // A broken dedupe guard must fail open to canonical xterm data.
-        }
-      }
+    const handleTerminalData = (data) => {
       const originalData = data;
       const isImeCommit = this._consumeMobileImeTerminalData(originalData);
       // Mouse SGR reports (tap-to-position) are NOT IME input — they must reach
@@ -2274,15 +2280,48 @@ Object.assign(CodemanApp.prototype, {
       }
     };
 
+    // Chrome on Android delivers a `composed: true` input event preceded by a
+    // keydown, which is exactly the shape xterm's _inputEvent refuses to
+    // forward, so the committed character is silently dropped. The controller
+    // forwards the input event's own `data` when xterm produced nothing for
+    // that keystroke. Created AFTER terminal.open() on purpose: for an event
+    // targeting the textarea, at-target listeners run in registration order,
+    // so xterm's listener (added in open()) still runs first. The controller
+    // registers its own listener with `capture: true`; on bubble xterm's
+    // `cancel()` (stopPropagation) would swallow exactly the handled events —
+    // see the measured table in terminal-keycode229-recovery.js.
     try {
       this._keyCode229Recovery = window.CodemanKeyCode229Recovery?.create?.({
         textarea: this.terminal.textarea,
-        emitRecovered: (data) => handleTerminalData(data, { recovered: true }),
+        emitRecovered: (data) => handleTerminalData(data),
+        isScreenReaderMode: () => this.terminal?.options?.screenReaderMode === true,
       });
     } catch {
       this._keyCode229Recovery = null;
     }
-    this.terminal.onData((data) => handleTerminalData(data));
+    this.terminal.onData((data) => {
+      // Canonical xterm data. Telling the controller is what lets it know a
+      // keystroke was already delivered and needs no recovery.
+      //
+      // ⚠️ onData ALSO fires for output xterm produces on its own initiative:
+      // the DA/DSR/CPR/OSC replies it answers during Ink redraws, and the SGR
+      // mouse and focus reports (see the two predicates above, used for exactly
+      // this question at the send sites). Any one of those landing between the
+      // keydown and the candidate's zero-delay resolution would be read as
+      // "xterm spoke for this keystroke", standing the recovery down and
+      // leaving the character dropped, worst on a busy agent pane, which is
+      // the case this exists for. Narrowing the counter cannot cause a
+      // duplicate: it only ever makes the controller less sure it can stand down.
+      try {
+        const input = window.CodemanTerminalInput;
+        if (!input?.shouldSuppressTerminalQueryResponse(data) && !input?.isTerminalFocusOrMouseReport(data)) {
+          this._keyCode229Recovery?.notifyCanonicalData?.();
+        }
+      } catch {
+        // Bookkeeping must never block real input.
+      }
+      handleTerminalData(data);
+    });
   },
 
   /**
@@ -3149,6 +3188,11 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _openTerminalUrl(text) {
+    // A `localhost` link tapped from another device can only work through the
+    // server: route it into a proxied web tab (webview-tabs.js). Anything else
+    // opens as before. Lives here rather than in the link provider's activate()
+    // so every caller of this one opener gets the same routing.
+    if (this.openLinkThroughWebTabIfLoopback?.(text)) return;
     window.open(text, '_blank', 'noopener,noreferrer');
   },
 
@@ -6039,6 +6083,14 @@ Object.assign(CodemanApp.prototype, {
     }
     if (this._isTerminalSessionGone?.(this.activeSessionId)) return false;
 
+    // The pane belongs to the popup showing it, so this window has nothing to
+    // restore. Say so rather than reporting a size that was never sent — the
+    // same button in that window does the job.
+    if (!this.isSoloWindow && this.detachedSessions?.has(this.activeSessionId)) {
+      this.showToast('This session is sized by its own window', 'warning');
+      return;
+    }
+
     const dims = this.getTerminalDimensions();
     if (!dims) {
       this.showToast('Could not determine terminal size', 'error');
@@ -7087,6 +7139,15 @@ Object.assign(CodemanApp.prototype, {
     const resolved = window.CodemanTerminalFont.resolve(custom);
     if (!this.terminal || this.terminal.options.fontFamily === resolved) return;
     this.terminal.options.fontFamily = resolved;
+    // Changing the family at runtime is the same race as the boot-time one: the
+    // option write makes xterm re-measure immediately, against a family the
+    // browser may not have loaded. Re-arm the wait for the new stack and fit
+    // again once it settles, so the setting takes effect at the right size
+    // without needing a tab switch. The fit below still runs, so the terminal
+    // is never left unfitted if the wait is slow.
+    this._terminalFontReady = this._awaitTerminalFont().then(() => {
+      if (this.terminal?.options?.fontFamily === resolved) this.fitAddon?.fit();
+    });
     this.fitAddon?.fit();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
@@ -7094,6 +7155,65 @@ Object.assign(CodemanApp.prototype, {
 
   loadFontSize() {
     this.applyTerminalFontPolicyForActiveSession();
+  },
+
+  /**
+   * Wait for the terminal's own font, then make xterm re-measure against it.
+   *
+   * A character cell measured against a fallback font has a different width and
+   * height from one measured against the terminal font, so a fit taken too early
+   * produces the wrong column and row count. The correction then arrives after
+   * the buffer has been replayed, and the CLI redraws a frame that no longer
+   * matches what the terminal is showing.
+   *
+   * ⚠️ Waiting is not sufficient on its own, which is what the re-measure at the
+   * end is for. `FitAddon.proposeDimensions()` divides the container by a CACHED
+   * cell size, and xterm refreshes that cache only from `open()`, from a resize
+   * that actually changed the grid, and on a device-pixel-ratio change — nothing
+   * in it listens for font loading. So a fit that runs after the font arrives can
+   * still divide by the fallback cell, propose the grid it already has, and
+   * short-circuit before anything re-measures.
+   *
+   * `document.fonts.load` for each family is what actually REQUESTS the faces:
+   * the WebGL renderer rasterises glyphs through a canvas texture atlas, and
+   * canvas text never triggers a CSS font fetch, so `document.fonts.ready` can
+   * resolve with a face never having been asked for at all.
+   *
+   * Every step is best-effort and the whole thing is bounded, because a font
+   * request that never settles must not hold up the terminal: `FontFaceSet.ready`
+   * has no deadline of its own, and the caller awaits this in front of the buffer
+   * replay. Past the deadline we fit against whatever is painted, which is the
+   * old behaviour rather than a new failure.
+   */
+  async _awaitTerminalFont() {
+    try {
+      if (typeof document === 'undefined' || !document.fonts?.load) return;
+      const size = this.terminal?.options?.fontSize || 14;
+      const families = String(this.terminal?.options?.fontFamily || '')
+        .split(',')
+        .map((family) => family.trim().replace(/^["']|["']$/g, ''))
+        .filter(Boolean)
+        // Only the faces that can supply the measured glyph are worth waiting on.
+        // The bundled symbols font is ~1.2MB and carries private-use-area glyphs
+        // only — xterm measures `W`, which it does not contain — so awaiting it
+        // puts a megabyte between the user and their first frame for nothing.
+        // Generic families match no FontFace at all.
+        .filter((family) => !TERMINAL_FONT_UNMEASURED.has(family.toLowerCase()));
+      const loaded = Promise.all(
+        families.map((family) => document.fonts.load(`${size}px "${family}"`).catch(() => {}))
+      ).then(() => document.fonts.ready);
+      await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, TERMINAL_FONT_WAIT_MS))]);
+    } catch {
+      /* font loading is unavailable or failed — fit against whatever is painted */
+    }
+    // Force the cache refresh xterm will not do for us. Without this the wait
+    // buys nothing on the common path (see the warning above). Private API, as
+    // FitAddon itself is; guarded because a terminal can be disposed mid-wait.
+    try {
+      this.terminal?._core?._charSizeService?.measure();
+    } catch {
+      /* renderer not ready or internals moved — the next real resize re-measures */
+    }
   },
 
   /**
@@ -7164,6 +7284,17 @@ Object.assign(CodemanApp.prototype, {
     // terminal size matches what we report to the server PTY.
     this.applyTerminalFontPolicyForActiveSession();
     if (this.fitAddon) this.fitAddon.fit();
+    // One PTY cannot hold two sizes. A detached session is owned by its own
+    // window, and the dashboard's terminal is narrower than that window because
+    // the session rail takes width the popup does not have — so both sizing it
+    // makes the CLI draw frames that fit neither, which garbles the popup. The
+    // dashboard yields; the solo window sizes what it alone displays.
+    // (_maybeRefetchFullHistory already stands aside for the same reason.)
+    // ⚠️ AFTER the fit, never before: the local reflow keeps the dashboard's own
+    // xterm right, and only the SERVER write is the dashboard's to withhold —
+    // the mobile-keyboard guard below draws exactly this line. tab-rail-resize
+    // performs its one settle-time refit through this call and has no fallback.
+    if (!this.isSoloWindow && this.detachedSessions?.has(sessionId)) return false;
     const dims = this.getTerminalDimensions();
     if (!dims) return false;
     if (sessionId !== this.activeSessionId) return false;

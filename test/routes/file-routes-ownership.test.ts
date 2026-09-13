@@ -275,8 +275,16 @@ describe('file and attachment route session ownership (COD-292)', () => {
       }
 
       expect(results).toEqual([
-        { statusCode: 200, disposition: 'attachment; filename="secret.txt"' },
-        { statusCode: 200, disposition: 'attachment; filename="secret.txt"' },
+        {
+          statusCode: 200, // 1.27.0 merge: the download route moved onto upstream's buildContentDisposition(),
+          // which adds the RFC 5987 filename* parameter alongside the quoted filename.
+          disposition: 'attachment; filename="secret.txt"; filename*=UTF-8\'\'secret.txt',
+        },
+        {
+          statusCode: 200, // 1.27.0 merge: the download route moved onto upstream's buildContentDisposition(),
+          // which adds the RFC 5987 filename* parameter alongside the quoted filename.
+          disposition: 'attachment; filename="secret.txt"; filename*=UTF-8\'\'secret.txt',
+        },
       ]);
     });
   });

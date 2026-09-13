@@ -403,10 +403,16 @@ const LINEAGE_DIP_MAX_PX = 64;
 // apart bled into one thick band instead of reading as three separate lines.
 const LINEAGE_SIBLING_STEP_PX = 8;
 const LINEAGE_STRIP_TOLERANCE_PX = 4;
-// COD-311: the vertical rail reserves 24px in CSS. Tracks start near its left edge
-// and move right for siblings, while both endpoints stay on the tab's left border.
-// With depth clamped to 6, 6 + (6 * 3) = 24, still inside that gutter.
-const LINEAGE_VERTICAL_TRACK_INSET_PX = 6;
+// COD-311: the vertical rail reserves a CSS gutter (24px, 14px when tight).
+// Tracks start near its left edge and move right for siblings, while both
+// endpoints stay on the tab's left border.
+// How far the vertical bracket sits in from the rail's left edge. It has to
+// clear the VIEWPORT edge, not just the tabs: the line carries an 11px outer
+// glow, so a track at 6px had half of that glow clipped away and the arc read
+// as a thin thread pinned to the window frame. The rail reserves the channel
+// itself (`--lineage-vertical-gutter` on the rail's .session-tabs), and
+// computeLineagePath still clamps the track to stay left of both tabs.
+const LINEAGE_VERTICAL_TRACK_INSET_PX = 10;
 const LINEAGE_VERTICAL_SIBLING_STEP_PX = 3;
 const LINEAGE_VERTICAL_ANCHOR_CLEARANCE_PX = 4;
 // Lineage palette, assigned per SPAWNING TAB in first-seen order and cycled
@@ -792,6 +798,22 @@ function sortSessionsByActivity(rows) {
 // prompt icons (powerline segments, folder/git glyphs from p10k, starship,
 // oh-my-posh) render even though the text fonts carry no private-use-area
 // symbols — while all readable text keeps coming from the text fonts.
+/**
+ * How long a terminal fit will wait for the terminal font, in ms.
+ *
+ * `FontFaceSet.ready` has no deadline of its own and the wait sits in front of
+ * the buffer replay, so a font request that never settles would leave the
+ * session unpainted. Past this we measure whatever is painted.
+ */
+const TERMINAL_FONT_WAIT_MS = 2000;
+
+/**
+ * Families in the stack that cannot move the measured cell, so nothing waits on
+ * them: the generics match no `FontFace`, and the bundled symbols face carries
+ * private-use-area glyphs only (xterm measures `W`) while weighing ~1.2MB.
+ */
+const TERMINAL_FONT_UNMEASURED = new Set(['monospace', 'serif', 'sans-serif', 'system-ui', 'symbols nerd font mono']);
+
 const TERMINAL_FONT_DEFAULT_STACK =
   '"Fira Code", "Cascadia Code", "JetBrains Mono", "SF Mono", Monaco, "Symbols Nerd Font Mono", monospace';
 

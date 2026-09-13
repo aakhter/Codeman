@@ -30,7 +30,7 @@ Types live in `src/types/session.ts`; persistence in `src/remote-hosts.ts`.
 | `RemoteHost` (extends `RemoteSshOptions`) | A saved host: `id`, `label`, `host`, `username`, `port?`, `commands?` (per-mode launch command override). |
 | `RemoteCase` | A working directory on a host: `name`, `type: 'remote'`, `hostId`, `remotePath`. |
 | `SessionRemote` (extends `RemoteSshOptions`) | The resolved bundle stamped onto a live session: host coordinates + `remotePath` + `commands`, plus **`owned?`** and **`remoteSessionName?`** (COD-105 — see [Ownership](#ownership-launched-vs-discovered-and-attached-cod-105)). Built by `toSessionRemote(host, case)` (sets `owned: true`) for the launch path, or `toAttachedSessionRemote(host, name, path)` (sets `owned: false`) for the attach path. Both copy the advanced SSH options through so every connection is identical. |
-| `RemoteCommandMode` | `Extract<SessionMode, 'shell' \| 'claude' \| 'opencode' \| 'codex' \| 'gemini' \| 'antigravity' \| 'pi' \| 'grok'>` — the modes that can run remotely. |
+| `RemoteCommandMode` | `Extract<SessionMode, 'shell' \| 'claude' \| 'opencode' \| 'codex' \| 'gemini' \| 'antigravity' \| 'pi' \| 'grok' \| 'deepseek' \| 'omp'>` — the modes that can run remotely. |
 | `RemoteSessionInfo` (COD-105) | One discovered remote tmux session: `name` (always `codeman-*`), `attached` (a client is connected), `created` (epoch s), `windows`. Returned by `listRemoteCodemanSessions()`. |
 
 Persistence is two flat JSON arrays in the instance data dir:
@@ -116,6 +116,11 @@ Key points:
   the agent. The per-mode command comes from `remote.commands?.[mode]` or
   `defaultRemoteCommandForMode(mode)` (`exec claude` / `exec opencode` /
   `exec codex` / `exec gemini` / `exec agy` / `exec bash -l`).
+  ⚠️ **claude and omp no longer take that path**: both have their own arm in
+  `buildRemoteLaunchCommand` so a respawn can continue the same conversation
+  (see [Respawn / reattach continuation](#respawn--reattach-continuation)), and
+  because the claude arm is an `a || b` pair under `-c`, its pane PID is the
+  **login shell**, not the agent.
 - The **whole tmux invocation is a single shell-quoted ssh argument**, and the
   pane command is independently quoted, so a `remotePath` with spaces is safe.
 - Connection options come from the **same `buildSshConnectionArgs(remote)`** as
@@ -201,6 +206,50 @@ remote `tmux attach`, which **detaches** — the durable remote session survives
 The early return is a structural guarantee that **no code path can ever issue a
 remote `kill-session` for a session we don't own** — the only `kill-session` run is
 on the local socket, which never reaches the remote socket.
+
+## Respawn / reattach continuation
+
+A dropped connection or a dead pane must reconnect to the **same conversation**,
+not launch a fresh one — the whole point of a durable remote session.
+
+- **Claude**: the launch command is idempotent — `claude --session-id <id> ||
+claude --resume <id>` (see `buildRemoteLaunchCommand`'s claude branch). The
+  first run creates the conversation under the deterministic session id; every
+  later reattach/respawn re-runs the same line, `--session-id` fails
+  ("already in use"), and the `||` fallback resumes it.
+- **OMP**: `omp` has no equivalent idempotent single-line form, so
+  `Session._pinOmpRespawnId()` resolves and pins an explicit `--resume <id>`
+  before a respawn (mirroring the local/docker builders, rendered through the
+  same `buildSpawnCommandFromRegistry` engine — not a hand-rolled command and
+  not `appendResumeFlag()`, which is docker-only and cannot work here: appending
+  a flag after the quoted `-c 'omp'` hands the id to the login shell as `$0`
+  instead of to `omp`). ⚠️ **The resolver only ever reads THIS host's local
+  `~/.omp/agent/sessions/`**, which is meaningless for a remote session — the
+  conversation and its session file live on the remote host, under the remote
+  user's home. For a remote session, `_pinOmpRespawnId()` therefore skips local
+  resolution entirely and falls back to `omp`'s own ambiguous `--continue`
+  (`ompConfig.continueSession`), which the remote pane command already renders.
+  This is a known, accepted degradation versus the local/docker paths' exact
+  `--resume` pin — safe in practice because each remote respawn talks to
+  exactly one remote pane's own omp history, so "most recent" is normally
+  correct, but it can drift the same way `--continue` always could if two
+  remote sessions ever share one remote directory.
+
+## Auto-reconnect vs. a clean agent exit
+
+`remoteAutoReconnect` (default ON) watches for a dropped SSH connection and
+reconnects with bounded backoff. It must **never** revive a session whose agent
+exited cleanly (Ctrl-C, Ctrl-D, `exit`) — that tears down the durable remote
+tmux session itself, and a transport-level `isPaneDead()` cannot tell that apart
+from a plain network drop. `remoteTmuxSessionAlive()` (#355) resolves this by
+probing the remote host directly: `tmux -L codeman-remote has-session -t
+codeman-ssh-<id8>` over the same `buildSshConnectionArgs` as launch, classified
+by **exit status alone** (`classifyRemoteAliveExit`: `0` = alive, ssh's `255` or
+a timeout = unknown, anything else = gone) — `has-session` prints nothing on
+success, so reading stdout would misclassify every live session as gone. An
+unreachable host answers "unknown", which also means do not revive. The answer
+is cached per session and cleared whenever the pane is next seen alive, so a
+stale `true` from one transport drop can never revive the NEXT clean exit.
 
 ## API
 
