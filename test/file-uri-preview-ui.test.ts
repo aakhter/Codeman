@@ -239,6 +239,65 @@ describe('COD-273 file URI preview UI', () => {
 describe('COD-288 external terminal path preview UI', () => {
   const absolutePath = '/mnt/c/kb-data/webex-archive/Isovalent and Cisco Unified Edge/report.pdf';
 
+  it('routes a remote Codex generated-artifact path through the file URI resolver', async () => {
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'chart.png', attachmentId: 'att_1' } }),
+    }));
+    const { proto, host, openFilePreview } = makeHarness(fetch);
+    host.sessions = new Map([['session-1', { mode: 'codex', remote: {} }]]);
+    const absolutePath = '/Users/saqebakhter/.codex-personal/generated_images/a chart.png';
+
+    await proto.openExternalPathPreview.call(host, absolutePath, 'session-1');
+
+    expect(fetch).toHaveBeenCalledWith('/api/sessions/session-1/file-uri-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri: 'file:///Users/saqebakhter/.codex-personal/generated_images/a%20chart.png' }),
+    });
+    expect(openFilePreview).toHaveBeenCalledWith('chart.png', 'session-1', 'att_1');
+  });
+
+  it('percent-encodes URI-reserved characters in a remote Codex path', async () => {
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'chart #1%?.png', attachmentId: 'att_1' } }),
+    }));
+    const { proto, host } = makeHarness(fetch);
+    host.sessions = new Map([['session-1', { mode: 'codex', remote: {} }]]);
+    const absolutePath = '/Users/saqebakhter/.codex-personal/generated_images/chart #1%?.png';
+
+    await proto.openExternalPathPreview.call(host, absolutePath, 'session-1');
+
+    expect(fetch).toHaveBeenCalledWith('/api/sessions/session-1/file-uri-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uri: 'file:///Users/saqebakhter/.codex-personal/generated_images/chart%20%231%25%3F.png',
+      }),
+    });
+  });
+
+  it('keeps a remote non-Codex session on the external attachment route', async () => {
+    const response = deferred<unknown>();
+    const fetch = vi.fn(() => response.promise);
+    const { proto, host } = makeHarness(fetch);
+    host.sessions = new Map([['session-1', { mode: 'claude', remote: {} }]]);
+
+    const opening = proto.openExternalPathPreview.call(host, absolutePath, 'session-1') as Promise<void>;
+
+    expect(fetch).toHaveBeenCalledWith('/api/sessions/session-1/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: absolutePath }),
+    });
+    response.resolve({
+      ok: true,
+      json: async () => ({ success: true, data: { fileName: 'report.pdf', attachmentId: 'att_1' } }),
+    });
+    await opening;
+  });
+
   it('registers the absolute path against the originating session and preserves it as the preview title', async () => {
     const response = deferred<unknown>();
     const fetch = vi.fn(() => response.promise);
