@@ -4576,6 +4576,12 @@ Object.assign(CodemanApp.prototype, {
   async openExternalPathPreview(absolutePath, sessionId) {
     if (!sessionId || !absolutePath) return;
 
+    const session = this.sessions?.get(sessionId);
+    if (session?.mode === 'codex' && session.remote) {
+      const fileUri = `file://${absolutePath.split('/').map(encodeURIComponent).join('/')}`;
+      return this.openFileUriPreview(fileUri, sessionId);
+    }
+
     if (!this._externalPathPreviewRequests) this._externalPathPreviewRequests = new Map();
     const requestKey = `${sessionId}\0${absolutePath}`;
     const existing = this._externalPathPreviewRequests.get(requestKey);

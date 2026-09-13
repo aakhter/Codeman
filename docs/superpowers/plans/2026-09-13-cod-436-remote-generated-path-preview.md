@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `test/file-uri-preview-ui.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add a test that marks `host.sessions.get('session-1')` as `{ mode: 'codex', remote: {} }`, calls:
 
@@ -31,7 +31,7 @@ and expects one request to:
 
 with `body: JSON.stringify({ uri: 'file:///Users/saqebakhter/.codex-personal/generated_images/a%20chart.png' })`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm test -- test/file-uri-preview-ui.test.ts`
 
@@ -43,17 +43,18 @@ Expected: the new assertion fails because the current browser code requests `/at
 - Modify: `src/web/public/panels-ui.js:openExternalPathPreview`
 - Test: `test/file-uri-preview-ui.test.ts`
 
-- [ ] **Step 1: Implement the minimal guard**
+- [x] **Step 1: Implement the minimal guard**
 
 At the start of `openExternalPathPreview()`, inspect the session stored under `sessionId`. If it is both `mode === 'codex'` and has `remote`, call:
 
 ```js
-return this.openFileUriPreview(new URL(`file://${absolutePath}`).href, sessionId);
+const fileUri = `file://${absolutePath.split('/').map(encodeURIComponent).join('/')}`;
+return this.openFileUriPreview(fileUri, sessionId);
 ```
 
 before creating an external-path request. Do not send remote Claude/OpenCode sessions, local Codex sessions, or resolver failures to the `/attachments` path.
 
-- [ ] **Step 2: Run the focused test**
+- [x] **Step 2: Run the focused test**
 
 Run: `npm test -- test/file-uri-preview-ui.test.ts`
 
@@ -64,7 +65,7 @@ Expected: PASS with the new remote Codex test and all existing UI resolver tests
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-13-cod-436-remote-generated-path-preview.md`
 
-- [ ] **Step 1: Run static and build gates**
+- [x] **Step 1: Run static and build gates**
 
 Run: `npm run typecheck && npm run lint && npm run format:check && npm run check:lockfile && npm run build`
 
