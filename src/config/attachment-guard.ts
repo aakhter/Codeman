@@ -191,6 +191,12 @@ function rejectedUploadDirectory(): UploadDirectoryResolutionError {
   return new UploadDirectoryResolutionError('.codeman-attachments is not an approved upload directory');
 }
 
+function rejectedUnconfiguredUploadDirectory(): UploadDirectoryResolutionError {
+  return new UploadDirectoryResolutionError(
+    'External .codeman-attachments requires an approved trusted attachment root'
+  );
+}
+
 /**
  * Shared resolution for the sole local upload destination.
  *
@@ -250,12 +256,11 @@ async function resolveUploadDirectory(
     const canonicalDir = await fs.realpath(attachmentsDir);
     const targetStat = await fs.stat(canonicalDir);
     const roots = await getTrustedAttachmentRoots();
-    if (
-      !targetStat.isDirectory() ||
-      !roots.includes(canonicalDir) ||
-      (await fs.realpath(canonicalDir)) !== canonicalDir
-    ) {
+    if (!targetStat.isDirectory()) {
       throw rejectedUploadDirectory();
+    }
+    if (!roots.includes(canonicalDir) || (await fs.realpath(canonicalDir)) !== canonicalDir) {
+      throw rejectedUnconfiguredUploadDirectory();
     }
     return { kind: 'trusted', canonicalDir };
   } catch (err) {

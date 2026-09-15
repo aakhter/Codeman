@@ -86,6 +86,19 @@ describe('buildServiceEnv', () => {
     const env = buildServiceEnv('/usr/bin', '/usr/bin', '/home/u');
     expect(Object.keys(env)).not.toContain('CODEMAN_PASSWORD');
   });
+
+  it('carries an operator-configured trusted attachment root into the service environment', () => {
+    const previous = process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = '/mnt/c/kb-data/runtime/codeman-attachments';
+    try {
+      expect(buildServiceEnv('/usr/bin', '/usr/bin', '/home/u').CODEMAN_TRUSTED_ATTACHMENT_ROOTS).toBe(
+        '/mnt/c/kb-data/runtime/codeman-attachments'
+      );
+    } finally {
+      if (previous === undefined) delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+      else process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = previous;
+    }
+  });
 });
 
 describe('escaping', () => {
@@ -140,6 +153,17 @@ describe('buildLaunchAgentPlist', () => {
     expect(xml).toContain('<string>/Users/a&amp;b</string>');
     expect(xml).not.toContain('<string>/Users/a&b</string>');
   });
+
+  it('serializes the trusted attachment root into the LaunchAgent environment', () => {
+    const xml = buildLaunchAgentPlist(
+      plan({
+        kind: 'launchd',
+        env: { ...plan().env, CODEMAN_TRUSTED_ATTACHMENT_ROOTS: '/mnt/c/kb-data/runtime/codeman-attachments' },
+      })
+    );
+    expect(xml).toContain('<key>CODEMAN_TRUSTED_ATTACHMENT_ROOTS</key>');
+    expect(xml).toContain('<string>/mnt/c/kb-data/runtime/codeman-attachments</string>');
+  });
 });
 
 describe('buildSystemdUnit', () => {
@@ -158,6 +182,15 @@ describe('buildSystemdUnit', () => {
     const unit = buildSystemdUnit(plan());
     expect(unit).toContain('Environment="PATH=/usr/bin:/bin"');
     expect(unit).toContain('Environment="HOME=/home/u"');
+  });
+
+  it('serializes the trusted attachment root into the systemd environment', () => {
+    const unit = buildSystemdUnit(
+      plan({
+        env: { ...plan().env, CODEMAN_TRUSTED_ATTACHMENT_ROOTS: '/mnt/c/kb-data/runtime/codeman-attachments' },
+      })
+    );
+    expect(unit).toContain('Environment="CODEMAN_TRUSTED_ATTACHMENT_ROOTS=/mnt/c/kb-data/runtime/codeman-attachments"');
   });
 
   it('keeps KillMode=process so agents survive a server restart', () => {
