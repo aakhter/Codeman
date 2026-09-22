@@ -673,6 +673,17 @@ describe('system-routes', () => {
       expect(writtenContent.showTokenCount).toBe(false);
     });
 
+    it('accepts the opt-in automatic reboot recovery setting', async () => {
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/settings',
+        payload: { autoRecoverSessionsAfterReboot: true },
+      });
+      expect(res.statusCode).toBe(200);
+      const writtenContent = JSON.parse(mockedWriteFile.mock.calls[0][1] as string);
+      expect(writtenContent.autoRecoverSessionsAfterReboot).toBe(true);
+    });
+
     it('rejects unknown settings fields (strict schema)', async () => {
       const res = await harness.app.inject({
         method: 'PUT',

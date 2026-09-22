@@ -1442,6 +1442,9 @@ export const SettingsUpdateSchema = z
     // the TmuxManager watcher does nothing — dropped remote sessions are NOT
     // auto-reattached.
     remoteAutoReconnect: z.boolean().optional(),
+    // COD-438: opt-in automatic recovery of records created by this startup's
+    // dead-mux reconciliation. Unsafe/ambiguous records still remain queued.
+    autoRecoverSessionsAfterReboot: z.boolean().optional(),
     thinkingEffort: z.string().max(20).optional(),
     // UI visibility
     showFontControls: z.boolean().optional(),

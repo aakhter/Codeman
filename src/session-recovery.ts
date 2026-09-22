@@ -16,6 +16,10 @@ export interface CreateRecoveryRecordOptions {
   launch?: SessionRecoveryLaunch;
 }
 
+export interface SnapshotRecoveryOptions {
+  resolveNativeResumeId?: (session: SessionState) => Promise<string | null>;
+}
+
 /** The small StateStore surface needed while boot reconciliation still has saved state available. */
 export interface RecoverySnapshotStore {
   getSession(id: string): SessionState | null;
@@ -101,14 +105,16 @@ function deriveRecoveryLaunch(session: SessionState): SessionRecoveryLaunch {
  * before reconciliation because mux implementations may discard dead entries while reporting
  * them; this function is invoked only after reconciliation has identified the dead IDs.
  */
-export function snapshotDeadSessionRecoveries(
+export async function snapshotDeadSessionRecoveries(
   store: RecoverySnapshotStore,
   deadSessionIds: readonly string[],
-  muxSessionsBeforeReconcile: ReadonlyMap<string, MuxSession>
-): void {
-  if (deadSessionIds.length === 0) return;
+  muxSessionsBeforeReconcile: ReadonlyMap<string, MuxSession>,
+  options: SnapshotRecoveryOptions = {}
+): Promise<SessionRecoveryRecord[]> {
+  if (deadSessionIds.length === 0) return [];
 
   const existingSourceSessionIds = new Set(store.getSessionRecoveries().map((recovery) => recovery.sourceSessionId));
+  const created: SessionRecoveryRecord[] = [];
   for (const sessionId of deadSessionIds) {
     // A previous boot has already preserved this candidate (including terminal/recovered
     // records), so never create another record or regress a recovered record back to pending.
@@ -118,17 +124,33 @@ export function snapshotDeadSessionRecoveries(
     if (!savedState) continue;
 
     const muxSession = muxSessionsBeforeReconcile.get(sessionId);
-    const source = {
+    let source: SessionState = {
       ...savedState,
       mode: savedState.mode ?? muxSession?.mode,
       remote: savedState.remote ?? muxSession?.remote,
       docker: savedState.docker ?? muxSession?.docker,
       owner: muxSession?.owner ?? savedState.owner,
     };
+    if (!source.nativeResumeId && options.resolveNativeResumeId) {
+      const nativeResumeId = await options.resolveNativeResumeId(source).catch(() => null);
+      if (nativeResumeId) source = { ...source, nativeResumeId };
+    }
     const recovery = createRecoveryRecord(source);
     clearRecoveryDismissal(recovery.id);
     store.upsertSessionRecovery(recovery);
+    created.push(recovery);
   }
+  return created;
+}
+
+/** Select the only automatic action whose prerequisites have already been proven. */
+export function planAutomaticRecovery(
+  record: SessionRecoveryRecord,
+  remoteLive: boolean
+): 'reconnect' | 'resume' | null {
+  if (record.transport === 'remote' && record.remote?.owned !== false && remoteLive) return 'reconnect';
+  if (record.status !== 'resumable' || record.launch.kind === 'manual_required') return null;
+  return 'resume';
 }
 
 /** Returns a fresh launch descriptor that cannot retain caller diagnostics in manual hints. */

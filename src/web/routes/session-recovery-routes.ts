@@ -1,16 +1,19 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Session } from '../../session.js';
-import { ManualRecoveryRequiredError, remoteTmuxSessionName } from '../../tmux-manager.js';
-import { probeRemoteRecoveryTarget } from '../../remote-hosts.js';
-import { readRemoteCases, readRemoteHosts, toAttachedSessionRemote, toSessionRemote } from '../../remote-hosts.js';
-import { readDockerCases, readDockerHosts, toSessionDocker } from '../../docker-hosts.js';
-import { getDataDir } from '../../config/instance.js';
 import { ApiErrorCode, createErrorResponse, type SessionDocker, type SessionRemote } from '../../types.js';
 import type { SessionRecoveryRecord } from '../../types/session-recovery.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
 import { dismissRecovery, isRecoveryDismissed } from '../../session-recovery-fence.js';
+import {
+  executeSessionRecovery,
+  recoveryRemoteIsLive,
+  resolveRecoveryTransport,
+  SessionRecoveryConflictError,
+} from '../session-recovery-service.js';
+
+export { recoveryCleanupKillsMux, recoverySessionConfig } from '../session-recovery-service.js';
 
 const RecoveryIdSchema = z
   .string()
@@ -42,78 +45,12 @@ function conflict(message: string) {
   return createErrorResponse(ApiErrorCode.OPERATION_FAILED, message);
 }
 
-/** Maps durable evidence to the launch inputs consumed by local, remote, and Docker mux builders. */
-export function recoverySessionConfig(
-  record: SessionRecoveryRecord,
-  action?: 'reconnect' | 'resume',
-  transport: { remote?: SessionRemote; docker?: SessionDocker } = {}
-) {
-  const nativeResumeId = record.nativeResumeId;
-  let remote: SessionRemote | undefined = transport.remote;
-  if (action === 'reconnect' && remote && remote.owned !== false) {
-    remote = { ...remote, remoteSessionName: remoteTmuxSessionName(record.sourceSessionId) };
-  }
-  return {
-    remote,
-    docker: transport.docker,
-    owner: record.owner,
-    // Docker's real builder receives this top-level field. The mode-specific
-    // config remains necessary for non-Docker local/remote builders.
-    resumeSessionId: record.transport === 'docker' ? (nativeResumeId ?? record.claudeResumeId) : record.claudeResumeId,
-    nativeResumeId,
-    codexConfig: record.mode === 'codex' && nativeResumeId ? { resumeSessionId: nativeResumeId } : undefined,
-    openCodeConfig: record.mode === 'opencode' && nativeResumeId ? { continueSession: nativeResumeId } : undefined,
-  };
-}
-
-/** A reconnect is only an SSH/tmux client wrapper around an already-live source. */
-export function recoveryCleanupKillsMux(record: SessionRecoveryRecord, action: 'reconnect' | 'resume'): boolean {
-  return !(record.transport === 'remote' && action === 'reconnect');
-}
-
-async function resolveRecoveryTransport(
-  record: SessionRecoveryRecord
-): Promise<{ remote?: SessionRemote; docker?: SessionDocker }> {
-  const configDir = getDataDir();
-  if (record.transport === 'remote' && record.remote) {
-    const host = (await readRemoteHosts(configDir)).find((item) => item.id === record.remote?.hostId);
-    if (!host) return {};
-    if (record.remote.owned === false && record.remote.remoteSessionName) {
-      return { remote: toAttachedSessionRemote(host, record.remote.remoteSessionName, record.workingDir) };
-    }
-    const remoteCase = (await readRemoteCases(configDir)).find(
-      (item) =>
-        item.hostId === record.remote?.hostId && item.remotePath === record.workingDir && item.owner === record.owner
-    );
-    return remoteCase ? { remote: toSessionRemote(host, remoteCase) } : {};
-  }
-  if (record.transport === 'docker' && record.docker) {
-    const host = (await readDockerHosts(configDir)).find((item) => item.id === record.docker?.hostId);
-    const dockerCase = (await readDockerCases(configDir)).find(
-      (item) =>
-        item.hostId === record.docker?.hostId &&
-        item.hostWorkspacePath === record.workingDir &&
-        item.owner === record.owner
-    );
-    return host && dockerCase ? { docker: toSessionDocker(host, dockerCase) } : {};
-  }
-  return {};
-}
-
-async function remoteIsLive(record: SessionRecoveryRecord, remote: SessionRemote): Promise<boolean> {
-  return probeRemoteRecoveryTarget(remote, {
-    owned: remote.owned !== false,
-    sessionId: record.sourceSessionId,
-    remoteSessionName: remote.remoteSessionName,
-  });
-}
-
 export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: RecoveryContext): void {
   const seams = ctx as RecoveryContext & RecoveryTestSeams;
   const resolveTransport = (record: SessionRecoveryRecord) =>
     seams.resolveRecoveryTransport?.(record) ?? resolveRecoveryTransport(record);
   const probe = (record: SessionRecoveryRecord, remote: SessionRemote) =>
-    seams.probeRecoveryTarget?.(record, remote) ?? remoteIsLive(record, remote);
+    seams.probeRecoveryTarget?.(record, remote) ?? recoveryRemoteIsLive(record, remote);
   app.get('/api/session-recoveries', async (req) => ({
     recoveries: ctx.store.getSessionRecoveries().filter((record) => canAccessOwned(getAuthUser(req), record.owner)),
   }));
@@ -162,7 +99,7 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
         ctx.store.upsertSessionRecovery(next);
         return { recovery: next, live };
       }
-      if (action === 'reconnect' && record.status !== 'reattachable')
+      if (action === 'reconnect' && !['reattachable', 'manual_required'].includes(record.status))
         return reply.code(409).send(conflict('Recovery is not reattachable'));
       if (action === 'resume' && record.status !== 'resumable')
         return reply.code(409).send(conflict('Recovery is not resumable'));
@@ -174,59 +111,14 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
       activeRecoveryActions.add(record.id);
 
       try {
-        if (record.launch.kind === 'manual_required') return reply.code(409).send(conflict(record.launch.hint));
-        if (record.transport === 'remote') {
-          const transport = await resolveTransport(record);
-          if (!transport.remote) return reply.code(409).send(conflict('Remote recovery configuration is unavailable'));
-          if (action === 'resume' && transport.remote.owned === false) {
-            return reply.code(409).send(conflict('Discovered remote sessions are attach-only and cannot be resumed'));
-          }
-          const live = await probe(record, transport.remote);
-          if (action === 'reconnect' && !live)
-            return reply.code(409).send(conflict('Remote tmux session is no longer live'));
-          if (action === 'resume' && live)
-            return reply.code(409).send(conflict('Remote tmux session is still live; reconnect instead'));
-        } else if (action === 'reconnect') {
-          return reply.code(409).send(conflict('Reconnect is available only for a live remote tmux session'));
-        }
-
-        const transport = await resolveTransport(record);
-        if (
-          (record.transport === 'remote' && !transport.remote) ||
-          (record.transport === 'docker' && !transport.docker)
-        ) {
-          return reply.code(409).send(conflict('Recovery configuration is unavailable'));
-        }
-        const session = new Session({
-          workingDir: record.workingDir,
-          mode: record.mode,
-          mux: ctx.mux,
-          useMux: true,
-          ...recoverySessionConfig(record, action, transport),
-        });
         try {
-          if (isRecoveryDismissed(record.id))
-            return reply.code(409).send(conflict('Recovery was dismissed before launch'));
-          await ctx.addSession(session);
-          await ctx.setupSessionListeners(session);
-          ctx.persistSessionStateNow(session);
-          if (isRecoveryDismissed(record.id)) {
-            if (!recoveryCleanupKillsMux(record, action)) await ctx.cleanupRecoveryReconnectWrapper(session.id);
-            else await ctx.cleanupSession(session.id, true, 'recovery dismissed');
-            return reply.code(409).send(conflict('Recovery was dismissed before launch'));
-          }
-          await session.startInteractive();
-          if (isRecoveryDismissed(record.id)) {
-            if (!recoveryCleanupKillsMux(record, action)) await ctx.cleanupRecoveryReconnectWrapper(session.id);
-            else await ctx.cleanupSession(session.id, true, 'recovery dismissed');
-            return reply.code(409).send(conflict('Recovery was dismissed while the action was in progress'));
-          }
-          const next = { ...record, status: 'recovered' as const, recoveredSessionId: session.id };
-          ctx.store.upsertSessionRecovery(next);
-          return { recovery: next, session: ctx.getSessionStateWithRespawn(session) };
+          return await executeSessionRecovery(ctx, record, action, {
+            resolveTransport,
+            probeRemote: probe,
+            isCancelled: () => isRecoveryDismissed(record.id),
+          });
         } catch (error) {
-          if (ctx.sessions.has(session.id)) await ctx.cleanupSession(session.id, false, 'recovery failed');
-          if (error instanceof ManualRecoveryRequiredError) return reply.code(409).send(conflict(error.message));
+          if (error instanceof SessionRecoveryConflictError) return reply.code(409).send(conflict(error.message));
           throw error;
         }
       } finally {

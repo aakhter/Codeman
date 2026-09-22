@@ -5,6 +5,7 @@ import { WebServer } from '../src/web/server.js';
 import type { SessionState } from '../src/types/session.js';
 import type { MuxSession } from '../src/mux-interface.js';
 import type { SessionRecoveryRecord } from '../src/types/session-recovery.js';
+import { createMockRouteContext } from './mocks/index.js';
 
 function savedSession(id: string): SessionState {
   return {
@@ -41,6 +42,61 @@ function muxSession(id: string): MuxSession {
 }
 
 describe('server reboot recovery snapshot', () => {
+  it('automatically launches a newly-created resumable boot record when the setting is enabled', async () => {
+    const ctx = createMockRouteContext();
+    const record: SessionRecoveryRecord = {
+      id: 'recovery-dead-auto',
+      sourceSessionId: 'dead-auto',
+      mode: 'codex',
+      workingDir: '/tmp/project',
+      transport: 'local',
+      nativeResumeId: '01a0c810-a5c4-7b32-be0b-1599d9d5995d',
+      status: 'resumable',
+      launch: { kind: 'built-in' },
+      createdAt: 100,
+    };
+    const upsertSessionRecovery = vi.fn();
+    Object.assign(ctx.store, { upsertSessionRecovery });
+    Object.assign(ctx.mux, {
+      backend: 'tmux',
+      muxSessionExists: vi.fn(async () => false),
+      isPaneDead: vi.fn(async () => false),
+      setAttached: vi.fn(),
+    });
+    ctx.mux.createSession.mockImplementation(async (options) => ({
+      sessionId: options.sessionId,
+      muxName: `codeman-${options.sessionId}`,
+      pid: 1,
+      createdAt: Date.now(),
+      workingDir: options.workingDir,
+      mode: options.mode,
+      attached: false,
+    }));
+
+    const server = new WebServer(0, false, true) as unknown as {
+      bootRecoveryRecords: SessionRecoveryRecord[];
+      readSettings: (fresh?: boolean) => Promise<Record<string, unknown>>;
+      createRouteContext: () => typeof ctx;
+      autoRecoverBootSessions: () => Promise<void>;
+    };
+    server.bootRecoveryRecords = [record];
+    server.readSettings = vi.fn(async () => ({ autoRecoverSessionsAfterReboot: true }));
+    server.createRouteContext = vi.fn(() => ctx);
+
+    await server.autoRecoverBootSessions();
+
+    expect(ctx.mux.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'codex',
+        codexConfig: { resumeSessionId: record.nativeResumeId },
+      })
+    );
+    expect(upsertSessionRecovery).toHaveBeenCalledWith(
+      expect.objectContaining({ id: record.id, status: 'recovered', recoveredSessionId: expect.any(String) })
+    );
+    expect(server.bootRecoveryRecords).toEqual([]);
+  });
+
   it('captures a dead session through the server restore path before finalize cleanup removes its saved state', async () => {
     const state = savedSession('dead-server-1');
     const savedStates = new Map([[state.id, state]]);
@@ -131,7 +187,7 @@ describe('server reboot recovery snapshot', () => {
     expect(store.getSession).not.toHaveBeenCalled();
   });
 
-  it('persists a dead managed session from saved state and pre-reconcile mux metadata', () => {
+  it('persists a dead managed session from saved state and pre-reconcile mux metadata', async () => {
     const state = savedSession('dead-1');
     const upsert = vi.fn();
     const store = {
@@ -140,7 +196,7 @@ describe('server reboot recovery snapshot', () => {
       upsertSessionRecovery: upsert,
     };
 
-    snapshotDeadSessionRecoveries(store, ['dead-1'], new Map([['dead-1', muxSession('dead-1')]]));
+    await snapshotDeadSessionRecoveries(store, ['dead-1'], new Map([['dead-1', muxSession('dead-1')]]));
 
     expect(upsert).toHaveBeenCalledWith({
       id: 'recovery-dead-1',
@@ -161,7 +217,7 @@ describe('server reboot recovery snapshot', () => {
     expect(upsert.mock.calls[0]?.[0].remote).toStrictEqual({ hostId: 'build-host' });
   });
 
-  it('does not create or overwrite recovery records when all managed mux sessions survive', () => {
+  it('does not create or overwrite recovery records when all managed mux sessions survive', async () => {
     const upsert = vi.fn();
     const store = {
       getSession: vi.fn(),
@@ -169,13 +225,13 @@ describe('server reboot recovery snapshot', () => {
       upsertSessionRecovery: upsert,
     };
 
-    snapshotDeadSessionRecoveries(store, [], new Map([['alive-1', muxSession('alive-1')]]));
+    await snapshotDeadSessionRecoveries(store, [], new Map([['alive-1', muxSession('alive-1')]]));
 
     expect(store.getSession).not.toHaveBeenCalled();
     expect(upsert).not.toHaveBeenCalled();
   });
 
-  it('does not overwrite a record already marked recovered for the same dead session', () => {
+  it('does not overwrite a record already marked recovered for the same dead session', async () => {
     const state = savedSession('dead-1');
     const upsert = vi.fn();
     const store = {
@@ -199,8 +255,36 @@ describe('server reboot recovery snapshot', () => {
       upsertSessionRecovery: upsert,
     };
 
-    snapshotDeadSessionRecoveries(store, ['dead-1'], new Map([['dead-1', muxSession('dead-1')]]));
+    await snapshotDeadSessionRecoveries(store, ['dead-1'], new Map([['dead-1', muxSession('dead-1')]]));
 
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('discovers and persists a native id for an active session before stale cleanup', async () => {
+    const state = { ...savedSession('dead-native'), nativeResumeId: null };
+    const upsert = vi.fn();
+    const store = {
+      getSession: vi.fn(() => state),
+      getSessionRecoveries: vi.fn(() => [] as SessionRecoveryRecord[]),
+      upsertSessionRecovery: upsert,
+    };
+    const resolveNativeResumeId = vi.fn(async () => '01a0c810-a5c4-7b32-be0b-1599d9d5995d');
+
+    const created = await snapshotDeadSessionRecoveries(
+      store,
+      [state.id],
+      new Map([[state.id, { ...muxSession(state.id), remote: undefined }]]),
+      { resolveNativeResumeId }
+    );
+
+    expect(resolveNativeResumeId).toHaveBeenCalledWith(expect.objectContaining({ id: state.id }));
+    expect(created).toEqual([
+      expect.objectContaining({
+        sourceSessionId: state.id,
+        nativeResumeId: '01a0c810-a5c4-7b32-be0b-1599d9d5995d',
+        status: 'resumable',
+      }),
+    ]);
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ status: 'resumable' }));
   });
 });
