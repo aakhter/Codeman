@@ -1412,16 +1412,17 @@ Object.assign(CodemanApp.prototype, {
 
   async runCodex(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote cases run Codex on the REMOTE host — skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
+    // SSH and Docker cases skip the local CLI probe. SSH carries Codex launch flags;
+    // Docker quick-start still rejects per-CLI config and environment overrides.
+    const runLocation = (this.cases || []).find(c => c.name === caseName)?.location;
+    const isDocker = runLocation === 'docker';
+    const isExternal = runLocation === 'remote' || isDocker;
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Codex session in ${caseName}...`);
     this.terminal.focus();
 
     try {
-      if (!isRemote) {
+      if (!isExternal) {
         const statusRes = await fetch('/api/codex/status');
         const status = (await statusRes.json()).data;
         if (!status.available) {
@@ -1443,14 +1444,14 @@ Object.assign(CodemanApp.prototype, {
           mode: 'codex',
           sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
           ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
-          ...(isRemote ? {} : {
+          ...(!isDocker ? {
             codexConfig: {
               dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
               animations: globalSettings.codexAnimationsEnabled ?? false,
               renderMode: 'hybrid',
             },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
+          } : {}),
+          ...(!isExternal && Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
         })
       });
       const data = await res.json();

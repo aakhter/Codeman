@@ -276,6 +276,32 @@ describe('Run launch synchronization', () => {
     expect(requests[0]).toMatchObject({ method: 'POST', body: { caseName: 'launch-case' } });
   });
 
+  it.each(['local', 'remote', 'docker'] as const)(
+    'passes saved Codex launch flags for %s cases only when supported',
+    async (location) => {
+      const { app, requests } = loadSessionLaunchHarness({ location });
+      app.loadAppSettingsFromStorage = () => ({
+        codexDangerouslyBypassApprovals: true,
+        codexAnimationsEnabled: false,
+      });
+      app.buildEnvOverrides = () => ({ CODEX_TEST_FLAG: 'enabled' });
+
+      await app.runCodex();
+
+      const body = requests.find((request) => request.url === '/api/quick-start')?.body;
+      if (location === 'docker') {
+        expect(body.codexConfig).toBeUndefined();
+      } else {
+        expect(body.codexConfig).toEqual({
+          dangerouslyBypassApprovals: true,
+          animations: false,
+          renderMode: 'hybrid',
+        });
+      }
+      expect(body.envOverrides).toEqual(location === 'local' ? { CODEX_TEST_FLAG: 'enabled' } : undefined);
+    }
+  );
+
   it.each(dispatchedModes)('forwards the same narrow launch options to %s', async (mode, method) => {
     const { app } = loadRunModeHarness();
     const launchOptions = { count: 1, tabGroupId: 'work' };
