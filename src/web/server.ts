@@ -116,7 +116,10 @@ import { intentStore } from '../intent-store.js';
 import { AI_CHECK_MODEL } from '../config/ai-defaults.js';
 import { approvalInbox } from './approval-inbox.js';
 import { stopDeepSeekWeb } from '../deepseek-web-server.js';
-import { snapshotDeadSessionRecoveries } from '../session-recovery.js';
+import { planAutomaticRecovery, snapshotDeadSessionRecoveries } from '../session-recovery.js';
+import { createNativeResumeIdResolver, resolveNativeResumeIdForRecovery } from '../native-session-identity.js';
+import type { SessionRecoveryRecord } from '../types/session-recovery.js';
+import { executeSessionRecovery, recoveryRemoteIsLive, resolveRecoveryTransport } from './session-recovery-service.js';
 import {
   wireRespawnListeners,
   setupTimedRespawn,
@@ -415,8 +418,11 @@ export interface AgentProcessEvidenceOptions {
 export class WebServer extends EventEmitter {
   private app: FastifyInstance;
   private sessions: Map<string, Session> = new Map();
+  /** Records created by this startup's dead-mux reconciliation only. */
+  private bootRecoveryRecords: SessionRecoveryRecord[] = [];
   private readonly activityAdapters = new Map<Session, CoordinatorSession>();
   private readonly activityIdentityKeys = new Map<Session, string>();
+  private readonly nativeIdentityCapturesInFlight = new Set<string>();
   private readonly watcherRevisionByIdentity = new Map<string, number>();
   private readonly watcherErrorsHandled = new WeakSet<object>();
   private readonly activityMutationInProgress = new Set<string>();
@@ -1384,11 +1390,13 @@ export class WebServer extends EventEmitter {
         attachSession: this.attachAgentActivity.bind(this),
         detachSession: this.detachAgentActivity.bind(this),
         identityChanged: this.agentIdentityChanged.bind(this),
-        terminalActivity: (session: Session) =>
+        terminalActivity: (session: Session) => {
+          this.captureNativeSessionIdentity(session);
           this.mutateAgentActivity(session, (adapter) => {
             this.reconcileAgentIdentity(session, adapter);
             this.agentActivityCoordinator.onTerminalOutput(adapter);
-          }),
+          });
+        },
         sessionExited: this.detachAgentActivity.bind(this),
         setTrackingEnabled: this.setAgentTrackingEnabled.bind(this),
         allocateEvent: this.allocateAgentActivityEvent.bind(this),
@@ -2443,6 +2451,31 @@ export class WebServer extends EventEmitter {
     attachSessionListeners(session, listeners);
   }
 
+  /** Persist exact native conversation identity while the pane is alive. */
+  private captureNativeSessionIdentity(session: Session): void {
+    if (
+      session.nativeResumeId ||
+      session.remote ||
+      session.docker ||
+      !['codex', 'opencode'].includes(session.mode) ||
+      this.nativeIdentityCapturesInFlight.has(session.id)
+    ) {
+      return;
+    }
+    this.nativeIdentityCapturesInFlight.add(session.id);
+    void resolveNativeResumeIdForRecovery(session.toState())
+      .then((id) => {
+        if (!id || session.nativeResumeId || this.sessions.get(session.id) !== session) return;
+        session.setNativeResumeId(id);
+        this._persistSessionStateNow(session);
+        console.log(`[Recovery] Persisted native resume identity for ${session.id}`);
+      })
+      .catch(() => {
+        // Best-effort. Later terminal output retries; ambiguity stays fail-closed.
+      })
+      .finally(() => this.nativeIdentityCapturesInFlight.delete(session.id));
+  }
+
   /** Build the deps object for session listener wiring. */
   private buildSessionListenerDeps() {
     return {
@@ -2450,11 +2483,13 @@ export class WebServer extends EventEmitter {
         attachSession: this.attachAgentActivity.bind(this),
         detachSession: this.detachAgentActivity.bind(this),
         identityChanged: this.agentIdentityChanged.bind(this),
-        terminalActivity: (session: Session) =>
+        terminalActivity: (session: Session) => {
+          this.captureNativeSessionIdentity(session);
           this.mutateAgentActivity(session, (adapter) => {
             this.reconcileAgentIdentity(session, adapter);
             this.agentActivityCoordinator.onTerminalOutput(adapter);
-          }),
+          });
+        },
         sessionExited: this.detachAgentActivity.bind(this),
         setTrackingEnabled: this.setAgentTrackingEnabled.bind(this),
         allocateEvent: this.allocateAgentActivityEvent.bind(this),
@@ -3438,6 +3473,7 @@ export class WebServer extends EventEmitter {
     if (!this.testMode) {
       const restored = await this.restoreMuxSessions();
       await this.finalizeRestoredState(restored);
+      if (restored) await this.autoRecoverBootSessions();
 
       // Instance-scoped reaper: after restore, `docker rm -f` managed containers of
       // THIS instance whose case is gone from docker-cases.json (best-effort, never
@@ -3751,10 +3787,13 @@ export class WebServer extends EventEmitter {
       const muxSessionsBeforeReconcile = new Map(this.mux.getSessions().map((session) => [session.sessionId, session]));
       const { alive, dead, discovered } = await this.mux.reconcileSessions();
 
-      // Must happen before finalizeRestoredState's stale-state cleanup. This is a synchronous
-      // StateStore update over persisted metadata only; it does not launch, attach, or block on
+      // Must happen before finalizeRestoredState's stale-state cleanup. Native identity discovery
+      // may read local provider metadata, but this phase never launches, attaches, or connects to
       // any CLI/SSH/session operation.
-      snapshotDeadSessionRecoveries(this.store, dead, muxSessionsBeforeReconcile);
+      const resolveNativeResumeId = createNativeResumeIdResolver();
+      this.bootRecoveryRecords = await snapshotDeadSessionRecoveries(this.store, dead, muxSessionsBeforeReconcile, {
+        resolveNativeResumeId,
+      });
 
       if (discovered.length > 0) {
         console.log(`[Server] Discovered ${discovered.length} unknown mux session(s)`);
@@ -4100,6 +4139,46 @@ export class WebServer extends EventEmitter {
     } catch (err) {
       console.error('[Server] Failed to restore mux sessions:', err);
       return false;
+    }
+  }
+
+  /**
+   * Auto-recover only records created by this startup. Existing queue entries
+   * are never replayed on an ordinary service restart, and unsafe/ambiguous
+   * records remain visible for explicit handling.
+   */
+  private async autoRecoverBootSessions(): Promise<void> {
+    const records = this.bootRecoveryRecords;
+    this.bootRecoveryRecords = [];
+    if (records.length === 0) return;
+    const settings = await this.readSettings(true);
+    if (settings.autoRecoverSessionsAfterReboot !== true) return;
+
+    const ctx = this.createRouteContext();
+    for (const record of records) {
+      try {
+        const transport = await resolveRecoveryTransport(record);
+        const remoteLive = transport.remote ? await recoveryRemoteIsLive(record, transport.remote) : false;
+        const action = planAutomaticRecovery(record, remoteLive);
+        if (!action) {
+          console.warn(`[Recovery] Automatic recovery skipped ${record.sourceSessionId}: manual action required`);
+          continue;
+        }
+        const result = await executeSessionRecovery(ctx, record, action, {
+          resolveTransport: async () => transport,
+          probeRemote: async () => remoteLive,
+        });
+        getLifecycleLog().log({
+          event: 'recovered',
+          sessionId: result.recovery.recoveredSessionId ?? record.sourceSessionId,
+          name: `auto:${record.sourceSessionId}`,
+        });
+        console.log(
+          `[Recovery] Automatically ${action === 'reconnect' ? 'reconnected' : 'resumed'} ${record.sourceSessionId} as ${result.recovery.recoveredSessionId}`
+        );
+      } catch (error) {
+        console.error(`[Recovery] Automatic recovery failed for ${record.sourceSessionId}:`, getErrorMessage(error));
+      }
     }
   }
 

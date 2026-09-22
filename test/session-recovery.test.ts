@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createRecoveryRecord } from '../src/session-recovery.js';
+import { createRecoveryRecord, planAutomaticRecovery } from '../src/session-recovery.js';
 import type { SessionState } from '../src/types/session.js';
 
 describe('createRecoveryRecord', () => {
@@ -177,5 +177,56 @@ describe('createRecoveryRecord', () => {
     });
     expect(JSON.stringify(record)).not.toContain(rawHint);
     expect(JSON.stringify(record)).not.toContain('super-secret');
+  });
+});
+
+describe('planAutomaticRecovery', () => {
+  const local = createRecoveryRecord(
+    {
+      id: 'local',
+      pid: null,
+      status: 'stopped',
+      workingDir: '/workspace/project',
+      currentTaskId: null,
+      createdAt: 10,
+      mode: 'codex',
+      nativeResumeId: '01a0c810-a5c4-7b32-be0b-1599d9d5995d',
+    } as SessionState,
+    { transport: 'local' }
+  );
+
+  it('resumes only a validated resumable local record', () => {
+    expect(planAutomaticRecovery(local, false)).toBe('resume');
+    expect(planAutomaticRecovery({ ...local, status: 'unavailable' }, false)).toBeNull();
+  });
+
+  it('reconnects a live owned remote even when its resume launcher is opaque', () => {
+    expect(
+      planAutomaticRecovery(
+        {
+          ...local,
+          transport: 'remote',
+          remote: { hostId: 'remote', owned: true },
+          status: 'manual_required',
+          launch: { kind: 'manual_required', hint: 'manual only' },
+        },
+        true
+      )
+    ).toBe('reconnect');
+  });
+
+  it('never auto-launches an opaque or ambiguous dead record', () => {
+    expect(
+      planAutomaticRecovery(
+        {
+          ...local,
+          transport: 'remote',
+          remote: { hostId: 'remote', owned: true },
+          status: 'manual_required',
+          launch: { kind: 'manual_required', hint: 'manual only' },
+        },
+        false
+      )
+    ).toBeNull();
   });
 });

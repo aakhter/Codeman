@@ -491,6 +491,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsCheckpointDefault').checked =
       settings.checkpointDefaultEnabled ?? defaults.checkpointDefaultEnabled ?? true;
     document.getElementById('appSettingsRemoteAutoReconnect').checked = settings.remoteAutoReconnect ?? true;
+    document.getElementById('appSettingsAutoRecoverSessionsAfterReboot').checked =
+      settings.autoRecoverSessionsAfterReboot ?? false;
     document.getElementById('appSettingsThinkingEffort').value = settings.thinkingEffort ?? '';
     document.getElementById('appSettingsHeadroomUrl').value = settings.headroomProxyUrl ?? 'http://192.168.55.175:8787';
     document.getElementById('appSettingsHeadroomClaude').checked = settings.headroomRouteClaude ?? true;
@@ -2299,6 +2301,7 @@ Object.assign(CodemanApp.prototype, {
       truecolorEnabled: document.getElementById('appSettingsTruecolor').checked,
       checkpointDefaultEnabled: document.getElementById('appSettingsCheckpointDefault').checked,
       remoteAutoReconnect: document.getElementById('appSettingsRemoteAutoReconnect').checked,
+      autoRecoverSessionsAfterReboot: document.getElementById('appSettingsAutoRecoverSessionsAfterReboot').checked,
       thinkingEffort: document.getElementById('appSettingsThinkingEffort').value,
       headroomProxyUrl: document.getElementById('appSettingsHeadroomUrl').value.trim(),
       headroomRouteClaude: document.getElementById('appSettingsHeadroomClaude').checked,
@@ -2762,6 +2765,7 @@ Object.assign(CodemanApp.prototype, {
         truecolorEnabled: false,
         // Remote auto-reconnect (COD-108) — on by default
         remoteAutoReconnect: true,
+        autoRecoverSessionsAfterReboot: false,
         // Headroom proxy settings
         headroomProxyUrl: 'http://192.168.55.175:8787',
         headroomRouteClaude: true,
