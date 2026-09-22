@@ -3899,6 +3899,10 @@ export class WebServer extends EventEmitter {
               allowedTools: recoveryClaudeMode.allowedTools,
               openCodeConfig: muxSession.mode === 'opencode' ? savedState?.openCodeConfig : undefined,
               codexConfig: recoveredCodexConfig,
+              // Keep the exact native conversation identity in memory across an
+              // ordinary service restart; host-reboot recovery reads the same
+              // persisted value before stale-state cleanup.
+              nativeResumeId: savedState?.nativeResumeId,
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
               piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
