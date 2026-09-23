@@ -5566,6 +5566,29 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Re-assert a history anchor captured before a terminal write (#358).
+   *
+   * Called from xterm's write callback, never synchronously after write():
+   * xterm parses on its own schedule, so the buffer only carries the redraw's
+   * effect once that callback fires. A null anchor means the user was following
+   * live output and nothing needs restoring.
+   */
+  _restoreTerminalViewport(preserveViewportY, sessionId) {
+    if (preserveViewportY === null || preserveViewportY === undefined) return;
+    // The anchor is a row index into the buffer it was captured from. Now that
+    // this runs a parse later instead of synchronously, a session switch can land
+    // in between: selectSession() resets the terminal and chunk-loads the new
+    // session's scrollback, and scrolling THAT buffer to a row that meant
+    // something in the previous one is not a restore, it is a jump to an
+    // arbitrary place. Both checks cover one half of that window.
+    if (sessionId !== undefined && sessionId !== this.activeSessionId) return;
+    if (this._isLoadingBuffer) return;
+    if (typeof this.terminal?.scrollToLine !== 'function') return;
+    if (this.terminal.buffer?.active?.viewportY === preserveViewportY) return;
+    this.terminal.scrollToLine(preserveViewportY);
+  },
+
+  /**
    * Flush pending writes to terminal, processing DEC 2026 sync markers.
    * Strips markers and writes content atomically within a single frame.
    */
@@ -5610,6 +5633,8 @@ Object.assign(CodemanApp.prototype, {
     // scroll-to-bottom below, where it protects against a mid-flush race.
     const preserveViewportY =
       this.terminal.buffer?.active && !this.isTerminalAtBottom() ? this.terminal.buffer.active.viewportY : null;
+    // Which buffer the anchor belongs to, checked again when the write parses.
+    const flushSessionId = this.activeSessionId;
 
     const firstChunkLength = Math.min(_joinedLen, MAX_FRAME_BYTES);
     let representedOffset = 0;
@@ -5651,17 +5676,24 @@ Object.assign(CodemanApp.prototype, {
     } catch {
       // A broken visual state reader must never affect terminal output.
     }
+
     const writtenTerminal = this.terminal;
     const writtenSessionId = this.activeSessionId;
     const writtenSelectGeneration = this._selectGeneration;
     const shouldStickToBottom = this._wasAtBottomBeforeWrite;
     const afterTerminalWrite = () => {
-      // xterm writes parse asynchronously, then schedule their render. Restore
-      // the sticky viewport on the following frame so the new rows exist before
-      // scrolling; doing it either before this callback or inside it can leave
-      // the viewport on the echoed command instead of live output.
+      this._terminalWriteInFlight = false;
+      this._terminalWriteInFlightBytes = 0;
+      // xterm parses asynchronously. Restore a history anchor only after the
+      // parse callback, and only if the anchor still belongs to this session.
+      this._restoreTerminalViewport(preserveViewportY, flushSessionId);
+      this._scheduleTerminalWriteFlush();
+
+      // Preserve Bitbucket's sticky-bottom behavior, but wait until parsing has
+      // completed and ensure a session switch or a newer scroll-up wins.
       requestAnimationFrame(() => {
         if (
+          preserveViewportY === null &&
           shouldStickToBottom &&
           !this._hasRecentUserScrollUp() &&
           this.terminal === writtenTerminal &&
@@ -5671,6 +5703,7 @@ Object.assign(CodemanApp.prototype, {
           this.terminal.scrollToBottom();
         }
       });
+
       const fallback = authoritativeFallback;
       if (!fallback) return;
       try {
@@ -5689,24 +5722,23 @@ Object.assign(CodemanApp.prototype, {
       }
     };
 
-    if (_joinedLen <= MAX_FRAME_BYTES) {
-      this.terminal.write(joined, afterTerminalWrite);
-    } else {
-      // Write first chunk now, defer rest to next frame
-      this.terminal.write(joined.slice(0, MAX_FRAME_BYTES), afterTerminalWrite);
+    const writeChunk = joined.slice(0, MAX_FRAME_BYTES);
+    if (_joinedLen > MAX_FRAME_BYTES) {
       for (const entry of deferredEntries) {
         this._queuePendingTerminalWrite(entry.data, entry.epoch);
       }
       deferred = true;
-      this._scheduleTerminalWriteFlush();
     }
-    if (
-      preserveViewportY !== null &&
-      this.terminal.buffer?.active?.viewportY !== preserveViewportY &&
-      typeof this.terminal.scrollToLine === 'function'
-    ) {
-      this.terminal.scrollToLine(preserveViewportY);
+    this._terminalWriteInFlight = true;
+    this._terminalWriteInFlightBytes = writeChunk.length;
+    try {
+      this.terminal.write(writeChunk, afterTerminalWrite);
+    } catch (err) {
+      this._terminalWriteInFlight = false;
+      this._terminalWriteInFlightBytes = 0;
+      throw err;
     }
+    if (deferred) this._scheduleTerminalWriteFlush();
     const bytesThisFrame = deferred ? MAX_FRAME_BYTES : _joinedLen;
     const _dt = performance.now() - _t0;
     if (_dt > 100 || deferred)

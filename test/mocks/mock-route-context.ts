@@ -69,25 +69,11 @@ export function createMockRouteContext(options?: {
     setupSessionListeners: vi.fn(async () => {}),
     persistSessionState: vi.fn(),
     persistSessionStateNow: vi.fn(),
-    getSessionStateWithRespawn: vi.fn((s: MockSession) => ({
-      ...s.toState(),
-      activityStatus: s.status,
-      activityStatusSince: null,
-    })),
-    agentActivity: {
-      attachSession: vi.fn(),
-      detachSession: vi.fn(),
-      identityChanged: vi.fn(),
-      terminalActivity: vi.fn(),
-      sessionExited: vi.fn(),
-      setTrackingEnabled: vi.fn(),
-      allocateEvent: vi.fn((_s, kind: string) => ({ sequence: 1, kind })),
-      decideEvent: vi.fn(async () => ({ presentToHuman: true, quarantined: false, autonomyBlocked: false })),
-      project: vi.fn(
-        (s: MockSession & { activityProjection?: { activityStatus: string; activityStatusSince: number | null } }) =>
-          s.activityProjection ?? { activityStatus: s.status, activityStatusSince: null }
-      ),
-    },
+    reapplyPersistedSessionState: vi.fn(async () => {}),
+    discardPartiallyBuiltSession: vi.fn(async (id: string) => {
+      sessions.delete(id);
+    }),
+    getSessionStateWithRespawn: vi.fn((s: MockSession) => s.toState()),
 
     // -- EventPort --
     broadcast: vi.fn(),
@@ -188,6 +174,8 @@ export function createMockRouteContext(options?: {
       getSession: vi.fn(() => null),
       clearRespawnConfig: vi.fn(),
       updateRespawnConfig: vi.fn(),
+      setHistoryLimit: vi.fn(async () => {}),
+      startStatsCollection: vi.fn(),
     },
     runSummaryTrackers: new Map(),
     activePlanOrchestrators: new Map(),
