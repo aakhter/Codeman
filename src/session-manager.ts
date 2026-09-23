@@ -295,13 +295,13 @@ export class SessionManager extends EventEmitter {
     // reserved `__` records go to disk but are stripped by getStoredSessions().
     const state = session.toState();
     const envOverrides = session.getEnvOverridesForPersist();
-    const codexProviderIdentity = session.getCodexProviderIdentityForPersist();
-    const attachmentHistory = session.getAttachmentHistoryForPersist();
+    // __customModel: same convention, the disk-only bookkeeping of a custom-model
+    // selection (env KEYS, config dir, launch model; never the injected values).
+    const customModel = session.getCustomModelForPersist();
     const toStore = {
       ...state,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
-      ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
-      ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
+      ...(customModel ? { __customModel: customModel } : {}),
     };
     this.store.setSession(session.id, toStore as SessionState);
   }

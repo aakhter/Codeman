@@ -478,10 +478,19 @@ describe('Virtual Keyboard', () => {
         );
       });
       // Tab replaced /clear in the simple bar; /clear and /compact live in the
-      // extended bar only. Flip both this line and the button in
-      // keyboard-accessory.js together if that product call is revisited.
-      // `readmymind` (the 🧠 key) joined the simple bar in a070fc43.
-      expect(actions).toEqual(['scroll-up', 'scroll-down', 'init', 'tab', 'paste', 'readmymind', 'esc', 'dismiss']);
+      // extended bar only.
+      expect(actions).toEqual([
+        'scroll-up',
+        'scroll-down',
+        'init',
+        'tab',
+        'shift-left',
+        'shift-right',
+        'paste',
+        'readmymind',
+        'esc',
+        'dismiss',
+      ]);
     });
 
     it('double-tap confirm on /clear button', async () => {

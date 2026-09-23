@@ -4,9 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionAttachmentHistoryItem, SessionRemote, SessionStatus } from '../../src/types/session.js';
-import type { SessionSource } from '../../src/types/sources.js';
-import type { CodexProviderEnvironment } from '../../src/readmymind-predictor.js';
+import type { SessionAttachmentHistoryItem, SessionStatus, SessionRemote } from '../../src/types.js';
 import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
 /**
@@ -19,7 +17,19 @@ export class MockSession extends EventEmitter {
   /** COD-241 — set by remote-session route tests; production reads `session.remote`. */
   remote?: SessionRemote;
   /**
-   * The REAL union, deliberately. This used to be `'idle' | 'working' | 'parked'`, and
+   * Mirrors `Session.remote` — set to a `SessionRemote` to model a remote-SSH case,
+   * whose `workingDir` is an absolute path on ANOTHER host. File routes must read it
+   * over ssh instead of with local `fs` (#415).
+   */
+  remote?: SessionRemote;
+  /** Mirrors Session.attachmentHistory (the attachment panel's source of truth). */
+  attachmentHistory: SessionAttachmentHistoryItem[] = [];
+  /** Mirrors Session.getAttachmentHistoryForPersist(). */
+  getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] {
+    return this.attachmentHistory;
+  }
+  /**
+   * The REAL union, deliberately. This used to be `'idle' | 'working'`, and
    * `'working'` is not a `SessionStatus` at all — so `signalForStatus()` fell to its
    * `default: null` branch in every route test and the busy / stopped / error halves
    * of the immediate-resolve mapping had zero coverage while appearing to be tested.
@@ -403,6 +413,43 @@ export class MockSession extends EventEmitter {
   setColor = vi.fn((c: string) => {
     this.color = c;
   });
+
+  /** Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) */
+  customModel: { endpointId: string; modelId: string; label?: string } | undefined = undefined;
+  remote: unknown = undefined;
+  docker: unknown = undefined;
+  private _mockCustomModel:
+    | {
+        endpointId: string;
+        modelId: string;
+        label?: string;
+        envKeys: string[];
+        configDir?: string;
+        launchModel?: string;
+      }
+    | undefined;
+  setCustomModel = vi.fn(
+    (
+      next:
+        | {
+            endpointId: string;
+            modelId: string;
+            label?: string;
+            envKeys: string[];
+            configDir?: string;
+            launchModel?: string;
+          }
+        | undefined,
+      _envOverrides?: Record<string, string>
+    ): { removedEnvKeys: string[]; previousConfigDir: string | undefined } => {
+      const previous = this._mockCustomModel;
+      this._mockCustomModel = next;
+      this.customModel = next ? { endpointId: next.endpointId, modelId: next.modelId, label: next.label } : undefined;
+      return { removedEnvKeys: previous?.envKeys ?? [], previousConfigDir: previous?.configDir };
+    }
+  );
+  restartCli = vi.fn(async () => true);
+  getCustomModelForPersist = vi.fn(() => this._mockCustomModel);
 
   /** Stub for sendInput */
   sendInput = vi.fn();

@@ -10,11 +10,13 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative, sep } from 'node:path';
-import { isBlockedAttachmentPath, loadAttachmentGuardConfig } from './config/attachment-guard.js';
+import { isBlockedAttachmentPath, isUnderTree, loadAttachmentGuardConfig } from './config/attachment-guard.js';
 import { MAX_PASTE_IMAGE_BYTES } from './config/buffer-limits.js';
 import { EDITABLE_EXTENSIONS } from './config/file-editing.js';
 import { validateSessionFilePath } from './web/route-helpers.js';
+import { remoteProbePaths, RemoteFileAccessError, type RemoteProbe } from './remote-files.js';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
+import type { SessionRemote } from './types/session.js';
 
 /**
  * Playable media extensions, single-sourced here because the WORKSPACE preview
@@ -251,10 +253,24 @@ export interface RegisterExternalAttachmentOptions {
    */
   forceWorkspaceConfinement?: boolean;
   /**
-   * The provenance to stamp on the created record (default `'external'`). The
-   * document-upload route (COD-241) passes `'upload'` so a browser-uploaded file
-   * is distinguishable from a passively-detected or externally-referenced one.
+   * Remote (SSH) case: the path exists on the REMOTE host, so it is resolved and
+   * stat'ed there (`remoteProbePaths`) instead of with local `realpathSync`/`fs.stat`,
+   * which cannot see it at all (#415). A file outside the case directory is
+   * unreachable exactly like a file inside it.
+   *
+   * `sessionWorkingDir` must then be the REMOTE path too, and the workspace
+   * confinement check (when active) compares against the remotely canonicalized root,
+   * so a symlinked `remotePath` does not refuse every registration.
    */
+  remote?: SessionRemote;
+  /**
+   * Remote only: `[file, workspaceRoot]` probes a caller already resolved in a BATCHED
+   * `remoteProbePaths` call (the attachment-history list does one round trip for the
+   * whole history). Skips this registration's own ssh probe; every guard below still
+   * runs on the same resolved path it would have produced itself.
+   */
+  remoteProbes?: readonly [RemoteProbe | null, RemoteProbe | null];
+  /** The provenance to stamp on the created record (default `'external'`). */
   source?: AttachmentSource;
   /** Canonical root that must continue to contain this generated artifact. */
   generatedArtifactBoundary?: string;
@@ -292,7 +308,6 @@ async function resolveBoundaryReadPath(record: AttachmentRecord, boundary: strin
   } catch {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
-
   if (
     resolvedPath !== record.filePath ||
     resolvedBoundary !== boundary ||
@@ -301,7 +316,6 @@ async function resolveBoundaryReadPath(record: AttachmentRecord, boundary: strin
   ) {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
-
   let stat;
   try {
     stat = await fs.stat(resolvedPath);
@@ -317,7 +331,6 @@ async function resolveBoundaryReadPath(record: AttachmentRecord, boundary: strin
   return resolvedPath;
 }
 
-/** Revalidate either server-private boundary type before every by-id read. */
 export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord): Promise<string | undefined> {
   if (record.generatedArtifactBoundary && record.trustedUploadBoundary) {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
@@ -331,23 +344,92 @@ export async function resolveGeneratedArtifactReadPath(record: AttachmentRecord)
   return undefined;
 }
 
-/**
- * Serving cap for a registered attachment, keyed to the policy that ADMITTED
- * its bytes (COD-297).
- *
- * An upload — workspace or through an approved symlink — is admitted by the
- * multipart per-file cap, which is `MAX_PASTE_IMAGE_BYTES`. Serving it under a
- * different (previously hardcoded 50MiB) number meant that raising the upload
- * knob produced files that upload and register successfully and then 413 on
- * every read. The two caps have to be the same knob.
- *
- * Generated artifacts and ordinary external references keep their own fixed
- * caps, so the upload knob widens nothing but uploads.
- */
 export function maxServableAttachmentBytes(record: AttachmentRecord): number {
   if (record.generatedArtifactBoundary) return MAX_GENERATED_ARTIFACT_BYTES;
   if (record.source === 'upload' || record.trustedUploadBoundary) return MAX_PASTE_IMAGE_BYTES;
   return MAX_EXTERNAL_ATTACHMENT_BYTES;
+}
+
+/**
+ * A path an attachment request resolved to, on whichever host it lives — the local
+ * filesystem or the remote host of a remote-SSH case. The rest of
+ * {@link registerExternalAttachment} (guards, extension allowlist, registry) is then
+ * host-agnostic: it only ever sees canonical absolute paths and numbers.
+ */
+interface ResolvedAttachmentFile {
+  resolvedPath: string;
+  size: number;
+  mtimeMs: number;
+  isFile: boolean;
+  extension: string;
+  /** Remote only: the workspace root, with symlinks resolved on the remote host. */
+  workspaceRoot?: string;
+}
+
+/** `extension` the way the attachment registry defines it (no dot, lowercased). */
+function attachmentExtensionOf(path: string): string {
+  return extname(path).toLowerCase().replace(/^\./, '');
+}
+
+/** Local resolution: the historical realpath + stat. */
+async function resolveLocalAttachment(requestedPath: string): Promise<ResolvedAttachmentFile> {
+  let resolvedPath: string;
+  try {
+    resolvedPath = realpathSync(requestedPath);
+  } catch {
+    throw new AttachmentRegistrationError('Attachment file not found', 404);
+  }
+  const stat = await fs.stat(resolvedPath);
+  return {
+    resolvedPath,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs ?? 0,
+    isFile: typeof stat.isFile === 'function' ? stat.isFile() : true,
+    extension: attachmentExtensionOf(resolvedPath),
+  };
+}
+
+/**
+ * Remote resolution for a remote-SSH case: ONE ssh round trip returns the
+ * symlink-resolved path, the size/mtime and the kind, for the file AND (when a
+ * workspace is known) its root, which the confinement check compares against.
+ */
+async function resolveRemoteAttachment(
+  requestedPath: string,
+  remote: SessionRemote,
+  sessionWorkingDir?: string,
+  preResolved?: readonly [RemoteProbe | null, RemoteProbe | null]
+): Promise<ResolvedAttachmentFile> {
+  const paths = sessionWorkingDir ? [requestedPath, sessionWorkingDir] : [requestedPath];
+  let probes: ReadonlyArray<RemoteProbe | null>;
+  if (preResolved) {
+    probes = preResolved;
+  } else {
+    try {
+      probes = await remoteProbePaths(remote, paths);
+    } catch (err) {
+      // 502 marks the TRANSPORT as the failure, distinct from the file's own 404/403,
+      // so a history listing can report the entry as unknown rather than missing.
+      throw new AttachmentRegistrationError(
+        err instanceof RemoteFileAccessError ? err.message : 'remote host unreachable',
+        502
+      );
+    }
+  }
+
+  const [probe, rootProbe] = probes;
+  if (!probe) {
+    throw new AttachmentRegistrationError('Attachment file not found', 404);
+  }
+
+  return {
+    resolvedPath: probe.realPath,
+    size: probe.size,
+    mtimeMs: probe.mtimeMs,
+    isFile: probe.kind === 'file',
+    extension: attachmentExtensionOf(probe.realPath),
+    workspaceRoot: rootProbe?.realPath,
+  };
 }
 
 export async function registerExternalAttachment(
@@ -359,12 +441,11 @@ export async function registerExternalAttachment(
     throw new AttachmentRegistrationError('Attachment path must be an absolute local path');
   }
 
-  let resolvedPath: string;
-  try {
-    resolvedPath = realpathSync(requestedPath);
-  } catch {
-    throw new AttachmentRegistrationError('Attachment file not found', 404);
-  }
+  const resolved = await (options.remote
+    ? resolveRemoteAttachment(requestedPath, options.remote, options.sessionWorkingDir, options.remoteProbes)
+    : resolveLocalAttachment(requestedPath));
+  const resolvedPath = resolved.resolvedPath;
+  const stat = { size: resolved.size, mtimeMs: resolved.mtimeMs };
 
   const generatedArtifactBoundary = options.generatedArtifactBoundary
     ? resolveAttachmentBoundary(resolvedPath, options.generatedArtifactBoundary)
@@ -388,7 +469,10 @@ export async function registerExternalAttachment(
     // the caller forces it for this registration (the magic-link scanner — see
     // forceWorkspaceConfinement). Strictly more restrictive than the blocklist.
     const workingDir = options.sessionWorkingDir;
-    if (!workingDir || !validateSessionFilePath(workingDir, resolvedPath)) {
+    const confined = options.remote
+      ? !!workingDir && isUnderTree(resolved.resolvedPath, resolved.workspaceRoot ?? workingDir)
+      : !!workingDir && !!validateSessionFilePath(workingDir, resolved.resolvedPath);
+    if (!confined) {
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
     }
   }
@@ -398,17 +482,24 @@ export async function registerExternalAttachment(
   // operator-configured extra trees. Symlinks are already resolved above.
   // Cross-workspace attachment of non-blocked files stays allowed, so
   // codeman-publish and the ~/.codeman review loop keep working.
-  if (isBlockedAttachmentPath(resolvedPath, guard.blockedTrees)) {
+  //
+  // The list is a pattern list over ABSOLUTE paths, so it is host-agnostic and holds
+  // for a remote path exactly as it does for a local one, with ONE exception worth
+  // knowing: `isSensitivePath`'s three home-anchored members (`~/.claude.json`,
+  // `~/.claude/settings.json`, `~/.claude/settings.local.json`) resolve against THIS
+  // host's `homedir()`, so on a remote host with a different home they do not match.
+  // Everything else in that list is depth-anchored (`/.ssh/`, `/.aws/credentials`,
+  // `/.claude/.credentials.json`, ...) and applies unchanged.
+  if (isBlockedAttachmentPath(resolved.resolvedPath, guard.blockedTrees)) {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
 
-  const extension = extname(resolvedPath).toLowerCase().replace(/^\./, '');
+  const extension = resolved.extension;
   if (!isSupportedAttachmentExtension(extension)) {
     throw new AttachmentRegistrationError('Unsupported attachment type');
   }
 
-  const stat = await fs.stat(resolvedPath);
-  if (typeof stat.isFile === 'function' && !stat.isFile()) {
+  if (!resolved.isFile) {
     throw new AttachmentRegistrationError('Attachment path is not a file');
   }
   if (generatedArtifactBoundary && stat.size > MAX_GENERATED_ARTIFACT_BYTES) {

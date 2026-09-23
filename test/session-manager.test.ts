@@ -98,6 +98,9 @@ vi.mock('../src/session.js', () => {
       };
     }
 
+    getCustomModelForPersist() {
+      return undefined;
+    }
     getEnvOverridesForPersist() {
       return undefined;
     }

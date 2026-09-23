@@ -5,7 +5,9 @@
  *
  * - KeyboardAccessoryBar (singleton object) — Quick action buttons shown above the virtual
  *   keyboard on mobile: arrow up/down, /init, Tab, paste, Esc, and dismiss (the extended
- *   bar adds /clear, /compact, Shift+Tab and more). Tab flushes any locally-buffered
+ *   bar adds /clear, /compact, Shift+Tab and more). Shift+Left/Right ship in both agent
+ *   layouts but are revealed only on Codex sessions (`codex-enabled` marker class on the
+ *   bar, synced on every session switch), since they are Codex bindings. Tab flushes any locally-buffered
  *   prompt text to the PTY before sending \t, so completion applies to what was typed.
  *   The paste button opens a dialog that handles both text paste and image attach
  *   (native picker + best-effort image paste, routed through app._uploadAndInsertImages).
@@ -661,6 +663,8 @@ const KeyboardAccessoryBar = {
       </button>
       <button class="accessory-btn" data-action="init" title="/init">/init</button>
       <button class="accessory-btn" data-action="tab" title="Tab">Tab</button>
+      <button class="accessory-btn accessory-btn-codex" data-action="shift-left" title="Shift+Left (Codex: edit queued message)" aria-label="Shift+Left (Codex: edit queued message)">⇧←</button>
+      <button class="accessory-btn accessory-btn-codex" data-action="shift-right" title="Shift+Right (Codex: prompt stack back)" aria-label="Shift+Right (Codex: prompt stack back)">⇧→</button>
       <button class="accessory-btn" data-action="paste" title="Paste from clipboard">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
@@ -746,6 +750,8 @@ const KeyboardAccessoryBar = {
       <button class="accessory-btn" data-action="clear-input" title="Clear the current unsent input">&#x232B; All</button>
       <button class="accessory-btn accessory-btn-rmm" data-action="readmymind" title="Read My Mind: predict your next prompt">🧠</button>
       <button class="accessory-btn" data-action="tab" title="Tab">Tab</button>
+      <button class="accessory-btn accessory-btn-codex" data-action="shift-left" title="Shift+Left (Codex: edit queued message)" aria-label="Shift+Left (Codex: edit queued message)">⇧←</button>
+      <button class="accessory-btn accessory-btn-codex" data-action="shift-right" title="Shift+Right (Codex: prompt stack back)" aria-label="Shift+Right (Codex: prompt stack back)">⇧→</button>
       <button class="accessory-btn" data-action="shift-tab" title="Shift+Tab">⇧Tab</button>
       <button class="accessory-btn" data-action="effort-max" title="/effort max">Max</button>
       <button class="accessory-btn" data-action="ctrl-o" title="Ctrl+O">⌃O</button>
@@ -772,6 +778,9 @@ const KeyboardAccessoryBar = {
     // The 🧠 key is opt-in (`readMyMindEnabled`, synced): it ships in both
     // templates but stays display:none until the bar carries the marker class.
     this.syncReadMyMind();
+    // The ⇧←/⇧→ keys are Codex bindings: same shape, gated on the active
+    // session's mode instead of a setting.
+    this.syncCodexKeys();
 
     // Add click handlers — preventDefault stops event from reaching terminal
     this.element.addEventListener('click', (e) => {
@@ -784,7 +793,7 @@ const KeyboardAccessoryBar = {
       this.handleAction(action, btn);
 
       // Refocus terminal so keyboard stays open (tap blurs terminal → keyboard dismisses → toolbar shifts)
-      const refocusActions = new Set(['scroll-up', 'scroll-down', 'arrow-left', 'arrow-right', 'tab', 'shift-tab', 'ctrl', 'ctrl-o', 'opt-enter', 'esc', 'effort-max', 'clear-input']);
+      const refocusActions = new Set(['scroll-up', 'scroll-down', 'arrow-left', 'arrow-right', 'tab', 'shift-tab', 'shift-left', 'shift-right', 'ctrl', 'ctrl-o', 'opt-enter', 'esc', 'effort-max', 'clear-input']);
       if (refocusActions.has(action) ||
           ((action === 'clear' || action === 'compact') && this._confirmAction)) {
         if (typeof app !== 'undefined' && app.terminal) {
@@ -815,6 +824,7 @@ const KeyboardAccessoryBar = {
   refreshForActiveSession() {
     this.clearCtrl();
     this._applyLayout(this._resolveMode());
+    this.syncCodexKeys();
   },
 
   /** Which layout the current state calls for. */
@@ -825,6 +835,11 @@ const KeyboardAccessoryBar = {
   _isShellSession() {
     if (typeof app === 'undefined' || !app.activeSessionId) return false;
     return app.sessions?.get(app.activeSessionId)?.mode === 'shell';
+  },
+
+  _isCodexSession() {
+    if (typeof app === 'undefined' || !app.activeSessionId) return false;
+    return app.sessions?.get(app.activeSessionId)?.mode === 'codex';
   },
 
   /** Swap the button set in the DOM. */
@@ -912,6 +927,12 @@ const KeyboardAccessoryBar = {
         break;
       case 'arrow-right':
         this.sendNavKey('\x1b[C');
+        break;
+      case 'shift-left':
+        this.sendNavKey('\x1b[1;2D');
+        break;
+      case 'shift-right':
+        this.sendNavKey('\x1b[1;2C');
         break;
       case 'esc':
         this.sendKey('\x1b');
@@ -1009,6 +1030,20 @@ const KeyboardAccessoryBar = {
     this.element.classList.toggle('rmm-enabled', enabled === true);
   },
 
+  /** Reveal the ⇧←/⇧→ keys only while the active session runs Codex. They are
+   *  Codex bindings (edit the last queued message / prompt stack back) and do
+   *  nothing in any other CLI, yet a tap still goes through sendNavKey(), which
+   *  hands the session to plain PTY echo for the rest of the prompt, so on a
+   *  phone a dead key would also switch off local echo. Same marker-class
+   *  shape as syncReadMyMind(): the class lives on the BAR because setMode()
+   *  rebuilds the buttons' innerHTML. Synced at init and on every session
+   *  switch (refreshForActiveSession); a session's mode is fixed at create, so
+   *  no other event can change the answer. */
+  syncCodexKeys() {
+    if (!this.element) return;
+    this.element.classList.toggle('codex-enabled', this._isCodexSession());
+  },
+
   /** Send a slash command to the active session.
    *  Sends text and Enter separately so Ink processes them as distinct events. */
   sendCommand(command) {
@@ -1044,7 +1079,7 @@ const KeyboardAccessoryBar = {
   },
 
   /**
-   * A composer nav key (the four arrows) from the bar, under the SAME contract
+   * A composer nav key (arrows, including Shift+Left/Right) from the bar, under the SAME contract
    * as pressing one on a hardware keyboard (the `isComposerNavKey` branch of
    * terminal-ui.js's onData): flush the unsent draft so the key edits the real
    * composer, then hand the session to plain PTY echo until Enter or Ctrl+C,

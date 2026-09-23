@@ -53,7 +53,11 @@ import {
   SessionOrderUpdateSchema,
   SessionWaitQuerySchema,
   SessionWaitOutputQuerySchema,
+  CustomModelSelectionSchema,
 } from '../schemas.js';
+import { readCustomModelHosts } from '../../custom-model-hosts.js';
+import { applyCustomModelInjection, removeConfigDir } from '../../custom-model-injection-apply.js';
+import { matchesPattern } from '../../config/cli-registry/patterns.js';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { TabLayoutValidationError } from '../../tab-layout.js';
 import {
@@ -1454,6 +1458,102 @@ export function registerSessionRoutes(
     session.setColor(body.color as SessionColor);
     persistAndBroadcastSession(ctx, session);
     return { color: session.color };
+  });
+
+  // ========== Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) ==========
+  //
+  // Applies (or clears) a session's custom OpenAI-compatible endpoint selection and
+  // RESTARTS the pane's CLI process — these harnesses read endpoint config at process
+  // start, not per-turn, so a live hot-swap isn't possible (confirmed with the
+  // maintainer). Endpoints come from the admin-configured custom-model-hosts store
+  // (chunk 3's CRUD routes), never raw client-supplied env — that's what keeps this
+  // route safe to let any session owner call for their own session, unlike the
+  // generic envOverrides field the privilegedEnvKeys clamp exists to guard.
+  //
+  // ⚠️ Local sessions only for now. A remote session's `restartCli()` renders
+  // `ssh ... tmux new-session -A`, which reattaches the durable remote tmux rather than
+  // restarting the agent, and the env lands on the LOCAL pane running ssh, which
+  // forwards nothing; docker is the same attach-or-create shape. Both used to answer
+  // `restarted: true` and change nothing, so they are refused until those paths are
+  // plumbed (the env would have to ride the remote/in-container launch command).
+  app.post('/api/sessions/:id/custom-model', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(CustomModelSelectionSchema, req.body, 'Invalid request body');
+    const session = findSessionOrFail(ctx, id, req);
+
+    if (session.remote || session.docker) {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'Custom model endpoints are not supported for remote (SSH) or Docker sessions yet'
+      );
+    }
+    if (session.isBusy()) {
+      return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
+    }
+
+    if ('clear' in body) {
+      const { previousConfigDir } = session.setCustomModel(undefined);
+      removeConfigDir(previousConfigDir);
+      const restarted = await session.restartCli();
+      persistAndBroadcastSession(ctx, session);
+      return { customModel: session.customModel, restarted };
+    }
+
+    const entry = getCli(session.mode);
+    if (!entry) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, `No CLI registry entry for mode ${session.mode}`);
+    }
+    if (entry.capabilities.customModelInjection.kind === 'unsupported') {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${session.mode} has no known custom-model mechanism`);
+    }
+
+    const hosts = await readCustomModelHosts(getDataDir());
+    const endpoint = hosts.find((h) => h.id === body.endpointId);
+    if (!endpoint) {
+      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+    }
+
+    // A CLI whose config alone cannot select the model also gets its `model` launch param
+    // forced (pi/omp `custom/<id>`, grok's block name). The argv engine DROPS a token that
+    // fails its pattern rather than quoting it, which would silently launch the CLI on its
+    // own default provider again, so refuse an id the pattern cannot carry up front.
+    const modelSpec = entry.launch.params.model;
+    const applied = applyCustomModelInjection(entry, endpoint, body.modelId, session.id);
+    if (!applied) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${session.mode} has no known custom-model mechanism`);
+    }
+    if (
+      applied.launchModel !== undefined &&
+      modelSpec?.type === 'token' &&
+      !matchesPattern(modelSpec.pattern, applied.launchModel)
+    ) {
+      removeConfigDir(applied.configDir);
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        `Model id ${JSON.stringify(body.modelId)} cannot be passed to ${session.mode} on its command line`
+      );
+    }
+
+    const { previousConfigDir } = session.setCustomModel(
+      {
+        endpointId: endpoint.id,
+        modelId: body.modelId,
+        label: endpoint.label,
+        envKeys: applied.envKeys,
+        configDir: applied.configDir,
+        launchModel: applied.launchModel,
+      },
+      applied.envOverrides
+    );
+    // Clean up the OLD config dir on disk, unless the new one happens to reuse the same
+    // path (same session, configDir kind again) — never delete the dir we just wrote.
+    if (previousConfigDir && previousConfigDir !== applied.configDir) {
+      removeConfigDir(previousConfigDir);
+    }
+
+    const restarted = await session.restartCli();
+    persistAndBroadcastSession(ctx, session);
+    return { customModel: session.customModel, restarted };
   });
 
   // ========== Delete Session ==========

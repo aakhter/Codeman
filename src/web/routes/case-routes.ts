@@ -85,6 +85,7 @@ import {
   dockerContainerName,
   dockerDisplayPath,
   probeAdoptableContainer,
+  classifyAdoptContainerConflict,
   listDockerContainers,
   browseInContainer,
   dockerAdoptProbeModes,
@@ -690,6 +691,7 @@ export function registerCaseRoutes(
           container,
           image: host.image,
           path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
           network: host.network ?? 'bridge',
           ...(dockerCase.availableModes ? { availableModes: dockerCase.availableModes } : {}),
           ...(dockerCase.owned === false ? { owned: false } : {}),
@@ -1345,12 +1347,35 @@ export function registerCaseRoutes(
       ) {
         return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Case already exists');
       }
-      // Two cases must never share one adopted container: session close kills the
-      // in-container tmux by session id, but a shared adoption would let one case's
-      // teardown and another's launch race over the same tmux server.
+      // One container may back SEVERAL adopted cases, each pointing at a different
+      // directory inside it. What still blocks it, and why, lives in
+      // classifyAdoptContainerConflict — note that none of it is about the shared
+      // in-container tmux server, which is safe precisely because sessions there
+      // are named per SESSION id (`codeman-dkr-<id8>`), never per case.
       const container = dockerCase.container;
-      if (dockerCases.some((item) => (item.container ?? dockerContainerName(item.name)) === container)) {
-        return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, `Container "${container}" is already linked to a case`);
+      const conflict = classifyAdoptContainerConflict({
+        container,
+        containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
+        existing: dockerCases,
+        canAccess: (owner) => canAccessOwned(getAuthUser(req), owner),
+      });
+      if (conflict?.kind === 'owned-case') {
+        return createErrorResponse(
+          ApiErrorCode.ALREADY_EXISTS,
+          `Container "${container}" belongs to case "${conflict.caseName}", which Codeman created and whose lifecycle it manages. Adopt a container you started yourself, or open that case directly.`
+        );
+      }
+      if (conflict?.kind === 'other-owner') {
+        return createErrorResponse(
+          ApiErrorCode.FORBIDDEN,
+          `Container "${container}" is already adopted by another user.`
+        );
+      }
+      if (conflict?.kind === 'duplicate') {
+        return createErrorResponse(
+          ApiErrorCode.ALREADY_EXISTS,
+          `Case "${conflict.caseName}" already adopts "${container}" at that same directory. Point this one at another directory inside the container.`
+        );
       }
 
       if (!isWorkingDirAllowed(getAuthUser(req), dockerCase.hostWorkspacePath)) {
@@ -2190,7 +2215,57 @@ export function registerCaseRoutes(
     if (!validateCaseName(req, name)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
-    if (!(await resolveAccessibleCase(req, name))) {
+
+    // Fold ownership INTO the match (don't early-return): a non-owned same-named remote/
+    // docker case is skipped so control falls through to the caller's own LOCAL case
+    // (remote/docker names are globally unique, local names per-user). No metadata is
+    // disclosed for a foreign case. canAccessOwned is allow-all for admins/single-user.
+    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
+    const remoteCase = remoteCases.find((item) => item.name === name && canAccessOwned(getAuthUser(req), item.owner));
+    if (remoteCase) {
+      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      return {
+        name,
+        path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
+        hasClaudeMd: false,
+        location: 'remote',
+        remote: {
+          hostId: host.id,
+          host: host.host,
+          username: host.username,
+          path: remoteCase.remotePath,
+        },
+      };
+    }
+
+    const dockerCase = (await readDockerCases(CODEMAN_CONFIG_DIR)).find(
+      (item) => item.name === name && canAccessOwned(getAuthUser(req), item.owner)
+    );
+    if (dockerCase) {
+      const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === dockerCase.hostId);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Docker host not found');
+      const container = dockerCase.container ?? dockerContainerName(dockerCase.name);
+      return {
+        name,
+        path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
+        hasClaudeMd: existsSync(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
+        location: 'docker',
+        docker: {
+          hostId: host.id,
+          container,
+          image: host.image,
+          path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
+          network: host.network ?? 'bridge',
+          ...(dockerCase.owned === false ? { owned: false } : {}),
+        },
+      };
+    }
+
+    const casePath = await resolveCasePath(name, getAuthUser(req));
+
+    if (!existsSync(casePath)) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
     }
     return readDefaultGroupResponse(req, name);

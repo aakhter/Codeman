@@ -1211,6 +1211,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       let type: FilesystemBrowseEntry['type'];
       let size: number | undefined;
       let mtimeMs: number | undefined;
+      let targetStat: Awaited<ReturnType<typeof fs.stat>> | undefined;
       const symlink = entry.isSymbolicLink();
       if (entry.isDirectory()) {
         type = 'directory';
@@ -1218,10 +1219,8 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         type = 'file';
       } else if (symlink) {
         try {
-          const targetStat = await fs.stat(targetPath);
+          targetStat = await fs.stat(targetPath);
           type = targetStat.isDirectory() ? 'directory' : 'file';
-          if (type === 'file') size = targetStat.size;
-          mtimeMs = targetStat.mtimeMs;
         } catch {
           continue;
         }
@@ -1230,16 +1229,16 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       }
 
       if (isBlockedPickerPath(targetPath, blockedTrees, type === 'directory')) continue;
-      if (mtimeMs === undefined) {
-        // One stat per entry: the modified time lets the picker sort by date, and
-        // a file's size rides along on the same call.
+      if (!targetStat) {
         try {
-          const targetStat = await fs.stat(targetPath);
-          mtimeMs = targetStat.mtimeMs;
-          if (type === 'file') size = targetStat.size;
+          targetStat = await fs.stat(targetPath);
         } catch {
-          // The path is still selectable even when a stat races a change.
+          // The path is still selectable when metadata lookup races a change.
         }
+      }
+      if (targetStat) {
+        mtimeMs = Number(targetStat.mtimeMs);
+        if (type === 'file') size = Number(targetStat.size);
       }
       entries.push({
         name: entry.name,

@@ -50,8 +50,10 @@ import {
   type SessionCheckpointMode,
   type OpenCodeConfig,
   type CodexConfig,
-  type GeminiConfig,
   type EffortLevel,
+  type CustomModelBookkeeping,
+  type CustomModelSelection,
+  type GeminiConfig,
   type SessionAttachmentHistoryItem,
   type AntigravityConfig,
   type PiConfig,
@@ -699,8 +701,6 @@ export class Session extends EventEmitter {
   private _cwd?: string;
   private readonly _terminalBufferMaxSize: number;
   private readonly _terminalBufferTrimSize: number;
-  private readonly _tmuxHistoryLimit: number;
-  private readonly _remote?: SessionRemote;
   /** Creating browser's terminal dims — new tmux windows spawn at this size instead of 120x40 (COD-179) */
   private readonly _initialDims?: { cols: number; rows: number };
   // Use BufferAccumulator for hot-path buffers to reduce GC pressure
@@ -906,6 +906,26 @@ export class Session extends EventEmitter {
   // at session creation; threaded into the tmux env exports and the direct-PTY env.
   // Default off → COLORTERM is unset (avoids tmux→PTY→xterm.js color glitches).
   private _truecolorEnabled: boolean = false;
+
+  // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md). `envKeys`,
+  // `configDir` and `launchModel` are internal bookkeeping ONLY (never surfaced via
+  // toState()/the customModel getter): they are what setCustomModel() needs to undo a
+  // previous injection (remove exactly the env keys it added, delete a previous isolated
+  // config dir) without guessing what it once wrote. Persisted disk-only (`__customModel`).
+  private _customModel: CustomModelBookkeeping | undefined;
+
+  // Env keys a retired custom-model selection injected that the NEXT respawn must
+  // `tmux setenv -u`. Deleting a key from `_envOverrides` alone does nothing to the
+  // tmux session, which keeps every `setenv` and hands it to `respawn-pane`, so the
+  // relaunched CLI would come back still pointed at the old endpoint (measured, see
+  // TmuxManager.applyEnvOverrides). Drained after a successful respawn.
+  private _pendingEnvUnsets = new Set<string>();
+
+  // tmux history-limit (scrollback lines) allocated when this session's pane is created.
+  private readonly _tmuxHistoryLimit: number;
+
+  // Remote execution metadata, present when this session runs over SSH through local tmux.
+  private readonly _remote?: SessionRemote;
 
   // Docker execution metadata, present when this session runs inside a container via
   // local tmux + `docker exec`. The container is per-CASE (shared by sibling sessions).
@@ -1806,6 +1826,65 @@ export class Session extends EventEmitter {
     }
   }
 
+  // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — public-safe
+  // subset only (never envKeys/configDir/launchModel, the bookkeeping for setCustomModel).
+  get customModel(): CustomModelSelection | undefined {
+    if (!this._customModel) return undefined;
+    const { endpointId, modelId, label } = this._customModel;
+    return { endpointId, modelId, label };
+  }
+
+  /**
+   * The full selection incl. bookkeeping, for state.json ONLY (`__customModel`, the
+   * same disk-only convention as `getEnvOverridesForPersist()`). Carries no env values,
+   * so nothing secret lands on disk; recovery re-derives them from the endpoint store.
+   * Without this a Codeman restart left the pane on the custom endpoint (tmux keeps
+   * its `setenv`s) while `customModel` came back undefined, so the state was wrong and
+   * clearing had nothing to unset. Must NOT be included in any API-bound serializer.
+   */
+  getCustomModelForPersist(): CustomModelBookkeeping | undefined {
+    return this._customModel ? { ...this._customModel, envKeys: [...this._customModel.envKeys] } : undefined;
+  }
+
+  /**
+   * Update this session's custom-model selection and merge the endpoint's injected env
+   * vars into `_envOverrides` — first UNDOING whatever the previous selection injected
+   * (removing exactly those env keys), so switching endpoints, or clearing back to the
+   * harness's native cloud default, never leaves a stale key behind. Synchronous and
+   * side-effect-free beyond mutating state, matching `setNice`/`setColor` above — this
+   * class does no file IO, so it reports the PREVIOUS `configDir` (if any) for the
+   * caller to clean up on disk (custom-model-injection.ts's configDir kind).
+   *
+   * Keys the previous selection injected that the new one does not re-set are queued
+   * for `tmux setenv -u` on the next respawn (`_pendingEnvUnsets`, threaded through
+   * `_buildRespawnPaneOptions().unsetEnvKeys`): the tmux session inherits every
+   * `setenv` into `respawn-pane`, so dropping them from the map alone would relaunch
+   * the CLI still pointed at the old endpoint — and for the `configDir` kinds, at a
+   * `HOME`/`CODEX_HOME`/`GROK_HOME` the caller has just deleted.
+   */
+  setCustomModel(
+    next: CustomModelBookkeeping | undefined,
+    envOverrides?: Record<string, string>
+  ): { removedEnvKeys: string[]; previousConfigDir: string | undefined } {
+    const previousConfigDir = this._customModel?.configDir;
+    const removedEnvKeys: string[] = [];
+    if (this._customModel) {
+      for (const key of this._customModel.envKeys) {
+        if (this._envOverrides) delete this._envOverrides[key];
+        removedEnvKeys.push(key);
+        this._pendingEnvUnsets.add(key);
+      }
+    }
+    this._customModel = next ? { ...next, envKeys: [...next.envKeys] } : undefined;
+    if (envOverrides && Object.keys(envOverrides).length > 0) {
+      this._envOverrides = { ...(this._envOverrides ?? {}), ...envOverrides };
+      // A key the new selection sets again does not need an unset (applyEnvOverrides
+      // would set it right back anyway); keep the list to what actually goes away.
+      for (const key of Object.keys(envOverrides)) this._pendingEnvUnsets.delete(key);
+    }
+    return { removedEnvKeys, previousConfigDir };
+  }
+
   // Token tracking getters and setters
   get totalTokens(): number {
     return this._totalInputTokens + this._totalOutputTokens;
@@ -2333,6 +2412,7 @@ export class Session extends EventEmitter {
       resumeSessionId: this._resumeSessionId,
       nativeResumeId: this._nativeResumeId,
       effort: this._effort,
+      customModel: this.customModel,
       // COD-118: runtime-only — surfaced so the frontend can require explicit user
       // intent before restarting a crash-looped session. Deliberately NOT restored
       // by the constructor: a Codeman restart starts with a fresh breaker so boot
@@ -2524,6 +2604,7 @@ export class Session extends EventEmitter {
         console.error('[Session] Failed to respawn pane, will create new session');
         needsNewSession = true;
       } else {
+        this._pendingEnvUnsets.clear();
         // Wait a moment for the respawned process to fully start
         await new Promise((resolve) => setTimeout(resolve, MUX_STARTUP_DELAY_MS));
       }
@@ -2619,13 +2700,67 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * Kill and relaunch this session's CLI process IN PLACE — same pane, same tmux
+   * session, fresh env/args from current state. Custom Model Endpoint Profiles
+   * (docs/custom-model-endpoints-plan.md) is the first caller: after `setCustomModel()` merges new
+   * env vars into `_envOverrides`, the running CLI process still has the OLD env
+   * (inherited at its own process start, not live-reloaded), so switching a
+   * session's model/endpoint requires this restart to actually take effect.
+   *
+   * A GENERALIZED {@link reattachRemote} with the `!this._remote` guard dropped —
+   * `_buildRespawnPaneOptions()` already passes `remote: this._remote` through
+   * unconditionally, so `mux.respawnPane()` builds the right command either way
+   * (a local session gets `respawn-pane -k` + the real launch line, which is the
+   * kill-and-relaunch this method exists for; a remote session gets the existing
+   * reattach-to-durable-tmux behavior). Deliberately does NOT check `isBusy()` —
+   * that's the caller's job (mirrors `/interactive`'s guard), since a raw restart
+   * primitive shouldn't itself decide when it's safe to use.
+   *
+   * @returns true if the pane was respawned, false otherwise (no mux session, or
+   *   the mux session is gone — see {@link reattachRemote} for that reasoning).
+   */
+  async restartCli(): Promise<boolean> {
+    if (!this._useMux || !this._mux || !this._muxSession) return false;
+    const mux = this._mux;
+
+    if (!mux.muxSessionExists(this._muxSession.muxName)) {
+      console.log('[Session] restartCli: mux session gone, skipping:', this._muxSession.muxName);
+      return false;
+    }
+
+    this._pinOmpRespawnId();
+    const options = this._buildRespawnPaneOptions();
+    // Unlike the dead-pane respawn, this one kills a WORKING pane whose conversation
+    // already has a transcript, and a CLI that launches with `--session-id <id>` refuses
+    // an id that is already in use (claude: `Error: Session ID ... is already in use.`),
+    // which turned an endpoint switch into a dead pane and a lost session. A launch that
+    // declares a `fallback` chain renders `resume || new` once a resume id is set, the
+    // same `--resume <id> || --session-id <id>` shape the docker and remote pane commands
+    // already use, so pin the live conversation id for THIS respawn only. The registry
+    // shape is the gate, not the CLI's name: an entry whose resume id is minted by the
+    // CLI itself (codex/pi/omp/grok) never declares that chain, and its resume field is
+    // read from its own `<Mode>Config` rather than this top-level one anyway.
+    if (!options.resumeSessionId && getCli(this.mode)?.launch.chain === 'fallback') {
+      options.resumeSessionId = this._claudeSessionId ?? this.id;
+    }
+    const newPid = await mux.respawnPane(options);
+    if (!newPid) {
+      console.error('[Session] restartCli: respawnPane failed for', this._muxSession.muxName);
+      return false;
+    }
+    this._pendingEnvUnsets.clear();
+    console.log('[Session] restartCli: restarted CLI for', this._muxSession.muxName, 'pid', newPid);
+    return true;
+  }
+
+  /**
    * Assemble the {@link RespawnPaneOptions} for this session. Single source of
    * truth shared by interactive start, shell start (via their inline copies),
-   * and {@link reattachRemote} so the remote reattach path can never drift from
+   * {@link reattachRemote}, and {@link restartCli} so no respawn path can drift from
    * the spawn path.
    */
   private _buildRespawnPaneOptions(): import('./mux-interface.js').RespawnPaneOptions {
-    return {
+    const options: import('./mux-interface.js').RespawnPaneOptions = {
       sessionId: this.id,
       workingDir: this.workingDir,
       mode: this.mode,
@@ -2653,6 +2788,7 @@ export class Session extends EventEmitter {
       ompConfig: this._ompConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
+      unsetEnvKeys: this._pendingEnvUnsets.size > 0 ? [...this._pendingEnvUnsets] : undefined,
       effort: this._effort,
       truecolorEnabled: this._truecolorEnabled,
       historyLimit: this._tmuxHistoryLimit,
@@ -2660,6 +2796,30 @@ export class Session extends EventEmitter {
       docker: this._docker,
       owner: this._owner,
     };
+    return this._withCustomModelLaunchModel(options);
+  }
+
+  /**
+   * Force the custom-model selection's `launchModel` (pi/omp `custom/<id>`, grok's
+   * `[model.<name>]` block name) onto the CLI's `model` launch param. Where that param
+   * lives is registry DATA — the entry's `legacyConfigField` (`piConfig`, `grokConfig`,
+   * ...) or the top-level `model` for an entry that declares none — so this stays a
+   * generic reader rather than a branch per CLI. Applied on the OPTIONS only: the stored
+   * `<Mode>Config` keeps whatever model the user chose at create, which is exactly what a
+   * later clear must fall back to.
+   */
+  private _withCustomModelLaunchModel(
+    options: import('./mux-interface.js').RespawnPaneOptions
+  ): import('./mux-interface.js').RespawnPaneOptions {
+    const launchModel = this._customModel?.launchModel;
+    if (!launchModel) return options;
+    const entry = getCli(this.mode);
+    if (!entry) return options;
+    const field = entry.launch.legacyConfigField;
+    if (!field) return { ...options, model: launchModel };
+    const bag = options as unknown as Record<string, unknown>;
+    const existing = (bag[field] ?? {}) as Record<string, unknown>;
+    return { ...options, [field]: { ...existing, model: launchModel } };
   }
 
   /**
@@ -4677,6 +4837,21 @@ export class Session extends EventEmitter {
    * half-open socket silently drops frames with no error) would type a prompt
    * twice whenever an ACK is lost after the write landed.
    */
+  /**
+   * The highest input seq recorded for `clientId`, or 0 when this session has
+   * never seen it.
+   *
+   * Reported back on a REJECTED (duplicate) frame so the client can lift its own
+   * counter above this watermark. Without that number a client whose persisted
+   * counter fell behind ours has no way to find its way out: every fresh
+   * keystroke it sends lands at or below the watermark, is dropped as a
+   * duplicate, and is ACKed anyway — so the UI looks healthy while nothing is
+   * delivered, and a reload restores the same stale counter from localStorage.
+   */
+  lastInputSeq(clientId: string): number {
+    return this._appliedInputSeq.get(clientId) ?? 0;
+  }
+
   shouldApplyInput(clientId: string, seq: number): boolean {
     const last = this._appliedInputSeq.get(clientId);
     if (last !== undefined && seq <= last) return false;

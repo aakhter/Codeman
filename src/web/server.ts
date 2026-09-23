@@ -83,6 +83,10 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
+import { getCli } from '../config/cli-registry/registry.js';
+import { readCustomModelHosts } from '../custom-model-hosts.js';
+import { applyCustomModelInjection, customModelConfigDir, removeConfigDir } from '../custom-model-injection-apply.js';
+import type { CustomModelBookkeeping } from '../types/session.js';
 import { registerGeneratedArtifactAttachment } from '../generated-artifact-attachments.js';
 import {
   buildDetectedAttachmentHistoryItem,
@@ -306,7 +310,13 @@ import { getLatestPlanUsage, setLatestCodexPlanUsage } from './plan-usage-latest
 import { telemetrySignature } from '../usage-telemetry.js';
 import { readCodexPlanUsage, resolveCodexBinaryPath } from '../utils/codex-cli-resolver.js';
 import type { ScheduledRun } from './ports/index.js';
-import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
+import {
+  registerAuthMiddleware,
+  registerSecurityHeaders,
+  registerHostGuard,
+  isLostWebviewRootFrame,
+  sendLostWebviewFramePage,
+} from './middleware/auth.js';
 import { isMultiUserMode } from '../config/multiuser.js';
 import { bootstrapInitialAdmin, hasUsers, resolveClaudeModeForUsername } from '../user-store.js';
 import { canUsernameRunPrivilegedCommands } from '../user-store.js';
@@ -340,12 +350,14 @@ import {
   registerVoiceRoutes,
   registerWebviewRoutes,
   registerTabLayoutRoutes,
+  registerCustomModelRoutes,
   registerSessionRecoveryRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { registerCodexCommandProfileRoutes } from './routes/codex-command-profile-routes.js';
 import { registerPerfTraceRoutes } from './routes/perf-trace-routes.js';
 import { mobileInputTraceCollector } from '../perf/mobile-input-trace.js';
+import { isLostWebviewFrameNavigation } from './webview-proxy.js';
 import { CronService } from '../cron/cron-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1557,7 +1569,14 @@ export class WebServer extends EventEmitter {
 
     // Security headers + CORS
     registerSecurityHeaders(this.app, this.https, this.basePath);
-    this.app.get('/', async (_req, reply) => {
+    this.app.get('/', async (req, reply) => {
+      // A web-tab frame that reloaded on its dashboard's landing page. The proxy's
+      // runtime shim maps `/webview/<cap>/` to exactly `/`, so that reload asks for
+      // Codeman's own root as an iframe navigation, and it used to get the app
+      // shell rendered inside the web tab. Only the credential-free form is taken
+      // (nothing in Codeman frames its root; the sandboxed frame has no cookie and
+      // no Authorization); under a password the auth hook has answered it already.
+      if (isLostWebviewRootFrame(req)) return sendLostWebviewFramePage(reply);
       return reply
         .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         .header('CDN-Cache-Control', 'no-store')
@@ -1750,6 +1769,11 @@ export class WebServer extends EventEmitter {
       // and the relay declines unless the Referer carries a live capability, so
       // genuinely unknown `/api` paths still get the envelope below.
       if (await tryWebviewRefererFallback(req, reply, this.basePath)) return reply;
+      // An authenticated web-tab frame (Basic auth, or trusted mode with a cookie)
+      // that navigated itself off its proxy prefix: the runtime shim masks the
+      // prefix so the page's router sees its own path, and a reload of that page
+      // lands here. The unauthenticated form is answered in the auth middleware.
+      if (!req.url.startsWith('/api') && isLostWebviewFrameNavigation(req)) return sendLostWebviewFramePage(reply);
       if (req.url.startsWith('/api')) {
         return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, notFound));
       }
@@ -1829,6 +1853,7 @@ export class WebServer extends EventEmitter {
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx, this.basePath);
     registerTabLayoutRoutes(this.app, ctx);
+    registerCustomModelRoutes(this.app);
     if (mobileInputTraceCollector.enabled) registerPerfTraceRoutes(this.app, mobileInputTraceCollector);
 
     // Cron: build the service from the same context, recompute
@@ -1939,6 +1964,34 @@ export class WebServer extends EventEmitter {
     });
   }
 
+  /**
+   * Recovery half of Custom Model Endpoint Profiles: the env values a selection injects
+   * are never persisted (they carry the API key), so they are computed again from the
+   * endpoint store, through the SAME apply path the route uses. Undefined when the
+   * endpoint is gone or the CLI is unregistered: the bookkeeping is still restored so
+   * the selection can be cleared, and the pane keeps running on tmux's retained env.
+   */
+  private async _rebuildCustomModelEnv(
+    session: Session,
+    saved: CustomModelBookkeeping
+  ): Promise<Record<string, string> | undefined> {
+    const entry = getCli(session.mode);
+    if (!entry) return undefined;
+    const endpoint = (await readCustomModelHosts(getDataDir())).find((h) => h.id === saved.endpointId);
+    if (!endpoint) {
+      console.warn(
+        `[WebServer] custom-model endpoint ${saved.endpointId} no longer exists; selection kept for clearing`
+      );
+      return undefined;
+    }
+    try {
+      return applyCustomModelInjection(entry, endpoint, saved.modelId, session.id)?.envOverrides;
+    } catch (err) {
+      console.warn('[WebServer] Failed to rebuild custom-model env on recovery:', err);
+      return undefined;
+    }
+  }
+
   /** Persists full session state including respawn config to state.json */
   private _persistSessionStateNow(session: Session): void {
     // Private recovery records stay off SessionState and API broadcasts.
@@ -1949,12 +2002,16 @@ export class WebServer extends EventEmitter {
     // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
     // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
+    // __customModel keeps the selection's bookkeeping (injected env KEYS, config dir,
+    // launch model; never the values) so recovery can restore and later clear it.
+    const customModel = session.getCustomModelForPersist();
     const state = {
       ...base,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
       ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
       ...(resolvedCodexCommand ? { __resolvedCodexCommand: resolvedCodexCommand } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
+      ...(customModel ? { __customModel: customModel } : {}),
     } as SessionState;
     const controller = this.respawnControllers.get(session.id);
     if (controller) {
@@ -2161,6 +2218,9 @@ export class WebServer extends EventEmitter {
       // come back to a loader whose file we deleted.
       if (killMux) {
         void removeAgentSessionPreamble(sessionId);
+        // The per-session custom-model config dir carries the endpoint's API key (pi and
+        // omp embed it literally); it must not outlive the session it was written for.
+        removeConfigDir(customModelConfigDir(sessionId));
       }
       await session.stop(killMux);
       this.sessions.delete(sessionId);
@@ -2584,6 +2644,7 @@ export class WebServer extends EventEmitter {
         : await registerExternalAttachment(sessionId, filePath, {
             sessionWorkingDir: session.workingDir,
             forceWorkspaceConfinement: true,
+            remote: session.remote,
           });
     const record = attachmentRegistry.get(sessionId, event.attachmentId);
     if (record) {
@@ -3847,6 +3908,9 @@ export class WebServer extends EventEmitter {
               muxSession.mode,
               (savedState as { __envOverrides?: unknown })?.__envOverrides
             );
+            const savedCustomModel = (savedState as { __customModel?: CustomModelBookkeeping })?.__customModel;
+            // COD-314: a local Codex pane's provider environment is memory-only, so the
+            // exact surviving tmux session is the one place it can be re-read from.
             const liveCodexProviderEnvironment = shouldRecoverCodexProviderEnvironment(
               muxSession.mode,
               recoveredRemote,
@@ -3948,6 +4012,16 @@ export class WebServer extends EventEmitter {
               // when both tabs are on screen.
               parentSessionId: savedState?.parentSessionId,
             });
+
+            // Custom-model selection survives the restart. The tmux session still carries
+            // the injected `setenv`s (that is what kept the pane on the endpoint across the
+            // restart), but `_envOverrides` is rebuilt from a persist that deliberately
+            // excludes them, so re-derive the values from the endpoint store and re-write
+            // the isolated config dir; an endpoint that has since been deleted still gets
+            // the bookkeeping restored, which is what a later clear needs to unset.
+            if (savedCustomModel) {
+              session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+            }
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name
             if (savedState?.name && muxSession.name !== savedState.name) {

@@ -143,6 +143,13 @@ export interface RespawnPaneOptions {
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */
   envOverrides?: Record<string, string>;
+  /**
+   * Env vars to REMOVE from the tmux session (`setenv -u`) before `envOverrides` is
+   * applied. `setenv` persists at the tmux-session level and is inherited by
+   * `respawn-pane`, so a key that merely disappears from `envOverrides` stays set
+   * for the relaunched CLI; clearing a custom-model selection has to name it.
+   */
+  unsetEnvKeys?: string[];
   /** Claude CLI effort level (preserved across respawns, injected via `--settings`) */
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75, preserved across respawns). Default off. */

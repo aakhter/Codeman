@@ -202,8 +202,19 @@ Object.assign(CodemanApp.prototype, {
     this._webviewListAppliedGeneration = this._webviewListAppliedGeneration || 0;
     this._webviewDeletedIds = this._webviewDeletedIds || new Set();
 
-    const acquired = await this.refreshWebviews();
-    if (!acquired) this._scheduleWebviewInitRetry();
+    await this.refreshWebviews();
+    this._installWebviewLostListener();
+
+    // Restore the previously open web tabs (per device: which dashboards you keep
+    // open is a workspace-layout choice, not something to sync across machines).
+    let saved = [];
+    try {
+      saved = JSON.parse(localStorage.getItem('codeman-webview-order') || '[]');
+    } catch {
+      saved = [];
+    }
+    this.webviewOrder = saved.filter((id) => this.webviews.has(id));
+    this.renderSessionTabs();
   },
 
   /** One bounded recovery read for a transient failure during the sole shipping init call. */
@@ -312,19 +323,56 @@ Object.assign(CodemanApp.prototype, {
     this.renderSessionTabs();
   },
 
-  _normalizeWebviewOpenIds(value) {
-    if (!Array.isArray(value)) return [];
-    const requested = new Set(value.filter((id) => typeof id === 'string'));
-    // Canonicalize membership against the authoritative saved-list snapshot so
-    // neither legacy order nor close/open chronology survives as index authority.
-    return [...(this.webviews?.keys() || [])].filter((id) => requested.has(id));
+  /**
+   * Take back a frame that navigated itself off its proxy prefix.
+   *
+   * The proxy's runtime shim masks `/webview/<cap>/` off the document URL so a
+   * single-page app routes on the path it expects. A navigation the page then
+   * starts itself — `location.reload()` (a dev server's full-reload HMR), a
+   * root-absolute `location.href = '/login'` — lands on Codeman's root with no
+   * capability, where the server answers a static page that does nothing but
+   * post `{type:'codeman:webview-lost', path}` here. The frame is identified by
+   * `event.source` against the iframes this tab mounted (never by the payload),
+   * and remounted inside the prefix at that path. Bounded per frame so a page
+   * that reloads itself on every boot cannot spin.
+   */
+  _installWebviewLostListener() {
+    if (this._webviewLostListener) return;
+    this._webviewLostListener = (event) => {
+      const data = event.data;
+      if (!data || typeof data !== 'object' || data.type !== 'codeman:webview-lost') return;
+      if (typeof data.path !== 'string' || !event.source) return;
+      const layer = document.getElementById('webviewLayer');
+      if (!layer) return;
+      for (const wrap of layer.querySelectorAll('.webview-frame')) {
+        const frame = wrap.querySelector('iframe');
+        if (!frame || frame.contentWindow !== event.source) continue;
+        const id = wrap.dataset.webviewId;
+        if (!id || !this.webviews?.has(id)) return;
+        const now = Date.now();
+        this._webviewRecoveries = this._webviewRecoveries || new Map();
+        const recent = (this._webviewRecoveries.get(id) || []).filter((at) => now - at < 60000);
+        if (recent.length >= 5) return;
+        recent.push(now);
+        this._webviewRecoveries.set(id, recent);
+        // Path only, never an origin. Three spellings would resolve to a foreign
+        // origin (in direct mode `new URL(path, src)` is the frame's src, so the
+        // frame would remount there): the protocol-relative `//host/x`; a
+        // backslash, which the WHATWG parser treats as `/` for http(s), so
+        // `/\host/x` too; and an ASCII tab or newline, which the parser deletes
+        // before it looks at anything, so `/<tab>/host/x` IS `//host/x` by the time
+        // it resolves. Drop the invisible ones, collapse the leading separators to
+        // one `/`, and refuse whatever still opens a second one. The proxied form
+        // is refused server-side as well (resolveUpstreamUrl).
+        const path = data.path.replace(/[\t\n\r]/g, '').replace(/^[/\\]+/, '/');
+        void this.openWebview(id, { path: path.startsWith('/') && !/^\/[/\\]/.test(path) ? path : '/' });
+        return;
+      }
+    };
+    window.addEventListener('message', this._webviewLostListener);
   },
 
-  /** Migrate legacy local ordering once, retaining only set membership. */
-  _loadWebviewOpenState() {
-    const current = this._normalizeWebviewOpenIds(this.webviewOrder);
-    let storage;
-    let stored;
+  _persistWebviewOrder() {
     try {
       storage = localStorage;
       stored = storage.getItem('codeman-webview-open');
@@ -525,17 +573,15 @@ Object.assign(CodemanApp.prototype, {
     this._webviewNavigationId = null;
 
     let src = data.embedUrl || data.webview?.url || webview.url;
-    const path = typeof options.path === 'string' ? options.path : '';
+    // A string `path` (even '') means "go there": the proxy prefix is
+    // `/webview/<cap>/` and the wildcard rides after it; in direct mode the deep
+    // link resolves against the dashboard's own origin. No `path` means "show
+    // the tab", leaving a mounted frame on whatever page it reached.
+    const path = typeof options.path === 'string' ? options.path : null;
     if (path) {
-      // The proxy prefix is `/webview/<cap>/`; a wildcard rides after it. In
-      // direct mode the deep link resolves against the dashboard's own origin.
       src = data.embedUrl ? `${data.embedUrl.replace(/\/?$/, '/')}${path.replace(/^\//, '')}` : new URL(path, src).href;
     }
-    // The options object is passed ONLY for a deep link: `navigate` defaults to
-    // false, so an ordinary open stays a 3-argument call and keeps the mount
-    // signature every other caller (and the open-state tests) already sees.
-    if (path) this._mountWebviewFrame(id, src, data.webview || webview, { navigate: true });
-    else this._mountWebviewFrame(id, src, data.webview || webview);
+    this._mountWebviewFrame(id, src, data.webview || webview, { navigate: path !== null });
     this.activeWebviewId = id;
     this.hideWelcome?.();
     document.querySelector('.main')?.classList.add('webview-active');
