@@ -42,6 +42,8 @@ const CODEX_GENERATED_DIRS = [
   '.codex-personal/generated_artifacts',
   '.codex/generated_artifacts',
 ];
+// User-selected default location: allow supported artifacts under /tmp.
+const DEFAULT_GENERATED_ARTIFACT_DIRS = ['/tmp'];
 
 const SUPERPOWERS_ARTIFACT_DIR_MARKERS = ['/output/', '/docs/mockups/'];
 
@@ -146,6 +148,8 @@ export interface GeneratedArtifactRegistrationOptions {
   filePath: string;
   sessionWorkingDir: string;
   remote?: SessionRemote;
+  /** One-file exception after the user explicitly approves the blocked preview. */
+  allowUnlistedPath?: boolean;
 }
 
 export async function registerGeneratedArtifactAttachment(
@@ -156,7 +160,7 @@ export async function registerGeneratedArtifactAttachment(
       hasUnsafeRemotePathCharacters(options.filePath) ||
       hasControlCharacters(options.remote.remotePath) ||
       !posixPath.isAbsolute(options.remote.remotePath) ||
-      !isAllowedRemoteGeneratedArtifactPath(options.filePath, options.remote)
+      (!options.allowUnlistedPath && !isAllowedRemoteGeneratedArtifactPath(options.filePath, options.remote))
     ) {
       throw new AttachmentRegistrationError('Access to this file is blocked', 403);
     }
@@ -164,7 +168,7 @@ export async function registerGeneratedArtifactAttachment(
     const existing = registeredArtifact(options.sessionId, resolvedPathOrOriginal(localPath));
     const inspection = await runRemoteGeneratedArtifactOperation(options.remote, options.filePath, !existing);
     if (
-      !isAllowedCanonicalRemoteGeneratedArtifactPath(inspection) ||
+      (!options.allowUnlistedPath && !isAllowedCanonicalRemoteGeneratedArtifactPath(inspection)) ||
       !isSupportedAttachmentExtension(posixPath.extname(inspection.filePath)) ||
       isSensitiveRemoteGeneratedArtifactPath(inspection)
     ) {
@@ -190,7 +194,13 @@ export async function registerGeneratedArtifactAttachment(
   } catch {
     // Keep the configured workspace path when it cannot be resolved.
   }
-  const generatedArtifactBoundary = findGeneratedArtifactBoundary(resolvedPath, resolvedWorkingDir);
+  const generatedArtifactBoundary =
+    findGeneratedArtifactBoundary(resolvedPath, resolvedWorkingDir) ??
+    (options.allowUnlistedPath &&
+    isSupportedAttachmentExtension(posixPath.extname(resolvedPath)) &&
+    !isSensitivePath(resolvedPath)
+      ? posixPath.dirname(resolvedPath)
+      : undefined);
   if (!generatedArtifactBoundary) {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
@@ -229,6 +239,10 @@ function findGeneratedArtifactBoundary(
   const normalizedPath = posixPath.normalize(filePath);
   const normalizedWorkingDir = posixPath.normalize(workingDir);
   if (isPathInside(normalizedPath, normalizedWorkingDir)) return normalizedWorkingDir;
+
+  for (const dir of DEFAULT_GENERATED_ARTIFACT_DIRS) {
+    if (isPathInside(normalizedPath, dir)) return dir;
+  }
 
   for (const dir of CODEX_GENERATED_DIRS) {
     const root = posixPath.join(homeDir, dir);
@@ -389,6 +403,7 @@ function hasControlCharacters(value: string): boolean {
 
 function isAllowedCanonicalRemoteGeneratedArtifactPath(inspection: RemoteGeneratedArtifactInspection): boolean {
   if (inspection.workspace && isPathInside(inspection.filePath, inspection.workspace)) return true;
+  if (DEFAULT_GENERATED_ARTIFACT_DIRS.some((dir) => isPathInside(inspection.filePath, dir))) return true;
   return inspection.homes.some((home) => isAllowedGeneratedArtifactHomePath(inspection.filePath, home));
 }
 

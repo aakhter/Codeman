@@ -71,6 +71,7 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
   let app: FastifyInstance;
   let ctx: MockRouteContext;
   let testRoot: string;
+  let outsideRoot: string;
   let workspaceDir: string;
   let outsideDir: string;
   let previousDataDir: string | undefined;
@@ -88,8 +89,9 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     });
     requestUser = undefined;
     testRoot = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-file-uri-preview-')));
+    outsideRoot = await fs.mkdtemp(join(process.cwd(), '.codeman-file-uri-preview-outside-'));
     workspaceDir = join(testRoot, 'workspace');
-    outsideDir = join(testRoot, 'outside');
+    outsideDir = join(outsideRoot, 'outside');
     await Promise.all([fs.mkdir(workspaceDir), fs.mkdir(outsideDir)]);
     previousDataDir = process.env.CODEMAN_DATA_DIR;
     process.env.CODEMAN_DATA_DIR = join(testRoot, 'data');
@@ -121,14 +123,21 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     else process.env.CODEMAN_DATA_DIR = previousDataDir;
     if (previousMultiUser === undefined) delete process.env.CODEMAN_MULTIUSER;
     else process.env.CODEMAN_MULTIUSER = previousMultiUser;
-    await fs.rm(testRoot, { recursive: true, force: true });
+    await Promise.all([
+      fs.rm(testRoot, { recursive: true, force: true }),
+      fs.rm(outsideRoot, { recursive: true, force: true }),
+    ]);
   });
 
-  async function postUri(uri?: string) {
+  async function postUri(uri?: string, options: { allowUnlistedPath?: boolean; host?: string; origin?: string } = {}) {
     return app.inject({
       method: 'POST',
       url: `/api/sessions/${ctx._sessionId}/file-uri-preview`,
-      payload: uri === undefined ? {} : { uri },
+      headers: options.origin ? { host: options.host ?? 'localhost:80', origin: options.origin } : undefined,
+      payload: {
+        ...(uri === undefined ? {} : { uri }),
+        ...(options.allowUnlistedPath ? { allowUnlistedPath: true } : {}),
+      },
     });
   }
 
@@ -532,6 +541,70 @@ describe('POST /api/sessions/:id/file-uri-preview', () => {
     });
     expect(JSON.stringify(routeLog)).not.toContain(remotePath);
     expect(JSON.stringify(routeLog)).not.toContain(remote.host);
+  });
+
+  it('previews supported remote artifacts under /tmp by default', async () => {
+    const remote: SessionRemote = {
+      hostId: 'mac-mini',
+      label: 'Mac mini',
+      host: 'remote.example',
+      username: 'ann',
+      remotePath: '/Users/ann/project',
+    };
+    const remotePath = '/tmp/infinidysk-settings-mockups/overview.png';
+    ctx._session.remote = remote;
+    mockRemoteSsh({ filePath: remotePath, size: 18, workspace: remote.remotePath, homes: ['/Users/ann'] });
+
+    const response = await postUri(pathToFileURL(remotePath).href);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      data: { fileName: 'overview.png', attachmentId: expect.stringMatching(/^att_/) },
+    });
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows an unlisted remote artifact after same-origin one-file approval', async () => {
+    const remote: SessionRemote = {
+      hostId: 'mac-mini',
+      label: 'Mac mini',
+      host: 'remote.example',
+      username: 'ann',
+      remotePath: '/Users/ann/project',
+    };
+    const remotePath = '/Users/ann/custom/one-off.png';
+    ctx._session.remote = remote;
+    mockRemoteSsh({ filePath: remotePath, size: 18, workspace: remote.remotePath, homes: ['/Users/ann'] });
+
+    const response = await postUri(pathToFileURL(remotePath).href, {
+      allowUnlistedPath: true,
+      host: 'codeman.test',
+      origin: 'http://codeman.test',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      data: { fileName: 'one-off.png', attachmentId: expect.stringMatching(/^att_/) },
+    });
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects one-file approval requests without a same-origin request header', async () => {
+    ctx._session.remote = {
+      hostId: 'mac-mini',
+      label: 'Mac mini',
+      host: 'remote.example',
+      username: 'ann',
+      remotePath: '/Users/ann/project',
+    };
+
+    const response = await postUri('file:///Users/ann/custom/one-off.png', { allowUnlistedPath: true });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ success: false, error: 'CSRF check failed' });
+    expect(execFile).not.toHaveBeenCalled();
   });
 
   it('resolves remote artifacts with the saved remote configuration and no local fallback or path disclosure', async () => {

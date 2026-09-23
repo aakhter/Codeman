@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const { execFile } = vi.hoisted(() => ({
@@ -87,36 +87,45 @@ describe('generated artifact attachments', () => {
   });
 
   it('allows workspace artifacts and known Codex generated image directories', () => {
-    const home = homedir();
+    const home = '/home/codeman-test';
     expect(isAllowedGeneratedArtifactPath('/repo/out/mockup.png', '/repo')).toBe(true);
-    expect(isAllowedGeneratedArtifactPath(join(home, '.codex-personal/generated_images/mockup.png'), '/repo')).toBe(
-      true
-    );
+    expect(
+      isAllowedGeneratedArtifactPath(join(home, '.codex-personal/generated_images/mockup.png'), '/repo', home)
+    ).toBe(true);
+    expect(isAllowedGeneratedArtifactPath('/tmp/infinidysk-settings-mockups/overview.png', '/repo')).toBe(true);
+    expect(isAllowedGeneratedArtifactPath('/tmp/other-output/deck.png', '/repo')).toBe(true);
     expect(isAllowedGeneratedArtifactPath('/etc/secret.png', '/repo')).toBe(false);
     expect(
-      isAllowedGeneratedArtifactPath(join(home, '.codex-personal/generated_images/../../.ssh/id_rsa.png'), '/repo')
+      isAllowedGeneratedArtifactPath(
+        join(home, '.codex-personal/generated_images/../../.ssh/id_rsa.png'),
+        '/repo',
+        home
+      )
     ).toBe(false);
     expect(isAllowedGeneratedArtifactPath('/var/tmp/staging/.codex/generated_images/leak.png', '/repo')).toBe(false);
   });
 
   it('allows known Superpowers mockup artifact directories only', () => {
-    const home = homedir();
+    const home = '/home/codeman-test';
     expect(
       isAllowedGeneratedArtifactPath(
         join(home, '.config/superpowers/worktrees/flux-player/issue-268/output/playwright/mockup.png'),
-        '/Users/aamer/projects/flux-player'
+        '/Users/aamer/projects/flux-player',
+        home
       )
     ).toBe(true);
     expect(
       isAllowedGeneratedArtifactPath(
         join(home, '.config/superpowers/worktrees/flux-player/issue-268/docs/mockups/mockup.png'),
-        '/Users/aamer/projects/flux-player'
+        '/Users/aamer/projects/flux-player',
+        home
       )
     ).toBe(true);
     expect(
       isAllowedGeneratedArtifactPath(
         join(home, '.config/superpowers/worktrees/flux-player/issue-268/.env.png'),
-        '/Users/aamer/projects/flux-player'
+        '/Users/aamer/projects/flux-player',
+        home
       )
     ).toBe(false);
   });
@@ -347,7 +356,7 @@ describe('generated artifact attachments', () => {
 
     it('rejects a workspace symlink to an outside file', async () => {
       workspaceDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-ws-')));
-      outsideDir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-genart-out-')));
+      outsideDir = await fs.realpath(await fs.mkdtemp(join(process.cwd(), '.codeman-genart-out-')));
       const outsideFile = join(outsideDir, 'private-notes.md');
       await fs.writeFile(outsideFile, 'secret');
       const linkPath = join(workspaceDir, 'x.md');
