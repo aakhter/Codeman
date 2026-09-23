@@ -62,7 +62,7 @@ export const SELECTORS = {
 
 // Device breakpoints (match app.js MobileDetection)
 export const BREAKPOINTS = {
-  PHONE_MAX: 430,
+  PHONE_MAX: 600,
   TABLET_MAX: 768,
 } as const;
 

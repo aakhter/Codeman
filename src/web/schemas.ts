@@ -531,8 +531,6 @@ export const CreateSessionSchema = z.object({
   effort: effortLevelSchema,
   /** Model override to write to .claude/settings.local.json (e.g., "opus[1m]"). Empty string clears. */
   modelOverride: z.string().max(50).optional(),
-  /** Inject the Claude statusLine source for the shared plan-usage chip. Claude sessions only; Codex is host-polled. */
-  statusLineTelemetry: z.boolean().optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
@@ -1457,14 +1455,13 @@ export const SettingsUpdateSchema = z
     showFileBrowser: z.boolean().optional(),
     showSubagents: z.boolean().optional(),
     showMultiMonitorButton: z.boolean().optional(),
+    // Doubles as the plan-usage telemetry COLLECTION switch, read fresh from
+    // disk by readPlanUsageTelemetryEnabled() (hooks-config.ts) at every claude
+    // session create/respawn — not just the chip's DISPLAY preference. See that
+    // function's doc comment for why one persisted field serves both. Absent
+    // means ON there, and the client sends it only on a save that flips the
+    // chip (planUsageCollectionFlip in settings-ui.js), never on every save.
     showPlanUsageLimits: z.boolean().optional(),
-    showAwayDigest: z.boolean().optional(),
-    // Action field (NOT persisted as a setting): when true, (re)injects the
-    // plan-usage statusLine exporter into active Claude sessions so live usage %
-    // starts flowing. Sent on ENABLE only — the chip's DISPLAY is per-device
-    // (client-side), but telemetry COLLECTION is server-side, so the per-device
-    // toggle signals it out-of-band here rather than via showPlanUsageLimits.
-    statusLineTelemetry: z.boolean().optional(),
     showRedrawButton: z.boolean().optional(),
     // Input
     gestureControlEnabled: z.boolean().optional(),

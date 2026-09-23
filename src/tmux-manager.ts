@@ -83,6 +83,20 @@ import {
   type DockerCommandMode,
 } from './types.js';
 import {
+  resolveStatusLineCliCommand,
+  readPlanUsageTelemetryEnabled,
+  findEffectiveUserStatusLineCommand,
+} from './hooks-config.js';
+import {
+  buildSshConnectionArgs,
+  buildSshConnectionArgv,
+  defaultRemoteCommandForMode,
+  remoteLoginShellCommand,
+  remoteSshTarget,
+  remoteTmuxSessionAlive,
+  withRemotePathBootstrap,
+} from './remote-hosts.js';
+import {
   buildDockerBaseArgs,
   buildDockerCreateArgs,
   containerApiUrl,
@@ -107,15 +121,6 @@ import type {
   PaneCaptureOptions,
 } from './mux-interface.js';
 import type { CodexProviderEnvironment } from './codex-provider-identity.js';
-import {
-  buildSshConnectionArgs,
-  buildSshConnectionArgv,
-  defaultRemoteCommandForMode,
-  remoteLoginShellCommand,
-  remoteSshTarget,
-  remoteTmuxSessionAlive,
-  withRemotePathBootstrap,
-} from './remote-hosts.js';
 import { resolveCodexRecoveryStrategy } from './codex-command-profiles.js';
 import {
   decideReconnect,
@@ -997,6 +1002,8 @@ export function buildSpawnCommand(options: {
   ompConfig?: OmpConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
+  /** Resolved by resolveStatusLineCliCommand (hooks-config.ts) — undefined skips the exporter. Claude only. */
+  statusLineCommand?: string;
   /** Codeman session name, passed to claude as `--name` (version-gated, sanitized; local spawns only). */
   sessionName?: string;
   /**
@@ -2419,6 +2426,38 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   }
 
   /**
+   * Export the user's own REAL statusLine command (found by
+   * findEffectiveUserStatusLineCommand) via tmux setenv, so the shared
+   * exporter script (statusLineExporterScriptContent in hooks-config.ts) can
+   * wrap it. Via setenv rather than embedding it in the spawn command line:
+   * tmux stores a setenv value verbatim and never re-parses it as shell
+   * syntax, so once safely escaped for THIS one command, the command's own
+   * `$`/quotes survive untouched into the claude process's environment — the
+   * same reasoning that made the exporter script itself necessary (see
+   * ensureStatusLineExporterScript's doc comment). Only this ONE line needs
+   * shellescape(); the stored value itself is opaque to tmux from then on.
+   *
+   * With NO user command the variable is UNSET rather than left alone: a tmux
+   * setenv survives respawn-pane, so a user who deleted their own statusline
+   * would otherwise keep getting the stale one wrapped (and lose Codeman's
+   * footer print-through) until the tmux session was recreated. Same shape as
+   * the CLAUDE_CODE_EFFORT_LEVEL cleanup in applyEnvOverrides.
+   */
+  private _configureStatusLineUserCommand(muxName: string, command: string | undefined): void {
+    const setOrUnset = command
+      ? `CODEMAN_USER_STATUSLINE_CMD ${shellescape(command)}`
+      : '-u CODEMAN_USER_STATUSLINE_CMD';
+    try {
+      execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} ${setOrUnset}`, {
+        timeout: EXEC_TIMEOUT_MS,
+        stdio: 'ignore',
+      });
+    } catch {
+      // Non-critical: the exporter prints its own footer, or nothing.
+    }
+  }
+
+  /**
    * Creates a new tmux session wrapping Claude CLI or a shell.
    * In test mode: creates an in-memory session only (no real tmux session).
    */
@@ -2492,12 +2531,22 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       }
     }
 
-    // COD-98: Codex routes through Headroom via its config.toml; reconcile to the
-    // live desired state (toggle + proxy health) right before spawn so a down proxy
-    // leaves codex on the direct chatgpt.com path.
-    if (local && mode === 'codex') {
-      await reconcileCodexHeadroomPatch();
-    }
+    // Registry-gated (capabilities.statusLineTelemetry — claude only today), local
+    // spawns only (remote/docker have their own separate command builders — out of
+    // scope here). Also self-heals: strips any legacy disk-written exporter from an
+    // older Codeman build the first time a session starts in that workspace again.
+    const statusLineCommand =
+      getCli(mode)?.capabilities.statusLineTelemetry && !remote && !docker
+        ? await resolveStatusLineCliCommand(workingDir, await readPlanUsageTelemetryEnabled())
+        : undefined;
+    // The user's own REAL statusLine, if any (walked via Claude Code's own
+    // settings precedence) — exported below so the shared exporter script
+    // can wrap it. Only worth discovering when we're actually injecting.
+    const userStatusLineCommand = statusLineCommand ? await findEffectiveUserStatusLineCommand(workingDir) : undefined;
+
+    // Reconcile the shared Codex Headroom config before launch so a failed health
+    // probe leaves Codex on its direct provider route.
+    if (local && mode === 'codex') await reconcileCodexHeadroomPatch();
     const headroomClaudeUrl = local ? await resolveHeadroomClaudeBaseUrl(mode) : undefined;
     const headroomRouted = local
       ? mode === 'claude'
@@ -2506,6 +2555,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           ? await resolveHeadroomRouted('codex')
           : undefined
       : undefined;
+
     try {
       const fullCmd = selectLaunchCommand({
         local: () => {
@@ -2530,6 +2580,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             ompConfig,
             resumeSessionId,
             effort,
+            statusLineCommand,
             sessionName: name,
           });
           const cmd = wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
@@ -2595,19 +2646,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         /* Non-critical */
       }
 
-      // Per-CLI env (secrets, config blobs, the dsh status bridge) via tmux setenv, so
-      // nothing lands in the bash command line or `ps`. Which vars, and from where, is
-      // registry DATA — this replaced a four-mode `if` chain over four bespoke helpers.
-      await this._configureCliEnv(muxName, sessionId, mode, {
-        openCodeConfig,
-        codexConfig,
-        geminiConfig,
-        antigravityConfig,
-        piConfig,
-        grokConfig,
-        deepSeekConfig,
-        ompConfig,
-      });
+      // Per-CLI env: API keys, config blobs, config-sourced vars, status bridges. All of
+      // it is registry data, so this is one unconditional call rather than a per-mode ladder.
+      this._configureCliEnv(
+        muxName,
+        sessionId,
+        mode,
+        legacyConfigForMode(mode, options as unknown as Record<string, unknown>) ?? {}
+      );
+      this._configureStatusLineUserCommand(muxName, userStatusLineCommand);
 
       // Apply user-supplied env overrides (e.g., CLAUDE_CODE_EFFORT_LEVEL) via tmux setenv
       // so secret values stay off the bash command line. Must run before respawn-pane.
@@ -2796,22 +2843,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     const local = !remote && !docker;
 
-    // COD-392: see createSession — revoked grants must fail respawn closed too.
-    if (local && mode === 'codex' && codexConfig?.baseCommand?.trim()) {
-      const owner = options.owner;
-      if (!(await canUsernameRunPrivilegedCommands(owner))) {
-        console.error(`[TmuxManager] Refusing to respawn ${muxName}: custom Codex command grant revoked`);
-        return null;
-      }
-    }
+    // See createSession()'s identical resolution for rationale.
+    const statusLineCommand =
+      getCli(mode)?.capabilities.statusLineTelemetry && !remote && !docker
+        ? await resolveStatusLineCliCommand(workingDir, await readPlanUsageTelemetryEnabled())
+        : undefined;
+    const userStatusLineCommand = statusLineCommand ? await findEffectiveUserStatusLineCommand(workingDir) : undefined;
 
-    // COD-254: Codex routing lives in the shared config.toml patch. Reconcile it
-    // before calculating this respawn's snapshot or launching its replacement,
-    // so the persisted/UI state matches the process that actually starts.
-    if (local && mode === 'codex') {
-      await reconcileCodexHeadroomPatch();
-    }
-
+    if (local && mode === 'codex') await reconcileCodexHeadroomPatch();
     const headroomClaudeUrl = local ? await resolveHeadroomClaudeBaseUrl(mode) : undefined;
     const headroomRouted = local
       ? mode === 'claude'
@@ -2820,11 +2859,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           ? await resolveHeadroomRouted('codex')
           : undefined
       : undefined;
+
     const fullCmd = selectLaunchCommand({
       local: () => {
         const { pathExport } = this.buildPathExport(mode);
         const envExports = this.buildEnvExports(sessionId, muxName, mode, truecolorEnabled, headroomClaudeUrl);
-        const baseCmd = buildSpawnCommand({
+        const command = buildSpawnCommand({
           mode,
           sessionId,
           model,
@@ -2840,10 +2880,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           ompConfig,
           resumeSessionId,
           effort,
+          statusLineCommand,
           sessionName: name,
         });
-        const cmd = wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
-        return buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
+        const wrapped = wrapSpawnCommandWithNice(command, niceConfig || DEFAULT_NICE_CONFIG);
+        return buildLocalPaneCommand({ mode, pathExport, envExports, cmd: wrapped });
       },
       remote: remote
         ? () =>
@@ -2865,19 +2906,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     });
 
     try {
-      // Per-CLI env (secrets, config blobs, the dsh status bridge) via tmux setenv, so
-      // nothing lands in the bash command line or `ps`. Which vars, and from where, is
-      // registry DATA — this replaced a four-mode `if` chain over four bespoke helpers.
-      await this._configureCliEnv(muxName, sessionId, mode, {
-        openCodeConfig,
-        codexConfig,
-        geminiConfig,
-        antigravityConfig,
-        piConfig,
-        grokConfig,
-        deepSeekConfig,
-        ompConfig,
-      });
+      // Same per-CLI env setup as createSession, re-applied so the respawned pane inherits it.
+      this._configureCliEnv(
+        muxName,
+        sessionId,
+        mode,
+        legacyConfigForMode(mode, options as unknown as Record<string, unknown>) ?? {}
+      );
+      this._configureStatusLineUserCommand(muxName, userStatusLineCommand);
 
       // Re-apply user env overrides before respawn so the new shell inherits them.
       await this.applyEnvOverrides(muxName, envOverrides);

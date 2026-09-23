@@ -5,7 +5,6 @@
  */
 
 import { FastifyInstance } from 'fastify';
-import { getCli } from '../../config/cli-registry/registry.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
@@ -14,7 +13,6 @@ import { totalmem, freemem, loadavg, cpus } from 'node:os';
 import { execSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { dataPath } from '../../config/instance.js';
-import { normalizeSettingsObject } from '../../config/settings.js';
 import { ApiErrorCode, createErrorResponse, getErrorMessage, type NiceConfig } from '../../types.js';
 import { isUnauthenticatedNetworkAcknowledged } from '../network-auth-policy.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
@@ -34,7 +32,6 @@ import {
 import { subagentWatcher } from '../../subagent-watcher.js';
 import { imageWatcher } from '../../image-watcher.js';
 import { workflowRunWatcher } from '../../workflow-run-watcher.js';
-import { applyStatusLineConfig } from '../../hooks-config.js';
 import { getLifecycleLog } from '../../session-lifecycle-log.js';
 import {
   buildAwayDigest,
@@ -1045,10 +1042,18 @@ export function registerSystemRoutes(
 
   // ========== Settings ===
   app.get('/api/settings', async () => {
-    const settings = normalizeSettingsObject(await readJsonConfig<unknown>(SETTINGS_PATH, 'settings', {}));
-    // COD-257: clients always receive the effective server default. localStorage
-    // mirrors this value but never becomes the authority across rebuilds/upgrades.
-    return { ...settings, checkpointDefaultEnabled: settings.checkpointDefaultEnabled !== false };
+    // A plain read. This route must NEVER write settings.json: readJsonConfig()
+    // answers `{}` for ANY read failure (a parse error, EACCES, EMFILE, a read
+    // that lands inside PUT's non-atomic write), not only for a missing file,
+    // and every page load calls this route, so a "persist the default when the
+    // key is absent" reconcile here replaced a whole settings file with one key
+    // on the first unlucky read. The plan-usage default is resolved by the
+    // READERS instead: an absent `showPlanUsageLimits` means ON to
+    // readPlanUsageTelemetryEnabled() (hooks-config.ts), the same way an absent
+    // `workspaceHooksEnabled` means ON, and the client resolves its own display
+    // default through planUsageChipEnabled(). Pinned by
+    // test/routes/system-routes-settings-get-plan-usage-default.test.ts.
+    return readJsonConfig(SETTINGS_PATH, 'settings', {});
   });
 
   app.put('/api/settings', async (req) => {
@@ -1102,9 +1107,9 @@ export function registerSystemRoutes(
       } catch {
         /* ignore */
       }
-      // statusLineTelemetry and acknowledgeUnauthTunnel are ACTION fields (not stored
-      // settings) — strip them before persisting so settings.json stays clean.
-      const { statusLineTelemetry, acknowledgeUnauthTunnel, ...settingsToStore } = settings;
+      // acknowledgeUnauthTunnel is an ACTION field (not a stored setting) — strip
+      // it before persisting so settings.json stays clean.
+      const { acknowledgeUnauthTunnel, ...settingsToStore } = settings;
       const merged = { ...existing, ...settingsToStore };
       await fs.writeFile(SETTINGS_PATH, JSON.stringify(merged, null, 2));
 
@@ -1117,7 +1122,7 @@ export function registerSystemRoutes(
       // Service toggles resolve from `merged` (existing + incoming), NEVER from the
       // raw request body. A PARTIAL PUT omits keys it does not intend to change, and
       // reading the body directly turned every omission into "apply the default":
-      // a body of just `{statusLineTelemetry:true}` would START the subagent watcher
+      // a body of just `{showPlanUsageLimits:true}` would START the subagent watcher
       // (`?? true`) and STOP the workflow + image watchers (`?? false`), silently
       // undoing the user's persisted config. Reading `merged` makes any PUT reconcile
       // services to the effective stored settings instead, which also self-heals
@@ -1145,22 +1150,23 @@ export function registerSystemRoutes(
         }
       });
 
-      // Plan-usage chip: its DISPLAY is per-device (client-side, see settings-ui.js).
-      // Telemetry COLLECTION is server-side and enable-sticky — when a client turns
-      // the chip ON it sends statusLineTelemetry:true and we (re)inject our exporter
-      // into every ACTIVE Claude session's working dir so the live % starts flowing
-      // immediately (no new session needed). We deliberately never auto-REMOVE here:
-      // the exporter is benign/print-through and a per-repo settings.local.json is
-      // shared by sibling sessions, so one device's "off" must not yank the exporter
-      // another device's chip depends on. Each dir handled once.
-      if (statusLineTelemetry === true) {
-        const dirs = new Set<string>();
-        for (const session of ctx.sessions.values()) {
-          if (getCli(session.mode)?.capabilities.statusLineTelemetry && session.workingDir)
-            dirs.add(session.workingDir);
-        }
-        await Promise.all([...dirs].map((dir) => applyStatusLineConfig(dir, true).catch(() => {})));
-      }
+      // Plan-usage chip: its DISPLAY is per-device (client-side, see settings-ui.js),
+      // but `showPlanUsageLimits` ALSO doubles as the telemetry COLLECTION switch,
+      // persisted here in settingsToStore like any other setting (no special-casing
+      // needed — see readPlanUsageTelemetryEnabled's doc comment in hooks-config.ts).
+      // Telemetry COLLECTION used to be a SEPARATE, action-only, sticky mechanism
+      // here: toggling the chip ON re-injected a statusLine.command into every
+      // ACTIVE Claude session's settings.local.json so live % started flowing
+      // without a new session. That disk write was the bug fixed 2026-08-31 (it
+      // took precedence over the user's own statusline for ANY `claude` run in
+      // that directory, including outside Codeman, with no way to undo it).
+      // Collection is now decided by TmuxManager.createSession/respawnPane reading
+      // `showPlanUsageLimits` FRESH from settings.json at spawn time — no
+      // per-session field, no per-request threading through cron/Ralph-loop/
+      // quick-start/interactive-create (they all reach the same read), and no
+      // (re)injection into an already-running session needed here: the NEXT
+      // respawn (a Ralph cycle, `/clear`, a PTY-exit restart) already picks up
+      // whatever this PUT just persisted.
 
       // Handle tunnel toggle dynamically
       if ('tunnelEnabled' in settings) {

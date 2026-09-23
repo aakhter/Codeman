@@ -176,19 +176,11 @@ const CLAUDE: CliEntry = {
     legacyConfigAliases: { resumeId: 'resumeSessionId' },
   },
   env: {
-    // Claude asks for truecolor, like every CLI here except `shell` and `opencode`.
-    // tmux hands the pane TERM=screen, which supports-color reads as 16 colors, and
-    // Claude then quantizes every RGB color its theme asks for down to that palette.
-    // Each dark background lands on ESC[40m, the terminal's own black, so the block
-    // Claude draws behind the user's own messages renders invisible. PR #3 unset
-    // COLORTERM here against xterm.js#484, which xterm.js had already closed in 2019,
-    // and Codeman now ships @xterm/xterm 6 and sets `terminal-overrides *:Tc` itself.
-    // The other truecolor CLIs also unset NO_COLOR. Claude does not, so a user who
-    // exports NO_COLOR globally keeps the monochrome panes they asked for.
-    // CLAUDECODE stays unset, because Claude reads it as a signal that it is running
-    // nested inside itself.
-    exports: [{ name: 'COLORTERM', value: 'truecolor' }],
-    unset: ['CLAUDECODE'],
+    // Bitbucket keeps Claude truecolor opt-in (COD-75): `buildEnvExports()` honors the
+    // user's per-session setting while the other terminal CLIs always export truecolor.
+    // CLAUDECODE is also unset because Claude treats it as a nested-session signal.
+    exports: [],
+    unset: ['CLAUDECODE', 'COLORTERM'],
     tmuxSetenvKeys: [],
     dockerExecEnvNames: [],
     allowedPrefixes: ['CLAUDE_CODE_'],
@@ -701,6 +693,10 @@ const PI: CliEntry = {
       },
       npmPackage: '@earendil-works/pi-coding-agent',
       docsUrl: 'https://pi.dev',
+      agentImageLayer: {
+        kind: 'dedicated',
+        reason: 'installed with --ignore-scripts in its own layer, so the flag cannot leak to the shared block',
+      },
     },
   },
   launch: {
@@ -915,6 +911,10 @@ const DEEPSEEK: CliEntry = {
       },
       npmPackage: '@deepseek-ai/dsh',
       docsUrl: 'https://github.com/deepseek-ai/deepseek-harness',
+      agentImageLayer: {
+        kind: 'dedicated',
+        reason: 'needs pnpm alongside it (dsh plugin, issue #352) and a dsh-tui profile install',
+      },
     },
   },
   launch: {

@@ -334,11 +334,33 @@ Object.assign(CodemanApp.prototype, {
   // App Settings Modal
   // ═══════════════════════════════════════════════════════════════
 
-  async openAppSettings() {
-    // The startup sync makes settings.json authoritative across browser/PWA
-    // clients. Do not let an immediately opened modal re-save stale localStorage
-    // before that sync has populated the local mirror.
-    await this._settingsSyncPromise;
+  /**
+   * Point one terminal-weight select at its stored value.
+   *
+   * A stored value the picker does not list (a hand-set 350, or a weight from a
+   * build whose options differ) is ADDED to the select rather than dropped:
+   * otherwise `select.value = '350'` silently selects nothing, the next save
+   * reads back '' and the setting resets itself just for having been opened.
+   * Empty means "use xterm's default for this slot".
+   */
+  populateTerminalFontWeight(select, value) {
+    if (!select) return;
+    const stored = value === undefined || value === null ? '' : String(value).trim();
+    if (stored && !Array.from(select.options).some((opt) => opt.value === stored)) {
+      const extra = document.createElement('option');
+      extra.value = stored;
+      extra.textContent = `${stored} (custom)`;
+      select.appendChild(extra);
+    }
+    select.value = stored;
+  },
+
+  /** Read one terminal-weight select back. '' means default; the resolver in constants.js validates. */
+  readTerminalFontWeight(select) {
+    return select?.value.trim() || '';
+  },
+
+  openAppSettings() {
     // Load current settings
     const settings = this.loadAppSettingsFromStorage();
     document.getElementById('appSettingsDisplayName').value = settings.displayName || 'Codeman';
@@ -381,7 +403,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = this.planUsageChipEnabled(settings);
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
-    // Phone overview home screen: only meaningful under 430px, so the row is
+    // Phone overview home screen: only meaningful under 600px, so the row is
     // hidden elsewhere rather than offering a toggle that changes nothing.
     // Spawn lineage lines: desktop-only (the overlay sits UNDER the fixed mobile
     // header), so the row is hidden elsewhere rather than offering a toggle that
@@ -417,6 +439,11 @@ Object.assign(CodemanApp.prototype, {
     // a way to read, so it is opt-in rather than a default anyone has to discover.
     document.getElementById('appSettingsAutoCopySelection').checked = settings.autoCopySelection === true;
     document.getElementById('appSettingsTerminalFont').value = settings.terminalFontFamily || '';
+    this.populateTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight'), settings.terminalFontWeight);
+    this.populateTerminalFontWeight(
+      document.getElementById('appSettingsTerminalFontWeightBold'),
+      settings.terminalFontWeightBold
+    );
     document.getElementById('appSettingsTerminalWheelLocal').checked =
       settings.terminalWheelLocalScrollback ?? defaults.terminalWheelLocalScrollback ?? false;
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
@@ -2262,6 +2289,10 @@ Object.assign(CodemanApp.prototype, {
       liveMirrorEnabled: document.getElementById('appSettingsLiveMirror').checked,
       autoCopySelection: document.getElementById('appSettingsAutoCopySelection').checked,
       terminalFontFamily: document.getElementById('appSettingsTerminalFont').value.trim(),
+      terminalFontWeight: this.readTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight')),
+      terminalFontWeightBold: this.readTerminalFontWeight(
+        document.getElementById('appSettingsTerminalFontWeightBold')
+      ),
       terminalWheelLocalScrollback: document.getElementById('appSettingsTerminalWheelLocal').checked,
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
@@ -2334,6 +2365,7 @@ Object.assign(CodemanApp.prototype, {
     this._updateLocalEchoState();
     this._applyLiveMirrorSetting?.(settings.liveMirrorEnabled); // COD-187
     this.applyTerminalFontFamily?.(settings.terminalFontFamily);
+    this.applyTerminalFontWeights?.(settings);
 
     // A real OFF→ON flip of the WebGL toggle retires the GPU-stall auto-fallback
     // marker so the next reload actually re-tries WebGL. Only the transition
@@ -2465,15 +2497,23 @@ Object.assign(CodemanApp.prototype, {
 
     // Save to server (includes notification prefs for cross-browser persistence).
     // Strip device-specific DISPLAY keys so they never sync across devices —
-    // localEcho/cjk/extendedKeyboard/skin are per-platform, and showPlanUsageLimits
-    // is per-device too (desktop can show the usage chip while mobile stays hidden).
+    // localEcho/cjk/extendedKeyboard/skin are per-platform.
     // webglRendererEnabled is per-device as well (renderer choice is GPU-specific,
     // and syncing would leak mobile's hidden-checkbox false onto desktop); it's
     // also absent from SettingsUpdateSchema, which is .strict() — sending it
     // would 400 the whole settings PUT.
-    // Telemetry COLLECTION is requested out-of-band via statusLineTelemetry (sent on
-    // ENABLE only, so a device with the chip OFF never strips the exporter that
-    // another device's chip depends on — see system-routes settings handler).
+    // showPlanUsageLimits is per-device for DISPLAY (loadAppSettingsFromServer
+    // only seeds it into localStorage when a device has no value yet, like every
+    // other display key) but ALSO doubles as the server-side plan-usage telemetry
+    // COLLECTION switch (readPlanUsageTelemetryEnabled in hooks-config.ts, read
+    // fresh at every claude session create/respawn). So it is stripped here like
+    // the others and re-added below ONLY when this save FLIPS it on this device
+    // (planUsageCollectionFlip): the chip defaults OFF on handhelds, so sending
+    // it on every save let a phone saving its font size persist `false` and
+    // switch collection off for every desktop, whose chip then went stale with
+    // no error anywhere. An explicit toggle on any device still writes it, in
+    // either direction.
+    const _chipFlip = this.planUsageCollectionFlip(_prev, settings.showPlanUsageLimits);
     const {
       localEchoEnabled: _leo,
       cjkInputEnabled: _cjk,
@@ -2495,6 +2535,11 @@ Object.assign(CodemanApp.prototype, {
       // Per-device by nature (the font must exist on the device) and absent
       // from SettingsUpdateSchema (.strict()) — sending it would 400 the PUT.
       terminalFontFamily: _tff,
+      // Same two reasons: which weights a family can actually render is a
+      // property of the faces installed on THIS device, and neither key is
+      // declared in the .strict() schema.
+      terminalFontWeight: _tfw,
+      terminalFontWeightBold: _tfwb,
       // Per-device header/toolbar button toggles — client-only, and absent from
       // SettingsUpdateSchema (.strict()), so sending them would 400 the PUT.
       showSessionButton: _ssb,
@@ -2515,7 +2560,7 @@ Object.assign(CodemanApp.prototype, {
     try {
       const res = await this._apiPut('/api/settings', {
         ...serverSettings,
-        ...(settings.showPlanUsageLimits ? { statusLineTelemetry: true } : {}),
+        ...(_chipFlip !== undefined ? { showPlanUsageLimits: _chipFlip } : {}),
         notificationPreferences: notifPrefsToSave,
         voiceSettings,
       });
@@ -2962,13 +3007,26 @@ Object.assign(CodemanApp.prototype, {
   // Resolved per-device state of the plan-usage chip. Desktop defaults ON,
   // handhelds default OFF (the mobile block in getDefaultSettings() sets false,
   // and the mobile-header-buttons-policy guard depends on that staying false).
-  // Single source of truth for THREE call sites that must never disagree: the
-  // App Settings checkbox, the chip's visibility, and the statusLineTelemetry
-  // flag sent on session create. A chip shown without telemetry renders "—"
-  // forever, which is exactly the drift this helper prevents.
+  // Single source of truth for the two call sites that must never disagree:
+  // the App Settings checkbox and the chip's visibility. Telemetry COLLECTION
+  // no longer has a THIRD client-side call site here at all — the server reads
+  // this same persisted setting directly (readPlanUsageTelemetryEnabled in
+  // hooks-config.ts), fresh, at every claude session create/respawn.
   planUsageChipEnabled(settings = null) {
     const s = settings ?? this.loadAppSettingsFromStorage();
     return s.showPlanUsageLimits ?? this.getDefaultSettings().showPlanUsageLimits ?? true;
+  },
+
+  // What a settings save tells the server about plan-usage COLLECTION: the new
+  // chip value when this save FLIPS it relative to what this device resolved
+  // before (stored value, else the per-device default), otherwise undefined,
+  // meaning "say nothing". The server reads an absent key as ON, so a device
+  // that never touched the chip leaves collection alone, and a handheld (chip
+  // default OFF) cannot switch it off for every desktop by saving its font
+  // size. Pure so test/plan-usage-collection-flip.test.ts can drive it.
+  planUsageCollectionFlip(prevSettings, now) {
+    const before = this.planUsageChipEnabled(prevSettings ?? {});
+    return now === before ? undefined : now;
   },
 
   applyHeaderVisibilitySettings() {
@@ -3536,12 +3594,11 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'tabRailSort', 'sessionListLayout',
-          'sessionSidebarFontSize',
-          'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
-          'skin', 'showPlanUsageLimits', 'showAwayDigest', 'showAttachmentsButton', 'liveMirrorEnabled',
-          'showFileViewerButton', 'webglRendererEnabled', 'language', 'terminalWheelLocalScrollback',
-          'terminalFontFamily',
+          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'tabRailSort', 'sessionListLayout', 'sessionSidebarFontSize', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
+          'terminalFontFamily', 'terminalFontWeight', 'terminalFontWeightBold',
+          'language',
+          'terminalWheelLocalScrollback',
           'autoCopySelection',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
@@ -3549,11 +3606,13 @@ Object.assign(CodemanApp.prototype, {
           'sessionLineageLines',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
-        // handheld default OFF): desktop can show it while mobile stays hidden. It
-        // used to sync, so an older server.json may still carry a value — drop it
-        // so the server value is NEVER
-        // seeded into a device that didn't explicitly enable it (collection is handled
-        // separately via the statusLineTelemetry action, not this display flag).
+        // handheld default OFF): desktop can show it while mobile stays hidden. Drop
+        // the server's stored value here so it is NEVER seeded into a device that
+        // didn't explicitly enable it — even though this SAME setting also drives
+        // server-side telemetry collection now (readPlanUsageTelemetryEnabled in
+        // hooks-config.ts), that's a read the server does directly from settings.json
+        // at spawn time; it has nothing to do with what gets merged into THIS
+        // device's local display preference.
         delete appSettings.showPlanUsageLimits;
         // Merge settings: non-display keys always sync from server,
         // display keys only seed from server when localStorage has no value

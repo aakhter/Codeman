@@ -499,52 +499,42 @@ describe('system-routes', () => {
   // ========== GET /api/settings ==========
 
   describe('GET /api/settings', () => {
-    it('returns the upgrade-safe checkpoint default when settings file does not exist', async () => {
+    // A plain read that never writes. The route briefly reconciled an absent
+    // showPlanUsageLimits to true on first read, but readJsonConfig() answers {}
+    // for ANY read failure and every page load hits this route, so one unlucky
+    // read replaced the whole file with a one-key file. The default now lives in
+    // readPlanUsageTelemetryEnabled() (absent means ON); see also
+    // system-routes-settings-get-plan-usage-default.test.ts.
+    it('answers {} for a missing settings file and creates nothing', async () => {
       mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      mockedWriteFile.mockClear();
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: true });
+      expect(JSON.parse(res.body)).toEqual({});
+      expect(mockedWriteFile).not.toHaveBeenCalled();
     });
 
-    it('returns parsed settings when file exists', async () => {
+    it('returns the file unchanged when showPlanUsageLimits is absent', async () => {
       const settings = { subagentTrackingEnabled: true, showSystemStats: false };
       mockedReadFile.mockResolvedValue(JSON.stringify(settings) as never);
+      mockedWriteFile.mockClear();
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual({ ...settings, checkpointDefaultEnabled: true });
+      expect(JSON.parse(res.body)).toEqual(settings);
+      expect(mockedWriteFile).not.toHaveBeenCalled();
     });
 
-    it('preserves an explicitly disabled checkpoint default', async () => {
-      mockedReadFile.mockResolvedValue(JSON.stringify({ checkpointDefaultEnabled: false }) as never);
-
-      const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: false });
-    });
-
-    it.each(['null', '[]', '"not a settings object"'])(
-      'returns the safe default for malformed persisted %s',
-      async (raw) => {
-        mockedReadFile.mockResolvedValue(raw as never);
-
-        const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
-
-        expect(res.statusCode).toBe(200);
-        expect(JSON.parse(res.body)).toEqual({ checkpointDefaultEnabled: true });
-      }
-    );
-
-    // COD-242: a reloaded client (after a deploy/upgrade) must get its persisted
-    // shortcut overrides back from the server so custom shortcuts are not reset.
-    it('returns persisted shortcutOverrides so a reloaded client restores them', async () => {
-      const settings = { shortcutOverrides: { search: { disabled: true } } };
+    it('passes an explicit false through untouched', async () => {
+      const settings = { subagentTrackingEnabled: true, showPlanUsageLimits: false };
       mockedReadFile.mockResolvedValue(JSON.stringify(settings) as never);
+      mockedWriteFile.mockClear();
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body).shortcutOverrides).toEqual({ search: { disabled: true } });
+      expect(JSON.parse(res.body)).toEqual(settings);
+      expect(mockedWriteFile).not.toHaveBeenCalled();
     });
   });
 

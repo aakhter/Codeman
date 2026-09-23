@@ -1113,17 +1113,6 @@ Object.assign(CodemanApp.prototype, {
             ...(hasEnvOverrides ? { envOverrides } : {}),
             ...(effort ? { effort } : {}),
             ...(modelOverride !== undefined ? { modelOverride } : {}),
-            ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
-            // Plan-usage statusLine exporter (App Settings → Display). The server
-            // ADDS our exporter on create when true; when false it intentionally
-            // leaves any existing exporter in place (a per-repo settings.local.json
-            // is shared by sibling sessions, so create-with-false must not yank it
-            // — see the comment in session-routes create). Disabling the setting
-            // removes it via the App Settings toggle path (system-routes), not here.
-            statusLineTelemetry: this.planUsageChipEnabled(globalSettings),
-            // COD-179: spawn the tmux window at this browser's real dims so the
-            // TUI's first frames aren't painted at the 120x40 legacy default.
-            ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
           })
         }).then(r => r.json())
       );
@@ -3119,7 +3108,7 @@ Object.assign(CodemanApp.prototype, {
       if (!input._mobileScrollWired) {
         input._mobileScrollWired = true;
         input.addEventListener('focus', () => {
-          if (window.innerWidth <= 430) {
+          if (window.innerWidth < 600) {
             setTimeout(() => input.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
           }
         });

@@ -752,7 +752,7 @@
           <button class="btn-toolbar btn-shell" onclick="app.runShell()" title="Run Shell">
             Run Shell
           </button>
-          <!-- Phone-only: replaces the Shell button on ≤430px (Shell moves into the Run
+          <!-- Phone-only: replaces the Shell button under 600px (Shell moves into the Run
                dropdown there). Sends a bare Enter to the active session, the complement
                to the accessory bar's Esc. Hidden everywhere else — see styles.css. -->
           <button class="btn-toolbar btn-enter" onclick="app.sendEnterKey()" title="Send Enter">
@@ -1823,6 +1823,42 @@
                       <span class="set-row-desc">Prepended to the built-in stack, so fallbacks (including bundled Nerd Font symbols) keep working. Must be installed on this device. Leave empty for the default.</span>
                     </div>
                     <input type="text" id="appSettingsTerminalFont" class="set-input" placeholder='e.g. JetBrainsMono Nerd Font'>
+                  </div>
+                  <div class="set-row has-field" data-search="terminal font weight normal regular light thin bold contrast">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Normal font weight</span>
+                      <span class="set-row-desc">Weight for ordinary terminal text. Lowering it widens the step up to bold, which for a family shipping only a regular and a bold face is the only cue bold text carries. Needs a family with faces at that weight; the bundled font covers 100 to 800.</span>
+                    </div>
+                    <select id="appSettingsTerminalFontWeight" class="set-select">
+                      <option value="">Default (normal)</option>
+                      <option value="100">100</option>
+                      <option value="200">200</option>
+                      <option value="300">300</option>
+                      <option value="400">400</option>
+                      <option value="500">500</option>
+                      <option value="600">600</option>
+                      <option value="700">700</option>
+                      <option value="800">800</option>
+                      <option value="900">900</option>
+                    </select>
+                  </div>
+                  <div class="set-row has-field" data-search="terminal bold font weight heavy black emphasis">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Bold font weight</span>
+                      <span class="set-row-desc">Weight for bold terminal text. Only useful with a family carrying something heavier than its bold face.</span>
+                    </div>
+                    <select id="appSettingsTerminalFontWeightBold" class="set-select">
+                      <option value="">Default (bold)</option>
+                      <option value="100">100</option>
+                      <option value="200">200</option>
+                      <option value="300">300</option>
+                      <option value="400">400</option>
+                      <option value="500">500</option>
+                      <option value="600">600</option>
+                      <option value="700">700</option>
+                      <option value="800">800</option>
+                      <option value="900">900</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -3209,7 +3245,7 @@
             <div class="form-row docker-create-only">
               <label>Image</label>
               <input type="text" id="dockerImage" placeholder="codeman/agent:base" autocomplete="off" autocapitalize="off" spellcheck="false">
-              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/codex/gemini/opencode/agy/pi/grok/dsh + tmux.</span>
+              <span class="form-hint">Build it once with <code>node scripts/build-agent-image.mjs</code>. Contains node + claude/opencode/codex/gemini/agy/pi/grok/dsh/omp + tmux.</span>
             </div>
             <div class="form-row docker-create-only">
               <label>Network</label>

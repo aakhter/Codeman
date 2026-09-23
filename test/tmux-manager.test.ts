@@ -144,51 +144,29 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
-  describe('Codex provider environment recovery', () => {
-    it('reads only the closed Codex provider allowlist', () => {
-      expect(
-        parseTmuxCodexProviderEnvironment(
-          [
-            'CODEX_HOME=/tmp/codex-home',
-            'OPENAI_API_KEY=openai-secret',
-            'CODEX_API_KEY=codex=secret',
-            'ANTHROPIC_API_KEY=must-not-cross',
-            'PATH=/usr/bin',
-          ].join('\n')
-        )
-      ).toEqual({
-        CODEX_HOME: '/tmp/codex-home',
-        OPENAI_API_KEY: 'openai-secret',
-        CODEX_API_KEY: 'codex=secret',
-      });
+  describe('statusline user-command env', () => {
+    // A tmux setenv survives respawn-pane, so the absence of a user statusline
+    // must UNSET the variable rather than leave a stale one for the exporter
+    // to wrap.
+    it('unsets CODEMAN_USER_STATUSLINE_CMD when the user has no statusline', () => {
+      mockedExecSync.mockClear();
+      (
+        manager as unknown as { _configureStatusLineUserCommand: (m: string, c?: string) => void }
+      )._configureStatusLineUserCommand('codeman-abc', undefined);
+      const cmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
+      expect(cmds.some((c) => c.includes("setenv -t 'codeman-abc' -u CODEMAN_USER_STATUSLINE_CMD"))).toBe(true);
     });
 
-    it('treats unset and empty provider variables as absent', () => {
-      expect(
-        parseTmuxCodexProviderEnvironment(
-          ['-CODEX_HOME', 'OPENAI_API_KEY=', '-CODEX_API_KEY', 'MALFORMED', '=value'].join('\n')
-        )
-      ).toEqual({});
-    });
-
-    it('uses exact argv for a tracked session and distinguishes an empty successful read', async () => {
-      const execute = vi.fn().mockResolvedValue({ stdout: 'PATH=/usr/bin\n', stderr: '' });
-
-      await expect(readTmuxCodexProviderEnvironment('codeman', 'codeman-abc12345', true, execute)).resolves.toEqual({});
-      expect(execute).toHaveBeenCalledWith('tmux', ['-L', 'codeman', 'show-environment', '-t', 'codeman-abc12345']);
-    });
-
-    it('rejects unsafe or untracked targets without executing tmux', async () => {
-      const execute = vi.fn();
-
-      await expect(readTmuxCodexProviderEnvironment('codeman', 'unsafe;name', true, execute)).resolves.toBeNull();
-      await expect(readTmuxCodexProviderEnvironment('codeman', 'codeman-abc12345', false, execute)).resolves.toBeNull();
-      expect(execute).not.toHaveBeenCalled();
-    });
-
-    it('maps a tmux execution failure to unreadable rather than ambient authentication', async () => {
-      const execute = vi.fn().mockRejectedValue(new Error('tmux unavailable'));
-      await expect(readTmuxCodexProviderEnvironment('codeman', 'codeman-abc12345', true, execute)).resolves.toBeNull();
+    it('sets CODEMAN_USER_STATUSLINE_CMD, shell-escaped, when the user has one', () => {
+      mockedExecSync.mockClear();
+      (
+        manager as unknown as { _configureStatusLineUserCommand: (m: string, c?: string) => void }
+      )._configureStatusLineUserCommand('codeman-abc', `printf '%s' "$1" | jq -r .model`);
+      const cmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
+      const setCmd = cmds.find((c) => c.includes('CODEMAN_USER_STATUSLINE_CMD'));
+      expect(setCmd).toBeDefined();
+      expect(setCmd).not.toContain(' -u ');
+      expect(setCmd).toContain("setenv -t 'codeman-abc' CODEMAN_USER_STATUSLINE_CMD ");
     });
   });
 
@@ -892,12 +870,12 @@ describe('TmuxManager (unit)', () => {
   });
 
   describe('environment exports', () => {
-    const callBuildEnvExports = (mode: string) =>
+    const callBuildEnvExports = (mode: string, truecolorEnabled?: boolean) =>
       (
         manager as unknown as {
-          buildEnvExports(sessionId: string, muxName: string, mode: string): string[];
+          buildEnvExports(sessionId: string, muxName: string, mode: string, truecolorEnabled?: boolean): string[];
         }
-      ).buildEnvExports('session-1', 'codeman-abc12345', mode);
+      ).buildEnvExports('session-1', 'codeman-abc12345', mode, truecolorEnabled);
 
     // COD-210 is a deliberate fork difference: OpenCode is a Bubble Tea TUI that
     // negotiates its palette against 24-bit color, so this fork exports truecolor
@@ -909,11 +887,10 @@ describe('TmuxManager (unit)', () => {
       expect(exports).not.toContain('unset COLORTERM');
     });
 
-    // Claude renders its themed backgrounds as RGB. Without this the pane inherits
-    // tmux's TERM=screen, supports-color reads 16 colors, and every dark background
-    // quantizes to ESC[40m — the terminal's own black — so the block goes invisible.
-    it('exports truecolor for Claude sessions', () => {
-      expect(callBuildEnvExports('claude')).toContain('export COLORTERM=truecolor');
+    // Keep Bitbucket's COD-75 per-session opt-in: unset by default, truecolor when selected.
+    it('keeps Claude truecolor opt-in', () => {
+      expect(callBuildEnvExports('claude')).toContain('unset COLORTERM');
+      expect(callBuildEnvExports('claude', true)).toContain('export COLORTERM=truecolor');
     });
 
     it('exports the server-stamped CODEMAN_API_URL verbatim', () => {
