@@ -13,6 +13,7 @@ import { isEffortLevel } from './types.js';
 import { getAugmentedPath } from './utils/index.js';
 import { compareVersions } from './utils/dependency-checker.js';
 import { dataPath } from './config/instance.js';
+import { getCli } from './config/cli-registry/registry.js';
 
 /**
  * Build Claude CLI permission flags based on the configured mode.
@@ -172,6 +173,36 @@ export function buildClaudeEnv(sessionId: string, truecolorEnabled?: boolean): R
     ...process.env,
     LANG: 'en_US.UTF-8',
     LC_ALL: 'en_US.UTF-8',
+  };
+
+  // The colour and identity vars come from the registry entry, the same source
+  // buildEnvExports() and buildMuxAttachEnv() read, so this fallback cannot drift from
+  // the tmux pane the way a hand-maintained list here did.
+  // ⚠️ This block runs BEFORE Codeman's own keys are assigned, mirroring
+  // buildEnvExports(), where `...cliEnv` is emitted ahead of `export CODEMAN_MUX=1`.
+  // Applied afterwards it would outrank them: `unset` and `exports` are config
+  // (`~/.codeman/clis.json` overrides any entry), so an entry naming
+  // CODEMAN_HOOK_SECRET_FILE or PATH would strip or rewrite it on this path while the
+  // tmux pane, where Codeman's exports come last, kept its own value.
+  // COD-115: `delete`, not `= undefined` — node-pty serializes a present-with-undefined
+  // key as the literal string "KEY=undefined" (see buildMuxAttachEnv below).
+  const cliEnv = getCli('claude')?.env;
+  for (const name of cliEnv?.unset ?? []) delete env[name];
+  for (const item of cliEnv?.exports ?? []) {
+    // A direct PTY has no mux, so `muxName` has no value to resolve against. Claude
+    // declares literals only; an unresolvable engine value is skipped, never guessed.
+    const value =
+      typeof item.value === 'string'
+        ? item.value
+        : item.value.engine === 'sessionId'
+          ? sessionId
+          : item.value.engine === 'codemanPrefixedSessionId'
+            ? `codeman_${sessionId}`
+            : undefined;
+    if (value !== undefined) env[item.name] = value;
+  }
+
+  Object.assign(env, {
     PATH: getAugmentedPath(),
     TERM: 'xterm-256color',
     COLORTERM: truecolorEnabled ? 'truecolor' : undefined,
@@ -185,11 +216,7 @@ export function buildClaudeEnv(sessionId: string, truecolorEnabled?: boolean): R
     // as the literal "CODEMAN_API_URL=undefined" (COD-115).
     // Path only (not the secret value) — hook curls cat it at execution time (COD-54)
     CODEMAN_HOOK_SECRET_FILE: dataPath('hook-secret'),
-  };
-  // COD-115: `delete`, not `= undefined` — node-pty serializes a present-with-undefined
-  // key as the literal string "KEY=undefined" (see buildMuxAttachEnv below).
-  if (!truecolorEnabled) delete env.COLORTERM;
-  delete env.CLAUDECODE;
+  });
   return env;
 }
 
