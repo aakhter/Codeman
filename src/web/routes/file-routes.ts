@@ -2012,13 +2012,43 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     }
 
     try {
-      const uri = req.body && typeof req.body === 'object' ? (req.body as { uri?: unknown }).uri : undefined;
+      const body: { uri?: unknown; allowUnlistedPath?: unknown } =
+        req.body && typeof req.body === 'object' ? (req.body as { uri?: unknown; allowUnlistedPath?: unknown }) : {};
+      const allowUnlistedPath = body.allowUnlistedPath === true;
+      if (allowUnlistedPath) {
+        const reqHost = req.headers.host;
+        const origin = req.headers.origin;
+        const referer = req.headers.referer;
+        let csrfOk = false;
+        if (origin) {
+          try {
+            csrfOk = new URL(origin).host === reqHost;
+          } catch {
+            /* invalid Origin → not ok */
+          }
+        } else if (referer) {
+          try {
+            csrfOk = new URL(referer).host === reqHost;
+          } catch {
+            /* invalid Referer → not ok */
+          }
+        } else {
+          csrfOk = !!req.headers['x-codeman-csrf'];
+        }
+        if (!csrfOk) {
+          reply.code(403);
+          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'CSRF check failed');
+        }
+      }
+
+      const uri = body.uri;
       const filePath = parsePreviewFileUri(uri);
       const registered = await registerGeneratedArtifactAttachment({
         sessionId: id,
         filePath,
         sessionWorkingDir: session.workingDir,
         remote: session.remote,
+        allowUnlistedPath,
       });
       const record = attachmentRegistry.get(id, registered.attachmentId);
       if (!record) throw new Error('Registered attachment record is unavailable');

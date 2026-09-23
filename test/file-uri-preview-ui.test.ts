@@ -50,7 +50,8 @@ function makeHarness(fetch: ReturnType<typeof vi.fn>) {
     classList: { add: vi.fn(), remove: vi.fn(), contains: vi.fn(() => true) },
   };
   const title = { textContent: '' };
-  const body = { innerHTML: '' };
+  const allowOnceButton = { disabled: false, textContent: '', addEventListener: vi.fn() };
+  const body = { innerHTML: '', querySelector: vi.fn(() => allowOnceButton) };
   const footer = { textContent: '' };
   const openFilePreview = vi.fn(async () => undefined);
   const host = Object.assign(Object.create(proto), {
@@ -78,7 +79,7 @@ function makeHarness(fetch: ReturnType<typeof vi.fn>) {
     _closeAnnotationTray: vi.fn(),
     openFilePreview,
   });
-  return { proto, host, overlay, title, body, footer, openFilePreview };
+  return { proto, host, overlay, title, body, footer, allowOnceButton, openFilePreview };
 }
 
 describe('COD-273 file URI preview UI', () => {
@@ -125,6 +126,38 @@ describe('COD-273 file URI preview UI', () => {
     );
     expect(body.innerHTML).not.toContain('/private/generated');
     expect(openFilePreview).not.toHaveBeenCalled();
+  });
+
+  it('offers one-file approval after a blocked preview and retries through the guarded resolver', async () => {
+    const uri = 'file:///tmp/custom/mockup.png';
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: async () => ({ success: false, error: 'Access to this file is blocked' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, data: { fileName: 'mockup.png', attachmentId: 'att_allowed' } }),
+      });
+    const { proto, host, body, allowOnceButton, openFilePreview } = makeHarness(fetch);
+
+    await proto.openFileUriPreview.call(host, uri, 'session-1');
+
+    expect(body.innerHTML).toContain('Allow this file once');
+    const clickHandler = allowOnceButton.addEventListener.mock.calls[0][1] as (event: {
+      currentTarget: typeof allowOnceButton;
+    }) => Promise<void>;
+    await clickHandler({ currentTarget: allowOnceButton });
+
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/sessions/session-1/file-uri-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri, allowUnlistedPath: true }),
+    });
+    expect(openFilePreview).toHaveBeenCalledWith('mockup.png', 'session-1', 'att_allowed');
   });
 
   it('ignores a response whose JSON completes after the preview is closed', async () => {

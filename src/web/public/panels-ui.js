@@ -4669,7 +4669,7 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async openFileUriPreview(fileUri, sessionId) {
+  async openFileUriPreview(fileUri, sessionId, { allowUnlistedPath = false } = {}) {
     if (!sessionId || !fileUri) return;
 
     const overlay = this.$('filePreviewOverlay');
@@ -4693,10 +4693,22 @@ Object.assign(CodemanApp.prototype, {
     const resolverState = { sessionId, fileUri, requestToken, mode: 'file-uri-resolver' };
     this.filePreviewState = resolverState;
     const ownsPreview = () => this.filePreviewState === resolverState && resolverState.requestToken === requestToken;
-    const renderError = (message) => {
+    const renderError = (message, offerAllowOnce = false) => {
       if (!ownsPreview()) return;
       const safeMessage = typeof message === 'string' && message.trim() ? message.trim().slice(0, 300) : 'Unable to preview file';
-      bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(safeMessage)}</div>`;
+      bodyEl.innerHTML = `<div class="binary-message">Error: ${escapeHtml(safeMessage)}${
+        offerAllowOnce
+          ? '<br><button type="button" class="btn-toolbar file-preview-allow-once">Allow this file once</button>'
+          : ''
+      }</div>`;
+      if (offerAllowOnce) {
+        bodyEl.querySelector('.file-preview-allow-once')?.addEventListener('click', async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          button.textContent = 'Allowing…';
+          await this.openFileUriPreview(fileUri, sessionId, { allowUnlistedPath: true });
+        });
+      }
     };
 
     let response;
@@ -4704,7 +4716,7 @@ Object.assign(CodemanApp.prototype, {
       response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/file-uri-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri: fileUri }),
+        body: JSON.stringify({ uri: fileUri, ...(allowUnlistedPath ? { allowUnlistedPath: true } : {}) }),
       });
     } catch (err) {
       if (!ownsPreview()) return;
@@ -4728,7 +4740,10 @@ Object.assign(CodemanApp.prototype, {
     const fileName = payload?.data?.fileName;
     const attachmentId = payload?.data?.attachmentId;
     if (!response.ok || payload?.success !== true) {
-      renderError(payload?.error);
+      renderError(
+        payload?.error,
+        !allowUnlistedPath && response.status === 403 && payload?.error === 'Access to this file is blocked'
+      );
       return;
     }
     if (typeof fileName !== 'string' || !fileName || typeof attachmentId !== 'string' || !attachmentId) {

@@ -12720,6 +12720,11 @@ kbd {
   color: var(--text-muted);
 }
 
+.file-preview-allow-once {
+  margin-top: 0.75rem;
+  cursor: pointer;
+}
+
 /* COD-387: the resolution base under a failed relative preview. Its own line —
    the parent has no `white-space: pre-wrap`, so a newline would collapse. */
 .file-preview-body .binary-message-detail {
