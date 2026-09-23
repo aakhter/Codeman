@@ -263,7 +263,7 @@ export function registerWsRoutes(
                 if (cid && seq !== null) {
                   recordTrace?.({ stage: 'server.input.pre-write', clientId: cid, seq });
                 }
-                delivered = session.write(msg.d);
+                delivered = session.write(msg.d, { fromUser: true });
               } catch {
                 delivered = false;
               }
@@ -278,7 +278,11 @@ export function registerWsRoutes(
             }
             if (seq !== null && socket.readyState === 1) {
               if (apply) {
-                if (delivered) socket.send(`{"t":"ia","seq":${seq}}`);
+                if (delivered) {
+                  recordTrace?.({ stage: 'server.input.pre-ack', clientId: cid as string, seq });
+                  socket.send(`{"t":"ia","seq":${seq}}`);
+                  recordTrace?.({ stage: 'server.input.post-ack', clientId: cid as string, seq });
+                }
               } else {
                 // REJECTED as a duplicate. ACK it — the client must still drop it
                 // from its durable queue — but say so, and hand back our watermark.
@@ -299,7 +303,9 @@ export function registerWsRoutes(
                   typeof (session as { lastInputSeq?: (c: string) => number }).lastInputSeq === 'function'
                     ? (session as { lastInputSeq: (c: string) => number }).lastInputSeq(cid as string)
                     : seq;
+                recordTrace?.({ stage: 'server.input.pre-ack', clientId: cid as string, seq });
                 socket.send(`{"t":"ia","seq":${seq},"dup":true,"last":${watermark}}`);
+                recordTrace?.({ stage: 'server.input.post-ack', clientId: cid as string, seq });
               }
             }
           } else if (

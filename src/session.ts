@@ -23,7 +23,7 @@
  *   ralph-tracker (todo/completion parsing), bash-tool-parser (tool invocation tracking),
  *   task-tracker (background tasks), mux-interface (tmux abstraction)
  * @consumedby session-manager, web/server, respawn-controller
- * @emits session:terminal, session:idle, session:working, session:completion, session:exit
+ * @emits session:terminal, session:idle, session:working, session:completion, session:promptSubmitted, session:exit
  *
  * @module session
  */
@@ -64,6 +64,8 @@ import {
   type SessionSource,
   type SessionDocker,
   type SessionActivityProjection,
+  type SessionNameSource,
+  type SessionWriteOptions,
 } from './types.js';
 import { resolveAndClaimOmpSessionId } from './utils/omp-session-resolver.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
@@ -141,6 +143,7 @@ import {
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
+import { isGeneratedSessionName, SubmittedPromptTracker } from './session-auto-name.js';
 import { parseTerminalAttachmentRequests } from './attachment-magic.js';
 import {
   sanitizeAttachmentHistory,
@@ -678,6 +681,15 @@ export class Session extends EventEmitter {
   private _taskCache = new SessionTaskCache();
 
   private _name: string;
+  private _nameSource: SessionNameSource;
+  /**
+   * Reconstructs the composer draft from USER keystrokes so the first real
+   * prompt can name the tab. Fed only when a write says `fromUser`, and never
+   * for a CLI whose Enter runs a command rather than submitting a prompt
+   * (`startMode: 'shell'`), so a shell tab is not renamed after every `ls`.
+   */
+  private readonly _submittedPromptTracker = new SubmittedPromptTracker();
+  private readonly _acceptsPrompts: boolean;
   private ptyProcess: pty.IPty | null = null;
   private _pid: number | null = null;
   private _status: SessionStatus = 'idle';
@@ -982,6 +994,12 @@ export class Session extends EventEmitter {
       workingDir: string;
       mode?: SessionMode;
       name?: string;
+      /**
+       * Who owns the name (see `SessionNameSource`). Omitted, it is inferred
+       * from the name: Codeman's own `w<n>-<case>` placeholders (or no name)
+       * stay eligible for auto-naming, anything else counts as the user's.
+       */
+      nameSource?: SessionNameSource;
       /** Terminal multiplexer instance (tmux) */
       mux?: TerminalMultiplexer;
       /** Whether to use multiplexer wrapping */
@@ -1071,6 +1089,9 @@ export class Session extends EventEmitter {
     this.createdAt = config.createdAt || Date.now();
     this.mode = config.mode || 'claude';
     this._name = config.name || '';
+    this._nameSource =
+      config.nameSource ?? (!this._name || isGeneratedSessionName(this._name) ? 'placeholder' : 'manual');
+    this._acceptsPrompts = getCli(this.mode)?.capabilities.startMode !== 'shell';
     this._resumeSessionId = config.resumeSessionId;
     this._nativeResumeId = config.nativeResumeId ?? null;
     // NOW, not `createdAt`: recovery passes the ORIGINAL creation time of a
@@ -1952,8 +1973,31 @@ export class Session extends EventEmitter {
     return this._muxSession?.headroomRoutedAt;
   }
 
+  /** An explicit rename: the name is the user's from here on and auto-naming never touches it. */
   set name(value: string) {
     this._name = value;
+    this._nameSource = 'manual';
+  }
+
+  /**
+   * Names the tab after its first prompt. Only a placeholder is eligible, and
+   * the session stops being one whether or not the string changed: "first
+   * prompt" means the first, not "every prompt until a rename". Returns
+   * whether the name changed, so the caller knows whether to persist and
+   * broadcast.
+   */
+  applyAutoName(value: string): boolean {
+    if (this._nameSource !== 'placeholder') return false;
+    const name = value.trim();
+    if (!name) return false;
+    this._nameSource = 'auto';
+    if (this._name === name) return false;
+    this._name = name;
+    return true;
+  }
+
+  get nameSource(): SessionNameSource {
+    return this._nameSource;
   }
 
   setAutoClear(enabled: boolean, threshold?: number): void {
@@ -2364,6 +2408,7 @@ export class Session extends EventEmitter {
       // attach repaint, so the home screens' quiet ordering survives a restart.
       lastActivityAt: this._wireActivityAt,
       name: this._name,
+      nameSource: this._nameSource,
       mode: this.mode,
       autoClearEnabled: this._autoOps.autoClearEnabled,
       autoClearThreshold: this._autoOps.autoClearThreshold,
@@ -4772,10 +4817,11 @@ export class Session extends EventEmitter {
    * discards the data, but it used to do so with no signal at all — which is how
    * input could disappear while the caller believed it had been delivered.
    */
-  write(data: string): boolean {
+  write(data: string, options: SessionWriteOptions = {}): boolean {
+    const submittedPrompt = this._trackSubmit(data, options);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
-    this._trackSubmit(data);
+    this._emitSubmittedPrompt(submittedPrompt);
     return true;
   }
 
@@ -4792,7 +4838,14 @@ export class Session extends EventEmitter {
     return this._lastSubmitAt;
   }
 
-  private _trackSubmit(data: string): void {
+  /**
+   * Stamps the pane's last Enter for EVERY write, and feeds the auto-name
+   * tracker only for user-originated input on a prompt-taking CLI. Ralph
+   * kick-starts, respawn `/clear`s, cron launches, approval answers and the
+   * trust-dialog keys all arrive without `fromUser` and so can never name a tab.
+   */
+  private _trackSubmit(data: string, options: SessionWriteOptions): string[] {
+    const submitted = options.fromUser && this._acceptsPrompts ? this._submittedPromptTracker.feed(data) : [];
     if (data.includes('\r') || data.includes('\n')) {
       this._lastSubmitAt = Date.now();
       this._terminalActivityEpoch++;
@@ -4801,6 +4854,24 @@ export class Session extends EventEmitter {
       // sibling codex pane's submit would otherwise be mistaken for this one's),
       // so codex panes additionally publish theirs to the shared map.
       if (this.mode === 'codex') Session.codexSubmitTimes.set(this.id, this._lastSubmitAt);
+    }
+    return submitted;
+  }
+
+  /**
+   * Feeds user input that reaches the pane AROUND the write paths: the
+   * send-key route injects Shift+Enter's line feed through `tmux send-keys -H`
+   * directly, and without this the two lines of a prompt joined with no
+   * separator. Reports submissions like a write would (a line feed never is one).
+   */
+  trackUserInput(data: string): void {
+    if (!this._acceptsPrompts) return;
+    this._emitSubmittedPrompt(this._submittedPromptTracker.feed(data));
+  }
+
+  private _emitSubmittedPrompt(prompts: string[]): void {
+    for (const prompt of prompts) {
+      this.emit('promptSubmitted', prompt);
     }
   }
 
@@ -4898,16 +4969,17 @@ export class Session extends EventEmitter {
    * session.writeViaMux('/new\r');    // Send /new command
    * ```
    */
-  async writeViaMux(data: string): Promise<boolean> {
+  async writeViaMux(data: string, options: SessionWriteOptions = {}): Promise<boolean> {
+    const submittedPrompt = this._trackSubmit(data, options);
     if (this._mux && this._muxSession) {
-      const delivered = await this._mux.sendInput(this.id, data);
-      if (delivered) this._trackSubmit(data);
-      return delivered;
+      const sent = await this._mux.sendInput(this.id, data);
+      if (sent) this._emitSubmittedPrompt(submittedPrompt);
+      return sent;
     }
     // Fallback to PTY write
     if (this.ptyProcess) {
       this.ptyProcess.write(data);
-      this._trackSubmit(data);
+      this._emitSubmittedPrompt(submittedPrompt);
       return true;
     }
     return false;
@@ -4957,7 +5029,7 @@ export class Session extends EventEmitter {
         if (isCodexFreshThread) {
           this._terminalActivityEpoch++;
           this.emit('terminalActivity');
-        } else this._trackSubmit(data);
+        } else this._trackSubmit(data, {});
       }
       if (isClear && !result.ok) {
         this._checkpointAwaitingInstantClear = false;
@@ -4970,7 +5042,7 @@ export class Session extends EventEmitter {
     if (this.mode === 'claude' && this.ptyProcess) {
       try {
         this.ptyProcess.write(data);
-        this._trackSubmit(data);
+        this._trackSubmit(data, {});
         return { ok: true, attempt: 1 };
       } catch (err) {
         if (isClear) {

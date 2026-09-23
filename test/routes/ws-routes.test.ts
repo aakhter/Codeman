@@ -443,7 +443,7 @@ describe('ws-routes', () => {
         ws.send(frame);
         expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 2 });
         ws.send(frame);
-        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 2 });
+        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 2, dup: true, last: 2 });
 
         const deduped = trace
           .snapshot()

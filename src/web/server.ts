@@ -2606,7 +2606,12 @@ export class WebServer extends EventEmitter {
         }
       },
       getStore: () => this.store,
-      registerAttachment: this.registerAttachment.bind(this),
+      registerAttachment: (id: string, filePath: string, source: 'external' | 'codex-generated') =>
+        this.registerAttachment(id, filePath, source),
+      updateSessionName: (id: string, name: string) => this.mux.updateSessionName(id, name),
+      // Opt-in: the first prompt lands in the tab name, mux-sessions.json, every
+      // session:updated broadcast and /api/search, so it is a choice, not a default.
+      isAutoNameEnabled: async () => (await this.readSettings()).autoNameSessions === true,
     };
   }
 
@@ -3953,6 +3958,7 @@ export class WebServer extends EventEmitter {
               remote: recoveredRemote,
               mode: muxSession.mode,
               name: sessionName,
+              nameSource: savedState?.nameSource,
               // When the session FIRST started, not when this server booted.
               // Without it every recovered session was restamped `Date.now()` on
               // each restart, so a week-old pane read as "created 2m ago" on the
