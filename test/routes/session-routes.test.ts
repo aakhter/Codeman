@@ -590,6 +590,85 @@ describe('session-routes', () => {
       }
     });
 
+    it.each([
+      {
+        selection: { kind: 'profile' as const, profileId: 'cisco' },
+        profiles: [{ id: 'cisco', name: 'Cisco', command: 'exec codx cisco' }],
+      },
+      {
+        selection: { kind: 'custom' as const, command: 'exec codx personal' },
+        profiles: [],
+      },
+    ])('uses the selected local Codex command in Quick Start ($selection.kind)', async ({ selection, profiles }) => {
+      const caseName = 'quick-local-codex-command';
+      const workingDir = join(CASES_DIR, caseName);
+      await mkdir(workingDir, { recursive: true });
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue(selection);
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue(profiles);
+      cliAvailability.codex = false;
+      const startInteractive = vi.spyOn(Session.prototype, 'startInteractive').mockResolvedValue(undefined);
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const sessionId = JSON.parse(response.body).data.sessionId as string;
+        expect(harness.ctx.sessions.get(sessionId)?.codexConfig?.baseCommand).toBe(
+          selection.kind === 'profile' ? profiles[0].command : selection.command
+        );
+        expect(harness.ctx.store.getCaseCodexCommandSelection).toHaveBeenCalledWith('@single', caseName);
+      } finally {
+        startInteractive.mockRestore();
+        await rm(workingDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails Quick Start before creating a local session when its selected profile is missing', async () => {
+      const caseName = 'quick-local-codex-missing';
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({ kind: 'profile', profileId: 'deleted' });
+      harness.ctx.store.getCodexCommandProfiles.mockReturnValue([]);
+
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/quick-start',
+        payload: { caseName, mode: 'codex' },
+      });
+
+      expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+      expect(JSON.parse(response.body)).toMatchObject({
+        errorCode: ApiErrorCode.OPERATION_FAILED,
+        error: 'Saved Codex command profile is unavailable',
+      });
+      expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    });
+
+    it('denies Quick Start for a non-granted local Codex command', async () => {
+      const username = 'quicklocalcodexuser';
+      const cleanup = await useRegularUserHarness(username, false);
+      const caseName = 'quick-local-codex-denied';
+      harness.ctx.store.getCaseCodexCommandSelection.mockReturnValue({
+        kind: 'custom',
+        command: 'exec codx cisco',
+      });
+
+      try {
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName, mode: 'codex' },
+        });
+
+        expect(response.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.FORBIDDEN));
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      } finally {
+        await cleanup();
+      }
+    });
+
     it('fails a missing local Codex profile before Session construction', async () => {
       const caseName = 'local-codex-missing';
       const workingDir = join(CASES_DIR, caseName);

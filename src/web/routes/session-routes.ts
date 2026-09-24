@@ -4077,6 +4077,22 @@ export function registerSessionRoutes(
         dockerResumeId = dockerCase.lastClaudeSessionId;
       }
     } else {
+      // Resolve the selected local command before the stock CLI availability check.
+      // Quick Start must apply the same owner and privilege gates as POST /api/sessions.
+      if (mode === 'codex') {
+        const localResolved = resolveLocalCaseCodexLaunchCommand(ctx.store, owner, caseName);
+        if (!localResolved.ok) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, localResolved.error);
+        if (localResolved.command !== undefined) {
+          if (!(await canUsernameRunPrivilegedCommands(owner))) {
+            return createErrorResponse(
+              ApiErrorCode.FORBIDDEN,
+              'Custom Codex commands require the can-bypass-permissions grant'
+            );
+          }
+          qsLocalCodexCommand = localResolved.command;
+        }
+      }
+
       // Same pre-flight as POST /api/sessions: refuse before spawning a pane that would die
       // on `command not found`, with the resolver's own diagnostics, and a launcher CLI's
       // more specific reason (dsh: binary vs no pane-capable profile vs the profile the
