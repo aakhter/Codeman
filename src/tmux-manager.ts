@@ -1276,6 +1276,8 @@ export function buildLocalPaneCommand(opts: {
   pathExport: string;
   envExports: string[];
   cmd: string;
+  /** COD-392: owner-authored command is a complete shell line, including any exec. */
+  exactCommand?: boolean;
 }): string {
   const nofile = buildNofileLimitCommand();
   if (isAgentCliMode(opts.mode)) {
@@ -1283,7 +1285,7 @@ export function buildLocalPaneCommand(opts: {
     const loginArgs = loginShellArgs(shell);
     // Run Codeman's path/export AFTER the profile so Codeman-controlled values still
     // win; the trailing exec keeps the pane PID as the agent CLI itself.
-    const agentCommand = buildLocalAgentExecCommand(opts.mode, opts.cmd);
+    const agentCommand = opts.exactCommand ? opts.cmd : buildLocalAgentExecCommand(opts.mode, opts.cmd);
     const body = [opts.pathExport.replace(/ && $/, ''), ...opts.envExports, agentCommand]
       .filter((s) => s.trim().length > 0)
       .join(' && ');
@@ -2751,8 +2753,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             statusLineCommand,
             sessionName: cliName ?? name,
           });
-          const cmd = wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
-          return buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
+          const exactCommand = mode === 'codex' && Boolean(codexConfig?.baseCommand?.trim());
+          const cmd = exactCommand ? baseCmd : wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
+          return buildLocalPaneCommand({
+            mode,
+            pathExport,
+            envExports,
+            cmd,
+            exactCommand,
+          });
         },
         remote: remote
           ? () =>
@@ -3052,8 +3061,15 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           statusLineCommand,
           sessionName: cliName,
         });
-        const wrapped = wrapSpawnCommandWithNice(command, niceConfig || DEFAULT_NICE_CONFIG);
-        return buildLocalPaneCommand({ mode, pathExport, envExports, cmd: wrapped });
+        const exactCommand = mode === 'codex' && Boolean(codexConfig?.baseCommand?.trim());
+        const wrapped = exactCommand ? command : wrapSpawnCommandWithNice(command, niceConfig || DEFAULT_NICE_CONFIG);
+        return buildLocalPaneCommand({
+          mode,
+          pathExport,
+          envExports,
+          cmd: wrapped,
+          exactCommand,
+        });
       },
       remote: remote
         ? () =>
