@@ -35,6 +35,7 @@
  * recurring (`abc` present, `XYZ` missing) instead of being re-diagnosed blind.
  */
 export const BROWSER_TEST_GLOBS = [
+  'test/*.browser.test.ts',
   'test/inline-rename.test.ts',
   'test/opencode-resize.test.ts',
   'test/webgl-fallback.test.ts',
