@@ -2615,7 +2615,9 @@ export class Session extends EventEmitter {
       cliAccountType: this._cliAccountType || undefined,
       cliLatestVersion: this._cliLatestVersion || undefined,
       openCodeConfig: this._openCodeConfig,
-      codexConfig: this._codexConfig,
+      codexConfig: this._codexConfig
+        ? (({ baseCommand: _baseCommand, ...publicCodexConfig }) => publicCodexConfig)(this._codexConfig)
+        : undefined,
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
@@ -3559,9 +3561,9 @@ export class Session extends EventEmitter {
             claudeMode: this._claudeMode,
             allowedTools: this._allowedTools,
             openCodeConfig: this._openCodeConfig,
-            codexConfig: this._codexConfig
-              ? (({ baseCommand: _baseCommand, ...publicCodexConfig }) => publicCodexConfig)(this._codexConfig)
-              : undefined,
+            // The mux create path needs the same resolved command as respawn.
+            // API/state serializers strip this private field separately.
+            codexConfig: this._codexConfig,
             geminiConfig: this._geminiConfig,
             antigravityConfig: this._antigravityConfig,
             piConfig: this._piConfig,
