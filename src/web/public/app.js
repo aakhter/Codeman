@@ -3951,6 +3951,64 @@ class CodemanApp {
     if (sessionId && this._wsOutputGapSession === sessionId) this._wsOutputGapSession = null;
   }
 
+  _isTuiSession(sessionId) {
+    const mode = this.sessions.get(sessionId)?.mode;
+    return mode === 'codex' || mode === 'gemini';
+  }
+
+  _isRemoteTuiSession(sessionId) {
+    return this._isTuiSession(sessionId) && !!this.sessions.get(sessionId)?.remote;
+  }
+
+  // Mirror history handlers are absent from this build. Keep TUI sessions on
+  // the full-buffer path so selecting a restored tab remains usable.
+  _isMirrorSession(_sessionId) {
+    return false;
+  }
+
+  _onSessionResized(data) {
+    if (data.id !== this.activeSessionId || !this.terminal || !this._isTuiSession(data.id)) return;
+    if (this.terminal.cols === data.cols && this.terminal.rows === data.rows) return;
+    this._foreignResizeDirty = data.id;
+    clearTimeout(this._foreignResizeTimer);
+    this._foreignResizeTimer = setTimeout(() => this._reconcileForeignResize(data.id), FOREIGN_RESIZE_SETTLE_MS);
+  }
+
+  async _reconcileForeignResize(sessionId) {
+    if (sessionId !== this.activeSessionId || !this.terminal) {
+      this._foreignResizeDirty = null;
+      return;
+    }
+    if (this._isLoadingBuffer) return;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/terminal`);
+      const data = (await res.json())?.data ?? {};
+      if (sessionId !== this.activeSessionId || this._isLoadingBuffer || data.source !== 'mux-full-history') return;
+      if (!data.terminalBuffer) return;
+      if (this._lastReconcileWrite?.id === sessionId && this._lastReconcileWrite.buf === data.terminalBuffer) {
+        this._foreignResizeDirty = null;
+        return;
+      }
+      this.terminal.clear();
+      this.terminal.reset();
+      await this.chunkedTerminalWrite(data.terminalBuffer);
+      this.terminal.scrollToBottom();
+      this._localEchoOverlay?.rerender();
+      this._lastReconcileWrite = { id: sessionId, buf: data.terminalBuffer };
+      this._foreignResizeDirty = null;
+    } catch (err) {
+      console.error('foreign-resize reconcile failed:', err);
+    }
+  }
+
+  _remoteReconcileTick() {
+    const id = this.activeSessionId;
+    if (!id || !this.terminal || this._isLoadingBuffer || !this._isRemoteTuiSession(id)) return;
+    const buf = this.terminal.buffer.active;
+    if (buf.viewportY !== buf.baseY) return;
+    void this._reconcileForeignResize(id);
+  }
+
   async _onSessionClearTerminal(data) {
     if (data.id === this.activeSessionId) {
       // COD-187: mirror tabs repaint from the frame capture instead of a
@@ -5544,6 +5602,19 @@ class CodemanApp {
       Array.isArray(data.sessions) &&
       data.sessions.some((s) => s.id === activeBefore);
 
+    const deferredCreatedSessionOwners = new Map();
+    for (const id of this._deferredCreatedSessionIds || []) {
+      const session = this.sessions.get(id);
+      if (session) deferredCreatedSessionOwners.set(id, this._tabLayoutSessionOwnerIdentity(session));
+    }
+    const currentUser = window.__codemanUser;
+    const currentLayoutOwner =
+      currentUser?.multiUser === true && typeof currentUser.username === 'string' && currentUser.username.length > 0
+        ? currentUser.username
+        : currentUser?.multiUser === false
+          ? '@single'
+          : null;
+
     this._resetAllAppState(keepTerminal);
 
     data.sessions.forEach(s => {
@@ -5677,35 +5748,35 @@ class CodemanApp {
       return;
     }
 
-    const previousActiveId = this.activeSessionId;
-    if (this.sessionOrder.length === 0) {
-      this.activeSessionId = null;
-    } else {
-      // Priority: current active > localStorage > first session
-      let restoreId = previousActiveId;
+    // Restore only after this generation's layout read has completed. A newer
+    // init or an explicit selection takes precedence over this pending restore.
+    void tabLayoutLoad.then(() => {
+      if (gen !== this._initGeneration) return;
+      if (
+        this._selectGeneration !== tabRestoreSnapshot.selectGeneration ||
+        this.activeSessionId !== tabRestoreSnapshot.activeSessionId ||
+        this.activeWebviewId !== tabRestoreSnapshot.activeWebviewId
+      ) return;
+      if (tabRestoreSnapshot.activeWebviewId) return;
+
+      // Priority: current active > localStorage > first projected session.
+      let restoreId = tabRestoreSnapshot.activeSessionId;
       if (!restoreId || !this.sessions.has(restoreId)) {
         try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
       }
-      if (keepTerminal && restoreId === previousActiveId && this.sessions.has(restoreId)) {
-        // Reconnect onto the session already on screen. renderSessionTabs() ran
-        // above and activeSessionId never changed, so the tab strip is already
-        // correct; only the buffer needs to catch up. The WS has its own
-        // backoff reconnect, but if it is not on this session (dead socket, or
-        // a give-up) nothing else would re-establish it from here.
+      if (keepTerminal && restoreId === tabRestoreSnapshot.activeSessionId && this.sessions.has(restoreId)) {
+        // Reconnect onto the session already on screen without resetting xterm.
         if (this._wsSessionId !== restoreId) this._connectWs(restoreId);
         void this._onSessionNeedsRefresh({ id: restoreId });
-      } else {
-        this.activeSessionId = null;
-        // `auto`: the app is restoring a session on load, not a human opening
-        // one, so a pending idle alert on that tab stays armed until it is
-        // actually tapped (see the userInitiated note in selectSession).
-        if (restoreId && this.sessions.has(restoreId)) {
-          this.selectSession(restoreId, { auto: true });
-        } else {
-          this.selectSession(this.sessionOrder[0], { auto: true });
-        }
+        return;
       }
-    }
+
+      this.activeSessionId = null;
+      this.updateFileBrowserHeaderButton?.();
+      if (this.sessionOrder.length === 0) return;
+      // An app-made restore must leave a pending idle alert armed.
+      this.selectSession(restoreId && this.sessions.has(restoreId) ? restoreId : this.sessionOrder[0], { auto: true });
+    });
   }
 
   async loadState() {
