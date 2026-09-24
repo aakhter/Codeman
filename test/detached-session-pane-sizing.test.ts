@@ -14,6 +14,12 @@
  * already stood aside on the same condition, so this follows a rule the code
  * had already established.
  *
+ * ⚠️ It returns early BEFORE the local fit, not after (issue #464). The earlier
+ * rule was "withhold the send, never the reflow", which leaves this window's
+ * xterm at a shape the PTY was never told about — and a CLI computes its
+ * repaints from the shape it was told, so that reflow bought a garbled frame
+ * rather than a correct one. Withhold both, or neither.
+ *
  * Loaded via `vm` with a stubbed context (no jsdom — jsdom is broken on this
  * box; see connection-indicator.test.ts), the same way terminal-buffer-flush
  * extracts the real mixin methods from terminal-ui.js.
@@ -56,15 +62,19 @@ function makeApp(overrides: Record<string, unknown> = {}) {
   currentFetch = fetchMock;
   const app = {
     sendResize: mixin.sendResize,
+    // The real chain: sendResize fits, floors and applies through one function
+    // now, so the harness must let it (#464).
+    syncTerminalGeometry: mixin.syncTerminalGeometry,
+    _geometryForResizeRequest: mixin._geometryForResizeRequest,
+    _resizeTerminalTo: mixin._resizeTerminalTo,
+    // Real, so a geometry change really does re-check whether the terminal now
+    // overflows its container (#464 item 4) — the fake DOM has no container, so
+    // it measures nothing and settles on "no overflow", which is the truth here.
+    _scheduleOverflowAffordanceSync: mixin._scheduleOverflowAffordanceSync,
+    _syncTerminalOverflowAffordance: mixin._syncTerminalOverflowAffordance,
+    _onPtyGeometryReport: vi.fn(),
     getTerminalDimensions: () => ({ cols: 120, rows: 40 }),
-    // Downstream's sendResize is STRICTER than upstream's: it returns early unless
-    // the id is the active browser view (a delayed selection must not report the
-    // winner's shared xterm as its own). Upstream has no such guard, so its test
-    // never set this — without it all three cases return before the local fit.
-    activeSessionId: SESSION,
-    // Downstream-only collaborators sendResize calls before/after the fit.
-    applyTerminalFontPolicyForActiveSession: vi.fn(),
-    _queuePendingTerminalResize: vi.fn(),
+    terminal: { cols: 120, rows: 40, resize: vi.fn() },
     fitAddon: { fit: vi.fn() },
     detachedSessions: new Set<string>(),
     isSoloWindow: false,
@@ -91,12 +101,18 @@ describe('detached sessions own their pane size', () => {
     const changed = await app.sendResize(SESSION);
 
     expect(changed).toBe(false);
-    // Nothing sent: the popup's size stands on the server.
-    expect((app._ws as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
-    // The LOCAL fit still runs, so the dashboard's own xterm stays correct and
-    // tab-rail-resize's single settle-time refit is not swallowed. Same line the
-    // mobile-keyboard guard draws: withhold the send, never the reflow.
-    expect((app.fitAddon as { fit: ReturnType<typeof vi.fn> }).fit).toHaveBeenCalled();
+    // No request: the popup's size stands on the server.
+    expect(fetchMock).not.toHaveBeenCalled();
+    // ⚠️ REVERSED by issue #464, deliberately. This used to assert that the
+    // LOCAL fit still ran — "withhold the send, never the reflow" — on the
+    // reasoning that it keeps the dashboard's own xterm correct. It does not:
+    // it leaves this xterm at a shape the PTY was never told about, and Claude
+    // Code computes every repaint from the shape it WAS told, so the frames
+    // land on rows nothing erased. The popup that owns the PTY is drawing for
+    // its own width either way, so the dashboard's reflow was a reflow nothing
+    // was rendering for. Withholding the resize means withholding all of it.
+    expect((app.fitAddon as { fit: ReturnType<typeof vi.fn> }).fit).not.toHaveBeenCalled();
+    expect((app.terminal as { resize: ReturnType<typeof vi.fn> }).resize).not.toHaveBeenCalled();
   });
 
   it('the solo window still sizes the session it displays', async () => {

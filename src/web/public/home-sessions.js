@@ -286,7 +286,48 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Array<object>} row descriptors, ready to render
    */
   buildHomeSessionRows() {
-    return this.buildHomeTabRows().filter((row) => row.kind === 'session');
+    const cases = Array.isArray(this.cases) ? this.cases : [];
+    const order = Array.isArray(this.sessionOrder) ? this.sessionOrder : [];
+    const ids = order.filter((id) => this.sessions?.has(id));
+    // A session created before the order list caught up would otherwise be
+    // invisible here while its tab already exists.
+    for (const id of this.sessions?.keys() || []) if (!ids.includes(id)) ids.push(id);
+
+    const rows = ids.map((id, orderIndex) => {
+      const session = this.sessions.get(id);
+      const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
+      const state = this._mobileOverviewState(session, this.pendingHooks?.get(id));
+      const mode = session.mode || 'claude';
+      return {
+        id,
+        orderIndex,
+        name: this.getSessionName ? this.getSessionName(session) : session.name || id.slice(0, 8),
+        mode,
+        modeBadge: HOME_SESSIONS_MODE_BADGE[mode] || '',
+        caseName: matched ? matched.name : '',
+        dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
+        state,
+        pill: HOME_SESSIONS_PILL_LABEL[state] || state,
+        // What the pane's footer says is still running in the background, straight off
+        // the session payload. Same field, same meaning as on the phone overview.
+        watching: typeof session.watching === 'string' ? session.watching : '',
+        // Epoch ms, straight off the session payload; formatting happens at
+        // render time so the clock below can redo it without a re-render.
+        createdAt: Number(session.createdAt) || 0,
+        lastActivityAt: Number(session.lastActivityAt) || 0,
+        // The running group is ordered by the pane's last Enter, since a
+        // working pane's last-activity stamp is always "now".
+        lastSubmitAt: Number(session.lastSubmitAt) || 0,
+        // "how long has it been like this", resolved by the phone overview's
+        // helper so both home screens label the same stamp with the same word.
+        since: this._mobileOverviewSince(state, session),
+      };
+    });
+
+    // Guarded like every other constants.js consumer: a stale cached
+    // constants.js (iOS Safari serves old JS after a deploy) must degrade to
+    // tab order, not TypeError the whole home screen away.
+    return window.CodemanSessionOrder ? window.CodemanSessionOrder.sort(rows) : rows;
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -523,6 +564,12 @@ Object.assign(CodemanApp.prototype, {
     // what stops it ellipsizing.
     const meta = this._buildHomeSessionsMeta(row);
     meta.appendChild(pill);
+    // Built by the phone overview so both home screens word the badge identically.
+    // Guarded like every other cross-file call here: a stale cached mobile-overview.js
+    // must cost the badge, not the rail.
+    if (row.watching && typeof this._buildWatchingBadge === 'function') {
+      meta.appendChild(this._buildWatchingBadge(row.watching, 'home-sessions-pill'));
+    }
     item.appendChild(meta);
 
     return item;

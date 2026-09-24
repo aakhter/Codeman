@@ -50,6 +50,7 @@ export interface SessionListenerRefs {
   exit: (code: number | null) => void;
   working: () => void;
   idle: (info?: SessionIdleInfo) => void;
+  watchingChanged: () => void;
   taskCreated: (task: BackgroundTask) => void;
   taskUpdated: (task: BackgroundTask) => void;
   taskCompleted: (task: BackgroundTask) => void;
@@ -331,6 +332,17 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       }
     },
 
+    /**
+     * Pushes the session state when `Session.watching` changes without the status
+     * changing with it. That is the badge appearing or, more often, going away: a CLI can
+     * finish its background work without taking a turn, so the row is idle before and
+     * after and no other broadcast fires. There is no SSE event of its own, because the
+     * badge reads off the session payload every surface already has.
+     */
+    watchingChanged: () => {
+      deps.broadcastSessionStateDebounced(session.id);
+    },
+
     // ─── Background Task Events ──────────────────────────────
 
     /** Broadcasts `task:created` — new background task discovered */
@@ -577,6 +589,7 @@ export function attachSessionListeners(session: Session, refs: SessionListenerRe
   session.on('exit', refs.exit);
   session.on('working', refs.working);
   session.on('idle', refs.idle);
+  session.on('watchingChanged', refs.watchingChanged);
   session.on('taskCreated', refs.taskCreated);
   session.on('taskUpdated', refs.taskUpdated);
   session.on('taskCompleted', refs.taskCompleted);
@@ -617,6 +630,7 @@ export function detachSessionListeners(session: Session, refs: SessionListenerRe
   session.off('exit', refs.exit);
   session.off('working', refs.working);
   session.off('idle', refs.idle);
+  session.off('watchingChanged', refs.watchingChanged);
   session.off('taskCreated', refs.taskCreated);
   session.off('taskUpdated', refs.taskUpdated);
   session.off('taskCompleted', refs.taskCompleted);

@@ -24,6 +24,7 @@ import type {
   OmpConfig,
   SessionRemote,
   SessionDocker,
+  PaneExit,
 } from './types.js';
 import type { CodexProviderEnvironment } from './codex-provider-identity.js';
 
@@ -63,10 +64,25 @@ export interface MuxSession {
   respawnConfig?: PersistedRespawnConfig;
   /** Whether Ralph / Todo tracking is enabled */
   ralphEnabled?: boolean;
-  /** COD-102: whether this session was routed through Headroom at spawn (claude/codex); undefined for other modes. */
   headroomRouted?: boolean;
-  /** COD-254: when the Headroom routing state above was captured at launch or respawn. */
   headroomRoutedAt?: number;
+  /**
+   * This record was rebuilt from the tmux socket rather than from Codeman's own
+   * bookkeeping, so everything on it but the name and the pid is a guess. Its
+   * synthetic `restored-<fragment>` id cannot find the session's `state.json`
+   * entry either, which means a remote or docker session rediscovered this way
+   * arrives with no `remote`/`docker` metadata and looks local. Anything that
+   * would be WRONG about such a session rather than merely vague must fail
+   * closed on this flag.
+   *
+   * ⚠ It is PERMANENT, not merely true for the boot that rediscovered the
+   * session: `saveSessions()` serializes the whole record to
+   * `mux-sessions.json` and `loadSessions()` restores it, so a genuinely local
+   * session rediscovered once stays opted out of everything keyed on this for
+   * the life of that record. That is the safe direction to fail, and it costs
+   * only the guess Codeman is declining to make.
+   */
+  discovered?: boolean;
 }
 
 /**
@@ -204,6 +220,7 @@ export interface PaneCaptureOptions {
  * - `sessionKilled` (data: { sessionId: string }) - Session terminated
  * - `sessionDied` (data: { sessionId: string }) - Session died unexpectedly
  * - `statsUpdated` (sessions: MuxSessionWithStats[]) - Stats refreshed
+ * - `paneExitsUpdated` () - A pane read finished; ask `getPaneExit()` per session
  */
 export interface TerminalMultiplexer extends EventEmitter {
   /** Which backend this instance uses */
@@ -335,6 +352,24 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /** Check if the pane in a session is dead (command exited but remain-on-exit keeps it alive) */
   isPaneDead(muxName: string): Promise<boolean>;
+
+  /**
+   * What the last pane read saw of this session's agent, or `undefined` for
+   * UNKNOWN (Ark0N/Codeman#446). Unlike `isPaneDead()` this costs nothing: it
+   * reads a map the batched watcher fills, so it answers no fresher than that
+   * watcher's interval and the three synchronous `isPaneDead()` callers still
+   * need their own probe. See {@link PaneExit}.
+   */
+  getPaneExit?(muxName: string): PaneExit | undefined;
+
+  /** Forget a session's exit observation, e.g. once its pane has been respawned. */
+  clearPaneExit?(muxName: string): void;
+
+  /** Start polling every pane on the socket for an exited agent. */
+  startPaneExitWatcher?(intervalMs?: number): void;
+
+  /** Stop the pane-exit watcher. */
+  stopPaneExitWatcher?(): void;
 
   /** Respawn a dead pane with a fresh command. Returns the new PID or null on failure. */
   respawnPane(options: RespawnPaneOptions): Promise<number | null>;

@@ -659,56 +659,42 @@ const KeyboardHandler = {
       this._settleRestoreScroll = false;
 
       if (typeof app !== 'undefined' && app.terminal) {
-        // COD-284: double-rAF waits for iOS to commit the keyboard layout,
-        // then repaints its xterm canvas before notifying the PTY.
-        requestAnimationFrame(() =>
-          requestAnimationFrame(() => {
-            try {
-              app.applyTerminalFontPolicyForActiveSession?.();
-            } catch {}
-            if (app.fitAddon) {
-              try {
-                app.fitAddon.fit();
-              } catch {}
-            }
-            if (this.keyboardVisible) this._shrinkPaddingToFit();
-            try {
-              app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
-            } catch {}
-            // Following live output → bottom, as before. Reading history → back to
-            // the pre-reflow anchor instead of being yanked down (#259).
-            // COD-187: never yank the frozen history view to the bottom either.
-            if (shouldRestoreScroll) {
-              if (this._settleFollowing === false || app._viewMode === 'history') this._restoreTerminalScrollIntent();
-              else app.terminal.scrollToBottom();
-            }
-            app._syncMobileHelperTextareaToCursor?.();
-            app._localEchoOverlay?.rerender?.();
-            this._sendTerminalResize();
-          })
-        );
+        // Floored fit, not a bare fitAddon.fit(): _shrinkPaddingToFit measures
+        // the leftover gap under the LAST row, so it has to run against the
+        // geometry xterm will actually keep (issue #464).
+        app.syncTerminalGeometry?.();
+        if (this.keyboardVisible) this._shrinkPaddingToFit();
+        // Following live output → bottom, as before. Reading history → back to
+        // the pre-reflow anchor instead of being yanked down (#259).
+        if (shouldRestoreScroll) {
+          if (this._settleFollowing === false) this._restoreTerminalScrollIntent();
+          else app.terminal.scrollToBottom();
+        }
+        app._syncMobileHelperTextareaToCursor?.();
+        app._localEchoOverlay?.rerender?.();
+        this._sendTerminalResize();
       }
       window.scrollTo(0, 0);
     }, this.VIEWPORT_SETTLE_MS);
   },
 
-  /** Send current terminal dimensions to the server (one-shot, for keyboard open/close) */
+  /**
+   * Send the settled terminal dimensions to the server (one-shot, for keyboard
+   * open/close — `throttledResize` deliberately holds the PTY's shape for the
+   * whole animation, so this is what stops it going stale).
+   *
+   * ⚠️ Delegates rather than computing its own numbers. This used to re-read
+   * `proposeDimensions()` and floor only what it POSTed, so on a phone with the
+   * keyboard up — where the proposal is routinely under ten rows — the PTY was
+   * told ten and xterm kept six, which is the #464 divergence. Worse, it read
+   * the proposal AFTER `_shrinkPaddingToFit()` had moved the container, so even
+   * unfloored its answer could differ from the fit above it. `sendResize` fits,
+   * floors and applies in one step, and additionally gets the WS fast path and
+   * the detached-session yield this hand-rolled POST never had.
+   */
   _sendTerminalResize() {
-    if (
-      typeof app === 'undefined' ||
-      !app.activeSessionId ||
-      typeof app.sendResize !== 'function' ||
-      app._isTerminalSessionGone?.(app.activeSessionId) ||
-      document.visibilityState === 'hidden'
-    )
-      return;
-    try {
-      // Keyboard settlement is passive geometry maintenance. Keep it on the
-      // token-fenced WebSocket path so a delayed/hidden phone callback cannot
-      // take sizing ownership back from the viewer the user is now using.
-      const pending = app.sendResize(app.activeSessionId);
-      pending?.catch?.(() => {});
-    } catch {}
+    if (typeof app === 'undefined' || !app.activeSessionId) return;
+    app.sendResize?.(app.activeSessionId)?.catch?.(() => {});
   },
 
   /**
@@ -766,10 +752,8 @@ const KeyboardHandler = {
         const currentPadding = parseInt(main.style.paddingBottom) || 0;
         const floor = Math.min(currentPadding, this._fixedBottomBarsHeight());
         main.style.paddingBottom = Math.max(floor, currentPadding - gap) + 'px';
-        if (app.fitAddon)
-          try {
-            app.fitAddon.fit();
-          } catch {}
+        // Floored, like every other fit of the main terminal (#464).
+        app.syncTerminalGeometry?.();
       }
     } catch {}
   },

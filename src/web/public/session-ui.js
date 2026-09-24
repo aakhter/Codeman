@@ -31,12 +31,14 @@
  */
 const RUN_MODE_LAUNCH = {
   opencode: {
+    runMethod: 'runOpenCode',
     label: 'OpenCode',
     installHint: 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
     supportsCustomModel: true,
     buildConfig: () => ({ openCodeConfig: { autoAllowTools: true } }),
   },
   codex: {
+    runMethod: 'runCodex',
     label: 'Codex',
     installHint: 'Codex CLI not found. Install with: npm install -g @openai/codex',
     supportsCustomModel: true,
@@ -49,12 +51,14 @@ const RUN_MODE_LAUNCH = {
     }),
   },
   gemini: {
+    runMethod: 'runGemini',
     label: 'Gemini',
     installHint: 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli',
     supportsCustomModel: true,
     buildConfig: () => ({ geminiConfig: { approvalMode: 'yolo' } }),
   },
   antigravity: {
+    runMethod: 'runAntigravity',
     label: 'Antigravity',
     installHint: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
     // antigravity has no customModelInjection recipe (docs/custom-model-endpoints-plan.md
@@ -63,6 +67,7 @@ const RUN_MODE_LAUNCH = {
     buildConfig: () => ({ antigravityConfig: { dangerouslySkipPermissions: true } }),
   },
   pi: {
+    runMethod: 'runPi',
     label: 'Pi',
     installHint: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
     supportsCustomModel: true,
@@ -74,12 +79,14 @@ const RUN_MODE_LAUNCH = {
     buildConfig: () => null,
   },
   omp: {
+    runMethod: 'runOmp',
     label: 'OMP',
     installHint: 'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh',
     supportsCustomModel: true,
     buildConfig: () => null,
   },
   grok: {
+    runMethod: 'runGrok',
     label: 'Grok',
     installHint: 'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash',
     supportsCustomModel: true,
@@ -91,6 +98,7 @@ const RUN_MODE_LAUNCH = {
     buildConfig: () => ({ grokConfig: { alwaysApprove: true } }),
   },
   deepseek: {
+    runMethod: 'runDeepSeek',
     label: 'DeepSeek',
     installHint: 'DeepSeek Harness CLI (dsh) not found. Install with: npm install -g @deepseek-ai/dsh',
     // The two-part availability check is deliberate. `dsh` being installed is
@@ -558,7 +566,7 @@ Object.assign(CodemanApp.prototype, {
       if (mode === 'claude' || !EXTERNAL_CLI_MODES.has(mode)) {
         return await this.runClaude(options);
       }
-      return await this._runCliMode(mode);
+      return await this[RUN_MODE_LAUNCH[mode].runMethod](options);
     } finally {
       const remaining = minLockMs - (Date.now() - startedAt);
       if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
@@ -1788,7 +1796,7 @@ Object.assign(CodemanApp.prototype, {
 
   async runClaude(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const tabCount = this._readTabCount();
+    const tabCount = options.count ?? this._readTabCount();
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} Claude session(s) in ${caseName}...`
@@ -1926,6 +1934,7 @@ Object.assign(CodemanApp.prototype, {
             caseName,
             ...(!isRemoteCase ? { workingDir } : {}),
             name,
+            ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
             ...(hasEnvOverrides ? { envOverrides } : {}),
             ...(effort ? { effort } : {}),
             ...(modelOverride !== undefined ? { modelOverride } : {}),
@@ -2171,7 +2180,7 @@ Object.assign(CodemanApp.prototype, {
    * launched exactly one session, with no error, just the wrong count.
    * `buildBody(sessionName)` returns that mode's quick-start POST body.
    */
-  async _launchQuickStartInstances(caseName, tabCount, label, buildBody, ownsLaunchTerminal) {
+  async _launchQuickStartInstances(caseName, tabCount, label, buildBody, ownsLaunchTerminal, options = {}) {
     const startNumber = this._nextCaseSessionStartNumber(caseName);
     let firstSessionId = null;
     // A custom-model launch can ask up to two questions before it starts anything: the
@@ -2184,7 +2193,7 @@ Object.assign(CodemanApp.prototype, {
     let customModelAnswered = false;
     for (let i = 0; i < tabCount; i++) {
       const sessionName = `w${startNumber + i}-${caseName}`;
-      const body = buildBody(sessionName);
+      const body = { ...buildBody(sessionName), ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}) };
       const data = await this._quickStartWithCustomModelConfirm(
         customModelAnswered && body.customModel
           ? { ...body, customModel: { ...body.customModel, confirmedContext: true, confirmedSwap: true } }
@@ -2192,7 +2201,12 @@ Object.assign(CodemanApp.prototype, {
       );
       if (!data.success) throw new Error(data.error || `Failed to start ${label}`);
       customModelAnswered = true;
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+      await this._ensureCreatedSessionVisible(
+        data.data.sessionId,
+        data.data.session,
+        data.data.tabLayout,
+        data.data.tabPlacements
+      );
       if (!firstSessionId) firstSessionId = data.data.sessionId;
     }
     if (tabCount > 1) {
@@ -2210,7 +2224,7 @@ Object.assign(CodemanApp.prototype, {
    * menu call them directly by name (`app.runOpenCode()` etc.), and several
    * tests assert on that name directly too.
    */
-  async _runCliMode(mode) {
+  async _runCliMode(mode, options = {}) {
     const entry = RUN_MODE_LAUNCH[mode];
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote/docker cases run the CLI on the OTHER side — the local status
@@ -2219,7 +2233,7 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const tabCount = this._readTabCount();
+    const tabCount = options.count ?? this._readTabCount();
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} ${entry.label} session(s) in ${caseName}...`
     );
@@ -2262,7 +2276,8 @@ Object.assign(CodemanApp.prototype, {
               : {}),
           }),
         }),
-        ownsLaunchTerminal
+        ownsLaunchTerminal,
+        options
       );
 
       // Switch to the new session (don't pre-set activeSessionId — selectSession
@@ -2277,36 +2292,36 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runOpenCode() {
-    return this._runCliMode('opencode');
+  async runOpenCode(options = {}) {
+    return this._runCliMode('opencode', options);
   },
 
-  async runCodex() {
-    return this._runCliMode('codex');
+  async runCodex(options = {}) {
+    return this._runCliMode('codex', options);
   },
 
-  async runGemini() {
-    return this._runCliMode('gemini');
+  async runGemini(options = {}) {
+    return this._runCliMode('gemini', options);
   },
 
-  async runAntigravity() {
-    return this._runCliMode('antigravity');
+  async runAntigravity(options = {}) {
+    return this._runCliMode('antigravity', options);
   },
 
-  async runPi() {
-    return this._runCliMode('pi');
+  async runPi(options = {}) {
+    return this._runCliMode('pi', options);
   },
 
-  async runOmp() {
-    return this._runCliMode('omp');
+  async runOmp(options = {}) {
+    return this._runCliMode('omp', options);
   },
 
-  async runGrok() {
-    return this._runCliMode('grok');
+  async runGrok(options = {}) {
+    return this._runCliMode('grok', options);
   },
 
-  async runDeepSeek() {
-    return this._runCliMode('deepseek');
+  async runDeepSeek(options = {}) {
+    return this._runCliMode('deepseek', options);
   },
 
 

@@ -268,7 +268,7 @@ describe('Run launch synchronization', () => {
       [method, 'docker'],
     ])
   )('%s skips its local status probe for a %s case and quick-starts', async (method, location) => {
-    const { app, requests } = loadSessionLaunchHarness({ location });
+    const { app, requests } = loadSessionLaunchHarness({ location, tabCount: '1' });
 
     await app[method]();
 
@@ -289,7 +289,7 @@ describe('Run launch synchronization', () => {
       await app.runCodex();
 
       const body = requests.find((request) => request.url === '/api/quick-start')?.body;
-      if (location === 'docker') {
+      if (location !== 'local') {
         expect(body.codexConfig).toBeUndefined();
       } else {
         expect(body.codexConfig).toEqual({
@@ -497,7 +497,7 @@ describe('Run launch synchronization', () => {
     // once. Confirmed live: adding `this.terminal.clear()` to `_runCliMode`
     // left this test 32/32 green under the old pattern.
     const bodies = new Map<string, string>();
-    const header = /^ {2}async (_?run[A-Za-z]*)\(\w*\) \{$/gm;
+    const header = /^ {2}async (_?run[A-Za-z]*)\([^)]*\) \{$/gm;
     for (let m = header.exec(src); m; m = header.exec(src)) {
       const start = m.index + m[0].length;
       const end = src.indexOf('\n  },', start);
@@ -532,38 +532,13 @@ describe('Run launch synchronization', () => {
     const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
     const dataCall = 'data.data.sessionId, data.data.session, data.data.tabLayout, data.data.tabPlacements';
     const resultCall = 'result.data.session.id, result.data.session, result.data.tabLayout, result.data.tabPlacements';
-    const expectedByMethod = new Map<string, string[]>([
-      ['runClaude', [dataCall, resultCall]],
-      ['runShell', [dataCall, resultCall]],
-      ['runOpenCode', [dataCall]],
-      ['runCodex', [dataCall]],
-      ['runAntigravity', [dataCall]],
-      ['runGemini', [dataCall]],
-      ['runPi', [dataCall]],
-      ['runGrok', [dataCall]],
-      ['runDeepSeek', [dataCall]],
-      ['runOmp', [dataCall]],
-    ]);
-    let totalCallsites = 0;
-
-    for (const [method, expectedCalls] of expectedByMethod) {
-      // Upstream's runGrok/runDeepSeek take no options argument yet, so accept
-      // either signature rather than silently skipping those two callsites.
-      const withOptions = `  async ${method}(options = {}) {`;
-      const startMarker = src.includes(withOptions) ? withOptions : `  async ${method}() {`;
-      const start = src.indexOf(startMarker);
-      const end = src.indexOf('\n  },', start + startMarker.length);
-      expect(start, `${method}() must exist`).toBeGreaterThanOrEqual(0);
-      expect(end, `${method}() must have a detectable end`).toBeGreaterThan(start);
-      const calls = [...src.slice(start, end).matchAll(/await this\._ensureCreatedSessionVisible\(([^)]+)\);/g)].map(
-        (match) => match[1].replace(/\s+/g, ' ').trim()
-      );
-      expect(calls, `${method}() creation layout arguments`).toEqual(expectedCalls);
-      totalCallsites += calls.length;
-    }
-
-    expect(totalCallsites).toBe(12);
-    expect([...src.matchAll(/await this\._ensureCreatedSessionVisible\(/g)]).toHaveLength(12);
+    const calls = [...src.matchAll(/await this\._ensureCreatedSessionVisible\(([^)]+)\);/g)].map((match) =>
+      match[1].replace(/\s+/g, ' ').trim()
+    );
+    // Eight CLI wrappers share one quick-start creation path.
+    expect(calls).toHaveLength(5);
+    expect(calls.filter((call) => call === dataCall)).toHaveLength(3);
+    expect(calls.filter((call) => call === resultCall)).toHaveLength(2);
   });
 
   it('coalesces overlapping Run activations and disables the button while the request is active', async () => {
@@ -814,9 +789,7 @@ describe('Codex quick start settings', () => {
 
     it('applies the gating from openAppSettings, not just in isolation', () => {
       const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
-      // Downstream openAppSettings() is async, so anchor on that signature —
-      // the upstream anchor silently sliced to '' and passed vacuously.
-      const open = src.slice(src.indexOf('\n  async openAppSettings() {'));
+      const open = src.slice(src.indexOf('\n  openAppSettings() {'));
       const body = open.slice(0, open.indexOf('\n  },'));
       expect(body).toContain('_applyCodexSettingsVisibility()');
     });

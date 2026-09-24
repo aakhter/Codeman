@@ -274,6 +274,12 @@ export function registerHookEventRoutes(
     // identity beyond the shared per-instance secret, so a prompt claimed for a
     // session that can never show one must not create an answerable item).
     let approvalId: string | undefined;
+    // Set when the item opened ALREADY acknowledged, which today means the session is
+    // watching work it started itself. It rides the broadcast so a live page declines to
+    // arm the alert (a reloading page learns the same thing from `acknowledgedAt` when it
+    // seeds from /api/approvals), and it suppresses the push: an alert nobody can answer
+    // is worth even less on a phone than in a tab.
+    let acknowledgedReason: string | undefined;
     const approvalKind = APPROVAL_KIND_BY_EVENT[event];
     if (session && hooksAvailableForMode(session.mode, sessionHookOptions(session))) {
       if (approvalKind) {
@@ -293,12 +299,16 @@ export function registerHookEventRoutes(
           toolSummary: typeof toolSummary === 'string' ? toolSummary : undefined,
           message: typeof safeData.message === 'string' ? safeData.message : undefined,
           cwd: typeof safeData.cwd === 'string' ? safeData.cwd : undefined,
-          sourceSequence,
+          // What the pane says is still running in the background. An idle prompt from a
+          // session that is watching its own work opens acknowledged, so it never arms an
+          // alert nobody can answer; notePrompt() carries the whole reasoning.
+          watching: session.watching,
           // Visible tmux frame first (it IS the dialog); raw byte-buffer tail as
           // the fallback for direct-PTY sessions and the no-op test mux.
           capture: buildPaneCapture(session, ctx.mux),
         });
         approvalId = item.id;
+        acknowledgedReason = item.acknowledgedReason;
       } else if (APPROVAL_RESOLVING_EVENTS.has(event)) {
         approvalInbox.resolveForSession(sessionId, 'resolved_in_terminal', undefined, sourceSequence);
       }
@@ -309,7 +319,7 @@ export function registerHookEventRoutes(
       timestamp: Date.now(),
       ...safeData,
       ...(approvalId && { approvalId }),
-      ...(decision.ambiguous && { agentActivityDiagnostic: 'evidence_unavailable' }),
+      ...(acknowledgedReason && { acknowledgedReason }),
     });
     // Full state ride-along, same shape as the working/idle handlers: the home
     // screens rank the blocked group on lastActivityAt, and without this a
@@ -321,12 +331,17 @@ export function registerHookEventRoutes(
     // on approvalId, and the answer route refuses keystrokes for dsh dialogs
     // (third-party TUI, unmeasured contract) — so a dsh push stays a plain
     // notification instead of offering buttons whose answer would be refused.
-    ctx.sendPushNotifications(`hook:${event}`, {
-      sessionId,
-      sessionName,
-      ...safeData,
-      ...(approvalId && session?.mode !== 'deepseek' && { approvalId }),
-    });
+    // Nothing to push for a prompt that opened acknowledged: the agent is waiting for its
+    // own monitor or backgrounded shell, and a phone buzzing about it is the same false
+    // alarm as the tab alert, delivered where it is hardest to ignore.
+    if (!acknowledgedReason) {
+      ctx.sendPushNotifications(`hook:${event}`, {
+        sessionId,
+        sessionName,
+        ...safeData,
+        ...(approvalId && session?.mode !== 'deepseek' && { approvalId }),
+      });
+    }
 
     // Track a `prompt_submitted` in the run summary ONLY when the conversation
     // actually moved (a /clear successor). It fires on EVERY prompt of every

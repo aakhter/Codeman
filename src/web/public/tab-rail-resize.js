@@ -157,11 +157,8 @@ Object.assign(CodemanApp.prototype, {
       this._tabRailSettleTimer = null;
       this._persistTabRailWidth(preferredWidth);
       try {
-        if (this.activeSessionId && this.sendResize) {
-          await this.sendResize(this.activeSessionId);
-        } else {
-          this.fitAddon?.fit();
-        }
+        if (this.activeSessionId && this.sendResize) await this.sendResize(this.activeSessionId);
+        else this.syncTerminalGeometry?.();
         this._updateConnectionLinesImmediate?.();
       } catch (err) {
         console.warn('Failed to resize terminal after rail resize:', err);

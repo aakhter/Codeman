@@ -116,6 +116,7 @@ function makeScrollApp() {
     _isLoadingBuffer: false,
     _loadBufferQueue: null as { at: number; data: string }[] | null,
     _scheduleTerminalWriteFlush: vi.fn(),
+    _queuePendingTerminalWrite: mixin._queuePendingTerminalWrite as (data: string, epoch: number) => void,
     batchTerminalWrite: mixin.batchTerminalWrite as (data: string) => void,
     isTerminalAtBottom: mixin.isTerminalAtBottom as () => boolean,
     _syncStickyScrollBaseline: mixin._syncStickyScrollBaseline as () => void,
@@ -186,7 +187,7 @@ describe('buffer-load flush (COD-144)', () => {
     pushWhileLoading(app, 'arrived-before-chunked-write');
 
     expect(app._beginBufferLoad(owner)).toBe(owner);
-    expect(app._loadBufferQueue).toEqual(['arrived-before-chunked-write']);
+    expect(app._loadBufferQueue).toEqual([expect.objectContaining({ data: 'arrived-before-chunked-write' })]);
     expect(app._finishBufferLoad(owner, { onDiscardedQueued: discarded })).toBe(true);
     expect(discarded).toHaveBeenCalledWith(1);
     expect(writes).toEqual([]);

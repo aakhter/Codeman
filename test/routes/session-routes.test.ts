@@ -2922,6 +2922,19 @@ and effort involved in moving workloads.
       expect(body.success).toBe(false);
     });
 
+    // Ark0N/Codeman#446: starting a command in the pane retracts `paneExit`, and
+    // the pane-exit watcher cannot write that retraction for us — its next tick
+    // finds the field already cleared, reports no change and persists nothing.
+    // Broadcasting without persisting leaves state.json saying the agent exited.
+    it('persists the session, not just broadcasts it', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(harness.ctx._session);
+    });
+
     it('returns error if session is busy', async () => {
       harness.ctx._session.isBusy.mockReturnValue(true);
       const res = await harness.app.inject({
@@ -2996,6 +3009,16 @@ and effort involved in moving workloads.
       expect(harness.ctx._session.startShell).toHaveBeenCalled();
       // COD-118: re-attach restores listener wiring detached by a prior PTY exit.
       expect(harness.ctx.setupSessionListeners).toHaveBeenCalledWith(harness.ctx._session);
+    });
+
+    // Same reason as /interactive above (Ark0N/Codeman#446).
+    it('persists the session, not just broadcasts it', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/shell`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(harness.ctx._session);
     });
 
     it('returns error if session is busy', async () => {

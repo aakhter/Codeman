@@ -113,175 +113,21 @@ describe('session listener wiring', () => {
     expect(registerAttachment).toHaveBeenNthCalledWith(2, 'wiring-attach-source-test', '/tmp/report.pdf', 'external');
   });
 
-  it('forwards one checkpoint progress payload to session:checkpoint', () => {
-    const session = new Session({ id: 'wiring-checkpoint-test', workingDir: '/tmp', mode: 'codex' });
-    const broadcast = vi.fn();
+  it('pushes the session state when the watching label changes on its own', () => {
+    // The badge appears on the idle transition, which broadcasts anyway. It goes AWAY
+    // when the background work ends, and a CLI can do that without taking a turn — codex
+    // repaints its background-terminal row away and stays idle — so nothing else fires
+    // and every open page would keep drawing a badge the server had already dropped.
+    const session = new Session({ id: 'wiring-watching-test', workingDir: '/tmp', mode: 'codex' });
     const broadcastSessionStateDebounced = vi.fn();
-    const persistSessionState = vi.fn();
-    const deps = {
-      broadcast,
-      broadcastSessionStateDebounced,
-      persistSessionState,
-      registerAttachment: vi.fn(),
-    } as unknown as Parameters<typeof createSessionListeners>[1];
+    const deps = { broadcastSessionStateDebounced } as unknown as Parameters<typeof createSessionListeners>[1];
+
     const refs = createSessionListeners(session, deps);
+    refs.watchingChanged();
 
-    refs.checkpointProgress({
-      mode: 'compact',
-      phase: 'failed',
-      step: 'continue',
-      attempt: 2,
-      stage: 'enter',
-      reason: 'continuation-delivery-failed',
-      updatedAt: 123,
-    });
-
-    expect(broadcast).toHaveBeenCalledWith(SseEvent.SessionCheckpoint, {
-      sessionId: 'wiring-checkpoint-test',
-      mode: 'compact',
-      phase: 'failed',
-      step: 'continue',
-      attempt: 2,
-      stage: 'enter',
-      reason: 'continuation-delivery-failed',
-      updatedAt: 123,
-    });
-    expect(broadcastSessionStateDebounced).toHaveBeenCalledWith('wiring-checkpoint-test');
-    expect(persistSessionState).toHaveBeenCalledWith(session);
+    expect(broadcastSessionStateDebounced).toHaveBeenCalledWith('wiring-watching-test');
   });
 
-  it("preserves the legacy session:checkpoint phase:'start' payload without persisting twice", () => {
-    const session = new Session({ id: 'wiring-checkpoint-start-test', workingDir: '/tmp', mode: 'codex' });
-    const broadcast = vi.fn();
-    const persistSessionState = vi.fn();
-    const deps = {
-      broadcast,
-      broadcastSessionStateDebounced: vi.fn(),
-      persistSessionState,
-      registerAttachment: vi.fn(),
-    } as unknown as Parameters<typeof createSessionListeners>[1];
-    const refs = createSessionListeners(session, deps);
-
-    refs.checkpointStart({ mode: 'new', runId: 'new-run' });
-
-    expect(broadcast).toHaveBeenCalledWith(SseEvent.SessionCheckpoint, {
-      sessionId: 'wiring-checkpoint-start-test',
-      phase: 'start',
-      mode: 'new',
-      runId: 'new-run',
-    });
-    expect(persistSessionState).not.toHaveBeenCalled();
-  });
-});
-
-describe('Codex Approvals Inbox idle wiring', () => {
-  it('commits one Codex turn-end after terminal output through the real activity coordinator', () => {
-    const session = new Session({ id: 'wiring-codex-real-coordinator', workingDir: '/tmp', mode: 'codex' });
-    (session as unknown as { _status: 'idle' })._status = 'idle';
-    const coordinator = new SessionAgentActivityCoordinator();
-    coordinator.attachSession(session);
-    const deps = listenerDeps();
-    deps.agentActivity.terminalActivity.mockImplementation(() => coordinator.onTerminalOutput(session));
-    deps.agentActivity.allocateEvent.mockImplementation((_session, kind) => coordinator.allocateEvent(session, kind));
-    deps.agentActivity.decideEvent.mockImplementation((_session, event) =>
-      coordinator.decisionForEvent(session, event)
-    );
-    const refs = createSessionListeners(session, deps as never);
-    session.on('terminalActivity', refs.terminalActivity);
-    session.on('terminal', refs.terminal);
-    const initialEpoch = session.terminalActivityEpoch;
-
-    (session as unknown as { _handleTerminalOutput(data: string): void })._handleTerminalOutput(
-      'idle composer repaint'
-    );
-    refs.idle({ reason: 'turn-end' });
-
-    expect(session.terminalActivityEpoch).toBe(initialEpoch + 1);
-    expect(approvalInbox.getForSession(session.id)).toMatchObject({ kind: 'idle', mode: 'codex', sourceSequence: 1 });
-    expect(deps.broadcast).toHaveBeenCalledTimes(1);
-    expect(deps.broadcast).toHaveBeenCalledWith(SseEvent.SessionIdle, { id: session.id });
-  });
-
-  it.each([
-    { mode: 'codex', reason: 'turn-end', creates: true },
-    { mode: 'codex', reason: 'initial-ready', creates: false },
-    { mode: 'claude', reason: 'turn-end', creates: false },
-    { mode: 'gemini', reason: 'turn-end', creates: false },
-  ] as const)('$mode + $reason creates=$creates', ({ mode, reason, creates }) => {
-    const session = new Session({ id: `wiring-${mode}-${reason}`, workingDir: '/tmp', mode });
-    (session as unknown as { _muxSession: { muxName: string } })._muxSession = {
-      muxName: `codeman-test-${mode}`,
-    };
-    const refs = createSessionListeners(session, listenerDeps());
-
-    refs.idle({ reason });
-
-    const item = approvalInbox.getForSession(session.id);
-    expect(Boolean(item)).toBe(creates);
-    if (creates) {
-      expect(item).toMatchObject({ kind: 'idle', mode: 'codex', sourceSequence: 1 });
-      expect(item?.context).toBeTruthy();
-    }
-  });
-
-  it('does not supersede an existing acknowledged idle item', () => {
-    const session = new Session({ id: 'wiring-codex-dedupe', workingDir: '/tmp', mode: 'codex' });
-    const refs = createSessionListeners(session, listenerDeps());
-    refs.idle({ reason: 'turn-end' });
-    const first = approvalInbox.getForSession(session.id)!;
-    approvalInbox.acknowledge(session.id);
-
-    refs.idle({ reason: 'turn-end' });
-
-    const second = approvalInbox.getForSession(session.id)!;
-    expect(second.id).toBe(first.id);
-    expect(second.acknowledgedAt).toBe(first.acknowledgedAt);
-  });
-
-  it('creates a later item for terminal-driven turns whose submit timestamp is unchanged', () => {
-    const session = new Session({ id: 'wiring-codex-terminal-turns', workingDir: '/tmp', mode: 'codex' });
-    const refs = createSessionListeners(session, listenerDeps());
-    refs.idle({ reason: 'turn-end' });
-    const first = approvalInbox.getForSession(session.id)!;
-
-    refs.working();
-    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
-    refs.idle({ reason: 'turn-end' });
-
-    const second = approvalInbox.getForSession(session.id);
-    expect(second).toMatchObject({ kind: 'idle', mode: 'codex' });
-    expect(second?.id).not.toBe(first.id);
-  });
-
-  it('sends the existing actionless idle push for a Codex approval', () => {
-    const session = new Session({ id: 'wiring-codex-push', workingDir: '/tmp', mode: 'codex' });
-    const deps = listenerDeps();
-    const refs = createSessionListeners(session, deps);
-
-    refs.idle({ reason: 'turn-end' });
-
-    const item = approvalInbox.getForSession(session.id)!;
-    expect(deps.sendPushNotifications).toHaveBeenCalledWith(SseEvent.HookIdlePrompt, {
-      sessionId: session.id,
-      sessionName: session.name,
-      approvalId: item.id,
-      approvalsInboxOnly: true,
-    });
-  });
-
-  it('resolves the Codex idle item on working and exit', () => {
-    const session = new Session({ id: 'wiring-codex-resolve', workingDir: '/tmp', mode: 'codex' });
-    const refs = createSessionListeners(session, listenerDeps());
-
-    refs.idle({ reason: 'turn-end' });
-    refs.working();
-    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
-
-    refs.idle({ reason: 'turn-end' });
-    expect(approvalInbox.getForSession(session.id)).toBeDefined();
-    refs.exit(0);
-    expect(approvalInbox.getForSession(session.id)).toBeUndefined();
-  });
   /** The listener reads the setting asynchronously; let its promise chain settle. */
   const flush = () => new Promise((resolve) => setTimeout(resolve, 5));
 

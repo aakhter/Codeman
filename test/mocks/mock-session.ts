@@ -54,10 +54,12 @@ export class MockSession extends EventEmitter {
   hasLostCodexProviderCredentials = vi.fn(() => false);
   codexLastSubmitAt?: number;
   isWorking: boolean = false;
-  blocksIdleAutomation = false;
-  isAutonomouslyIdle(): boolean {
-    return this.status === 'idle' && !this.blocksIdleAutomation;
-  }
+  /**
+   * Mirrors Session.watching — what the pane's footer says is still running in the
+   * background. An idle prompt from such a session opens acknowledged, so the routes
+   * need to be able to set it.
+   */
+  watching: string | null = null;
   private _activeChildProcesses: { pid: number; command: string }[] = [];
   ralphTracker: null = null;
   writeBuffer: string[] = [];

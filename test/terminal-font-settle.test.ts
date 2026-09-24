@@ -177,9 +177,11 @@ describe('selectSession font gate', () => {
 
   it('waits for the font before the first fit', () => {
     const wait = body.indexOf('await this._terminalFontReady');
-    // Downstream guards the fit in try/catch; upstream does not. Anchor on the
-    // call itself so the ORDERING guarantee is what is pinned, not the shape.
-    const fit = body.indexOf('this.fitAddon.fit()');
+    // `syncTerminalGeometry()` replaced the bare `fitAddon.fit()` here: it fits
+    // AND applies the floor it reports, so xterm and the PTY cannot disagree
+    // (#464). The gate this test guards is unchanged — the font must be
+    // measured before the terminal is.
+    const fit = body.indexOf('this.syncTerminalGeometry();');
     expect(wait).toBeGreaterThan(-1);
     expect(fit).toBeGreaterThan(-1);
     expect(wait).toBeLessThan(fit);

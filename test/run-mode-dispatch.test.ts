@@ -100,7 +100,7 @@ describe('run() dispatch (session-ui.js)', () => {
       app._runMode = id;
       await expect(app.run()).resolves.toBe(`cli:${id}`);
       expect(app._runCliMode).toHaveBeenCalledTimes(1);
-      expect(app._runCliMode).toHaveBeenCalledWith(id);
+      expect(app._runCliMode).toHaveBeenCalledWith(id, {});
       expect(app.runClaude).not.toHaveBeenCalled();
       expect(app.runShell).not.toHaveBeenCalled();
     });

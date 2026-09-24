@@ -510,8 +510,11 @@ class NotificationManager {
     if (this.isDrawerOpen) {
       this.markAllRead();
     }
-    // Canonical resize applies the active mode/device font policy before its
-    // single fit, avoiding a one-frame stale-metric jump on visibility return.
+    // Re-fit terminal and send resize to PTY so this client's dimensions win.
+    // Fixes broken layout when switching between desktop and mobile on the same session.
+    // sendResize fits (floored) as its first synchronous step, so the bare
+    // fit that used to precede it was both redundant and a chance to leave
+    // xterm at the unfloored proposal (#464).
     if (this.app?.activeSessionId) {
       this.app.sendResize(this.app.activeSessionId);
     }
