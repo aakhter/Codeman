@@ -2951,7 +2951,10 @@ export function registerSessionRoutes(
       const frameMuxName = session.muxName;
       let frame: string | null = null;
       if (frameMuxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
-        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, frameMuxName, { visibleFrame: true });
+        frame = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, frameMuxName, {
+          visibleFrame: true,
+          owner: ownerFor(req),
+        });
       }
       if (
         (frame === null || frame.length === 0) &&

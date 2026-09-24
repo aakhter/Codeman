@@ -2167,8 +2167,40 @@ and effort involved in moving workloads.
           (harness.ctx._session as { remote?: unknown }).remote,
           harness.ctx._sessionId,
           harness.ctx._session.muxName,
-          { visibleFrame: true }
+          { visibleFrame: true, owner: undefined }
         );
+      });
+
+      it('COD-441: scopes a remote frame connection to the authenticated viewer', async () => {
+        const username = 'frameviewer';
+        const cleanup = await useRegularUserHarness(username);
+        try {
+          harness.ctx._session.owner = username;
+          harness.ctx._session.mode = 'codex';
+          (harness.ctx._session as { remote?: unknown }).remote = {
+            hostId: 'worker',
+            host: '192.168.21.109',
+            username: 'ubuntu',
+            remotePath: '/tmp/case',
+          };
+          const remoteSpy = vi.fn(async () => 'REMOTE_FRAME');
+          (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remoteSpy;
+
+          const res = await harness.app.inject({
+            method: 'GET',
+            url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1`,
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(remoteSpy).toHaveBeenCalledWith(
+            (harness.ctx._session as { remote?: unknown }).remote,
+            harness.ctx._sessionId,
+            harness.ctx._session.muxName,
+            { visibleFrame: true, owner: username }
+          );
+        } finally {
+          await cleanup();
+        }
       });
 
       it('COD-207: opencode frame request also uses the visible-frame capture path', async () => {

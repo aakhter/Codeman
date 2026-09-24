@@ -4370,6 +4370,7 @@ export class WebServer extends EventEmitter {
     this.lastRecordedTokens.clear();
 
     // Stop multiplexer and flush pending saves
+    await this.mux.closeRemoteFrameConnections?.();
     this.mux.destroy();
 
     // Flush any pending persist-debounce timers and persist dirty sessions
