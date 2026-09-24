@@ -2279,9 +2279,9 @@ Object.assign(CodemanApp.prototype, {
       });
     if (!entry) throw new Error(`Unknown run mode: ${mode}`);
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote/docker cases run the CLI on the OTHER side — the local status
-    // probe and the local-only config/env below don't apply (quick-start
-    // rejects them for remote cases).
+    // Remote/docker cases run the CLI on the OTHER side, so skip the local
+    // status probe. SSH remote Codex still needs its launch flags; Docker and
+    // remote environment overrides remain excluded.
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
@@ -2323,6 +2323,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode,
           sessionName,
+          ...(_runLoc === 'remote' && mode === 'codex' ? (entry.buildConfig(globalSettings) || {}) : {}),
           ...(isRemote ? {} : {
             ...(entry.buildConfig(globalSettings) || {}),
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
