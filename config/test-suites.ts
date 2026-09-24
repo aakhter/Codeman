@@ -43,28 +43,9 @@ export const BROWSER_TEST_GLOBS = [
   'test/capture-load-window.browser.test.ts',
   'test/capture-geometry-retry.browser.test.ts',
   'test/codex-predictive-echo.test.ts', // also needs a real codex binary
-  'test/codex-command-profiles.browser.test.ts',
-  // The `.browser.test.ts` convention post-dates the five above. Membership is
-  // decided by whether a file drives a real browser, NOT by its name, which is
-  // why `npm run check:browser-excludes` asks `vitest list` what CI would
-  // actually collect rather than matching the filename — a file missing from
-  // this array passes locally and dies in CI with
-  // "browserType.launch: Executable doesn't exist" (COD-293, then COD-299 one
-  // commit later, which is why it is enforced rather than remembered).
-  'test/case-default-group-ui.browser.test.ts',
-  'test/file-browser-session-preview.browser.test.ts',
-  'test/file-preview-source-download.browser.test.ts',
-  'test/session-options-responsive.browser.test.ts',
-  'test/session-sidebar-ux.browser.test.ts',
-  'test/spreadsheet-preview.browser.test.ts',
-  'test/tab-activation.browser.test.ts',
-  'test/tab-focus-smart-group.browser.test.ts',
-  'test/tab-group-menu.browser.test.ts',
-  'test/tab-rail-resize.browser.test.ts',
-  'test/tab-move-destination-order.browser.test.ts',
-  'test/terminal-document-link.browser.test.ts',
-  'test/terminal-input-performance.browser.test.ts',
-  'test/tab-rail-session-search.browser.test.ts',
+  'test/split-pane-terminal.browser.test.ts',
+  'test/split-pane-orchestration.browser.test.ts',
+  'test/split-pane-auto-collapse.browser.test.ts',
 ];
 
 /**

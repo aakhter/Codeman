@@ -1930,6 +1930,12 @@ Object.assign(CodemanApp.prototype, {
         if (this._localEchoOverlay?.hasPending) {
           this._localEchoOverlay.rerender();
         }
+        // Pane B (split view) has its own container and its own fit()/resize
+        // frame — this observer only ever measured Pane A's container, so
+        // without this call Pane B never learned about a window resize, an
+        // Alt+B sidebar toggle, or a tab-rail drag, and its PTY silently
+        // stayed at whatever size it was last dragged to.
+        this._splitPane?.fit();
       }, 300); // Trailing-edge: only fire after 300ms of no resize events
     };
 
@@ -6193,8 +6199,9 @@ Object.assign(CodemanApp.prototype, {
       this._localEchoOverlay.suppressBufferDetection();
       this._flushedOffsets?.delete(this.activeSessionId);
       this._flushedTexts?.delete(this.activeSessionId);
-      if (flushed.count > 0) {
-        this.sendInput('\x7f'.repeat(flushed.count)).catch(() => {});
+      const flushedLength = Array.from(flushed.text || '').length;
+      if (flushedLength > 0) {
+        this.sendInput('\x7f'.repeat(flushedLength)).catch(() => {});
       }
     } else {
       // In non-local-echo mode the TUI already owns the editable buffer. Ctrl+U
@@ -7332,6 +7339,10 @@ Object.assign(CodemanApp.prototype, {
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontSize = size;
+      this._splitPane.fitAddon?.fit();
+    }
   },
 
   getTerminalFontPolicy(mode, { performanceFallback = false } = {}) {
@@ -7405,6 +7416,10 @@ Object.assign(CodemanApp.prototype, {
     this.fitAddon?.fit();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontFamily = resolved;
+      this._splitPane.fitAddon?.fit();
+    }
   },
 
   /**
@@ -7455,6 +7470,11 @@ Object.assign(CodemanApp.prototype, {
       } catch {
         /* pane not laid out yet — its own resize observer refits it */
       }
+    }
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontWeight = fontWeight;
+      this._splitPane.terminal.options.fontWeightBold = fontWeightBold;
+      this._splitPane.fitAddon?.fit();
     }
   },
 
@@ -7712,6 +7732,13 @@ Object.assign(CodemanApp.prototype, {
           } catch {}
         }
       }
+    }
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.minimumContrastRatio = minimumContrastRatio;
+      this._splitPane.terminal.options.theme = { ...theme };
+      try {
+        this._splitPane.terminal.refresh(0, this._splitPane.terminal.rows - 1);
+      } catch {}
     }
   },
 });
