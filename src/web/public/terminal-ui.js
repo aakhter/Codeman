@@ -1877,6 +1877,25 @@ Object.assign(CodemanApp.prototype, {
     this._resizeRaf = null;
     this._lastResizeDims = null;
 
+    // Refresh the current viewport promptly on iOS and OpenCode. Geometry is
+    // applied once by the settled resize below, together with the PTY request.
+    const scheduleImmediateFit = () => {
+      if (this._resizeRaf) return;
+      this._resizeRaf = requestAnimationFrame(() => {
+        this._resizeRaf = null;
+        const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+        const needsRefresh =
+          (typeof MobileDetection !== 'undefined' && MobileDetection.isIOS?.()) || session?.mode === 'opencode';
+        if (needsRefresh) {
+          try {
+            this.terminal.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1));
+          } catch {
+            /* terminal may have been disposed during the frame */
+          }
+        }
+      });
+    };
+
     const throttledResize = () => {
       if (this._isTerminalSessionGone?.(this.activeSessionId)) return;
       // COD-299: the rail controller owns terminal sizing while its width is

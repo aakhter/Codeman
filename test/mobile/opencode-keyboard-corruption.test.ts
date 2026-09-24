@@ -37,9 +37,9 @@ describe('COD-284 iPhone opencode keyboard corruption fix', () => {
     expect(terminalUi).toMatch(/isMobileSafari[\s\S]*?requestAnimationFrame[\s\S]*?fitAddon\.fit[\s\S]*?refresh/s);
   });
 
-  it('onKeyboardShow/Hide uses double-rAF + refresh (COD-284)', () => {
-    expect(handlers).toMatch(/onKeyboardShow[\s\S]*?requestAnimationFrame[\s\S]*?fitAddon\.fit[\s\S]*?refresh/s);
-    expect(handlers).toMatch(/onKeyboardHide[\s\S]*?requestAnimationFrame[\s\S]*?fitAddon\.fit[\s\S]*?refresh/s);
+  it('onKeyboardShow/Hide uses settled double-rAF + geometry sync + refresh (COD-284)', () => {
+    expect(handlers).toMatch(/onKeyboardShow[\s\S]*?requestAnimationFrame[\s\S]*?syncTerminalGeometry[\s\S]*?refresh/s);
+    expect(handlers).toMatch(/onKeyboardHide[\s\S]*?requestAnimationFrame[\s\S]*?syncTerminalGeometry[\s\S]*?refresh/s);
     expect(handlers).toContain('COD-284');
   });
 

@@ -535,7 +535,9 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(app.webviews.has('w1')).toBe(false);
     expect(win.document.querySelector('.webview-frame[data-webview-id="w1"]')).toBeNull();
     expect(app.selectSession).not.toHaveBeenCalled();
-    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/w2/', app.webviews.get('w2'));
+    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/w2/', app.webviews.get('w2'), {
+      navigate: false,
+    });
     expect(app.activeWebviewId).toBe('w2');
     expect(app.webviewOrder).toEqual(['w2']);
   });
@@ -578,7 +580,9 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(app.activeWebviewId).toBe('w2');
     expect(app.webviewOrder).toEqual(['w1', 'w2']);
     expect(app._mountWebviewFrame).toHaveBeenCalledTimes(1);
-    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/b/', app.webviews.get('w2'));
+    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/b/', app.webviews.get('w2'), {
+      navigate: false,
+    });
   });
 
   it('cancels a pending open when that webview is closed', async () => {
@@ -615,7 +619,9 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(app.activeWebviewId).toBe('w2');
     expect(app.webviewOrder).toEqual(['w2']);
     expect(app._mountWebviewFrame).toHaveBeenCalledTimes(1);
-    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/b/', app.webviews.get('w2'));
+    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w2', '/webview/b/', app.webviews.get('w2'), {
+      navigate: false,
+    });
   });
 
   it('lets only the newest same-ID retry mount and activate', async () => {
@@ -635,7 +641,9 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(app.activeWebviewId).toBe('w1');
     expect(app.webviewOrder).toEqual(['w1']);
     expect(app._mountWebviewFrame).toHaveBeenCalledTimes(1);
-    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w1', '/webview/new/', app.webviews.get('w1'));
+    expect(app._mountWebviewFrame).toHaveBeenCalledWith('w1', '/webview/new/', app.webviews.get('w1'), {
+      navigate: false,
+    });
   });
 
   it('closes an active webview to its authoritative successor instead of local chronology', async () => {

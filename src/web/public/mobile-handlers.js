@@ -659,20 +659,27 @@ const KeyboardHandler = {
       this._settleRestoreScroll = false;
 
       if (typeof app !== 'undefined' && app.terminal) {
-        // Floored fit, not a bare fitAddon.fit(): _shrinkPaddingToFit measures
-        // the leftover gap under the LAST row, so it has to run against the
-        // geometry xterm will actually keep (issue #464).
-        app.syncTerminalGeometry?.();
-        if (this.keyboardVisible) this._shrinkPaddingToFit();
-        // Following live output → bottom, as before. Reading history → back to
-        // the pre-reflow anchor instead of being yanked down (#259).
-        if (shouldRestoreScroll) {
-          if (this._settleFollowing === false) this._restoreTerminalScrollIntent();
-          else app.terminal.scrollToBottom();
-        }
-        app._syncMobileHelperTextareaToCursor?.();
-        app._localEchoOverlay?.rerender?.();
-        this._sendTerminalResize();
+        // COD-284: wait two frames for iOS to commit the settled keyboard
+        // layout. Apply the floored geometry once, then repaint the canvas.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            app.applyTerminalFontPolicyForActiveSession?.();
+            app.syncTerminalGeometry?.();
+            if (this.keyboardVisible) this._shrinkPaddingToFit();
+            try {
+              app.terminal.refresh(0, Math.max(0, (app.terminal.rows || 24) - 1));
+            } catch {
+              /* terminal may have been disposed during the frame */
+            }
+            if (shouldRestoreScroll) {
+              if (this._settleFollowing === false || app._viewMode === 'history') this._restoreTerminalScrollIntent();
+              else app.terminal.scrollToBottom();
+            }
+            app._syncMobileHelperTextareaToCursor?.();
+            app._localEchoOverlay?.rerender?.();
+            this._sendTerminalResize();
+          })
+        );
       }
       window.scrollTo(0, 0);
     }, this.VIEWPORT_SETTLE_MS);

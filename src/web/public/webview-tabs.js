@@ -202,19 +202,9 @@ Object.assign(CodemanApp.prototype, {
     this._webviewListAppliedGeneration = this._webviewListAppliedGeneration || 0;
     this._webviewDeletedIds = this._webviewDeletedIds || new Set();
 
-    await this.refreshWebviews();
+    const acquired = await this.refreshWebviews();
     this._installWebviewLostListener();
-
-    // Restore the previously open web tabs (per device: which dashboards you keep
-    // open is a workspace-layout choice, not something to sync across machines).
-    let saved = [];
-    try {
-      saved = JSON.parse(localStorage.getItem('codeman-webview-order') || '[]');
-    } catch {
-      saved = [];
-    }
-    this.webviewOrder = saved.filter((id) => this.webviews.has(id));
-    this.renderSessionTabs();
+    if (!acquired) this._scheduleWebviewInitRetry();
   },
 
   /** One bounded recovery read for a transient failure during the sole shipping init call. */
@@ -372,7 +362,17 @@ Object.assign(CodemanApp.prototype, {
     window.addEventListener('message', this._webviewLostListener);
   },
 
-  _persistWebviewOrder() {
+  _normalizeWebviewOpenIds(value) {
+    if (!Array.isArray(value)) return [];
+    const requested = new Set(value.filter((id) => typeof id === 'string'));
+    return [...(this.webviews?.keys() || [])].filter((id) => requested.has(id));
+  },
+
+  /** Migrate legacy local ordering once, retaining only set membership. */
+  _loadWebviewOpenState() {
+    const current = this._normalizeWebviewOpenIds(this.webviewOrder);
+    let storage;
+    let stored;
     try {
       storage = localStorage;
       stored = storage.getItem('codeman-webview-open');

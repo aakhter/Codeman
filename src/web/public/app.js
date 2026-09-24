@@ -6449,10 +6449,6 @@ class CodemanApp {
     menu.querySelector('[role="menuitem"]:not([disabled])')?.focus();
   }
 
-  _tabOrientation() {
-    return document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
-  }
-
   _tabRailSessionSearchNeedle() {
     return String(this._tabRailSessionSearch || '').trim().toLocaleLowerCase();
   }
