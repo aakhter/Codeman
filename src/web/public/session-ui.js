@@ -5191,7 +5191,8 @@ Object.assign(CodemanApp.prototype, {
     select.add(new Option('Custom', 'custom'));
     select.value = [...select.options].some(o => o.value === selection) ? selection : 'default';
     this._storeSelectionForScope(scope, select.value);
-    this.onCaseCodexProfileChanged(true);
+    // Refresh only this selector; touching the active edit scope here can overwrite its pending choice.
+    this.onCaseCodexProfileChanged(true, scope);
   },
 
   _renderCodexCommandProfiles(selection = 'default') {
