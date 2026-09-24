@@ -182,10 +182,13 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // --- Legacy <Mode>Config plumbing (public wire shape, see the header) ---
   //
   // Same category as the `===` block below, reached from the recovery and validation paths.
-  "web/routes/session-recovery-routes.ts::mode === 'codex'": 'legacy <Mode>Config plumbing (native resume recovery)',
-  "web/routes/session-recovery-routes.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing (native resume recovery)',
-  "web/routes/session-routes.ts::mode !== 'deepseek'":
-    'legacy <Mode>Config plumbing: rejects a <Mode>Config sent for the wrong mode',
+  "native-session-identity.ts::mode === 'codex'": 'Codex rollout lookup for native resume identity',
+  "native-session-identity.ts::mode === 'opencode'": 'OpenCode session lookup for native resume identity',
+  "native-session-identity.ts::mode !== 'codex'": 'Codex rollout scan reuse for native resume identity',
+  "web/session-recovery-service.ts::mode === 'codex'": 'legacy Codex resume config slot',
+  "web/session-recovery-service.ts::mode === 'opencode'": 'legacy OpenCode resume config slot',
+  "web/server.ts::'codex', 'opencode'].includes(":
+    'native identity capture is implemented for these transcript formats',
 
   // ── COD-416 wave 2: session.ts ──────────────────────────────────────────────────────
   //
@@ -498,7 +501,6 @@ describe('declared-for-later fields', () => {
    * list — and wiring one up should make its line here fail, which is the good direction.
    */
   const DECLARED_FOR_LATER = [
-    'shortBadge',
     'accent',
     'capabilities.echo',
     'capabilities.wheelForward',

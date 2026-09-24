@@ -311,6 +311,7 @@ const capabilitiesSchema = z
     effort: z.boolean(),
     agentSkillInjection: z.boolean(),
     statusLineTelemetry: z.boolean(),
+    approvals: z.boolean().default(false),
     // How many columns this CLI indents its transcript body by, so a copy can take
     // that much off the clipboard. Bounded, because it is the whole strip: a copy
     // never removes more than this, nor more than every selected line shares.

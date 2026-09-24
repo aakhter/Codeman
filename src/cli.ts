@@ -330,6 +330,8 @@ async function postHookEvent(
 
 /** Same registry the server resolves case names through (mirrors `case-routes.ts`). */
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
+/** Graceful shutdown budget before the process force-exits (see the SIGTERM handler). */
+const SHUTDOWN_FORCE_EXIT_MS = 10_000;
 
 /**
  * Case name to directory, checking `linked-cases.json` FIRST and falling back to the
@@ -1767,6 +1769,14 @@ webCmd.action(async (options) => {
       if (shuttingDown) return;
       shuttingDown = true;
       console.log(palette.warn(`\n${signal} received, shutting down gracefully...`));
+      // A hung stop() must not keep the process alive: the listener is already
+      // closed by then, and a KeepAlive LaunchDaemon only respawns the server once
+      // it EXITS (systemd would SIGKILL after TimeoutStopSec; launchd does not).
+      // Seen after a self-update on macOS: port closed, process alive, service down.
+      setTimeout(() => {
+        console.error(palette.err(`Shutdown did not finish in ${SHUTDOWN_FORCE_EXIT_MS / 1000}s, forcing exit`));
+        process.exit(1);
+      }, SHUTDOWN_FORCE_EXIT_MS).unref();
       try {
         await server.stop();
       } catch (err) {

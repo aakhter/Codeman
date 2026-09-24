@@ -1330,6 +1330,9 @@ Object.assign(CodemanApp.prototype, {
           gitBranch: s.gitBranch,
           worktreeName: s.worktreeName,
           worktreeRepo: s.worktreeRepo,
+          mode: s.mode,
+          claudeSessionId: s.claudeSessionId,
+          resumeId: s.resumeId,
         };
         const isLive = !!this.sessions?.has?.(s.sessionId);
         if (isLive) {

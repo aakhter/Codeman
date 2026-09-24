@@ -92,7 +92,7 @@ function agentDefaults(): Pick<
 // `accent` still has no reader, so nothing rendered changes because of it.
 const CLAUDE: CliEntry = {
   id: 'claude' as CliEntry['id'],
-  label: 'Claude',
+  label: 'Claude Code',
   shortBadge: 'CC',
   accent: '#3b82f6',
   enabled: true,

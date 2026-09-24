@@ -1130,7 +1130,7 @@ export function buildSpawnCommand(options: {
   effort?: EffortLevel;
   /** Resolved by resolveStatusLineCliCommand (hooks-config.ts) — undefined skips the exporter. Claude only. */
   statusLineCommand?: string;
-  /** Codeman session name, passed to claude as `--name` (version-gated, sanitized; local spawns only). */
+  /** Name pinned on claude as `--name` (version-gated, sanitized; local spawns only). Only a user-chosen name: see `Session.cliPinnedName`. */
   sessionName?: string;
   /**
    * Claude CLI version for the `--name` gate. Omitted = probe the local CLI
@@ -2634,6 +2634,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       workingDir,
       mode,
       name,
+      cliName,
       niceConfig,
       model,
       claudeMode,
@@ -2711,8 +2712,6 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // can wrap it. Only worth discovering when we're actually injecting.
     const userStatusLineCommand = statusLineCommand ? await findEffectiveUserStatusLineCommand(workingDir) : undefined;
 
-    // Reconcile the shared Codex Headroom config before launch so a failed health
-    // probe leaves Codex on its direct provider route.
     if (local && mode === 'codex') await reconcileCodexHeadroomPatch();
     const headroomClaudeUrl = local ? await resolveHeadroomClaudeBaseUrl(mode) : undefined;
     const headroomRouted = local
@@ -2748,7 +2747,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
             resumeSessionId,
             effort,
             statusLineCommand,
-            sessionName: name,
+            sessionName: cliName ?? name,
           });
           const cmd = wrapSpawnCommandWithNice(baseCmd, niceConfig || DEFAULT_NICE_CONFIG);
           return buildLocalPaneCommand({ mode, pathExport, envExports, cmd });
@@ -2993,7 +2992,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
       remote,
       docker,
-      name,
+      cliName,
     } = options;
     const session = this.sessions.get(sessionId);
     if (!session) return null;
@@ -3049,7 +3048,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           resumeSessionId,
           effort,
           statusLineCommand,
-          sessionName: name,
+          sessionName: cliName,
         });
         const wrapped = wrapSpawnCommandWithNice(command, niceConfig || DEFAULT_NICE_CONFIG);
         return buildLocalPaneCommand({ mode, pathExport, envExports, cmd: wrapped });

@@ -2165,7 +2165,7 @@ describe('COD-334 cliNotFoundMessage', () => {
    * three newest CLIs had no coverage here at all. Added.
    */
   const installHints = {
-    claude: 'Claude CLI not found. Install with: curl -fsSL https://claude.ai/install.sh | bash',
+    claude: 'Claude Code CLI not found. Install with: curl -fsSL https://claude.ai/install.sh | bash',
     opencode: 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
     codex: 'Codex CLI not found. Install with: npm install -g @openai/codex',
     gemini: 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli',

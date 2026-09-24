@@ -298,10 +298,12 @@ export class SessionManager extends EventEmitter {
     // __customModel: same convention, the disk-only bookkeeping of a custom-model
     // selection (env KEYS, config dir, launch model; never the injected values).
     const customModel = session.getCustomModelForPersist();
+    const codexProviderIdentity = session.getCodexProviderIdentityForPersist();
     const toStore = {
       ...state,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
       ...(customModel ? { __customModel: customModel } : {}),
+      ...(codexProviderIdentity ? { __codexProviderIdentity: codexProviderIdentity } : {}),
     };
     this.store.setSession(session.id, toStore as SessionState);
   }
