@@ -951,6 +951,7 @@ describe('Codex quick start settings', () => {
   it('passes global Codex settings into quick-start config for new sessions', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1277,6 +1278,7 @@ describe('Gemini quick start', () => {
   it('drives runGemini() through the {success,data} envelope and selects the new session', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'gemini-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1331,6 +1333,7 @@ describe('Antigravity quick start', () => {
   it('drives runAntigravity() through the {success,data} envelope and selects the new session', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'ag-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1387,6 +1390,7 @@ describe('Pi quick start', () => {
   it('drives runPi() through the {success,data} envelope and sends no piConfig', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'pi-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1462,5 +1466,163 @@ describe('Pi quick start', () => {
 
     expect(requests).toEqual(['/api/pi/status']);
     expect(errors[0]).toContain('@earendil-works/pi-coding-agent');
+  });
+});
+
+describe('Grok quick start', () => {
+  // Same envelope-unwrap regression guard as the blocks above, for runGrok(),
+  // plus the rule that makes grok the OPPOSITE of pi: the Run button DOES send
+  // `grokConfig: { alwaysApprove: true }` (grok's bypassPermissions mode), the
+  // same product decision as runAntigravity's dangerouslySkipPermissions and
+  // claude's --dangerously-skip-permissions. The multi-user clamp strips it
+  // server-side for non-granted owners.
+  it('drives runGrok() through the {success,data} envelope and sends alwaysApprove', async () => {
+    const elements: Record<string, any> = {
+      quickStartCase: { value: 'grok-case' },
+      tabCount: { value: '1' },
+    };
+    const requests: Array<{ url: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      fetch: async (url: string, init?: { body?: string }) => {
+        requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+        if (url === '/api/grok/status')
+          return {
+            json: async () => ({
+              success: true,
+              data: { available: true, path: '/home/user/.grok/bin', version: '1.0.5' },
+            }),
+          };
+        if (url === '/api/quick-start')
+          return { json: async () => ({ success: true, data: { sessionId: 'sess-gk' } }) };
+        if (url === '/api/sessions/sess-gk')
+          return { json: async () => ({ success: true, data: { id: 'sess-gk', name: 'w1-grok-case' } }) };
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    app.loadAppSettingsFromStorage = () => ({});
+    app.getCaseSettings = () => ({});
+    app.buildEnvOverrides = () => ({});
+    app.sessions = new Map();
+    app._onSessionCreated = (session: any) => app.sessions.set(session.id, session);
+    app._renderSessionTabsImmediate = vi.fn();
+    const selected: string[] = [];
+    app.selectSession = async (id: string) => {
+      selected.push(id);
+    };
+
+    await app.runGrok();
+
+    const body = requests.find((req) => req.url === '/api/quick-start')?.body;
+    expect(body).toMatchObject({
+      caseName: 'grok-case',
+      mode: 'grok',
+      grokConfig: { alwaysApprove: true },
+    });
+    expect(selected).toEqual(['sess-gk']);
+  });
+
+  it('reports the install hint when the CLI is missing and starts nothing', async () => {
+    const elements: Record<string, any> = { quickStartCase: { value: 'grok-case' } };
+    const requests: string[] = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      fetch: async (url: string) => {
+        requests.push(url);
+        if (url === '/api/grok/status')
+          return { json: async () => ({ success: true, data: { available: false, path: null, version: null } }) };
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    const errors: string[] = [];
+    app._reportSessionLaunchError = (_owns: boolean, msg: string) => errors.push(msg);
+
+    await app.runGrok();
+
+    expect(requests).toEqual(['/api/grok/status']);
+    expect(errors[0]).toContain('https://x.ai/cli/install.sh');
+  });
+
+  // The whole point of the shared _launchQuickStartInstances() helper. Before it,
+  // every non-Claude run*() hardcoded exactly one quick-start call, so the
+  // "Instance count" stepper next to the Run button silently did nothing on all
+  // eight of them: no error, no hint, just the wrong number of sessions. The five
+  // fixture edits that came with the change stub tabCount at '1', so they pass
+  // identically with and without it; this is the one that does not.
+  it('launches tabCount sessions with sequential w<n>-<case> names and selects the first', async () => {
+    const elements: Record<string, any> = {
+      quickStartCase: { value: 'grok-case' },
+      tabCount: { value: '3' },
+    };
+    const requests: Array<{ url: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+    let created = 0;
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      fetch: async (url: string, init?: { body?: string }) => {
+        const body = init?.body ? JSON.parse(init.body) : undefined;
+        requests.push({ url, body });
+        if (url === '/api/grok/status')
+          return {
+            json: async () => ({
+              success: true,
+              data: { available: true, path: '/home/user/.grok/bin', version: '1.0.5' },
+            }),
+          };
+        if (url === '/api/quick-start') {
+          const id = `sess-gk-${created++}`;
+          return {
+            json: async () => ({ success: true, data: { sessionId: id, session: { id, name: body.sessionName } } }),
+          };
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    app.loadAppSettingsFromStorage = () => ({});
+    app.getCaseSettings = () => ({});
+    app.buildEnvOverrides = () => ({});
+    app.sessions = new Map();
+    app._onSessionCreated = (session: any) => app.sessions.set(session.id, session);
+    app._renderSessionTabsImmediate = () => {};
+    const selected: string[] = [];
+    app.selectSession = async (id: string) => {
+      selected.push(id);
+    };
+
+    await app.runGrok();
+
+    const names = requests.filter((r) => r.url === '/api/quick-start').map((r) => r.body.sessionName);
+    expect(names).toEqual(['w1-grok-case', 'w2-grok-case', 'w3-grok-case']);
+    expect(selected).toEqual(['sess-gk-0']);
   });
 });

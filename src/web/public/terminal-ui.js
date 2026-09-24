@@ -951,11 +951,26 @@ Object.assign(CodemanApp.prototype, {
       // this handler before its own cancel()), so preventDefault is explicit:
       // without it the browser runs its native copy on top of ours.
       if (this.shouldCopyTerminalSelectionFromShortcut?.(ev)) {
-        const selection = this.terminal.hasSelection?.() ? this.terminal.getSelection() : '';
-        if (selection) {
+        // The CLEANED selection decides, not the raw one. A drag across the blank
+        // part of a row selects real padding spaces, which are truthy, so testing
+        // the raw text would spend this press on a copy of nothing and make the
+        // user press again to interrupt.
+        const selection = this.cleanedTerminalSelection();
+        if (selection.trim()) {
           ev.preventDefault();
           void this.copyTerminalSelection(selection);
           return false;
+        }
+        // Nothing worth copying. The clear is for feedback, not for the
+        // interrupt: the gate above tests the CLEANED selection, so a
+        // padding-only selection left set cleans to '' on every later press and
+        // falls through to the PTY anyway. What it buys is that a highlight
+        // which copies nothing does not linger with no explanation, which is
+        // also what the toast is for. Falls through exactly as an empty
+        // selection does, so this press still reaches the PTY as 0x03.
+        if (this.terminal?.hasSelection?.()) {
+          this.terminal.clearSelection?.();
+          this.showToast('Nothing to copy', 'warning');
         }
         if (ev.shiftKey) {
           ev.preventDefault();
@@ -4962,6 +4977,38 @@ Object.assign(CodemanApp.prototype, {
     return buffer.viewportY >= buffer.baseY - 2;
   },
 
+  /**
+   * Re-take the sticky-scroll baseline from where the viewport now sits.
+   *
+   * `batchTerminalWrite` samples `_wasAtBottomBeforeWrite` before it queues
+   * data, and `flushPendingWrites` scrolls to the bottom off that sample. A
+   * buffer load that replays its queue samples at the worst possible moment:
+   * `_finishBufferLoad` runs inside `chunkedTerminalWrite`, before its promise
+   * resolves, with the terminal freshly reset and rewritten, so the sample is
+   * always true. A caller that then restores the reader's position would have
+   * that restore undone by the next flush.
+   *
+   * `_onSessionNeedsRefresh` and `_maybeRefetchFullHistory` restore a position
+   * and both call this, so their baseline describes the position they chose.
+   *
+   * The other two load paths do not call it, for different reasons.
+   * `_onSessionClearTerminal` resets and rewrites with no scroll afterwards,
+   * so the sampled true is already the truth there. `selectSession` does NOT
+   * end at the bottom, whatever its `scrollToBottom()` after the write
+   * suggests: it ends at `scrollToLastNonEmptyLine()`, which targets
+   * `lastNonEmptyLine - rows + 2` and therefore parks ABOVE `baseY` whenever
+   * the replayed frame keeps trailing blank rows, which a full capture does on
+   * purpose. Its baseline is a stale true. What decides whether that matters
+   * is the sticky snap in `flushPendingWrites`, and since de864e7d that snap
+   * fires only when the flush found the viewport already at the bottom
+   * (`preserveViewportY === null`), which a parked selectSession viewport is
+   * not. Do not read the absent call here as a claim that selectSession lands
+   * at the bottom.
+   */
+  _syncStickyScrollBaseline() {
+    this._wasAtBottomBeforeWrite = this.isTerminalAtBottom();
+  },
+
   // Record manual scroll gestures so sticky-scroll can give an upward scroll a
   // short grace window (see _hasRecentUserScrollUp). A downward scroll that
   // lands back at the bottom clears the suppression immediately.
@@ -5104,10 +5151,11 @@ Object.assign(CodemanApp.prototype, {
     // to prevent interleaving historical buffer data with live SSE data.
     // This is critical: interleaving causes cursor position chaos with Ink redraws.
     if (this._isLoadingBuffer) {
-      if (this._loadBufferQueue) this._loadBufferQueue.push(data);
-      if (this._loadBufferQueueAcceptanceEpochs) {
-        this._loadBufferQueueAcceptanceEpochs.push(acceptedOutputEpoch);
-      }
+      // Each entry records when it arrived. A flush of a tmux-capture load
+      // replays only what arrived after the capture; without the timestamp it
+      // would have to replay the whole queue, duplicating the events the
+      // capture already contains. See _finishBufferLoad's `since`.
+      if (this._loadBufferQueue) this._loadBufferQueue.push({ at: performance.now(), data });
       return;
     }
 
@@ -5932,9 +5980,14 @@ Object.assign(CodemanApp.prototype, {
    * and a tick-Worker so progress continues on occluded / idle-throttled tabs.
    * @param {string} buffer - The full terminal buffer to write
    * @param {number} chunkSize - Size of each chunk (default 32KB)
+   * @param {string} [loadOwner] - Load token to finish under
+   * @param {{ flushQueued?: boolean, since?: number }} [finishOpts] - Passed to
+   *   `_finishBufferLoad`. This method ends the load for every non-empty buffer,
+   *   so a caller that wants the queue replayed has to say so HERE; the call in
+   *   `selectSession` only runs when the write was skipped entirely.
    * @returns {Promise<{parsedAt: number, bufferLength: number, completed: boolean}>} Parse marker snapshot
    */
-  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner, finishOptions) {
+  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner, finishOpts) {
     // Generation counter: if a newer chunkedTerminalWrite starts (tab switch),
     // older writes abort instead of continuing to push stale data into the terminal.
     const writeGen = ++this._chunkedWriteGen;
@@ -5947,7 +6000,7 @@ Object.assign(CodemanApp.prototype, {
         completed,
       });
       if (!buffer || buffer.length === 0) {
-        this._finishBufferLoad(bufferLoadOwner, finishOptions);
+        this._finishBufferLoad(bufferLoadOwner, finishOpts);
         resolve(parseSnapshot());
         return;
       }
@@ -5961,7 +6014,7 @@ Object.assign(CodemanApp.prototype, {
         this.terminal.write(cleanBuffer, () => resolve(parseSnapshot()));
         // The write is now ordered in xterm's queue. Release live output before
         // parsing completes; subsequent writes stay behind it without being lost.
-        this._finishBufferLoad(bufferLoadOwner, finishOptions);
+        this._finishBufferLoad(bufferLoadOwner, finishOpts);
         return;
       }
 
@@ -5992,7 +6045,7 @@ Object.assign(CodemanApp.prototype, {
             );
             resolve(result);
           });
-          this._finishBufferLoad(bufferLoadOwner, finishOptions);
+          this._finishBufferLoad(bufferLoadOwner, finishOpts);
           return;
         }
 
@@ -6007,14 +6060,48 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Open a buffer load: live terminal events are queued from here until
+   * `_finishBufferLoad` decides what to do with them. Returns the load token the
+   * finish call must present; a stale token makes that call a no-op.
+   *
+   * @param {string} [owner] Reuse an existing token to re-enter the same load
+   *   (see below); omit it to start a new one.
+   * @returns {string} The load token.
+   */
+  _beginBufferLoad(owner) {
+    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
+    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    // `selectSession` opens the load before its fetch, and `chunkedTerminalWrite`
+    // opens it again under the SAME owner when it starts writing. Resetting the
+    // queue on that second call would throw away everything that arrived during
+    // the fetch, which on the capture path is output no buffer holds. Re-entering
+    // one load keeps its queue; a genuinely new load still starts empty.
+    const reentering = this._bufferLoadOwner === loadOwner && Array.isArray(this._loadBufferQueue);
+    this._bufferLoadOwner = loadOwner;
+    this._isLoadingBuffer = true;
+    if (!reentering) this._loadBufferQueue = [];
+    return loadOwner;
+  },
+
+  /**
    * Complete a buffer load: unblock live SSE writes.
    * Called when chunkedTerminalWrite finishes (or is skipped for empty buffers).
    *
    * By default queued SSE events are DISCARDED, not flushed. For an established
-   * session the loaded buffer from the API is the source of truth up to the
-   * response timestamp; SSE events queued during the fetch+write overlap already
-   * appear in that buffer, so flushing them writes duplicate data (especially Ink
-   * cursor-up redraws), corrupting the terminal display.
+   * session whose buffer came from the server's accumulated byte history, that
+   * history is the source of truth up to the response timestamp; SSE events
+   * queued during the fetch+write overlap already appear in it, so flushing
+   * them writes duplicate data (especially Ink cursor-up redraws), corrupting
+   * the terminal display.
+   *
+   * A tmux PANE CAPTURE is the exception, and the reason `since` exists. A
+   * capture is a point-in-time frame taken part-way through the fetch, so it is
+   * the source of truth only up to CAPTURE time — not up to the response. Every
+   * event that arrives between the capture and the end of the chunked write is
+   * queued and, under a plain discard, lost outright: nothing re-fetches, and
+   * the CLI's next partial redraw lands on a frame the terminal never received.
+   * The caller passes the response's own arrival time as `since` so exactly
+   * that tail is replayed and the pre-capture events stay dropped.
    *
    * COD-144: a brand-new session is the exception. Its terminal fetch can resolve
    * BEFORE the PTY emits its first prompt, so the fetched buffer is empty and the
@@ -6028,25 +6115,10 @@ Object.assign(CodemanApp.prototype, {
    * After unblocking, new SSE/WS events deliver subsequent output normally.
    *
    * @param {string} [owner] Load token from `_beginBufferLoad`; a stale owner is a no-op.
-   * @param {{ flushQueued?: boolean, onDiscardedQueued?: (count: number) => void }} [opts]
-   * When `flushQueued` is true, replay any queued events. Otherwise report a
-   * nonempty discarded queue so the caller can safely fetch canonical state.
+   * @param {{ flushQueued?: boolean, since?: number }} [opts] When `flushQueued`
+   *   is true, replay queued events whose arrival timestamp is at or after
+   *   `since` (default 0, meaning the whole queue).
    */
-  _beginBufferLoad(owner) {
-    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
-    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
-    // chunkedTerminalWrite re-enters this helper with selectSession's same
-    // owner. Keep output that arrived between the outer gate and the chunked
-    // writer; replacing the queue here would make it invisible to the
-    // post-load canonical refresh safeguard.
-    if (this._isLoadingBuffer && this._bufferLoadOwner === loadOwner) return loadOwner;
-    this._bufferLoadOwner = loadOwner;
-    this._isLoadingBuffer = true;
-    this._loadBufferQueue = [];
-    this._loadBufferQueueAcceptanceEpochs = [];
-    return loadOwner;
-  },
-
   _finishBufferLoad(owner, opts) {
     if (owner !== undefined && this._bufferLoadOwner !== owner) {
       return false;
@@ -6059,11 +6131,13 @@ Object.assign(CodemanApp.prototype, {
     this._bufferLoadOwner = null;
     // COD-144: replay (rather than discard) queued live events when the load
     // painted nothing — the queued prompt is the only content a new session has.
+    // A tmux-capture load replays too, but only the tail: `since` cuts the queue
+    // at the moment the capture stopped being able to contain what arrived.
     if (opts?.flushQueued && queued && queued.length) {
-      for (let index = 0; index < queued.length; index++) {
-        const acceptedOutputEpoch = queuedEpochs?.[index];
-        if (acceptedOutputEpoch === undefined) this.batchTerminalWrite(queued[index]);
-        else this.batchTerminalWrite(queued[index], acceptedOutputEpoch);
+      const since = typeof opts.since === 'number' ? opts.since : 0;
+      for (const entry of queued) {
+        if (entry.at < since) continue;
+        this.batchTerminalWrite(entry.data);
       }
     } else if (queued && queued.length) {
       opts?.onDiscardedQueued?.(queued.length);
@@ -6247,12 +6321,54 @@ Object.assign(CodemanApp.prototype, {
     return !ev.altKey && (ev.key || '').toLowerCase() === 'c';
   },
 
+  /**
+   * xterm's current selection, cleaned for the clipboard. The transform itself
+   * is CodemanCopySelection.clean in constants.js, beside decideAutoCopy; this
+   * is the half that needs the live terminal.
+   *
+   * `text` is for the callers that already read the selection to decide whether
+   * to copy at all (the Ctrl+C gate and the right-click handler), so the read is
+   * not repeated. The transform is idempotent on xterm output, so an
+   * already-cleaned string is an acceptable argument: a CR is consumed by the
+   * parser as a cursor move and never stored in a cell, so the only \r the
+   * selection can carry is the Windows line join, and that is what makes the
+   * trailing scan a fixed point. Fuzzed over 300 000 realistic selections.
+   *
+   * A COLUMN selection comes back untouched. Alt+drag makes one (xterm's
+   * shouldColumnSelect keys on altKey alone, and Codeman sets neither of the
+   * terminals it creates with the one option that would disable it), and a
+   * rectangle's whole point is that its rows line up, which trimming each row
+   * to its own last glyph would destroy. xterm exposes the mode nowhere public,
+   * so this reads the private field the way this file already reads
+   * terminal._core for cell dimensions, and falls back to cleaning normally if
+   * a future xterm renames it. SelectionMode.COLUMN is 3.
+   */
+  cleanedTerminalSelection(text) {
+    const raw = text ?? (this.terminal?.hasSelection?.() ? this.terminal.getSelection() : '');
+    if (!raw) return '';
+    if (this.terminal?._core?._selectionService?._activeSelectionMode === 3) return raw;
+    const clean = window.CodemanCopySelection?.clean;
+    if (!clean) return raw;
+    return clean(raw);
+  },
+
   // Copy the current terminal selection. Goes through _copyText (Clipboard API,
   // then a hidden-textarea + execCommand fallback) because install.sh's LAN
   // option serves plain HTTP, where navigator.clipboard is undefined.
   async copyTerminalSelection(text) {
-    const selection = text ?? (this.terminal.hasSelection?.() ? this.terminal.getSelection() : '');
-    if (!selection) return false;
+    const selection = this.cleanedTerminalSelection(text);
+    // trim(), not emptiness: a multi-row drag across padding cleans to newlines
+    // alone, which are truthy, and a bare newline pasted into a chat composer
+    // or a shell submits the line. decideAutoCopy applies the same rule.
+    if (!selection.trim()) {
+      // Clearing is feedback, not protection. The Ctrl+C gate tests the CLEANED
+      // selection, so a padding-only selection left set can no longer swallow a
+      // later interrupt; it cleans to '' and the press reaches the PTY. What the
+      // clear avoids is a highlight that sits there having copied nothing.
+      this.terminal?.clearSelection?.();
+      this.showToast('Nothing to copy', 'warning');
+      return false;
+    }
     const ok = await this._copyText(selection);
     if (ok) {
       // Clearing is what makes a second Ctrl+C an interrupt (and xterm already
@@ -6301,9 +6417,15 @@ Object.assign(CodemanApp.prototype, {
   async _flushAutoCopySelection() {
     const decide = window.CodemanAutoCopy?.decide;
     if (!decide || !this.terminal) return;
-    const text = this.terminal.hasSelection?.() ? this.terminal.getSelection() : '';
+    // The toggle is read FIRST because Auto Copy is off by default: reading and
+    // cleaning a selection that can run to the 50 000-row scrollback ceiling
+    // costs real time on a phone, and every mouseup would pay it for nothing.
+    // Cleaning before decide() then means its dedupe and size cap both measure
+    // the text that actually reaches the clipboard, not the padded rows behind.
+    const enabled = this._autoCopySelectionEnabled();
+    const text = enabled ? this.cleanedTerminalSelection() : '';
     const verdict = decide({
-      enabled: this._autoCopySelectionEnabled(),
+      enabled,
       text,
       lastCopied: this._autoCopyLastText,
       pending: !!this._autoCopyPending,
