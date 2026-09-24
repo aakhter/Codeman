@@ -2077,6 +2077,20 @@ describe('COD-276 buildLocalPaneCommand', () => {
     expect(out).toBe(`${buildNofileLimitCommand()} && export CODEMAN_MUX=1 && $SHELL`);
   });
 
+  it('runs a saved Codex shell command without prepending another exec', () => {
+    const command = 'exec /home/ubuntu/.local/bin/codx cisco';
+    const out = buildLocalPaneCommand({
+      mode: 'codex',
+      pathExport: '',
+      envExports: ['export CODEMAN_MUX=1'],
+      cmd: command,
+      exactCommand: true,
+    });
+
+    expect(out).toContain(`export CODEMAN_MUX=1 && ${command}`);
+    expect(out).not.toContain('exec exec /home/ubuntu/.local/bin/codx');
+  });
+
   it('nices both controlled Claude resume legs and execs only the final fallback', () => {
     const base = buildSpawnCommand({
       mode: 'claude',
