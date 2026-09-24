@@ -84,6 +84,22 @@ Rules that keep this safe — **do not bypass them by hand-building an ssh line 
 Token construction is unit-tested independently of any live connection (see
 `test/` for `buildSshConnectionArgs` / `buildRemoteTmuxCheckCommand` cases).
 
+### Visible-frame capture connection reuse (COD-441)
+
+The `?frame=1` terminal route uses `RemoteFrameSshPool` to reuse an SSH connection
+across visible-frame captures. It adds `ControlMaster=auto`, a 60-second
+`ControlPersist`, and a `ControlPath` in a process-private mode-0700 temporary
+directory. The socket key includes the authenticated Codeman owner, remote SSH
+target, and effective connection arguments. Saved `ControlMaster`, `ControlPath`,
+or `ControlPersist` options take precedence: those captures use the saved SSH
+behavior without an app-owned socket.
+
+The pool checks an existing master before reuse, removes an unresponsive socket,
+and lets OpenSSH establish a fresh connection. Capture failures retain the
+existing local-wrapper fallback. Web-server shutdown asks each app-owned master
+to exit and removes its private socket directory. Full-history capture, remote
+launch, remote reconnect probes, and SFTP still use their existing SSH paths.
+
 ## Durable launch (COD-104)
 
 `buildRemoteLaunchCommand({ mode, remote, sessionId })` in `tmux-manager.ts`

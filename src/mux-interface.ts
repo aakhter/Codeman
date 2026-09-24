@@ -438,6 +438,8 @@ export interface TerminalMultiplexer extends EventEmitter {
     remote: SessionRemote,
     sessionId: string,
     muxName: string,
-    opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
+    opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number; owner?: string }
   ): Promise<string | null>;
+  /** Close only the SSH control masters owned by visible-frame capture. */
+  closeRemoteFrameConnections?(): Promise<void>;
 }

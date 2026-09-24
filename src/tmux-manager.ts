@@ -35,6 +35,7 @@ import {
 } from './session-cli-registry-bridge.js';
 import type { SpawnBridgeOptions } from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
+import { RemoteFrameSshPool } from './remote-frame-ssh-pool.js';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -2279,6 +2280,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private readonly paneTextExecutor: TmuxPaneTextExecutor;
   /** tmux 3.7+ can resize pane history after creation; older releases cannot. */
   private liveHistoryResizeSupported: boolean | null = null;
+  private readonly remoteFrameSshPool = new RemoteFrameSshPool();
 
   constructor(
     options: {
@@ -4198,6 +4200,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.reconnectGuard.clear();
     this.remoteAliveCache.clear();
     this.remoteAliveInFlight.clear();
+    void this.remoteFrameSshPool.close().catch(() => {});
+  }
+
+  /** Release app-owned SSH control masters before web-server shutdown. */
+  closeRemoteFrameConnections(): Promise<void> {
+    return this.remoteFrameSshPool.close();
   }
 
   registerSession(session: MuxSession): void {
@@ -4766,7 +4774,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     remote: SessionRemote,
     sessionId: string,
     muxName: string,
-    opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number }
+    opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number; owner?: string }
   ): Promise<string | null> {
     if (IS_TEST_MODE) return '';
     // Owned sessions (this Codeman launched them via `new-session -A`) live on
@@ -4789,13 +4797,17 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // invocation fetches capture + geometry; a delimiter line separates them.
     if (opts?.visibleFrame) {
       const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target, socket));
-      const frameArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), frameCmd];
       try {
-        const { stdout } = await execFileAsync('ssh', frameArgv, {
-          encoding: 'utf-8',
-          timeout: REMOTE_CAPTURE_TIMEOUT_MS,
-          maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
-        });
+        const stdout = await this.remoteFrameSshPool.capture(
+          buildSshConnectionArgv(remote),
+          remoteSshTarget(remote),
+          frameCmd,
+          opts.owner,
+          {
+            timeout: REMOTE_CAPTURE_TIMEOUT_MS,
+            maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
+          }
+        );
         return parseRemoteFrameCapture(stdout);
       } catch (err) {
         console.error('[TmuxManager] Remote frame capture failed (falling back to local wrapper):', err);
