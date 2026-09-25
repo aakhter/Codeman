@@ -1691,7 +1691,12 @@ function terminalLogicalLine(buffer, row, cols, maxRows) {
     if (r <= 0) return false;
     if (lineAt(r)?.isWrapped) return true;
     const prev = lineAt(r - 1);
-    return !!prev && (prev.translateToString(true) || '').length >= width;
+    const prevText = prev?.translateToString(true) || '';
+    // A full-width table divider is a row boundary, not a hard-wrapped line.
+    // Treating it as a continuation hides the next row's wrapped URL from the
+    // link provider when a CLI renders a markdown table in scrollback.
+    if (/^[\s─━═╌╍┄┅┈┉-]+$/u.test(prevText)) return false;
+    return prevText.length >= width;
   };
 
   let startRow = row;

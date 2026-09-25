@@ -147,6 +147,14 @@ describe('terminalUrlContinuationExtent (COD-448 wrap joining)', () => {
     }
   });
 
+  it('starts at the URL row when a full-width table divider precedes it', () => {
+    const rows = [{ text: '─'.repeat(TABLE_COLS) }, ...TABLE_WITH_TRAILING_COLUMNS.slice(1, 4)];
+    const buffer = fakeBuffer(rows, TABLE_COLS);
+    for (const row of [1, 2, 3]) {
+      expect(terminalUrlContinuationExtent(buffer, row, TABLE_COLS, 12)).toMatchObject({ startRow: 1, endRow: 3 });
+    }
+  });
+
   it('does not treat the next numbered table row as a URL continuation', () => {
     const rows = [TABLE_WITH_TRAILING_COLUMNS[1], { text: '  13   New to trending       Another document' }];
     const buffer = fakeBuffer(rows, TABLE_COLS);
@@ -292,6 +300,17 @@ describe('terminal link provider with wrapped table URLs (COD-448)', () => {
     }
     const firstRowLink = provide(2).find((link) => link.text === URL && link.range.start.y === 2);
     expect(firstRowLink?.range.end.x).toBe(TABLE[1].text.length);
+  });
+
+  it('opens every segment after a full-width table divider', () => {
+    const rows = [{ text: '─'.repeat(TABLE_COLS) }, ...TABLE_WITH_TRAILING_COLUMNS.slice(1, 4)];
+    const { provide, openSpy } = harness(rows, TABLE_COLS);
+    for (const line of [2, 3, 4]) {
+      const link = provide(line).find((item) => item.text === URL && item.range.start.y === line);
+      expect(link).toBeDefined();
+      link!.activate(null, link!.text);
+      expect(openSpy).toHaveBeenLastCalledWith(URL, '_blank', 'noopener,noreferrer');
+    }
   });
 
   it('underlines only the URL cells on each row, never the indent between pieces', () => {
