@@ -193,6 +193,32 @@ describe('terminalUrlContinuationExtent (COD-448 wrap joining)', () => {
   });
 });
 
+describe('native OSC 8 terminal URLs (COD-448)', () => {
+  it('opens complete HTTP links through the terminal opener and rejects unsafe schemes', () => {
+    const open = vi.fn();
+    const context = vm.createContext({
+      console,
+      CodemanApp: class CodemanApp {},
+      document: { addEventListener: vi.fn() },
+      window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
+    });
+    vm.runInContext(`${CONSTANTS}\n${TERMINAL_UI}\nglobalThis.__proto = CodemanApp.prototype;`, context);
+    const proto = (
+      context as unknown as {
+        __proto: { _terminalOsc8LinkHandler: () => { activate: (event: unknown, url: string) => void } };
+      }
+    ).__proto;
+    const handler = proto._terminalOsc8LinkHandler.call({ _openTerminalUrl: open });
+    const url = 'https://docs.example.com/Doc.aspx?file=Q3%20Plan&action=default&mobileredirect=true';
+    handler.activate(null, url);
+    expect(open).toHaveBeenCalledExactlyOnceWith(url);
+    for (const unsafe of ['javascript:alert(1)', 'data:text/html,hello', 'file:///etc/passwd']) {
+      handler.activate(null, unsafe);
+    }
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('terminal link provider with wrapped table URLs (COD-448)', () => {
   function harness(rows: Row[], cols: number) {
     const openSpy = vi.fn();

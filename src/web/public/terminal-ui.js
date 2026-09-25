@@ -830,6 +830,7 @@ Object.assign(CodemanApp.prototype, {
       scrollback: scrollback,
       allowTransparency: true,
       allowProposedApi: true,
+      linkHandler: this._terminalOsc8LinkHandler(),
     });
 
     this.fitAddon = new FitAddon.FitAddon();
@@ -3449,6 +3450,18 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.registerLinkProvider(provider);
 
     console.log('[LinkProvider] File path link provider registered');
+  },
+
+  _terminalOsc8LinkHandler() {
+    // OSC 8 links take precedence over our text link provider in xterm. Route
+    // them through the same opener, while accepting only browser web URLs from
+    // terminal output. Other URI schemes remain handled by the text provider.
+    return {
+      activate: (_event, text) => {
+        if (!/^https?:\/\/[^\s\x00-\x1f]+$/i.test(text)) return;
+        this._openTerminalUrl(text);
+      },
+    };
   },
 
   _openTerminalUrl(text) {
