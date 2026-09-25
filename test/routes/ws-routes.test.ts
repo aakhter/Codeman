@@ -482,11 +482,27 @@ describe('ws-routes', () => {
     it('COD-374 never traces a successful write for malformed or oversized frames', async () => {
       const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
       try {
+        // Both ACKs can land in one tick, so collect them with one listener
+        // rather than two sequential once() calls that could miss the second.
+        const acks: unknown[] = [];
+        const bothAcked = new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('WS message timeout')), 2000);
+          ws.on('message', (raw) => {
+            acks.push(JSON.parse(String(raw)));
+            if (acks.length === 2) {
+              clearTimeout(timer);
+              resolve();
+            }
+          });
+        });
         ws.send('not-json{{{');
         ws.send(JSON.stringify({ t: 'i', d: 'x'.repeat(MAX_INPUT_LENGTH + 1), cid: 'oversized-client', seq: 4 }));
         ws.send(JSON.stringify({ t: 'i', d: 'ok', cid: 'valid-client', seq: 5 }));
-        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 4, err: 'too_large', max: MAX_INPUT_LENGTH });
-        expect(await nextMessage(ws)).toEqual({ t: 'ia', seq: 5 });
+        await bothAcked;
+        expect(acks).toEqual([
+          { t: 'ia', seq: 4, err: 'too_large', max: MAX_INPUT_LENGTH },
+          { t: 'ia', seq: 5 },
+        ]);
 
         const successfulWrites = trace
           .snapshot()

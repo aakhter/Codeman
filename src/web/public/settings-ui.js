@@ -4146,6 +4146,7 @@ Object.assign(CodemanApp.prototype, {
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',
+          'liveMirrorEnabled',
           'sessionLineageLines',
           'showSplitButton',
         ]);
