@@ -2500,7 +2500,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 uploads/min per session)');
     }
 
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
 
     if (!req.isMultipart()) {
       reply.code(400);
@@ -2772,7 +2772,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       reply.header('Retry-After', '60');
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 ops/min per session)');
     }
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const body = (req.body ?? {}) as { path?: string };
     const rawPath = (body.path ?? '').trim();
     if (!rawPath) {
@@ -2909,7 +2909,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       reply.header('Retry-After', '60');
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 ops/min per session)');
     }
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const body = (req.body ?? {}) as { from?: string; to?: string };
     const rawFrom = (body.from ?? '').trim();
     const rawTo = (body.to ?? '').trim();
@@ -3073,7 +3073,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       reply.header('Retry-After', '60');
       return createErrorResponse(ApiErrorCode.RATE_LIMITED, 'Rate limit exceeded (20 ops/min per session)');
     }
-    const session = findSessionOrFail(ctx, id);
+    const session = findSessionOrFail(ctx, id, req);
     const rawPath = ((req.query as { path?: string }).path ?? '').trim();
     if (!rawPath) {
       reply.code(400);

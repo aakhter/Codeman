@@ -315,11 +315,45 @@ function sessionNotFoundError(sessionId: string): Error & { statusCode: number; 
  * Look up a session by ID or throw a structured error.
  * Replaces the pattern: `const session = sessions.get(id); if (!session) return createErrorResponse(...)`.
  *
- * When `req` is passed in multi-user mode, a session the caller does not own is
- * reported as NOT_FOUND (never 403), so existence of other users' sessions is not
- * leaked. Single-user / admin callers are unaffected.
+ * In multi-user mode a session the caller does not own is reported as NOT_FOUND
+ * (never 403), so the existence of other users' sessions is not leaked. Single-user
+ * and admin callers are unaffected — `canAccessOwned` short-circuits when multi-user
+ * is off, so single-user behaviour is byte-identical.
+ *
+ * COD-298: `req` is REQUIRED. It used to be optional, which meant the quiet default
+ * was the UNSCOPED one: forgetting it compiled cleanly, warned about nothing, and
+ * silently returned another user's session. That shipped twice (COD-292, COD-294),
+ * both found by somebody happening to look — and a third time, in the four COD-318
+ * File Manager write routes, found by this ticket. A request-less caller must now
+ * say so at the call site via `findSessionUnscopedOrFail`, so the compiler enumerates
+ * the decision instead of a reviewer having to notice it.
  */
-export function findSessionOrFail(ctx: SessionPort, sessionId: string, req?: FastifyRequest): Session {
+export function findSessionOrFail(ctx: SessionPort, sessionId: string, req: FastifyRequest): Session {
+  return lookupSessionOrFail(ctx, sessionId, req);
+}
+
+/**
+ * Look up a session WITHOUT ownership scoping.
+ *
+ * Deliberately verbose and greppable: every call is a decision to skip the
+ * multi-user ownership check, and should carry a comment saying why it is correct
+ * (typically a startup/reconciliation path with no request in flight, or a caller
+ * that has already authorized the user by another route).
+ *
+ * If you are reaching for this inside a request handler, you almost certainly want
+ * `findSessionOrFail(ctx, id, req)` instead — `req` is in scope there by definition.
+ *
+ * ⚠ It has NO production callers today, and that is the finding rather than a gap:
+ * after COD-298 every lookup in `src/` is request-scoped. It exists so that the next
+ * genuinely request-less caller has somewhere to go OTHER than making `req` optional
+ * again, which is the change that caused this bug three times. Do not delete it as
+ * dead code without reading that sentence.
+ */
+export function findSessionUnscopedOrFail(ctx: SessionPort, sessionId: string): Session {
+  return lookupSessionOrFail(ctx, sessionId, undefined);
+}
+
+function lookupSessionOrFail(ctx: SessionPort, sessionId: string, req: FastifyRequest | undefined): Session {
   const session = ctx.sessions.get(sessionId);
   if (!session) throw sessionNotFoundError(sessionId);
   if (req && !canAccessOwned(getAuthUser(req), session.owner)) throw sessionNotFoundError(sessionId);
