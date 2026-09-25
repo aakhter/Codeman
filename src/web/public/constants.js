@@ -1737,6 +1737,123 @@ function terminalLogicalLine(buffer, row, cols, maxRows) {
   return { startRow, endRow, text, offsetToCell, cellToOffset };
 }
 
+/**
+ * Ordinary URLs in terminal text (http, https, webexteams).
+ *
+ * A single `&` is part of the URL (query separator); `&&` is the shell operator
+ * and ends it. `)` is allowed INSIDE a URL when it closes a `(` that is also
+ * inside it (COD-448: `…/Sites/Just-In-Time(JIT)Asset…` used to link only as far
+ * as `(JIT`), and an unmatched `)` ends the URL, which keeps the closing paren of
+ * `(https://…)` and `[text](https://…)` out of the link. Trailing sentence
+ * punctuation is trimmed.
+ *
+ * @param {string} text
+ * @returns {Array<{url: string, startIndex: number, endIndex: number, rawEnd: number}>}
+ *          `endIndex` is exclusive; `rawEnd` is where the match ran to before the
+ *          paren/punctuation trim (the URL-continuation test needs it).
+ */
+function findTerminalUrls(text) {
+  const pattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&\]\x00-\x1f]|&(?!&))+/g;
+  const urls = [];
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const raw = match[0];
+    let end = raw.length;
+    let depth = 0;
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] === '(') depth++;
+      else if (raw[i] === ')') {
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+        depth--;
+      }
+    }
+    const url = raw.slice(0, end).replace(/[.,;:!?&]+$/, '');
+    if (!/:\/\/[^/]/.test(url)) continue;
+    urls.push({ url, startIndex: match.index, endIndex: match.index + url.length, rawEnd: match.index + raw.length });
+  }
+  return urls;
+}
+
+/**
+ * COD-448: the row span a URL covers when the CLI wrapped it with its OWN
+ * newlines at a point short of the terminal width.
+ *
+ * terminalLogicalLine() joins soft wraps and full-width hard wraps. A CLI that
+ * word-wraps inside a table cell or a paragraph (codex's markdown tables, for
+ * one) breaks a long URL at `/`, `?`, `-` … well before the right edge and
+ * indents the rest to the cell's column, so neither rule fires and each row
+ * linked a fragment. A row continues the URL above it only when ALL hold:
+ *   - the URL runs to the end of the text so far, ending on a character a
+ *     wrapper breaks after (`/ ? & = - _ % # + ~`);
+ *   - the next row is indented no further right than the column the URL
+ *     started in (a table cell or list item continuation, not unrelated text);
+ *   - that row's first token looks like URL material (contains one of
+ *     `% & = / ? . - _` or a digit) and is not itself a new `scheme://`.
+ * The last rule is what stops prose such as "…/files/" + "then run it" from
+ * being glued into one link.
+ *
+ * Bounded by `maxRows`, like the logical line. Pure: reads rows only.
+ *
+ * @param {{getLine: (row: number) => any, length: number}} buffer
+ * @param {number} row 0-based absolute row being examined.
+ * @param {number} cols Terminal width.
+ * @param {number} [maxRows]
+ * @returns {{startRow: number, endRow: number} | null} null when the row is not
+ *          part of a URL continued this way (callers keep the logical line).
+ */
+function terminalUrlContinuationExtent(buffer, row, cols, maxRows) {
+  const bound = Math.max(1, maxRows || 12);
+  const here = terminalLogicalLine(buffer, row, cols, bound);
+  if (!here) return null;
+
+  const chainFrom = (start) => {
+    const first = terminalLogicalLine(buffer, start, cols, bound);
+    if (!first || first.startRow !== start) return null;
+    let text = first.text.replace(/\s+$/, '');
+    let endRow = first.endRow;
+    let urlStartCol = -1;
+    let extended = false;
+    while (endRow - start + 1 < bound) {
+      const urls = findTerminalUrls(text);
+      const last = urls[urls.length - 1];
+      if (!last || last.rawEnd !== text.length || !/[/?&=\-_%#+~]$/.test(text)) break;
+      if (urlStartCol < 0) urlStartCol = first.offsetToCell(last.startIndex).col;
+      const next = buffer.getLine(endRow + 1);
+      if (!next || next.isWrapped) break;
+      const nextText = next.translateToString(true) || '';
+      const indent = nextText.length - nextText.replace(/^\s+/, '').length;
+      const token = nextText.slice(indent).split(/\s/, 1)[0];
+      if (!token || indent > urlStartCol) break;
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token) || !/^[A-Za-z0-9%_~]/.test(token)) break;
+      if (!/[%&=/?.\-_0-9]/.test(token)) break;
+      const nextLogical = terminalLogicalLine(buffer, endRow + 1, cols, bound);
+      if (!nextLogical) break;
+      text += nextLogical.text.slice(indent).replace(/\s+$/, '');
+      endRow = nextLogical.endRow;
+      extended = true;
+    }
+    return { startRow: start, endRow, extended };
+  };
+
+  // Walk up through earlier logical lines: the nearest one whose URL chain
+  // reaches this row owns it.
+  let start = here.startRow;
+  while (start >= 0 && here.startRow - start < bound) {
+    const chain = chainFrom(start);
+    if (chain && chain.extended && chain.endRow >= here.startRow) {
+      return { startRow: chain.startRow, endRow: chain.endRow };
+    }
+    if (start === 0) break;
+    const above = terminalLogicalLine(buffer, start - 1, cols, bound);
+    if (!above) break;
+    start = above.startRow;
+  }
+  return null;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Split-Pane Sessions — pure helpers (divider math, picker list)
 // ═══════════════════════════════════════════════════════════════
@@ -2029,7 +2146,7 @@ if (typeof window !== 'undefined') {
     FILE_PREVIEW_EXTENSIONS,
     relativeResolutionBase,
   };
-  window.CodemanTerminalLines = { terminalLogicalLine };
+  window.CodemanTerminalLines = { terminalLogicalLine, terminalUrlContinuationExtent, findTerminalUrls };
   window.CodemanSplitPane = {
     clampDividerPercent,
     buildSplitPickerSessions,

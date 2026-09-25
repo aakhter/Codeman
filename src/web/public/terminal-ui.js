@@ -2969,27 +2969,42 @@ Object.assign(CodemanApp.prototype, {
         // arithmetic mapping assumes one string offset per column, which shifts every
         // range after a wide CJK/emoji cell or a combining sequence.
         const cols = self.terminal.cols;
+        // COD-448: a URL the CLI wrapped short of the right edge (inside a table
+        // cell or an indented paragraph) spans rows the logical line does not
+        // join. The continuation extent widens the span to the whole URL; the
+        // rows it adds are hard continuations, handled by the indent strip below.
+        const urlExtent = window.CodemanTerminalLines?.terminalUrlContinuationExtent?.(
+          buffer,
+          bufferLineNumber - 1,
+          cols,
+          MAX_STITCHED_ROWS
+        );
+        const extentStart = urlExtent ? Math.min(urlExtent.startRow, logical.startRow) : logical.startRow;
+        const extentEnd = urlExtent ? Math.max(urlExtent.endRow, logical.endRow) : logical.endRow;
         const rowTexts = [];
         const rowColStarts = [];
         const markerOffsets = [];
         let stitchedOffset = 0;
-        for (let r = logical.startRow; r <= logical.endRow; r++) {
+        for (let r = extentStart; r <= extentEnd; r++) {
           const row = buffer.getLine(r);
           if (!row) break;
-          // Only the final row may be trimmed. Continuation rows fill the width by
-          // definition, and trimming one would shift every later offset.
-          let rowText = row.translateToString(r === logical.endRow);
+          // Only a row the NEXT row soft-wraps from is read untrimmed: it fills the
+          // width by definition, and trimming one would shift every later offset.
+          // Every other row is trimmed, which is a no-op for a full-width hard wrap
+          // and drops the padding a short hard-wrapped row (COD-448) carries.
+          const nextRow = r < extentEnd ? buffer.getLine(r + 1) : null;
+          let rowText = row.translateToString(!(nextRow && nextRow.isWrapped));
           // A HARD wrap (the program wrapped the line itself, so nothing is flagged
           // isWrapped) can indent its continuation. Joining that indent verbatim puts
           // a space inside the URL/path and the detector stops at the row boundary,
           // which is the truncation this stitching exists to prevent. Mirrors what
           // terminalLogicalLine does for the same rows.
           let colStart = 0;
-          if (r > logical.startRow && !row.isWrapped) {
+          if (r > extentStart && !row.isWrapped) {
             colStart = rowText.length - rowText.replace(/^\s+/, '').length;
             rowText = rowText.slice(colStart);
           }
-          if (r === logical.startRow || !row.isWrapped) markerOffsets.push(stitchedOffset);
+          if (r === extentStart || !row.isWrapped) markerOffsets.push(stitchedOffset);
           rowTexts.push(rowText);
           rowColStarts.push(colStart);
           stitchedOffset += rowText.length;
@@ -3003,7 +3018,7 @@ Object.assign(CodemanApp.prototype, {
          * path's underline or touch hit target. */
         const offsetPositions = [];
         for (let i = 0; i < rowTexts.length; i++) {
-          const row = buffer.getLine(logical.startRow + i);
+          const row = buffer.getLine(extentStart + i);
           const text = rowTexts[i];
           const rowPositions = [];
           if (row && typeof row.getCell === 'function') {
@@ -3011,21 +3026,21 @@ Object.assign(CodemanApp.prototype, {
               const cell = row.getCell(column);
               if (!cell || cell.getWidth() === 0) continue;
               const chars = cell.getChars() || ' ';
-              for (let k = 0; k < chars.length; k++) rowPositions.push({ x: column + 1, y: logical.startRow + i + 1 });
+              for (let k = 0; k < chars.length; k++) rowPositions.push({ x: column + 1, y: extentStart + i + 1 });
             }
           }
           // Drop the stripped indent's cells so offset 0 of this row's text still
           // points at the first character that survived the strip.
           if (rowColStarts[i]) rowPositions.splice(0, rowColStarts[i]);
           for (let k = 0; k < text.length; k++) {
-            offsetPositions.push(rowPositions[k] || { x: k + rowColStarts[i] + 1, y: logical.startRow + i + 1 });
+            offsetPositions.push(rowPositions[k] || { x: k + rowColStarts[i] + 1, y: extentStart + i + 1 });
           }
         }
         const coordAt = (index) => {
           if (offsetPositions[index]) return offsetPositions[index];
           // Past-the-end offset (an exclusive link end): one cell past the last.
           const last = offsetPositions[offsetPositions.length - 1];
-          return last ? { x: last.x + 1, y: last.y } : { x: index + 1, y: logical.startRow + 1 };
+          return last ? { x: last.x + 1, y: last.y } : { x: index + 1, y: extentStart + 1 };
         };
 
         if (!lineText || !lineText.includes('/')) {
@@ -3051,13 +3066,10 @@ Object.assign(CodemanApp.prototype, {
         // Pre-scan with the exact ordinary-URL grammar used for link creation.
         // File-token rejection consults these same ranges so query separators
         // such as `&next=file:///...` cannot make the two detectors disagree.
-        const urlPattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&)\]\x00-\x1f]|&(?!&))+/g;
-        const ordinaryUrlReferences = [];
-        let urlMatch;
-        while ((urlMatch = urlPattern.exec(lineText)) !== null) {
-          const url = urlMatch[0].replace(/[.,;:!?)&]+$/, '');
-          ordinaryUrlReferences.push({ url, startIndex: urlMatch.index, endIndex: urlMatch.index + url.length });
-        }
+        // The grammar (balanced parens, `&` vs `&&`, trailing punctuation) lives in
+        // findTerminalUrls() in constants.js so the continuation extent above
+        // reads URLs exactly the way the links below are made.
+        const ordinaryUrlReferences = window.CodemanTerminalLines?.findTerminalUrls?.(lineText) ?? [];
 
         // Pattern 0: strict local file URIs. Scan before ordinary URLs and paths,
         // retaining the encoded URI for the authenticated resolver to decode. The
@@ -3172,24 +3184,39 @@ Object.assign(CodemanApp.prototype, {
         const addUrlLink = (reference) => {
           if (overlapsLink(reference.startIndex, reference.endIndex)) return;
 
-          const start = coordAt(reference.startIndex);
-          const end = coordAt(reference.endIndex);
           reserveLink(reference.startIndex, reference.endIndex);
 
-          links.push({
-            text: reference.url,
-            range: { start, end },
-            decorations: { pointerCursor: true, underline: true },
-            activate(_event, text) {
-              self._openTerminalUrl(text);
-            },
-            hover() {
-              self._linkHovered = true;
-            },
-            leave() {
-              self._linkHovered = false;
-            },
-          });
+          // One link per terminal row the URL occupies, each opening the WHOLE
+          // URL. A single range spanning rows would also underline (and make
+          // clickable) the indent and table columns between a CLI-wrapped URL's
+          // pieces (COD-448). A single-row URL keeps its original range.
+          const segments = [];
+          let segStart = reference.startIndex;
+          for (let i = reference.startIndex + 1; i < reference.endIndex; i++) {
+            if (coordAt(i).y !== coordAt(i - 1).y) {
+              segments.push([segStart, i]);
+              segStart = i;
+            }
+          }
+          segments.push([segStart, reference.endIndex]);
+          for (let n = 0; n < segments.length; n++) {
+            const [from, to] = segments[n];
+            const last = n === segments.length - 1;
+            links.push({
+              text: reference.url,
+              range: { start: coordAt(from), end: last && n === 0 ? coordAt(to) : coordAt(to - 1) },
+              decorations: { pointerCursor: true, underline: true },
+              activate() {
+                self._openTerminalUrl(reference.url);
+              },
+              hover() {
+                self._linkHovered = true;
+              },
+              leave() {
+                self._linkHovered = false;
+              },
+            });
+          }
         };
 
         // Pattern 2: Commands with file paths (tail -f, cat, head, grep pattern, etc.)
