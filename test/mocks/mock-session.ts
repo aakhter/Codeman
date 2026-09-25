@@ -14,20 +14,12 @@ import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/se
 export class MockSession extends EventEmitter {
   id: string;
   workingDir: string = '/tmp/test-workdir';
-  /** COD-241 — set by remote-session route tests; production reads `session.remote`. */
-  remote?: SessionRemote;
   /**
    * Mirrors `Session.remote` — set to a `SessionRemote` to model a remote-SSH case,
    * whose `workingDir` is an absolute path on ANOTHER host. File routes must read it
    * over ssh instead of with local `fs` (#415).
    */
   remote?: SessionRemote;
-  /** Mirrors Session.attachmentHistory (the attachment panel's source of truth). */
-  attachmentHistory: SessionAttachmentHistoryItem[] = [];
-  /** Mirrors Session.getAttachmentHistoryForPersist(). */
-  getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] {
-    return this.attachmentHistory;
-  }
   /**
    * The REAL union, deliberately. This used to be `'idle' | 'working'`, and
    * `'working'` is not a `SessionStatus` at all — so `signalForStatus()` fell to its
