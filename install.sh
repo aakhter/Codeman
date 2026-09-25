@@ -2772,6 +2772,11 @@ setup_launchd_service() {
         bind_plist+=$'\n'"    <key>CODEMAN_PORT</key>
     <string>$(xml_escape "$CODEMAN_PORT")</string>"
     fi
+    local trusted_attachment_roots_plist=""
+    if [[ -n "${CODEMAN_TRUSTED_ATTACHMENT_ROOTS:-}" ]]; then
+        trusted_attachment_roots_plist=$'\n'"    <key>CODEMAN_TRUSTED_ATTACHMENT_ROOTS</key>
+    <string>$(xml_escape "$CODEMAN_TRUSTED_ATTACHMENT_ROOTS")</string>"
+    fi
 
     cat > "$agent_plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2795,6 +2800,7 @@ setup_launchd_service() {
     <key>LANG</key>
     <string>en_US.UTF-8</string>
 $bind_plist
+$trusted_attachment_roots_plist
   </dict>
   <key>WorkingDirectory</key>
   <string>$HOME</string>
@@ -2855,6 +2861,10 @@ setup_systemd_service() {
     if [[ -n "${CODEMAN_PORT:-}" && "${CODEMAN_PORT}" != "3000" ]]; then
         bind_env="${bind_env:+$bind_env$'\n'}Environment=CODEMAN_PORT=$CODEMAN_PORT"
     fi
+    local trusted_attachment_roots_env=""
+    if [[ -n "${CODEMAN_TRUSTED_ATTACHMENT_ROOTS:-}" ]]; then
+        trusted_attachment_roots_env=$'\n'"Environment=\"CODEMAN_TRUSTED_ATTACHMENT_ROOTS=$(systemd_env_escape "$CODEMAN_TRUSTED_ATTACHMENT_ROOTS")\""
+    fi
 
     # Create service file
     cat > "$service_file" << EOF
@@ -2871,6 +2881,7 @@ RestartSec=10
 Environment=NODE_ENV=production
 Environment=PATH=$PATH
 $bind_env
+$trusted_attachment_roots_env
 
 [Install]
 WantedBy=default.target

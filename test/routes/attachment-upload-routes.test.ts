@@ -313,6 +313,24 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
     }
   });
 
+  it('explains that an external attachment symlink needs trusted-root configuration', async () => {
+    const target = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-unconfigured-')));
+    await fs.symlink(target, join(workdir, '.codeman-attachments'));
+    try {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(BOUNDARY, 'Needs-config.pdf', 'application/pdf', PDF_BYTES),
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain('External .codeman-attachments requires an approved trusted attachment root');
+      expect(res.body).not.toContain(target);
+    } finally {
+      await fs.rm(target, { recursive: true, force: true });
+    }
+  });
+
   it('200: uploads a valid PDF, registers it as source:upload, writes it under .codeman-attachments/', async () => {
     const res = await harness.app.inject({
       method: 'POST',

@@ -139,6 +139,8 @@ export function buildServiceEnv(
     LANG: lang || 'en_US.UTF-8',
   };
   if (CODEMAN_INSTANCE) env.CODEMAN_INSTANCE = CODEMAN_INSTANCE;
+  const trustedAttachmentRoots = process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS?.trim();
+  if (trustedAttachmentRoots) env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trustedAttachmentRoots;
   return env;
 }
 
