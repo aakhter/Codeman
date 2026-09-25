@@ -1753,10 +1753,12 @@ function terminalLogicalLine(buffer, row, cols, maxRows) {
  *          paren/punctuation trim (the URL-continuation test needs it).
  */
 function findTerminalUrls(text) {
-  const pattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&\]\x00-\x1f]|&(?!&))+/g;
+  // Named `urlPattern` on purpose: test/link-provider-regex.test.ts extracts it
+  // by name to prove it stays linear-time on hostile lines.
+  const urlPattern = /(?:https?|webexteams):\/\/(?:[^\s"'<>|;&\]\x00-\x1f]|&(?!&))+/g;
   const urls = [];
   let match;
-  while ((match = pattern.exec(text)) !== null) {
+  while ((match = urlPattern.exec(text)) !== null) {
     const raw = match[0];
     let end = raw.length;
     let depth = 0;
