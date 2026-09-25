@@ -3049,6 +3049,12 @@ Object.assign(CodemanApp.prototype, {
           // and drops the padding a short hard-wrapped row (COD-448) carries.
           const nextRow = r < extentEnd ? buffer.getLine(r + 1) : null;
           let rowText = row.translateToString(!(nextRow && nextRow.isWrapped));
+          // The first table row may also contain date/owner columns after the
+          // URL cell. They occupy real cells, but cannot sit between the URL's
+          // first fragment and its indented continuation in the scan text.
+          if (r === extentStart && urlExtent?.firstRowUrlEnd != null) {
+            rowText = rowText.slice(0, urlExtent.firstRowUrlEnd);
+          }
           // A HARD wrap (the program wrapped the line itself, so nothing is flagged
           // isWrapped) can indent its continuation. Joining that indent verbatim puts
           // a space inside the URL/path and the detector stops at the row boundary,

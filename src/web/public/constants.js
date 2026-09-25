@@ -1788,8 +1788,8 @@ function findTerminalUrls(text) {
  * one) breaks a long URL at `/`, `?`, `-` … well before the right edge and
  * indents the rest to the cell's column, so neither rule fires and each row
  * linked a fragment. A row continues the URL above it only when ALL hold:
- *   - the URL runs to the end of the text so far, ending on a character a
- *     wrapper breaks after (`/ ? & = - _ % # + ~`);
+ *   - the URL fragment ends on a character a wrapper breaks after
+ *     (`/ ? & = - _ % # + ~`); a following table column may be excluded;
  *   - the next row is indented no further right than the column the URL
  *     started in (a table cell or list item continuation, not unrelated text);
  *   - that row's first token looks like URL material (contains one of
@@ -1803,8 +1803,9 @@ function findTerminalUrls(text) {
  * @param {number} row 0-based absolute row being examined.
  * @param {number} cols Terminal width.
  * @param {number} [maxRows]
- * @returns {{startRow: number, endRow: number} | null} null when the row is not
- *          part of a URL continued this way (callers keep the logical line).
+ * @returns {{startRow: number, endRow: number, firstRowUrlEnd?: number} | null}
+ *          `firstRowUrlEnd` excludes adjacent table columns when present; null
+ *          means the row is not part of a URL continued this way.
  */
 function terminalUrlContinuationExtent(buffer, row, cols, maxRows) {
   const bound = Math.max(1, maxRows || 12);
@@ -1817,11 +1818,15 @@ function terminalUrlContinuationExtent(buffer, row, cols, maxRows) {
     let text = first.text.replace(/\s+$/, '');
     let endRow = first.endRow;
     let urlStartCol = -1;
+    let firstRowUrlEnd = null;
     let extended = false;
     while (endRow - start + 1 < bound) {
       const urls = findTerminalUrls(text);
       const last = urls[urls.length - 1];
-      if (!last || last.rawEnd !== text.length || !/[/?&=\-_%#+~]$/.test(text)) break;
+      const trailingColumns =
+        endRow === first.endRow && last && last.rawEnd < text.length && /^ {2,}\S/.test(text.slice(last.rawEnd));
+      const urlText = trailingColumns ? text.slice(0, last.rawEnd) : text;
+      if (!last || last.rawEnd !== urlText.length || !/[/?&=\-_%#+~]$/.test(urlText)) break;
       if (urlStartCol < 0) urlStartCol = first.offsetToCell(last.startIndex).col;
       const next = buffer.getLine(endRow + 1);
       if (!next || next.isWrapped) break;
@@ -1829,15 +1834,26 @@ function terminalUrlContinuationExtent(buffer, row, cols, maxRows) {
       const indent = nextText.length - nextText.replace(/^\s+/, '').length;
       const token = nextText.slice(indent).split(/\s/, 1)[0];
       if (!token || indent > urlStartCol) break;
+      // When other table columns follow the URL, the next row must align with
+      // the start of its cell. A new numbered row must not become URL text.
+      if (
+        trailingColumns &&
+        (!indent ||
+          first.text[indent - 1] !== ' ' ||
+          first.text[indent] === ' ' ||
+          / {2,}/.test(first.text.slice(indent, last.startIndex)))
+      )
+        break;
       if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token) || !/^[A-Za-z0-9%_~]/.test(token)) break;
       if (!/[%&=/?.\-_0-9]/.test(token)) break;
       const nextLogical = terminalLogicalLine(buffer, endRow + 1, cols, bound);
       if (!nextLogical) break;
-      text += nextLogical.text.slice(indent).replace(/\s+$/, '');
+      if (trailingColumns) firstRowUrlEnd = last.rawEnd;
+      text = urlText + nextLogical.text.slice(indent).replace(/\s+$/, '');
       endRow = nextLogical.endRow;
       extended = true;
     }
-    return { startRow: start, endRow, extended };
+    return { startRow: start, endRow, extended, firstRowUrlEnd };
   };
 
   // Walk up through earlier logical lines: the nearest one whose URL chain
@@ -1846,7 +1862,11 @@ function terminalUrlContinuationExtent(buffer, row, cols, maxRows) {
   while (start >= 0 && here.startRow - start < bound) {
     const chain = chainFrom(start);
     if (chain && chain.extended && chain.endRow >= here.startRow) {
-      return { startRow: chain.startRow, endRow: chain.endRow };
+      return {
+        startRow: chain.startRow,
+        endRow: chain.endRow,
+        ...(chain.firstRowUrlEnd === null ? {} : { firstRowUrlEnd: chain.firstRowUrlEnd }),
+      };
     }
     if (start === 0) break;
     const above = terminalLogicalLine(buffer, start - 1, cols, bound);

@@ -78,6 +78,17 @@ const TABLE: Row[] = [
   { text: '  13   Next row              another cell' },
 ];
 const COLS = 160;
+const TABLE_CELL_START = TABLE[1].text.indexOf('Quarterly');
+const TABLE_WITH_TRAILING_COLUMNS: Row[] = [
+  TABLE[0],
+  {
+    text: TABLE[1].text + '           2026-09-16 18:00:54    Document Owner',
+  },
+  { text: ' '.repeat(TABLE_CELL_START) + TABLE[2].text.slice(CELL) },
+  { text: ' '.repeat(TABLE_CELL_START) + TABLE[3].text.slice(CELL) },
+  TABLE[4],
+];
+const TABLE_COLS = 220;
 
 describe('findTerminalUrls (COD-448 grammar)', () => {
   const { findTerminalUrls } = loadPure();
@@ -127,6 +138,20 @@ describe('terminalUrlContinuationExtent (COD-448 wrap joining)', () => {
     for (const row of [1, 2, 3]) {
       expect(terminalUrlContinuationExtent(buffer, row, COLS, 12)).toEqual({ startRow: 1, endRow: 3 });
     }
+  });
+
+  it('spans a table URL even when date and owner columns follow its first fragment', () => {
+    const buffer = fakeBuffer(TABLE_WITH_TRAILING_COLUMNS, TABLE_COLS);
+    for (const row of [1, 2, 3]) {
+      expect(terminalUrlContinuationExtent(buffer, row, TABLE_COLS, 12)).toMatchObject({ startRow: 1, endRow: 3 });
+    }
+  });
+
+  it('does not treat the next numbered table row as a URL continuation', () => {
+    const rows = [TABLE_WITH_TRAILING_COLUMNS[1], { text: '  13   New to trending       Another document' }];
+    const buffer = fakeBuffer(rows, TABLE_COLS);
+    expect(terminalUrlContinuationExtent(buffer, 0, TABLE_COLS, 12)).toBeNull();
+    expect(terminalUrlContinuationExtent(buffer, 1, TABLE_COLS, 12)).toBeNull();
   });
 
   it('leaves the neighbouring table rows alone', () => {
@@ -228,6 +253,19 @@ describe('terminal link provider with wrapped table URLs (COD-448)', () => {
       onRow!.activate(null, onRow!.text);
       expect(openSpy).toHaveBeenLastCalledWith(URL, '_blank', 'noopener,noreferrer');
     }
+  });
+
+  it('opens the whole table URL without including the adjacent date and owner columns', () => {
+    const { provide, openSpy } = harness(TABLE_WITH_TRAILING_COLUMNS, TABLE_COLS);
+    for (const line of [2, 3, 4]) {
+      const links = provide(line).filter((link) => link.text.startsWith('https://'));
+      expect(links.length).toBeGreaterThan(0);
+      for (const link of links) expect(link.text).toBe(URL);
+      links[0].activate(null, links[0].text);
+      expect(openSpy).toHaveBeenLastCalledWith(URL, '_blank', 'noopener,noreferrer');
+    }
+    const firstRowLink = provide(2).find((link) => link.text === URL && link.range.start.y === 2);
+    expect(firstRowLink?.range.end.x).toBe(TABLE[1].text.length);
   });
 
   it('underlines only the URL cells on each row, never the indent between pieces', () => {
