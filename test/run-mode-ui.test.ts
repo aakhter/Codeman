@@ -290,7 +290,7 @@ describe('Run launch synchronization', () => {
       await app.runCodex();
 
       const body = requests.find((request) => request.url === '/api/quick-start')?.body;
-      if (location !== 'local') {
+      if (location === 'docker') {
         expect(body.codexConfig).toBeUndefined();
       } else {
         expect(body.codexConfig).toEqual({
