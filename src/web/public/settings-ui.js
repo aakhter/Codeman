@@ -11,6 +11,14 @@
  * @loadorder 10 of 15 — loaded after ralph-panel.js, before panels-ui.js
  */
 
+function codexAnimationsControlValue(preference) {
+  return preference === true ? 'on' : preference === false ? 'off' : 'auto';
+}
+
+function codexAnimationsPreference(value) {
+  return value === 'on' ? true : value === 'off' ? false : null;
+}
+
 Object.assign(CodemanApp.prototype, {
   // Hooks (Claude Code hook events)
   _onHookIdlePrompt(data) {
@@ -518,8 +526,8 @@ Object.assign(CodemanApp.prototype, {
     // that does have it.
     document.getElementById('appSettingsCodexDangerouslyBypassApprovals').checked =
       settings.codexDangerouslyBypassApprovals ?? false;
-    document.getElementById('appSettingsCodexAnimations').checked =
-      settings.codexAnimationsEnabled ?? false;
+    document.getElementById('appSettingsCodexAnimations').value =
+      codexAnimationsControlValue(settings.codexAnimationsEnabled);
     this._applyCodexSettingsVisibility();
     // Terminal history settings
     document.getElementById('appSettingsTerminalScrollbackLines').value =
@@ -2379,7 +2387,9 @@ Object.assign(CodemanApp.prototype, {
         (parseInt(document.getElementById('appSettingsTerminalBufferMaxMiB').value, 10) || 32) * 1024 * 1024,
       terminalBufferTrimBytes:
         (parseInt(document.getElementById('appSettingsTerminalBufferTrimMiB').value, 10) || 24) * 1024 * 1024,
-      codexAnimationsEnabled: document.getElementById('appSettingsCodexAnimations').checked,
+      codexAnimationsEnabled: codexAnimationsPreference(
+        document.getElementById('appSettingsCodexAnimations').value
+      ),
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       agentSkillEnabled: document.getElementById('appSettingsAgentSkill').checked,

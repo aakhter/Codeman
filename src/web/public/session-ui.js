@@ -45,7 +45,9 @@ const RUN_MODE_LAUNCH = {
     buildConfig: (globalSettings) => ({
       codexConfig: {
         dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
-        animations: globalSettings.codexAnimationsEnabled ?? false,
+        ...(typeof globalSettings.codexAnimationsEnabled === 'boolean'
+          ? { animations: globalSettings.codexAnimationsEnabled }
+          : {}),
         renderMode: 'hybrid',
       },
     }),

@@ -1563,7 +1563,7 @@ export const SettingsUpdateSchema = z
     showResponseViewer: z.boolean().optional(),
     // Codex CLI settings
     codexDangerouslyBypassApprovals: z.boolean().optional(),
-    codexAnimationsEnabled: z.boolean().optional(),
+    codexAnimationsEnabled: z.boolean().nullable().optional(),
     // Terminal history and retention
     terminalScrollbackLines: z
       .number()
