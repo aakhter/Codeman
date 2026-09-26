@@ -583,7 +583,14 @@
     return order[(start + (delta < 0 ? -1 : 1) + order.length) % order.length] || null;
   }
 
-  function renderProjection(projection, orientation, renderRef, escapeHtml, renderFocusRef = renderRef) {
+  function renderProjection(
+    projection,
+    orientation,
+    renderRef,
+    escapeHtml,
+    renderFocusRef = renderRef,
+    visualOrderForRef
+  ) {
     const refs = Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [];
     const sections = Array.isArray(projection?.sections) ? projection.sections : [];
     if (orientation !== 'vertical' || sections.length === 0) {
@@ -623,7 +630,11 @@
               .replace(/<button(?![^>]*tabindex)/g, '<button tabindex="-1"');
             if (!/role="treeitem"/.test(rendered)) rendered = rendered.replace(/^<([a-z]+)/, '<$1 role="treeitem"');
             const storedIndex = section.refIndices?.[refIndex] ?? refIndex;
-            return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${storedIndex}"></div>${rendered}`;
+            // The rail sorts rows with flex `order`. Their drop zones must carry
+            // the same order or every default-order zone gathers above the rows.
+            const visualOrder = visualOrderForRef?.(ref);
+            const zoneOrder = Number.isInteger(visualOrder) ? ` style="order:${visualOrder}"` : '';
+            return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${storedIndex}"${zoneOrder}></div>${rendered}`;
           })
           .join('');
         const headerId = section.id === null ? '' : `tab-group-header-${sectionIndex}`;
@@ -636,9 +647,12 @@
             : `<div class="tab-layout-group-header" role="treeitem" tabindex="-1" aria-labelledby="${escapeHtml(headerId)}" aria-expanded="${section.collapsed ? 'false' : 'true'}">${groupToggle}<span id="${escapeHtml(headerId)}" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>${escapeHtml(name)}</span><span class="tab-layout-group-count">${section.count ?? section.refs.length}</span><button type="button" tabindex="-1" class="tab-layout-group-drag-handle" aria-label="Move ${escapeHtml(name)}" data-tab-group-drag="${escapeHtml(section.id)}">&#x2630;</button><button type="button" tabindex="-1" class="tab-layout-group-menu" aria-label="Actions for ${escapeHtml(name)}" aria-haspopup="menu" aria-expanded="false" onclick="app.openTabGroupMenu(event, this.closest('.tab-layout-group-header').querySelector('[data-tab-group-header]').dataset.tabGroupHeader)">&#x22EF;</button></div>`;
         const label =
           section.id === null ? `aria-label="${escapeHtml(name)}"` : `aria-labelledby="${escapeHtml(headerId)}"`;
+        // Webview rows sort at 9999, so the trailing insertion zone follows
+        // every card even when the section contains webviews.
+        const endZoneOrder = visualOrderForRef ? ' style="order:10000"' : '';
         const members = section.collapsed
-          ? `<div class="tab-layout-group-refs tab-layout-collapsed-exception" role="presentation"${section.refs.length ? ` data-tab-highlighted-exception="${escapeHtml(section.id)}"` : ''}>${content}<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${section.count ?? section.refs.length}"></div></div>`
-          : `<div class="tab-layout-group-refs" role="group" ${label}>${content}<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${section.count ?? section.refs.length}"></div></div>`;
+          ? `<div class="tab-layout-group-refs tab-layout-collapsed-exception" role="presentation"${section.refs.length ? ` data-tab-highlighted-exception="${escapeHtml(section.id)}"` : ''}>${content}<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${section.count ?? section.refs.length}"${endZoneOrder}></div></div>`
+          : `<div class="tab-layout-group-refs" role="group" ${label}>${content}<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${section.count ?? section.refs.length}"${endZoneOrder}></div></div>`;
         return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-before-group="${escapeHtml(section.id || '')}"></div><section class="tab-layout-group" role="presentation" data-tab-group-id="${escapeHtml(section.id || '')}">${header}${members}</section>`;
       })
       .join('');

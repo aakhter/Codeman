@@ -7960,6 +7960,10 @@ class CodemanApp {
         // rail when the setting (or the layout) flips without a full rebuild.
         const railOrder = railSortOrder?.has(id) ? String(railSortOrder.get(id)) : '';
         if (tab.style.order !== railOrder) tab.style.order = railOrder;
+        const dropZone = tab.previousElementSibling;
+        if (dropZone?.classList.contains('tab-layout-drop-zone') && dropZone.style.order !== railOrder) {
+          dropZone.style.order = railOrder;
+        }
 
         // A web tab owns the active state while one is open. activeSessionId stays
         // set (the terminal keeps streaming underneath, and switching back is
@@ -8336,6 +8340,9 @@ class CodemanApp {
       : !this.activeWebviewId && this.activeSessionId === ref.id;
     tab.classList.remove('active');
     tab.classList.add('tab-focus-shortcut');
+    // Focus keeps its canonical order; a copied rail sort value would move the
+    // shortcut away from its drop zone and leave another blank run of slots.
+    tab.style.order = '';
     tab.setAttribute('data-tab-focus-shortcut', key);
     tab.setAttribute(ref.kind === 'webview' ? 'data-focus-webview-id' : 'data-focus-session-id', ref.id);
     tab.removeAttribute(ref.kind === 'webview' ? 'data-webview-id' : 'data-id');
@@ -8567,7 +8574,10 @@ class CodemanApp {
           ref,
           renderedByRef.get(`${ref.kind}:${ref.id}`) || '',
           window.CodemanTabLayout.altNumberForRef(altRefs, ref)
-        )
+        ),
+      railSortOrder
+        ? (ref) => (ref.kind === 'webview' ? 9999 : railSortOrder.get(ref.id))
+        : null
     );
     container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
     container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
