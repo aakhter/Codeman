@@ -609,6 +609,10 @@ const DEFAULT_SHORTCUTS = [
   },
 ];
 
+// Smart copy is dispatched by terminal-ui.js so Ctrl+C can still reach the PTY
+// when there is no selection. Keep it out of the generic document shortcut loop.
+const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set(['copyTerminalSelection']);
+
 // ═══════════════════════════════════════════════════════════════
 // CodemanApp Class — constructor and global state
 // ═══════════════════════════════════════════════════════════════
