@@ -2665,9 +2665,13 @@
                   <div class="set-row" data-search="codex animations status effects">
                     <div class="set-row-text">
                       <span class="set-row-label">Animated status effects</span>
-                      <span class="set-row-desc">Decorative Codex TUI motion. Leave off to reduce remote and mobile redraws.</span>
+                      <span class="set-row-desc">Auto uses your Codex configuration. On and Off pass a session override; Codex may start without its shared background server.</span>
                     </div>
-                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsCodexAnimations"><span class="slider"></span></label>
+                    <select id="appSettingsCodexAnimations" class="set-select">
+                      <option value="auto">Auto</option>
+                      <option value="on">On</option>
+                      <option value="off">Off</option>
+                    </select>
                   </div>
                 </div>
               </div>

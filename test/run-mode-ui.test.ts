@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
+import { SettingsUpdateSchema } from '../src/web/schemas.js';
 
 function loadRunModeHarness() {
   const elements: Record<string, any> = {};
@@ -724,6 +725,42 @@ describe('Run launch synchronization', () => {
 });
 
 describe('Codex quick start settings', () => {
+  it('maps Auto, On, and Off between the settings control and stored preference', () => {
+    const CodemanApp = function CodemanApp(this: any) {};
+    const context: any = vm.createContext({
+      CodemanApp,
+      document: { getElementById: () => null, addEventListener: () => {} },
+      MobileDetection: {},
+      console,
+    });
+    context.window = context;
+    const settingsUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
+    vm.runInContext(settingsUi, context, { filename: 'settings-ui.js' });
+
+    expect(vm.runInContext('codexAnimationsControlValue(null)', context)).toBe('auto');
+    expect(vm.runInContext('codexAnimationsControlValue(true)', context)).toBe('on');
+    expect(vm.runInContext('codexAnimationsControlValue(false)', context)).toBe('off');
+    expect(vm.runInContext("codexAnimationsPreference('auto')", context)).toBe(null);
+    expect(vm.runInContext("codexAnimationsPreference('on')", context)).toBe(true);
+    expect(vm.runInContext("codexAnimationsPreference('off')", context)).toBe(false);
+  });
+
+  it('keeps the Auto animation preference out of the Codex launch config', async () => {
+    const { app, requests } = loadSessionLaunchHarness();
+    app.loadAppSettingsFromStorage = () => ({ codexAnimationsEnabled: null });
+
+    await app.runCodex();
+
+    const launchConfig = requests.find((request) => request.url === '/api/quick-start')?.body.codexConfig;
+    expect(launchConfig).not.toHaveProperty('animations');
+  });
+
+  it('accepts Auto as a nullable synced setting while retaining booleans', () => {
+    expect(SettingsUpdateSchema.safeParse({ codexAnimationsEnabled: null }).success).toBe(true);
+    expect(SettingsUpdateSchema.safeParse({ codexAnimationsEnabled: false }).success).toBe(true);
+    expect(SettingsUpdateSchema.safeParse({ codexAnimationsEnabled: true }).success).toBe(true);
+  });
+
   it('renders Codex CLI settings in their own group inside Agents & CLIs', () => {
     const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
 
@@ -735,6 +772,9 @@ describe('Codex quick start settings', () => {
     const codexGroup = clis![1].match(/id="appSettingsCodexGroup"([\s\S]*)$/);
     expect(codexGroup?.[1]).toContain('appSettingsCodexDangerouslyBypassApprovals');
     expect(codexGroup?.[1]).toContain('appSettingsCodexAnimations');
+    expect(codexGroup?.[1]).toContain('<option value="auto">Auto</option>');
+    expect(codexGroup?.[1]).toContain('<option value="on">On</option>');
+    expect(codexGroup?.[1]).toContain('<option value="off">Off</option>');
     expect(codexGroup?.[1]).not.toContain('appSettingsCodexRenderMode');
 
     // The Claude settings above it must not have absorbed the codex inputs.

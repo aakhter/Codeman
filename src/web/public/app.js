@@ -609,6 +609,10 @@ const DEFAULT_SHORTCUTS = [
   },
 ];
 
+// Smart copy is dispatched by terminal-ui.js so Ctrl+C can still reach the PTY
+// when there is no selection. Keep it out of the generic document shortcut loop.
+const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set(['copyTerminalSelection']);
+
 // ═══════════════════════════════════════════════════════════════
 // CodemanApp Class — constructor and global state
 // ═══════════════════════════════════════════════════════════════
@@ -8530,6 +8534,7 @@ class CodemanApp {
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
 
       parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
