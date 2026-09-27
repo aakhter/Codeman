@@ -1002,6 +1002,9 @@ async function captureDocumentVersion(sessionId: string, filePath: string, exten
   if (!isDiffableDocExtension(extension)) return;
   try {
     const stat = await fs.stat(filePath);
+    // Over the per-file history budget: the store would refuse it anyway, so do
+    // not read (and, for docx, convert) it on every 1.5s poll (COD-457).
+    if (stat.size > documentVersionStore.maxVersionBytes) return;
     const latest = documentVersionStore.latest(sessionId, filePath);
     if (latest && latest.mtimeMs === (stat.mtimeMs ?? 0) && latest.size === stat.size) return;
     if (isBinaryDocExtension(extension)) {

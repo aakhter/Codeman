@@ -88,6 +88,7 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
+import { documentVersionStore } from '../document-version-store.js';
 import { getCli, enabledClis, listClis } from '../config/cli-registry/registry.js';
 import { isCliEntryInstalled, probeStockCliAvailability } from '../utils/cli-installed-probes.js';
 import { readCustomModelHosts } from '../custom-model-hosts.js';
@@ -2222,6 +2223,11 @@ export class WebServer extends EventEmitter {
     // Clear batches, per-session timers, and pending state updates
     this.sse.cleanupSessionBatches(sessionId);
 
+    // Drop the session's document revision history (full bodies + raw docx
+    // bytes). Outside the `if (session)` block on purpose: the store is keyed by
+    // id alone, and nothing else would ever free it (COD-457).
+    documentVersionStore.clearSession(sessionId);
+
     // Reset Ralph tracker on the session before cleanup
     if (session) {
       session.ralphTracker.fullReset();
@@ -4330,6 +4336,7 @@ export class WebServer extends EventEmitter {
     // otherwise meet the retry, which reuses the same session id by design.
     this.stopTranscriptWatcher(sessionId);
     attachmentRegistry.clearSession(sessionId);
+    documentVersionStore.clearSession(sessionId);
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
