@@ -29,6 +29,12 @@ export class MockSession extends EventEmitter {
   status: SessionStatus = 'idle';
   /** `null` once the PTY is gone (or before it has ever started) — see `pid` in Session. */
   pid: number | null = 12345;
+  /** Mirrors Session.blocksIdleAutomation (COD-350): background agents still working. */
+  blocksIdleAutomation = false;
+  /** Mirrors Session.isAutonomouslyIdle(): idle, and no agent work blocks automation. */
+  isAutonomouslyIdle(): boolean {
+    return this.status === 'idle' && !this.blocksIdleAutomation;
+  }
   /** COD-124 — preserved conversation ref for claude-mode resume via --resume. */
   resumeSessionId?: string;
   /** COD-124 unit 2, Gap B — native external-CLI (codex) rollout id captured at park time. */
@@ -351,6 +357,11 @@ export class MockSession extends EventEmitter {
 
   get attachmentHistory(): SessionAttachmentHistoryItem[] {
     return sanitizeAttachmentHistory(this._attachmentHistory);
+  }
+
+  /** Test seeding only (the real Session has no setter): replaces the raw list. */
+  set attachmentHistory(history: SessionAttachmentHistoryItem[]) {
+    this._attachmentHistory = history.map((item) => ({ ...item }));
   }
 
   upsertAttachmentHistory = vi.fn((item: SessionAttachmentHistoryItem) => {
