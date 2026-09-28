@@ -7520,15 +7520,13 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * True when this session's LOCAL scrollback is structurally empty: a Claude
-   * pane in repaint mode, where tmux reports `history_size≈0` and every frame
-   * overwrites the last, so xterm's normal buffer never grows past one screen
-   * (`baseY === 0`). Scrolling that buffer is a no-op no matter how the gesture
-   * is routed — the "wheel does nothing at all" half of the #205 retest.
+   * True when the local buffer has no history and the CLI can page its own
+   * transcript. Claude repaints in place; Codex 0.157.1 uses tmux's alternate
+   * screen. Both can leave xterm at baseY 0 while the CLI has older output.
    */
   _localScrollbackIsHollow() {
     const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
-    if (mode !== 'claude') return false;
+    if (mode !== 'claude' && mode !== 'codex') return false;
     const buf = this.terminal?.buffer?.active;
     if (!buf || buf.type === 'alternate') return false;
     return (buf.baseY || 0) === 0;
@@ -7538,17 +7536,14 @@ Object.assign(CodemanApp.prototype, {
    * LAST-RESORT scroll for a hollow local buffer: translate gesture lines into
    * coalesced PageUp/PageDown key sends so the CLI pages its OWN transcript.
    *
-   * The rescue path for every way `_shouldForwardWheelToApp` can come back false
-   * on a Claude session that has no local history to fall back on: the CLI
-   * version probe failed or is genuinely older than 2.1.187, or the user turned
-   * on "Wheel scrolls local history" (which pins the wheel to a buffer that,
-   * for a repaint-mode CLI, is empty — the setting's footgun). Before this, all
-   * of those produced a completely dead gesture; the #205 reporter proved the
-   * keyboard route works by paging back through intact text with Fn+Up.
+   * Claude reaches this path when its version cannot receive SGR wheel reports
+   * or local scrollback is selected. Codex reaches it when its alternate-screen
+   * transcript has no xterm history: measured on 0.157.1, PageUp changes the
+   * visible transcript while SGR wheel reports and local scrolling do nothing.
    *
-   * Triple-guarded (claude mode + gate false + `baseY === 0`), so a session with
-   * real local scrollback is never touched. Shift is excluded on purpose: it is
-   * the explicit "give me local scrollback" gesture and must keep that meaning.
+   * Guarded by CLI mode, normal buffer, and `baseY === 0`, so a session with
+   * real local scrollback is never touched. Shift is excluded on purpose: it
+   * explicitly selects local scrollback.
    *
    * @returns true when the gesture was consumed here (the caller must not also
    *          scroll locally).
