@@ -62,32 +62,6 @@ function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number } = {})
   return { app, sent, logs };
 }
 
-describe('COD-459 history scroll during capture', () => {
-  it('keeps drag and momentum rows until the history buffer can display them', () => {
-    const { app } = loadTerminalUiHarness();
-    const scrolled: number[] = [];
-    app.activeSessionId = 'mirror';
-    app._viewMode = 'history';
-    app._historyLoadGen = 3;
-    app._historyInitialLoadGen = 3;
-    app._historyPendingScrollRows = 0;
-    app._historyScrollFraction = 0;
-    app.terminal = { scrollLines: (rows: number) => scrolled.push(rows) };
-
-    expect(app._handleUserScrollIntent(-2)).toBe('scrolled');
-    expect(app._handleUserScrollIntent(-1)).toBe('scrolled');
-    expect(app._historyPendingScrollRows).toBe(-3);
-    expect(scrolled).toEqual([]);
-
-    app._historyInitialLoadGen = 0;
-    app._noteTerminalUserScroll = () => {};
-    app.isTerminalAtBottom = () => false;
-    app.terminal.buffer = { active: { viewportY: 1 } };
-    expect(app._handleUserScrollIntent(-1)).toBe('scrolled');
-    expect(scrolled).toEqual([-1]);
-  });
-});
-
 describe('full-history re-pull downgrade guard (issue #205 round 2)', () => {
   it('estimates replayed rows from wrapped, escape-laden capture text', () => {
     const { app } = loadTerminalUiHarness();

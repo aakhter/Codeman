@@ -390,13 +390,6 @@ Object.assign(CodemanApp.prototype, {
       scrollLines = Math.trunc(this._historyScrollFraction);
       this._historyScrollFraction -= scrollLines;
       if (!scrollLines) return 'swallowed';
-      // Keep following the finger while the first history capture is in flight.
-      // The live frame still has zero scrollback, so scrolling it loses this
-      // travel and makes the content jump when the capture finally arrives.
-      if (this._historyInitialLoadGen === this._historyLoadGen) {
-        this._historyPendingScrollRows += scrollLines;
-        return 'scrolled';
-      }
     }
     this._noteTerminalUserScroll(scrollLines);
     this.terminal.scrollLines(scrollLines);
@@ -1488,7 +1481,7 @@ Object.assign(CodemanApp.prototype, {
             // forward/page routing below.
             if (this._isMirrorSession?.(this.activeSessionId) || this._viewMode === 'history') {
               const intent = this._handleUserScrollIntent(lines);
-              if (intent === 'swallowed') velocity = 0;
+              if (intent === 'entered-history' || intent === 'swallowed') velocity = 0;
             } else if (this._shouldForwardWheelToApp({ shiftKey: false })) {
               // Flick momentum keeps feeding the CLI's transcript from the last
               // touch point; the 40ms coalescer batches the per-frame reports.
@@ -1673,11 +1666,11 @@ Object.assign(CodemanApp.prototype, {
               return;
             }
             const delta = touchLastY - touchY; // positive = scroll down
+            pixelAccum += delta;
             velocity = delta * 1.2;
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
-              pixelAccum += delta;
               // opencode touch: immediate per-frame SGR (no double 16ms batch) for smooth 60fps
               if (getIsOpencodeMobile()) {
                 pendingDelta += delta;
@@ -1698,7 +1691,7 @@ Object.assign(CodemanApp.prototype, {
                 });
                 return;
               }
-              if (Math.abs(pixelAccum) >= getThreshold()) {
+            if (Math.abs(pixelAccum + delta) >= getThreshold()) {
                 pendingDelta += delta;
                 pendingX = touchX; pendingY = touchY;
                 if (touchMoveRaf) return;
@@ -1710,7 +1703,7 @@ Object.assign(CodemanApp.prototype, {
               return;
             }
             pixelAccum += delta;
-            if (Math.abs(pixelAccum) < getThreshold()) return;
+          if (Math.abs(pixelAccum) < getThreshold()) return;
           if (getIsOpencodeMobile()) {
               pendingDelta += pixelAccum;
               if (touchMoveRaf) return;
@@ -1721,7 +1714,7 @@ Object.assign(CodemanApp.prototype, {
                 if (lines !== 0) {
                   const intent = this._handleUserScrollIntent(lines);
                   pixelAccum -= lines * ch;
-                  if (intent === 'entered-history') pixelAccum = 0;
+                  if (intent === 'entered-history') { velocity = 0; pixelAccum = 0; }
                 }
               });
               return;
@@ -1745,7 +1738,10 @@ Object.assign(CodemanApp.prototype, {
                 this._maybeLoadMoreHistoryOnScroll(lines);
               }
               pixelAccum -= lines * ch;
-              if (intent === 'entered-history') pixelAccum = 0;
+              if (intent === 'entered-history') {
+                velocity = 0;
+                pixelAccum = 0;
+              }
             }
           }
         },

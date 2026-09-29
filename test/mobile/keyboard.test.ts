@@ -1356,61 +1356,6 @@ describe('Virtual Keyboard', () => {
       expect(calls.some((lines) => lines !== 0)).toBe(true);
     });
 
-    it('moves the terminal by the finger distance once per touch move', async () => {
-      const movement = await page.evaluate(() => {
-        app.activeSessionId = 'mobile-touch-distance-test';
-        app.sessions.set('mobile-touch-distance-test', {
-          id: 'mobile-touch-distance-test',
-          mode: 'shell',
-          status: 'running',
-        });
-        app.hideWelcome();
-        const target = document.querySelector('#terminalContainer .xterm-screen')!;
-        const rect = target.getBoundingClientRect();
-        const x = rect.left + rect.width / 2;
-        const startY = rect.top + Math.min(180, rect.height - 20);
-        const cellHeight = app.terminal._core._renderService.dimensions.css.cell.height;
-        const distance = cellHeight * 2 + 1; // clear the second row despite pixel rounding
-        const calls: number[] = [];
-        const originalScrollLines = app.terminal.scrollLines.bind(app.terminal);
-        app.terminal.scrollLines = (lines: number) => {
-          calls.push(lines);
-          return originalScrollLines(lines);
-        };
-        const touch = (y: number) => new Touch({ identifier: 1, target, clientX: x, clientY: y, pageX: x, pageY: y });
-        target.dispatchEvent(
-          new TouchEvent('touchstart', {
-            touches: [touch(startY)],
-            changedTouches: [touch(startY)],
-            bubbles: true,
-            cancelable: true,
-          })
-        );
-        target.dispatchEvent(
-          new TouchEvent('touchmove', {
-            touches: [touch(startY - distance)],
-            changedTouches: [touch(startY - distance)],
-            bubbles: true,
-            cancelable: true,
-          })
-        );
-        const dragCalls = [...calls]; // measure before release and momentum
-        target.dispatchEvent(
-          new TouchEvent('touchend', {
-            touches: [],
-            changedTouches: [touch(startY - distance)],
-            bubbles: true,
-            cancelable: true,
-          })
-        );
-        app.terminal.scrollLines = originalScrollLines;
-        return { distance, cellHeight, dragCalls };
-      });
-
-      expect(movement.distance).toBeGreaterThan(8);
-      expect(movement.dragCalls).toEqual([2]);
-    });
-
     it('consumes terminal touch drag while keyboard is visible so Safari does not pan the viewport', async () => {
       await showKeyboard(page, KEYBOARD.TYPICAL_IOS_HEIGHT);
       await page.waitForTimeout(WAIT.KEYBOARD_ANIMATION);

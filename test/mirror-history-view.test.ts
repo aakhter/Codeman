@@ -110,7 +110,7 @@ describe('COD-187 live-mirror structural guards', () => {
 
   it('COD-190: history entry is an atomic DEC-2026 swap with no-jump bottom landing', () => {
     const start = appJs.indexOf('async _enterHistoryView(');
-    const body = appJs.slice(start, start + 4500);
+    const body = appJs.slice(start, start + 4000);
     // one synchronized write — never a visible blank between clear and repaint
     expect(body).toContain('?2026h');
     expect(body).toContain('?2026l');
@@ -118,7 +118,7 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(body).not.toContain('_resetTerminalForReplay'); // reset() would drop sync mode
     // land on the exact pixels the user was watching, then apply their gesture
     const bottom = body.indexOf('scrollToBottom()');
-    const carry = body.indexOf('scrollLines(pendingRows - carryRows)');
+    const carry = body.indexOf('scrollLines(-carryRows)');
     expect(bottom).toBeGreaterThan(-1);
     expect(carry).toBeGreaterThan(bottom);
   });
@@ -150,7 +150,7 @@ describe('COD-187 live-mirror structural guards', () => {
 
     const funnel = termUi.slice(
       termUi.indexOf('_handleUserScrollIntent(lines) {'),
-      termUi.indexOf('_handleUserScrollIntent(lines) {') + 2800
+      termUi.indexOf('_handleUserScrollIntent(lines) {') + 2200
     );
     expect(funnel).toContain('this._historyInitialLoadGen !== this._historyLoadGen');
 
@@ -161,7 +161,7 @@ describe('COD-187 live-mirror structural guards', () => {
   it('COD-291: fractional trackpad carry is converted to whole rows before xterm scrolling', () => {
     const enter = appJs.slice(appJs.indexOf('async _enterHistoryView('), appJs.indexOf('async _expandHistoryFull()'));
     expect(enter).toContain('const carryRows = Math.max(0, Math.trunc(carryLines));');
-    expect(enter).toContain('this.terminal.scrollLines(pendingRows - carryRows);');
+    expect(enter).toContain('if (carryRows > 0) this.terminal.scrollLines(-carryRows);');
     expect(enter).not.toContain('this.terminal.scrollLines(-carryLines)');
   });
 
