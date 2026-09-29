@@ -984,6 +984,7 @@ class CodemanApp {
     this._viewMode = 'live'; // 'live' | 'history' — meaningful only for mirror sessions
     this._historyLoadGen = 0; // aborts stale history fetches
     this._historyInitialLoadGen = 0; // COD-291: generation whose first history buffer is still pending
+    this._historyPendingScrollRows = 0; // COD-459: finger travel while the first capture loads
     this._historyMissedOutput = false; // live output arrived while frozen in history
     this._lastMirrorFrame = null; // {id, buf} dedupe for _refreshMirrorFrame
     this._historyExitAt = 0; // history re-entry cooldown timestamp
@@ -4128,6 +4129,7 @@ class CodemanApp {
     this._viewMode = 'history';
     this._historyMissedOutput = false;
     this._historyScrollFraction = 0;
+    this._historyPendingScrollRows = 0;
     const gen = ++this._historyLoadGen;
     this._historyInitialLoadGen = gen;
     this._showHistoryPill('History — loading…');
@@ -4193,7 +4195,9 @@ class CodemanApp {
         this.terminal.scrollToBottom();
       }
       const carryRows = Math.max(0, Math.trunc(carryLines));
-      if (carryRows > 0) this.terminal.scrollLines(-carryRows);
+      const pendingRows = this._historyPendingScrollRows;
+      this._historyPendingScrollRows = 0;
+      if (carryRows || pendingRows) this.terminal.scrollLines(pendingRows - carryRows);
       this._updateHistoryPill();
     } catch (err) {
       console.error('history view load failed:', err);
@@ -4248,6 +4252,7 @@ class CodemanApp {
     this._historyMissedOutput = false;
     this._historyPartial = false;
     this._historyScrollFraction = 0;
+    this._historyPendingScrollRows = 0;
     this._historyExitAt = Date.now();
     this._hideHistoryPill();
     // Stale sticky-scroll grace must not survive into live mode.
