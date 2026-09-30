@@ -12,6 +12,7 @@ import { exec, execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { basename, dirname, join, posix as posixPath, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { boundedPathExists } from '../../utils/bounded-path-probe.js';
 import { homedir } from 'node:os';
 import type {
   AgentCaseSummary,
@@ -247,8 +248,11 @@ function gitDiagnosticLine(stderr: string): string {
  * hooks, which run on the user's machine when a session starts in the case, so
  * the clone response says so out loud instead of silently merging into them.
  */
-function repoShipsClaudeSettings(casePath: string): boolean {
-  return ['settings.json', 'settings.local.json'].some((file) => existsSync(join(casePath, '.claude', file)));
+async function repoShipsClaudeSettings(casePath: string): Promise<boolean> {
+  for (const file of ['settings.json', 'settings.local.json']) {
+    if (await boundedPathExists(join(casePath, '.claude', file))) return true;
+  }
+  return false;
 }
 
 /**
@@ -559,7 +563,7 @@ export function registerCaseRoutes(
       return {
         name,
         path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
-        hasClaudeMd: existsSync(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
+        hasClaudeMd: await boundedPathExists(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
         location: 'docker',
         docker: {
           hostId: host.id,
@@ -572,12 +576,12 @@ export function registerCaseRoutes(
     }
 
     const casePath = await resolveCasePath(name, user);
-    if (!existsSync(casePath)) return null;
+    if (!(await boundedPathExists(casePath))) return null;
     const linked = casePath !== join(resolveCasesDir(user), name);
     return {
       name,
       path: casePath,
-      hasClaudeMd: existsSync(join(casePath, 'CLAUDE.md')),
+      hasClaudeMd: await boundedPathExists(join(casePath, 'CLAUDE.md')),
       ...(linked && { linked: true }),
       location: linked ? ('linked-local' as const) : ('local' as const),
       codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), name),
@@ -624,7 +628,7 @@ export function registerCaseRoutes(
           cases.push({
             name: e.name,
             path: casePath,
-            hasClaudeMd: existsSync(join(casePath, 'CLAUDE.md')),
+            hasClaudeMd: await boundedPathExists(join(casePath, 'CLAUDE.md')),
             location: 'local',
             codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), e.name),
             ...(marker ? { agentCreated: agentCreatedInfo(marker) } : {}),
@@ -640,11 +644,11 @@ export function registerCaseRoutes(
     const existingNames = new Set(cases.map((c) => c.name));
     if (admin) {
       for (const [name, path] of Object.entries(linkedCases)) {
-        if (!existingNames.has(name) && SAFE_CASE_NAME.test(name) && existsSync(path)) {
+        if (!existingNames.has(name) && SAFE_CASE_NAME.test(name) && (await boundedPathExists(path))) {
           cases.push({
             name,
             path,
-            hasClaudeMd: existsSync(join(path, 'CLAUDE.md')),
+            hasClaudeMd: await boundedPathExists(join(path, 'CLAUDE.md')),
             linked: true,
             location: 'linked-local',
             codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), name),
@@ -696,7 +700,7 @@ export function registerCaseRoutes(
       const dockerCaseInfo: CaseInfo = {
         name: dockerCase.name,
         path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
-        hasClaudeMd: existsSync(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
+        hasClaudeMd: await boundedPathExists(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
         location: 'docker',
         docker: {
           hostId: host.id,
@@ -988,7 +992,7 @@ export function registerCaseRoutes(
         } else {
           warnings.push('Kept the repository’s own CLAUDE.md.');
         }
-        if (repoShipsClaudeSettings(casePath)) {
+        if (await repoShipsClaudeSettings(casePath)) {
           warnings.push(
             'This repository ships its own .claude/settings files. Codeman merged its hooks alongside them without removing anything — review them before starting a session, since repo-supplied hooks run on this machine.'
           );
@@ -2266,7 +2270,7 @@ export function registerCaseRoutes(
       return {
         name,
         path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
-        hasClaudeMd: existsSync(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
+        hasClaudeMd: await boundedPathExists(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
         location: 'docker',
         docker: {
           hostId: host.id,
@@ -2282,7 +2286,7 @@ export function registerCaseRoutes(
 
     const casePath = await resolveCasePath(name, getAuthUser(req));
 
-    if (!existsSync(casePath)) {
+    if (!(await boundedPathExists(casePath))) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
     }
     return readDefaultGroupResponse(req, name);
@@ -2332,7 +2336,7 @@ export function registerCaseRoutes(
 
     const fixPlanPath = join(casePath, '@fix_plan.md');
 
-    if (!existsSync(fixPlanPath)) {
+    if (!(await boundedPathExists(fixPlanPath))) {
       return { exists: false, content: null, todos: [] };
     }
 
