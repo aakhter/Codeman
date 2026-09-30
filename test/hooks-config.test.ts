@@ -38,6 +38,7 @@ import {
   stripCaseEnvKeys,
   updateCaseEnvVars,
   updateCaseModel,
+  verifyClaudeSessionStartHookCapability,
   writeHooksConfig,
 } from '../src/hooks-config.js';
 
