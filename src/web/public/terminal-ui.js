@@ -1499,6 +1499,14 @@ Object.assign(CodemanApp.prototype, {
             scrollFrame = requestAnimationFrame(scrollLoop);
             return;
           }
+          // COD-464: flick momentum keeps feeding the paced CLI route with
+          // fractional lines per frame (the pacer carries and caps).
+          if (this._shouldPaceWheelToCli({ shiftKey: false })) {
+            this._paceWheelToCli(touchLastX, touchLastY, velocity / cellHeight());
+            velocity *= 0.92;
+            scrollFrame = requestAnimationFrame(scrollLoop);
+            return;
+          }
           // Momentum phase — convert pixel velocity to lines
           const lines = Math.round(velocity / cellHeight());
           if (lines !== 0) {
@@ -1730,6 +1738,18 @@ Object.assign(CodemanApp.prototype, {
             }
             pixelAccum += delta;
           if (Math.abs(pixelAccum) < getThreshold()) return;
+          // COD-464: same paced route as the desktop wheel. Measured on iPhone
+          // emulation with real CLIs: a swipe on a Claude/Codex mirror tab opened
+          // the frozen history view, which holds ONE screen for these CLIs (their
+          // transcript lives in the CLI, not in tmux), so nothing older than the
+          // last screen was reachable at all. The finger's own pixel travel is
+          // fed (delta / row height, fractional; the pacer carries the rest), not
+          // `pixelAccum`, which counts each delta twice on this path.
+          if (this._shouldPaceWheelToCli({ shiftKey: false })) {
+            this._logScrollRouting('forward-sgr-paced');
+            this._paceWheelToCli(touchLastX, touchLastY, delta / cellHeight());
+            return;
+          }
           if (getIsOpencodeMobile()) {
               pendingDelta += pixelAccum;
               if (touchMoveRaf) return;

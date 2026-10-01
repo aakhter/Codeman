@@ -348,3 +348,44 @@ describe('COD-464 reversal debounce (Claude ignores the report that reverses its
     expect(h.count(DOWN)).toBe(1);
   });
 });
+
+describe('COD-464 touch: phone swipes take the same paced route', () => {
+  // Measured on iPhone 15 Pro emulation with real CLIs: a swipe on a Claude/Codex
+  // mirror tab opened the frozen history view, which holds ONE screen for these
+  // CLIs, so nothing older than MARK-122 of 150 was reachable with any number of
+  // drags. Through the paced route both reach MARK-1.
+  const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+
+  it('touchmove consults the paced route after the tap threshold and before opencode/mirror routing', () => {
+    const threshold = src.indexOf('if (Math.abs(pixelAccum) < getThreshold()) return;');
+    expect(threshold).toBeGreaterThan(-1);
+    const after = src.slice(threshold);
+    const paced = after.indexOf('if (this._shouldPaceWheelToCli({ shiftKey: false })) {');
+    expect(paced).toBeGreaterThan(-1);
+    expect(paced).toBeLessThan(after.indexOf('if (getIsOpencodeMobile()) {'));
+    expect(paced).toBeLessThan(after.indexOf('intent = this._handleUserScrollIntent(lines);'));
+    // The finger's own travel, NOT pixelAccum (which this path increments twice per move).
+    expect(after.slice(paced, paced + 300)).toContain(
+      'this._paceWheelToCli(touchLastX, touchLastY, delta / cellHeight());'
+    );
+  });
+
+  it('flick momentum feeds the paced route before the mirror/forward/page branches', () => {
+    const momentum = src.indexOf('// Momentum phase — convert pixel velocity to lines');
+    const block = src.slice(momentum - 600, momentum + 900);
+    const paced = block.indexOf('this._paceWheelToCli(touchLastX, touchLastY, velocity / cellHeight());');
+    expect(paced).toBeGreaterThan(-1);
+    expect(paced).toBeLessThan(block.indexOf('const intent = this._handleUserScrollIntent(lines);'));
+  });
+
+  it('per-move fractional touch travel adds up to whole reports (finger tracking)', () => {
+    const h = harness({ mode: 'codex' }); // 3 rows per report
+    // 20 moves of 6px on a 17px row: 120px ≈ 7.06 lines ≈ 2.35 reports.
+    for (let i = 0; i < 20; i++) {
+      h.advance(16);
+      h.app._paceWheelToCli(200, 300, -6 / 17);
+      h.drain();
+    }
+    expect(h.count(UP)).toBe(2);
+  });
+});
