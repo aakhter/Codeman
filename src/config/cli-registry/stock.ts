@@ -269,7 +269,17 @@ const CLAUDE: CliEntry = {
     // #498: the default INLINE renderer turns no mouse tracking on and ignores wheel
     // reports, so every forwarding mode also requires `cliMouseTracking` (frontend
     // `_wheelReportsFor`), which fullscreen claude sets and inline claude does not.
-    wheelForward: { mode: 'version-gated', minVersion: '2.1.187', rows: 1, reversalDeadReports: 1 },
+    // Acceleration, measured the same way (one write per burst, and single writes at
+    // fixed spacing): the k-th report of a streak moves 1,1,1,1,2,2,2,3,3,3,3,4,4,4,5,5
+    // rows, then 6 for every later one (bursts of 16/20/24/28/32 moved 44/67/91/115/139),
+    // and a pause of 40 ms resets the streak while 30 ms does not.
+    wheelForward: {
+      mode: 'version-gated',
+      minVersion: '2.1.187',
+      rows: 1,
+      reversalDeadReports: 1,
+      streak: { resetMs: 35, steps: [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6] },
+    },
     keyboardAccessory: 'agent',
     privilegedCommandGate: false,
     startMode: 'interactive',

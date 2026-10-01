@@ -178,7 +178,13 @@ describe('WebServer.renderIndexHtml', () => {
       const match = html.match(/window\.__codemanWheelForward=(\{[^<]*\});/);
       expect(match, String(solo)).not.toBeNull();
       const map = JSON.parse(match![1]) as Record<string, Record<string, unknown>>;
-      expect(map.claude).toEqual({ mode: 'version-gated', minVersion: '2.1.187', rows: 1, reversalDeadReports: 1 });
+      expect(map.claude).toEqual({
+        mode: 'version-gated',
+        minVersion: '2.1.187',
+        rows: 1,
+        reversalDeadReports: 1,
+        streak: { resetMs: 35, steps: [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6] },
+      });
       expect(map.codex).toEqual({ mode: 'mouse-tracking', rows: 3, reversalDeadReports: 0 });
       expect(map.shell).toBeUndefined();
       expect(map.gemini).toBeUndefined();

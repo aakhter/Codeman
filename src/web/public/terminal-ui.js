@@ -119,19 +119,32 @@
   // Bound on page keys emitted from one gesture batch, mirroring the SGR tick
   // cap: a fling must not build a backlog that keeps paging after it stops.
   const PAGE_KEY_MAX_PER_BATCH = 3;
-  // COD-464 paced wheel → CLI: per animation frame, send this share of the
-  // pending SGR reports (at least one), capped. One mouse notch on a 1-row/report
-  // CLI (4 reports) then lands as 1,1,1,1 over four frames, a gentle glide,
-  // while a fast flick still keeps up.
-  const WHEEL_PACE_EASE = 0.25;
-  const WHEEL_PACE_MAX_REPORTS_PER_FRAME = 4;
+  // COD-464 paced wheel → CLI. Per animation frame, send at most this share of
+  // the rows still owed (always at least one report's worth). Small amounts, which
+  // is everything a trackpad or a finger produces, go out at once, so the content
+  // stops when the input stops; only a big jump (a mouse notch, ~5 rows) is spread
+  // over a few frames, halving each frame, instead of landing in one repaint.
+  const WHEEL_PACE_EASE = 0.5;
+  const WHEEL_PACE_MAX_REPORTS_PER_FRAME = 6;
+  // Streak timing margins. A CLI that accelerates within a streak (`wheelForward.
+  // streak`, measured on Claude: reset between 30 and 40 ms) is only ever sent a
+  // report while the streak is CLEARLY alive (gap < resetMs - continue margin) or
+  // CLEARLY reset (gap >= resetMs + reset margin), never in between. ASYMMETRIC on
+  // purpose: the browser → WS → server → tmux path compresses gaps (a flick whose
+  // sends were 47-52 ms apart moved 68 rows, which only fits Claude NOT resetting
+  // at those gaps), and wrongly assuming a reset over-delivers (the runaway feel)
+  // while wrongly assuming a continuation merely under-delivers.
+  const WHEEL_STREAK_CONTINUE_MARGIN_MS = 12;
+  const WHEEL_STREAK_RESET_MARGIN_MS = 35;
+  // Finger still for this long before lifting = a hold, not a flick (iOS does the same).
+  const TOUCH_HOLD_NO_FLING_MS = 80;
   // A wheel event after this much quiet starts a NEW gesture, whose first event
   // sends a report even when it is less than one report's worth of travel, so the
   // screen answers the very first event (a trackpad's first deltas are a few px).
   // The pre-paid travel is owed back by the rest of the gesture, never added.
   const WHEEL_PACE_GESTURE_GAP_MS = 150;
-  // ...but not for sub-line jitter (0.1 line = 2.5px at Chrome's 25px/line).
-  const WHEEL_PACE_MIN_START_LINES = 0.1;
+  // ...but not for sub-row jitter (0.1 row, ~2px).
+  const WHEEL_PACE_MIN_START_ROWS = 0.1;
   const TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM = 4;
   // Composer navigation keys as xterm.js encodes user keystrokes: plain and
   // modified arrows (CSI A-D, CSI 1;mA-D, SS3 A-D), Home/End (CSI H/F, SS3
@@ -296,7 +309,10 @@
     WHEEL_PACE_EASE,
     WHEEL_PACE_MAX_REPORTS_PER_FRAME,
     WHEEL_PACE_GESTURE_GAP_MS,
-    WHEEL_PACE_MIN_START_LINES,
+    WHEEL_PACE_MIN_START_ROWS,
+    WHEEL_STREAK_CONTINUE_MARGIN_MS,
+    WHEEL_STREAK_RESET_MARGIN_MS,
+    TOUCH_HOLD_NO_FLING_MS,
     TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM,
     MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR,
     MOBILE_KEYBOARD_DISMISS_TAP_SLOP,
@@ -1393,7 +1409,7 @@ Object.assign(CodemanApp.prototype, {
         // to fall through to the half-screen PageUp fallback below.
         if (this._shouldPaceWheelToCli(ev)) {
           this._logScrollRouting('forward-sgr-paced');
-          this._paceWheelToCli(ev.clientX, ev.clientY, this._wheelScrollLinesFloat(ev));
+          this._paceWheelToCli(ev.clientX, ev.clientY, this._wheelRowsFloat(ev));
           return;
         }
         if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
@@ -1472,6 +1488,9 @@ Object.assign(CodemanApp.prototype, {
       let touchLastY = 0;
       let velocity = 0;
       let lastTime = 0;
+      // COD-464: when the finger last MOVED. Lifting after holding still must
+      // not fling (measured: drag, hold 300 ms, lift → 664 ms of momentum).
+      let lastMoveAt = 0;
       let scrollFrame = null;
       let isTouching = false;
 
@@ -1703,6 +1722,7 @@ Object.assign(CodemanApp.prototype, {
             const delta = touchLastY - touchY; // positive = scroll down
             pixelAccum += delta;
             velocity = delta * 1.2;
+            lastMoveAt = performance.now();
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
@@ -1821,6 +1841,12 @@ Object.assign(CodemanApp.prototype, {
           const touch = this._endTerminalTouchGesture(touchGesture, ev.changedTouches, ev.touches);
           isTouching = false;
           if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; pendingDelta = 0; }
+          if (
+            this._shouldPaceWheelToCli({ shiftKey: false }) &&
+            performance.now() - lastMoveAt > window.CodemanTerminalInput.TOUCH_HOLD_NO_FLING_MS
+          ) {
+            velocity = 0;
+          }
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
@@ -7486,6 +7512,21 @@ Object.assign(CodemanApp.prototype, {
   /** Unrounded variant for the smooth local-scroll path, which accumulates
    *  sub-line fractions across events instead of forcing every tiny trackpad
    *  delta to a whole ±1 line. Same unit handling and Shift-axis trap. */
+  /**
+   * COD-464: the wheel delta in CONTENT ROWS at 1:1 pixels, so the transcript
+   * moves as far as a web page would for the same input. `_wheelScrollLinesFloat`
+   * uses a fixed 25px per line, but a row is ~21px on desktop, so content moved
+   * ~0.84x the trackpad. Line/page units keep their meaning.
+   */
+  _wheelRowsFloat(ev) {
+    const delta = ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+    if (!delta) return 0;
+    if (ev.deltaMode === 1) return delta;
+    if (ev.deltaMode === 2) return delta * (this.terminal?.rows || 24);
+    const rowPx = this.terminal?._core?._renderService?.dimensions?.css?.cell?.height;
+    return delta / (Number.isFinite(rowPx) && rowPx > 0 ? rowPx : 25);
+  },
+
   _wheelScrollLinesFloat(ev) {
     const delta = ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
     if (!delta) return 0;
@@ -7579,7 +7620,11 @@ Object.assign(CodemanApp.prototype, {
       return null;
     }
     const dead = Number.isInteger(spec.reversalDeadReports) ? Math.max(0, spec.reversalDeadReports) : 0;
-    return { rows: spec.rows, reversalDeadReports: dead };
+    const streak =
+      spec.streak && Number.isFinite(spec.streak.resetMs) && Array.isArray(spec.streak.steps) && spec.streak.steps.length
+        ? { resetMs: spec.streak.resetMs, steps: spec.streak.steps }
+        : null;
+    return { rows: spec.rows, reversalDeadReports: dead, streak };
   },
 
   /**
@@ -7606,26 +7651,35 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * COD-464 paced wheel → CLI. Gesture lines (fractional, see
-   * _wheelScrollLinesFloat) become whole SGR reports at the CLI's declared
-   * rows-per-report, with the remainder carried so a slow trackpad drag tracks
-   * the finger. The FIRST report of a gesture is sent synchronously (start
-   * latency is one WebSocket hop + one CLI repaint); the rest drain one batch
-   * per animation frame with easing, so the CLI repaints row by row instead of
-   * jumping once per 40ms batch. Each send is a WS frame that the server writes
-   * straight into the attached PTY, so per-frame sends are cheap. The backlog
-   * is capped at about one screen so a flick cannot keep scrolling after it
-   * stops, reversals cancel arithmetically, and travel never crosses tabs.
+   * COD-464 paced wheel/touch → CLI, in CONTENT ROWS (fractional): what the
+   * input asks the transcript to move, at 1:1 with its pixels (see
+   * _wheelRowsFloat; touch passes finger pixels / row height).
+   *
+   * Measured "not natural" (isolated real Claude 2.1.286 + Codex 0.159.3): the
+   * content moved ~0.82x the input, a notch kept gliding ~120 ms after the wheel
+   * stopped, and Claude ACCELERATES inside a streak of reports (step per report
+   * 1,1,1,1,2,2,2,3,3,3,3,4,4,4,5,5,6…; reset by a 35-40 ms pause), so a phone
+   * flick moved 8.5x the finger and sustained scrolling sped up the longer it
+   * ran. So the rows still OWED are tracked, and each frame sends only the
+   * reports whose measured step (`_wheelPaceStep`, from the CLI's `streak`
+   * curve, else its fixed `rows`) the debt covers: Claude stays linear while
+   * fast input still gets bigger steps. Rules:
+   *  - the first event of a gesture moves at once (pre-paid, owed back);
+   *  - overshoot from a coarse step is CREDIT against the next same-direction
+   *    input, never sent back the other way (that would jitter and trip
+   *    Claude's reversal debounce);
+   *  - the backlog is capped at one screen; travel never crosses tabs.
    */
-  _paceWheelToCli(clientX, clientY, lines) {
+  _paceWheelToCli(clientX, clientY, rows) {
     const sessionId = this.activeSessionId;
     const spec = this._wheelReportsFor(sessionId);
-    if (!sessionId || !spec || !lines) return;
-    const rowsPerReport = spec.rows;
+    if (!sessionId || !spec || !rows) return;
     if (this._wheelPaceSession !== sessionId) {
       this._wheelPaceSession = sessionId;
-      this._wheelPacePending = 0;
-      this._wheelPaceCarry = 0;
+      this._wheelPaceOwed = 0;
+      this._wheelPaceForce = false;
+      this._wheelPaceStreakK = 0;
+      this._wheelPaceSentAt = undefined;
     }
     // Snap a scrolled-up local viewport back first, like _forwardScrollToApp:
     // reports address the live screen.
@@ -7637,55 +7691,100 @@ Object.assign(CodemanApp.prototype, {
     const gestureStart =
       typeof this._wheelPaceLastAt !== 'number' || now - this._wheelPaceLastAt > tuning.WHEEL_PACE_GESTURE_GAP_MS;
     this._wheelPaceLastAt = now;
-    if (gestureStart) this._wheelPaceCarry = 0;
-    const carry = (this._wheelPaceCarry || 0) + lines / rowsPerReport;
-    // Epsilon: thirds do not add exactly (-2/3 + -4/3 is -1.999…), which would
-    // silently lose a report per gesture on a 3-rows-per-report CLI.
-    let whole = Math.trunc(carry + Math.sign(carry) * 1e-9);
-    if (!whole && gestureStart && Math.abs(lines) >= tuning.WHEEL_PACE_MIN_START_LINES) whole = Math.sign(carry);
-    this._wheelPaceCarry = carry - whole;
-    if (!whole) return;
-    const cap = Math.max(4, Math.ceil((this.terminal?.rows || 24) / rowsPerReport));
-    this._wheelPacePending = Math.max(-cap, Math.min(cap, (this._wheelPacePending || 0) + whole));
+    if (gestureStart) {
+      // A stale sub-step remainder (or credit) belongs to the gesture that made it.
+      this._wheelPaceOwed = 0;
+      if (Math.abs(rows) >= tuning.WHEEL_PACE_MIN_START_ROWS) this._wheelPaceForce = true;
+    }
+    this._wheelPaceInputDir = rows < 0 ? -1 : 1;
+    const cap = Math.max(4, this.terminal?.rows || 24);
+    this._wheelPaceOwed = Math.max(-cap, Math.min(cap, (this._wheelPaceOwed || 0) + rows));
     if (!this._wheelPaceFrame) this._drainWheelPace();
   },
 
-  /** COD-464: send one eased batch of paced wheel reports; reschedules itself while any remain. */
+  /** COD-464: rows the k-th report of a streak moves (0-based), from the CLI's measured curve. */
+  _wheelPaceStep(spec, k) {
+    const steps = spec?.streak?.steps;
+    if (Array.isArray(steps) && steps.length) return steps[Math.min(k, steps.length - 1)];
+    return spec?.rows || 1;
+  },
+
+  /** COD-464: send this frame's reports for the owed rows; reschedules while a report can still be earned. */
   _drainWheelPace() {
     this._wheelPaceFrame = null;
-    const pending = this._wheelPacePending || 0;
-    if (!pending) return;
     const sessionId = this.activeSessionId;
-    if (!sessionId || sessionId !== this._wheelPaceSession) {
-      this._wheelPacePending = 0;
-      this._wheelPaceCarry = 0;
+    const spec = sessionId ? this._wheelReportsFor(sessionId) : null;
+    if (!sessionId || sessionId !== this._wheelPaceSession || !spec) {
+      this._wheelPaceOwed = 0;
+      this._wheelPaceForce = false;
       return;
     }
+    let owed = this._wheelPaceOwed || 0;
+    const dir = this._wheelPaceInputDir || (owed < 0 ? -1 : 1);
+    // Only ever move in the direction the input is going. An opposite-signed
+    // remainder is overshoot credit, held for the next input.
+    if (!owed || Math.sign(owed) !== dir) return;
     const tuning = window.CodemanTerminalInput;
-    const n = Math.min(
-      tuning.WHEEL_PACE_MAX_REPORTS_PER_FRAME,
-      Math.max(1, Math.ceil(Math.abs(pending) * tuning.WHEEL_PACE_EASE))
-    );
-    const count = pending < 0 ? -n : n;
-    this._wheelPacePending = pending - count;
-    const pos = this._clientPointToCell?.(this._wheelPaceX, this._wheelPaceY) || {
-      col: Math.max(1, Math.floor((this.terminal?.cols || 80) / 2)),
-      row: Math.max(1, Math.floor((this.terminal?.rows || 24) / 2)),
-    };
-    const btn = count < 0 ? 64 : 65;
-    // Reversal debounce (`reversalDeadReports`, measured on Claude): the CLI
-    // ignores the report(s) that reverse its last effective direction, so the
-    // first batch of a reversed gesture would move nothing. Pay them on top,
-    // never out of the user's travel. The CLI's direction outlives a tab switch,
-    // so it is remembered per session; unknown reads as "down" (a CLI starts at
-    // the bottom of its transcript), so the common first gesture, up, is primed.
-    const dir = count < 0 ? -1 : 1;
+    const force = this._wheelPaceForce === true;
+    const now = performance.now();
     if (!this._wheelPaceDir) this._wheelPaceDir = new Map();
-    const lastDir = this._wheelPaceDir.get(sessionId) ?? 1;
-    const dead = lastDir !== dir ? this._wheelReportsFor(sessionId)?.reversalDeadReports || 0 : 0;
-    this._wheelPaceDir.set(sessionId, dir);
-    this._sendInputEphemeral(sessionId, `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(n + dead));
-    if (this._wheelPacePending) this._wheelPaceFrame = requestAnimationFrame(() => this._drainWheelPace());
+    const reversed = (this._wheelPaceDir.get(sessionId) ?? 1) !== dir;
+    let k = this._wheelPaceStreakK || 0;
+    if (spec.streak) {
+      const gap = typeof this._wheelPaceSentAt === 'number' ? now - this._wheelPaceSentAt : Infinity;
+      const resetMs = spec.streak.resetMs;
+      if (reversed || gap >= resetMs + tuning.WHEEL_STREAK_RESET_MARGIN_MS) {
+        k = 0;
+      } else if (gap > resetMs - tuning.WHEEL_STREAK_CONTINUE_MARGIN_MS) {
+        // Ambiguous: wait a frame or two for a sure reset rather than guess.
+        this._wheelPaceFrame = requestAnimationFrame(() => this._drainWheelPace());
+        return;
+      }
+    }
+    const budget = Math.max(this._wheelPaceStep(spec, k), Math.abs(owed) * tuning.WHEEL_PACE_EASE);
+    let n = 0;
+    let sent = 0;
+    while (n < tuning.WHEEL_PACE_MAX_REPORTS_PER_FRAME) {
+      const step = this._wheelPaceStep(spec, k);
+      if (!(Math.abs(owed) >= step / 2 || (force && n === 0))) break;
+      if (n > 0 && sent + step > budget + step / 2) break;
+      n++;
+      k++;
+      sent += step;
+      owed -= dir * step;
+    }
+    this._wheelPaceForce = false;
+    if (n) {
+      const pos = this._clientPointToCell?.(this._wheelPaceX, this._wheelPaceY) || {
+        col: Math.max(1, Math.floor((this.terminal?.cols || 80) / 2)),
+        row: Math.max(1, Math.floor((this.terminal?.rows || 24) / 2)),
+      };
+      const btn = dir < 0 ? 64 : 65;
+      // Reversal debounce (`reversalDeadReports`, measured on Claude): the CLI
+      // ignores the report(s) that reverse its last effective direction, so the
+      // first batch of a reversed gesture would move nothing. Pay them on top,
+      // never out of the user's travel. The CLI's direction outlives a tab
+      // switch, so it is remembered per session; unknown reads as "down" (a CLI
+      // starts at the bottom of its transcript), so the common first gesture,
+      // up, is primed.
+      const dead = reversed ? spec.reversalDeadReports || 0 : 0;
+      this._wheelPaceDir.set(sessionId, dir);
+      this._wheelPaceSentAt = now;
+      this._sendInputEphemeral(sessionId, `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(n + dead));
+    }
+    this._wheelPaceStreakK = k;
+    this._wheelPaceOwed = owed;
+    // Keep going while a report can still be earned in the input's direction:
+    // the next step is covered, or at least a whole first-step is owed (then the
+    // streak is let lapse so the next report is small again). Anything less stays
+    // as carry for the next input: waiting out a streak for a fraction of a row is
+    // what made a single notch trail ~150 ms and land one row long.
+    const first = this._wheelPaceStep(spec, 0);
+    const next = this._wheelPaceStep(spec, k);
+    const left = Math.sign(owed) === dir ? Math.abs(owed) : 0;
+    if (left >= first / 2 && (left >= next / 2 || left >= first)) {
+      this._wheelPaceFrame = requestAnimationFrame(() => this._drainWheelPace());
+    }
   },
 
   _sendSyntheticSgrWheel(clientX, clientY, lines) {
