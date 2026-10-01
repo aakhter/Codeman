@@ -3388,9 +3388,9 @@ export class WebServer extends EventEmitter {
     if (event.startsWith('tab:')) {
       return deriveTabLayoutSseHint(data);
     }
-    // Saved-webview invalidations carry only the trusted affected owner and
-    // resource identity. Admin edits of foreign records route to that resource
-    // owner (plus admins), never to the requesting admin's personal workspace.
+    // Saved-webview invalidations carry the trusted resource owner. Route them to
+    // that owner (plus admins), so an admin editing a user's web tab notifies the
+    // user, and no other user learns the ids of someone else's web tabs.
     if (event.startsWith('webview:')) {
       return deriveWebviewSseHint(data);
     }

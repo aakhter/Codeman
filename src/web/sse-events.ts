@@ -499,8 +499,10 @@ export const AuthPasswordChangeRequired = 'auth:passwordChangeRequired' as const
 export const SessionOrderChanged = 'session:orderChanged' as const;
 
 /** A saved web tab (dashboard URL) was created, updated or deleted.
- *  Payload: `{ action: 'created' | 'updated' | 'deleted', id }`. The client
- *  re-fetches the list rather than patching from the payload. */
+ *  Payload: `{ action: 'created' | 'updated' | 'deleted', id, owner }`. The client
+ *  re-fetches the list rather than patching from the payload. `owner` is the web
+ *  tab's owner (`'@single'` when multi-user mode is off); in multi-user mode the
+ *  event is delivered only to that owner and admins (`deriveWebviewSseHint`). */
 export const WebviewChanged = 'webview:changed' as const;
 /** Owner-scoped layout change. New payloads include `{ owner, version, layout }` for inline adoption;
  *  legacy `{ owner, version }` payloads remain invalidations that make the client re-fetch. */
