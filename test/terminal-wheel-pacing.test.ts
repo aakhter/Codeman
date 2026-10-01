@@ -137,6 +137,12 @@ describe('COD-464 routing: which wheel events are paced to the CLI', () => {
     });
   });
 
+  it("#498: claude's inline renderer (right version, no mouse tracking) is never paced", () => {
+    const h = harness({ cliMouseTracking: false });
+    expect(h.app._wheelReportsFor('sess-1')).toBeNull();
+    expect(h.app._shouldPaceWheelToCli(h.wheel(-100))).toBe(false);
+  });
+
   it("'never' and a forwarding mode without measured rows are never paced", () => {
     const never = harness({ rows: { claude: { mode: 'never', rows: 1 } } });
     expect(never.app._shouldPaceWheelToCli(never.wheel(-100))).toBe(false);

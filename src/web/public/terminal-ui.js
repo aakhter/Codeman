@@ -1309,8 +1309,9 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Mouse wheel: forward to the TUI only for sessions verified to handle SGR
-    // wheel reports (claude 2.1.187+ — see _shouldForwardWheelToApp), local
-    // scrollback otherwise. Claude Code 2.1.187+ scrolls its own
+    // wheel reports (claude 2.1.187+ while it tracks the mouse, which only its
+    // fullscreen renderer does; see _shouldForwardWheelToApp), local scrollback
+    // otherwise. Claude Code 2.1.187+ scrolls its own
     // transcript on SGR wheel reports — scrolled-away tool blocks re-render
     // live and stay clickable — and its select menus no longer capture wheel
     // as option navigation (verified against 2.1.202: /model menu highlight
@@ -1442,7 +1443,7 @@ Object.assign(CodemanApp.prototype, {
     // phone/tablet swipe scrolls the local buffer of stale repaint frames and
     // drags the CLI's pinned input box off the screen (issue #205's mobile
     // half). Same gate, so Shift has no touch analog but the local-scrollback
-    // opt-out setting and the CLI-version gate apply to touch exactly as they
+    // opt-out setting and the version/tracking gate apply to touch exactly as they
     // do to the wheel — including the PageUp/PageDown fallback the wheel uses
     // when that gate is false and there is no local scrollback to scroll
     // (_maybePageCliTranscript), which is what keeps a swipe from being a
@@ -5274,9 +5275,9 @@ Object.assign(CodemanApp.prototype, {
   /**
    * Post-scroll companion to _noteTerminalUserScroll: hitting the TOP of the
    * buffer while scrolling up gives the app a chance to pull the rest of tmux's
-   * scrollback (issue #205, see _maybeRefetchFullHistory). Shell sessions decline
-   * automatic pulls because their captures can be large; their banner button is
-   * the explicit path. Must be called AFTER scrollLines(), since the check is on
+   * scrollback (issue #205, see _maybeRefetchFullHistory). Shell sessions pull a
+   * bounded window because their captures can be large; their banner button is
+   * the unbounded path. Must be called AFTER scrollLines(), since the check is on
    * the resulting position, and it is deliberately not folded into
    * _noteTerminalUserScroll for exactly that reason.
    */
@@ -5324,13 +5325,17 @@ Object.assign(CodemanApp.prototype, {
    * below the last line, and _estimateReplayRows can only approximate wrapping.
    * Only a capture that is worse by more than a full screen counts as a
    * downgrade, which leaves every genuine recovery case untouched.
+   *
+   * A caller that already estimated the capture's rows passes them as
+   * `estimatedRows`, so a megabyte capture is not scanned twice.
    */
-  _replayWouldShrinkBuffer(capture) {
+  _replayWouldShrinkBuffer(capture, estimatedRows) {
     const term = this.terminal;
     const rowsNow = term?.buffer?.active?.length || 0;
     if (!rowsNow) return false;
     const screen = term?.rows || 24;
-    return this._estimateReplayRows(capture, term?.cols) + screen < rowsNow;
+    const rows = estimatedRows ?? this._estimateReplayRows(capture, term?.cols);
+    return rows + screen < rowsNow;
   },
 
   /**
@@ -7444,9 +7449,10 @@ Object.assign(CodemanApp.prototype, {
 
   // Wheel forwarding gate for the container wheel handler: no Shift override,
   // xterm's own encoder dormant, viewport at the bottom, and a TUI VERIFIED to
-  // scroll its transcript on SGR wheel reports — which today is claude 2.1.187+
-  // and nothing else (older Claude Code captures wheel as select-menu option
-  // navigation; an unknown version is treated as older). Gemini and codex are
+  // scroll its transcript on SGR wheel reports, which today is claude 2.1.187+
+  // with mouse tracking on (fullscreen) and nothing else (older Claude Code
+  // captures wheel as select-menu option navigation, an unknown version is
+  // treated as older, and inline Claude ignores it). Gemini and codex are
   // strip modes too but keep the local wheel — taps/clicks are still forwarded
   // for them (harmless no-ops at worst).
   //
@@ -7513,6 +7519,15 @@ Object.assign(CodemanApp.prototype, {
     const sessionMode = session?.mode || 'claude';
     if (sessionMode !== 'claude') return false;
     if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
+    // Only while Claude is actually listening for the mouse. In its default
+    // inline renderer (2.1.280 measured: alternate_on=0, mouse_any_flag=0) the
+    // transcript lives in real scrollback, like codex, and SGR wheel reports are
+    // ignored, so forwarding made every swipe and wheel tick dead. Fullscreen
+    // (CLAUDE_CODE_NO_FLICKER=1, or "tui": "fullscreen" in ~/.claude/settings.json)
+    // turns on alt-screen + mode 1003/1006, which the server records as
+    // cliMouseTracking. A stale-false flag after a server restart falls through
+    // to _maybePageCliTranscript, so it never goes dead.
+    if (session?.cliMouseTracking !== true) return false;
     // Deliberately NOT gated on _terminalViewportAtBottom(). It used to be, so
     // that leaving the bottom handed the wheel back to local scrollback and both
     // histories stayed reachable without a mode switch. In practice that inverted
@@ -7544,21 +7559,23 @@ Object.assign(CodemanApp.prototype, {
    * COD-464: this session's `wheelForward` capability, as the server injects it
    * into `window.__codemanWheelForward` (never an id literal here), when it says
    * the wheel goes to the CLI RIGHT NOW: `{ rows, reversalDeadReports }`, else
-   * null. 'version-gated' needs the probed CLI version; 'mouse-tracking' needs
-   * the CLI to have turned mouse tracking on itself (`cliMouseTracking`), which
-   * is false for panes Codeman cannot see into (remote wrappers), so those keep
-   * the PageUp fallback.
+   * null. Every forwarding mode needs the CLI to have turned mouse tracking on
+   * itself (`cliMouseTracking`, false for claude's inline renderer, older codex
+   * and panes Codeman cannot see into, which keep the local/PageUp routes);
+   * 'version-gated' additionally needs the probed CLI version.
    */
   _wheelReportsFor(sessionId) {
     const session = this.sessions?.get(sessionId);
     const map = typeof window !== 'undefined' ? window.__codemanWheelForward : null;
     const spec = session?.mode && map ? map[session.mode] : null;
     if (!spec || !Number.isInteger(spec.rows) || spec.rows <= 0) return null;
+    // #498: a pane that never turned mouse tracking on ignores wheel reports
+    // (claude's default inline renderer, older codex, remote wrappers), so EVERY
+    // forwarding mode needs it; forwarding there made every wheel tick dead.
+    if (session.cliMouseTracking !== true) return null;
     if (spec.mode === 'version-gated') {
       if (!spec.minVersion || !this._cliVersionAtLeast?.(session.cliVersion, spec.minVersion)) return null;
-    } else if (spec.mode === 'mouse-tracking') {
-      if (session.cliMouseTracking !== true) return null;
-    } else {
+    } else if (spec.mode !== 'mouse-tracking') {
       return null;
     }
     const dead = Number.isInteger(spec.reversalDeadReports) ? Math.max(0, spec.reversalDeadReports) : 0;
@@ -7717,10 +7734,19 @@ Object.assign(CodemanApp.prototype, {
    * LAST-RESORT scroll for a hollow local buffer: translate gesture lines into
    * coalesced PageUp/PageDown key sends so the CLI pages its OWN transcript.
    *
-   * Claude reaches this path when its version cannot receive SGR wheel reports
-   * or local scrollback is selected. Codex reaches it when its alternate-screen
-   * transcript has no xterm history: measured on 0.157.1, PageUp changes the
-   * visible transcript while SGR wheel reports and local scrolling do nothing.
+   * The rescue path for every way `_shouldForwardWheelToApp` can come back false
+   * on a Claude session that has no local history to fall back on: the CLI
+   * version probe failed or is genuinely older than 2.1.187, the CLI's mouse
+   * tracking flag is unset (the inline renderer, or fullscreen right after a
+   * server restart), or the user turned on "Wheel scrolls local history" (which
+   * pins the wheel to a buffer that, for a repaint-mode CLI, is empty: the
+   * setting's footgun). Before this, all of those produced a completely dead
+   * gesture; the #205 reporter proved the keyboard route works by paging back
+   * through intact text with Fn+Up.
+   *
+   * Codex also reaches it when its alternate-screen transcript has no xterm
+   * history: measured on 0.157.1, PageUp changes the visible transcript while
+   * SGR wheel reports and local scrolling do nothing.
    *
    * Guarded by CLI mode, normal buffer, and `baseY === 0`, so a session with
    * real local scrollback is never touched. Shift is excluded on purpose: it
@@ -7764,14 +7790,19 @@ Object.assign(CodemanApp.prototype, {
     const session = this.sessions?.get(sessionId);
     const optOut = !!this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback;
     const tracking = this.terminal?.modes?.mouseTrackingMode || 'none';
+    // xterm's own mode above stays 'none' for a strip mode (the server removes
+    // the DECSETs), so the CLI's real tracking state is reported separately.
+    const cliTracking = session?.cliMouseTracking === true;
     const baseY = this.terminal?.buffer?.active?.baseY ?? -1;
-    const signature = `${decision}|${session?.mode}|${session?.cliVersion}|${optOut}|${tracking}|${baseY > 0}`;
+    const signature =
+      `${decision}|${session?.mode}|${session?.cliVersion}|${optOut}|${tracking}|${cliTracking}|${baseY > 0}`;
     if (!this._scrollRoutingLogged) this._scrollRoutingLogged = new Map();
     if (this._scrollRoutingLogged.get(sessionId) === signature) return;
     this._scrollRoutingLogged.set(sessionId, signature);
     console.log(
       `[scroll] ${sessionId} → ${decision} (mode=${session?.mode || '?'}, cliVersion=${session?.cliVersion || 'unknown'}, ` +
-        `localScrollbackOptOut=${optOut}, mouseTracking=${tracking}, localScrollbackRows=${baseY})`
+        `localScrollbackOptOut=${optOut}, mouseTracking=${tracking}, cliMouseTracking=${cliTracking}, ` +
+        `localScrollbackRows=${baseY})`
     );
   },
 

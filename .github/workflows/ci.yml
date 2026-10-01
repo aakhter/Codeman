@@ -38,8 +38,9 @@ jobs:
         run: npm run check:public-assets
 
       # Asks `vitest list` what CI would actually collect, rather than matching
-      # filenames: a browser-driven test missing from BROWSER_TEST_GLOBS passes
-      # locally and dies here with "browserType.launch: Executable doesn't exist".
+      # filenames: a browser-driven test missing from BROWSER_TEST_GLOBS
+      # (config/test-suites.ts) passes locally and dies in the test job with
+      # "browserType.launch: Executable doesn't exist".
       - name: Browser-test exclusion check
         run: npm run check:browser-excludes
 
