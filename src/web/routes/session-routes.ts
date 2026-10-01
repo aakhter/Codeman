@@ -204,6 +204,19 @@ const CODEMAN_CONFIG_DIR = getDataDir();
 const INFERABLE_LOCAL_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
 const SINGLE_USER_OWNER = '@single';
 
+/**
+ * COD-463 — flag a /terminal response whose remote capture was skipped because
+ * the host is in ssh backoff: the body is the local wrapper's copy, which may
+ * not be live and holds about one screen of history. The client warns on it.
+ */
+function remoteCaptureDegradedFields(
+  ctx: { mux: { isRemoteCaptureDegraded?(remote: SessionRemote): boolean } },
+  session: { remote?: SessionRemote }
+): { remoteCaptureDegraded?: true } {
+  if (!session.remote || ctx.mux.isRemoteCaptureDegraded?.(session.remote) !== true) return {};
+  return { remoteCaptureDegraded: true };
+}
+
 function remoteProfileLibraryOwner(remoteCaseOwner: string | undefined, requestOwner: string | undefined): string {
   return remoteCaseOwner ?? requestOwner ?? SINGLE_USER_OWNER;
 }
@@ -3308,6 +3321,7 @@ export function registerSessionRoutes(
         fullSize: frameBuffer.length,
         truncated: false,
         source: frameBuffer.length > 0 ? ('mux-frame' as const) : ('history' as const),
+        ...remoteCaptureDegradedFields(ctx, session),
       };
     }
 
@@ -3378,6 +3392,7 @@ export function registerSessionRoutes(
       liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, {
         fullHistory: true,
         lastLines,
+        owner: ownerFor(req),
       });
       if (liveMuxBuffer === null || liveMuxBuffer.length === 0) {
         remoteCaptureFailed = true;
@@ -3577,6 +3592,7 @@ export function registerSessionRoutes(
       // damage that does not exist.
       captureCols: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.cols : undefined,
       captureRows: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.rows : undefined,
+      ...remoteCaptureDegradedFields(ctx, session),
     };
   });
 

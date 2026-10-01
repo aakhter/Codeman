@@ -2191,6 +2191,51 @@ and effort involved in moving workloads.
       expect(body.data.source).toBe('mux-visible');
     });
 
+    it('COD-463: flags full and frame responses while the remote host is in capture backoff', async () => {
+      harness.ctx._session.mode = 'codex';
+      const remote = { hostId: 'ubuntu-worker', host: '192.168.20.91', username: 'ubuntu', remotePath: '/tmp/case' };
+      (harness.ctx._session as { remote?: unknown }).remote = remote;
+      const degraded = vi.fn(() => true);
+      const mux = harness.ctx.mux as Record<string, unknown>;
+      mux.captureRemotePaneBuffer = vi.fn(async () => null);
+      mux.captureActivePaneBuffer = vi.fn(() => 'local wrapper single screen');
+      mux.isRemoteCaptureDegraded = degraded;
+
+      for (const query of ['?full=1', '?frame=1']) {
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal${query}`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.remoteCaptureDegraded, query).toBe(true);
+        expect(body.data.terminalBuffer, query).toContain('local wrapper single screen');
+      }
+      expect(degraded).toHaveBeenCalledWith(remote);
+
+      degraded.mockReturnValue(false);
+      const healthy = JSON.parse(
+        (await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1` }))
+          .body
+      );
+      expect(healthy.data.remoteCaptureDegraded).toBeUndefined();
+    });
+
+    it('COD-463: local sessions never carry the remote-capture flag', async () => {
+      harness.ctx._session.mode = 'codex';
+      const degraded = vi.fn(() => true);
+      const mux = harness.ctx.mux as Record<string, unknown>;
+      mux.captureActivePaneBuffer = vi.fn(() => 'local full capture');
+      mux.isRemoteCaptureDegraded = degraded;
+
+      const body = JSON.parse(
+        (await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1` }))
+          .body
+      );
+      expect(body.data.remoteCaptureDegraded).toBeUndefined();
+      expect(degraded).not.toHaveBeenCalled();
+    });
+
     it('COD-180: local sessions never attempt a remote capture', async () => {
       harness.ctx._session.terminalBuffer = 'local history';
       harness.ctx._session.mode = 'codex';

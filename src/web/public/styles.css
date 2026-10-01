@@ -18984,6 +18984,18 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
   cursor: default;
 }
 
+/* COD-463: remote pane captures are in ssh backoff, so the terminal shows the
+   local wrapper's copy, which may be stale. Yellow-brown: a warning about what
+   you are looking at, not an outage of the session. */
+.remote-capture-banner {
+  background: linear-gradient(90deg, #a16207, #854d0e);
+}
+
+.remote-capture-banner .offline-banner-retry:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Above the mobile fixed header (1200) and modals (1300): this is a blocking
    "nothing works right now" state, and it only appears before any session
    state has loaded, so there is no modal underneath to bury. Stays below the

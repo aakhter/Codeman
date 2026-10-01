@@ -86,12 +86,16 @@ Object.assign(CodemanApp.prototype, {
     const state = this._hostWake;
     if (state && state.sessionId && state.sessionId !== sessionId) this._hostWake = null;
     this._hostWakeTick();
+    this._renderRemoteCaptureBanner();
   },
 
   /** Create the page-wide poller once (interval + a visibility wake-up). */
   _ensureHostWakePoller() {
     if (this._hostWakeTimer) return;
-    this._hostWakeTimer = setInterval(() => this._hostWakeTick({ periodic: true }), HOST_WAKE_POLL_MS);
+    this._hostWakeTimer = setInterval(() => {
+      this._hostWakeTick({ periodic: true });
+      this._remoteCaptureRecheck();
+    }, HOST_WAKE_POLL_MS);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') this._hostWakeTick({ periodic: true });
     });
@@ -436,5 +440,88 @@ Object.assign(CodemanApp.prototype, {
     state.error = 'timeout';
     state.reachable = false;
     this._renderHostWakeBanner();
+  },
+
+  // ── COD-463: remote capture backoff ("this view may not be live") ──────────
+  //
+  // The server stops blocking on ssh for a host whose captures just timed out
+  // and serves the LOCAL wrapper's copy of the pane instead, flagging the
+  // /terminal response with `remoteCaptureDegraded`. That copy can be stale and
+  // holds about one screen of history, so the user is told. Distinct from the
+  // wake banner above: that one is about TCP reachability (a sleeping host);
+  // here the host answers TCP but new ssh sessions hang.
+
+  /** Session ids whose last /terminal response was served from the local copy. */
+  _remoteCaptureDegraded: null,
+  _remoteCaptureRecheckInFlight: false,
+
+  /**
+   * Record what a /terminal response said about its remote capture. Called for
+   * every capture response, remote or not; a response without the flag clears it.
+   */
+  noteRemoteCaptureState(sessionId, data) {
+    if (!sessionId) return;
+    if (!this._remoteCaptureDegraded) this._remoteCaptureDegraded = new Set();
+    if (data && data.remoteCaptureDegraded === true) this._remoteCaptureDegraded.add(sessionId);
+    else this._remoteCaptureDegraded.delete(sessionId);
+    this._renderRemoteCaptureBanner();
+  },
+
+  /** Draw the banner for the ACTIVE session only. */
+  _renderRemoteCaptureBanner() {
+    const banner = this.$('remoteCaptureBanner');
+    if (!banner) return;
+    const sessionId = this.activeSessionId;
+    const visible = Boolean(sessionId && this._remoteCaptureDegraded && this._remoteCaptureDegraded.has(sessionId));
+    banner.hidden = !visible;
+    if (!visible) return;
+    const session = this.sessions ? this.sessions.get(sessionId) : null;
+    const label = (session && session.remote && (session.remote.label || session.remote.host)) || 'Remote host';
+    const text = this.$('remoteCaptureBannerText');
+    const detail = this.$('remoteCaptureBannerDetail');
+    const action = this.$('remoteCaptureBannerAction');
+    if (text) text.textContent = `${label} is not responding over ssh: this view may not be live`;
+    if (detail) detail.textContent = 'showing a local copy, scrollback may be incomplete';
+    if (action) {
+      action.textContent = this._remoteCaptureRecheckInFlight ? 'Retrying …' : 'Retry';
+      action.disabled = this._remoteCaptureRecheckInFlight;
+    }
+  },
+
+  /** Banner button: ask the server again now. */
+  remoteCaptureRetry() {
+    return this._remoteCaptureRecheck({ manual: true });
+  },
+
+  /**
+   * Re-ask the server for the active degraded session's frame. The server's
+   * probe is rate-limited and bounded, so this never blocks for the ssh timeout.
+   * On recovery the session reloads its real remote history.
+   */
+  async _remoteCaptureRecheck({ manual = false } = {}) {
+    if (!manual && typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    const sessionId = this.activeSessionId;
+    if (!sessionId || !this._remoteCaptureDegraded || !this._remoteCaptureDegraded.has(sessionId)) return;
+    if (this._remoteCaptureRecheckInFlight) return;
+    this._remoteCaptureRecheckInFlight = true;
+    this._renderRemoteCaptureBanner();
+    let recovered = false;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal?frame=1`);
+      const json = await res.json();
+      const data = (json && json.data) || json || {};
+      recovered = data.remoteCaptureDegraded !== true;
+      if (recovered) this._remoteCaptureDegraded.delete(sessionId);
+    } catch {
+      /* A failed recheck is not a state change. */
+    } finally {
+      this._remoteCaptureRecheckInFlight = false;
+      this._renderRemoteCaptureBanner();
+    }
+    if (recovered && sessionId === this.activeSessionId) {
+      this._onSessionNeedsRefresh?.({ id: sessionId });
+    } else if (manual && !recovered && typeof this.showToast === 'function') {
+      this.showToast('Remote host still not responding over ssh', 'warning');
+    }
   },
 });
