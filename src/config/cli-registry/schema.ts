@@ -309,6 +309,15 @@ const capabilitiesSchema = z
         minVersion: z.string().max(20).optional(),
         rows: z.number().int().min(1).max(10).optional(),
         reversalDeadReports: z.number().int().min(0).max(3).optional(),
+        // The CLI's own wheel acceleration, MEASURED: rows moved by the k-th
+        // report of a streak (last entry repeats), and the pause that resets it.
+        streak: z
+          .object({
+            resetMs: z.number().int().min(10).max(500),
+            steps: z.array(z.number().int().min(1).max(20)).min(1).max(32),
+          })
+          .strict()
+          .optional(),
       })
       .strict(),
     keyboardAccessory: z.enum(['agent', 'shell']),

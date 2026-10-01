@@ -494,12 +494,17 @@ export interface CliCapabilities {
    * `reversalDeadReports`: reports the CLI ignores when one reverses its last effective
    * scroll direction (a reversal debounce); paid on top of the first reversed batch, or
    * the first event of every reversed gesture moves nothing.
+   * `streak`: the CLI's own wheel ACCELERATION. `steps[k]` is how many rows the k-th
+   * report of a streak moves (the last entry repeats), and a pause of `resetMs`
+   * starts a new streak. The pacer reads it to keep scrolling linear (send a report
+   * only when the owed rows cover its step). Absent = every report moves `rows`.
    */
   wheelForward: {
     mode: 'never' | 'version-gated' | 'mouse-tracking';
     minVersion?: string;
     rows?: number;
     reversalDeadReports?: number;
+    streak?: { resetMs: number; steps: number[] };
   };
   keyboardAccessory: 'agent' | 'shell';
   /** Multi-user: this CLI is a raw shell, so its commands need the privileged gate. */

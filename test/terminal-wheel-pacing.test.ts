@@ -57,7 +57,7 @@ function harness(
     filename: 'terminal-ui.js',
   });
   const app = new (CodemanApp as unknown as new () => Record<string, any>)();
-  const sent: Array<{ id: string; data: string }> = [];
+  const sent: Array<{ id: string; data: string; at: number }> = [];
   app.activeSessionId = 'sess-1';
   app._viewMode = 'live';
   app.sessions = new Map([
@@ -71,7 +71,7 @@ function harness(
     ],
     ['sess-2', { mode: opts.mode ?? 'claude', cliMouseTracking: true, cliVersion: '2.1.286' }],
   ]);
-  app._sendInputEphemeral = (id: string, data: string) => sent.push({ id, data });
+  app._sendInputEphemeral = (id: string, data: string) => sent.push({ id, data, at: now });
   app._clientPointToCell = () => ({ col: 40, row: 10 });
   app._terminalViewportAtBottom = () => true;
   app.terminal = {
@@ -80,6 +80,7 @@ function harness(
     modes: { mouseTrackingMode: 'none' },
     buffer: { active: { type: 'normal', viewportY: 0, baseY: 0 } },
     scrollToBottom: vi.fn(),
+    _core: { _renderService: { dimensions: { css: { cell: { height: 21 } } } } },
   };
   const count = (needle: string) => sent.reduce((n, s) => n + s.data.split(needle).length - 1, 0);
   const runFrame = () => {
@@ -134,6 +135,7 @@ describe('COD-464 routing: which wheel events are paced to the CLI', () => {
     expect(harness({ cliVersion: '2.1.187' }).app._wheelReportsFor('sess-1')).toEqual({
       rows: 1,
       reversalDeadReports: 0,
+      streak: null,
     });
   });
 
@@ -187,58 +189,70 @@ describe('COD-464 routing: which wheel events are paced to the CLI', () => {
   });
 });
 
-describe('COD-464 pacing: immediate start, row-by-row drain', () => {
-  it('sends the first report of a gesture synchronously, before any animation frame', () => {
+describe('COD-464 pacing: rows owed, immediate start, no trailing glide', () => {
+  const perFrame = (h: ReturnType<typeof harness>, needle: string) => {
+    const out: number[] = [];
+    while (h.frames.length) {
+      const before = h.count(needle);
+      h.runFrame();
+      out.push(h.count(needle) - before);
+    }
+    return out;
+  };
+
+  it('sends the first batch of a gesture synchronously, before any animation frame', () => {
     const h = harness();
-    h.app._paceWheelToCli(500, 300, -4); // one Chrome notch = 100px = 4 lines
-    expect(h.count(UP)).toBe(1);
-    expect(h.sent[0]).toEqual({ id: 'sess-1', data: '\x1b[<64;40;10M' });
+    h.app._paceWheelToCli(500, 300, -4.8); // one Chrome notch: 100px / 21px rows
+    expect(h.count(UP)).toBeGreaterThanOrEqual(1);
+    expect(h.sent[0].data.startsWith('\x1b[<64;40;10M')).toBe(true);
   });
 
-  it('drains the rest one report per frame for a single notch (no burst, no jump)', () => {
+  it('a mouse notch lands as a short halving glide and nets the rounded distance', () => {
     const h = harness();
-    h.app._paceWheelToCli(500, 300, -4);
-    const perFrame: number[] = [];
-    while (h.frames.length) {
-      const before = h.count(UP);
-      h.runFrame();
-      perFrame.push(h.count(UP) - before);
+    h.app._paceWheelToCli(500, 300, -4.8);
+    const sync = h.count(UP);
+    const frames = perFrame(h, UP);
+    expect(sync).toBe(2); // half of 4.8, rounded down to whole reports
+    expect(frames).toEqual([1, 1, 1]);
+    expect(h.count(UP)).toBe(5); // 4.8 rows → 5, never the old 4 (0.84x)
+  });
+
+  it('a coarse-step CLI rounds to the nearest step and keeps the rest as credit', () => {
+    const h = harness({ mode: 'codex' }); // 3 rows per report
+    for (let i = 0; i < 5; i++) {
+      h.app._paceWheelToCli(500, 300, -4.8); // 5 notches, 120 ms apart = 24 rows
+      h.drain();
+      h.advance(120);
     }
-    expect(perFrame).toEqual([1, 1, 1]);
-    expect(h.count(UP)).toBe(4);
+    expect(Math.abs(h.count(UP) * 3 - 24)).toBeLessThanOrEqual(1.5);
     expect(h.count(DOWN)).toBe(0);
   });
 
-  it("converts lines to reports at the CLI's declared rows per report, carrying the remainder", () => {
-    const h = harness({ mode: 'codex' }); // 3 rows per report
-    h.app._paceWheelToCli(500, 300, -4); // 4 lines → 1 report, 1/3 carried
+  it('overshoot from a coarse step is credit, never a report the other way', () => {
+    const h = harness({ mode: 'codex' });
+    h.app._paceWheelToCli(500, 300, -2); // gesture start: one 3-row report for 2 rows
+    h.drain();
+    h.advance(16);
+    h.app._paceWheelToCli(500, 300, -1); // still 0 owed after the 1-row credit: nothing
     h.drain();
     expect(h.count(UP)).toBe(1);
-    h.advance(50);
-    h.app._paceWheelToCli(500, 300, -4); // 1/3 + 4/3 → 1 report, 2/3 carried
-    h.drain();
-    expect(h.count(UP)).toBe(2);
-    h.advance(50);
-    h.app._paceWheelToCli(500, 300, -4); // 2/3 + 4/3 = 2 → 2 reports
-    h.drain();
-    expect(h.count(UP)).toBe(4); // 12 lines of travel = 4 reports x 3 rows
+    expect(h.count(DOWN)).toBe(0);
   });
 
-  it('moves on the FIRST event of a slow trackpad gesture, and the whole gesture tracks the finger', () => {
+  it('moves on the FIRST event of a slow trackpad gesture and tracks it 1:1', () => {
     const h = harness();
-    // macOS trackpad: 60 events of 4px = 240px = 9.6 lines, 16ms apart.
-    h.app._paceWheelToCli(500, 300, -0.16);
-    expect(h.count(UP)).toBe(1); // before the PageUp route moved nothing for this whole gesture
+    // 60 events of 4.2px (0.2 rows at 21px) 16 ms apart = 12 rows.
+    h.app._paceWheelToCli(500, 300, -0.2);
+    expect(h.count(UP)).toBe(1);
     for (let i = 1; i < 60; i++) {
       h.advance(16);
-      h.app._paceWheelToCli(500, 300, -0.16);
+      h.app._paceWheelToCli(500, 300, -0.2);
       h.drain();
     }
-    // The first report was pre-paid, not added: 9.6 lines → 9 whole reports.
-    expect(h.count(UP)).toBe(9);
+    expect(h.count(UP)).toBe(12); // the pre-paid first report is owed back, not added
   });
 
-  it('ignores sub-line jitter at gesture start', () => {
+  it('ignores sub-row jitter at gesture start', () => {
     const h = harness();
     h.app._paceWheelToCli(500, 300, -0.05);
     h.drain();
@@ -247,40 +261,33 @@ describe('COD-464 pacing: immediate start, row-by-row drain', () => {
 
   it('a new gesture after a pause starts fresh: no stale carry, immediate report', () => {
     const h = harness({ mode: 'codex' });
-    h.app._paceWheelToCli(500, 300, -1); // gesture A: pre-pays one report for 1/3
+    h.app._paceWheelToCli(500, 300, -1);
     h.drain();
     expect(h.count(UP)).toBe(1);
     h.advance(500);
-    h.app._paceWheelToCli(500, 300, 1); // gesture B, downward
+    h.app._paceWheelToCli(500, 300, 1);
     expect(h.count(DOWN)).toBe(1);
   });
 
-  it('eases a fast flick: several reports per frame, capped, and bounded to about a screen', () => {
+  it('caps the backlog at one screen and sends at most 6 reports a frame', () => {
     const h = harness();
-    for (let i = 0; i < 20; i++) h.app._paceWheelToCli(500, 300, -12); // 240 lines requested
-    const perFrame: number[] = [];
-    while (h.frames.length) {
-      const before = h.count(UP);
-      h.runFrame();
-      perFrame.push(h.count(UP) - before);
-    }
-    expect(Math.max(...perFrame)).toBe(4);
-    expect(perFrame.at(-1)).toBe(1);
-    // Backlog capped at one screen (40 rows / 1 row per report) plus the reports
-    // already on the wire, never the full 240.
-    expect(h.count(UP)).toBeLessThanOrEqual(44);
+    for (let i = 0; i < 20; i++) h.app._paceWheelToCli(500, 300, -12); // 240 rows asked
+    const frames = perFrame(h, UP);
+    expect(Math.max(...frames)).toBeLessThanOrEqual(6);
+    // One screen of backlog (terminal is 40 rows) on top of the first batch already
+    // on the wire (6), never the 240 asked for.
+    expect(h.count(UP)).toBeLessThanOrEqual(46);
   });
 
   it('a direction reversal cancels pending travel instead of finishing it', () => {
     const h = harness();
-    h.app._paceWheelToCli(500, 300, -8); // first eased batch (2) sent now, 6 pending
-    expect(h.count(UP)).toBe(2);
+    h.app._paceWheelToCli(500, 300, -8); // first batch (half) sent now
+    const up = h.count(UP);
     h.advance(16);
-    h.app._paceWheelToCli(500, 300, 8); // cancels the 6 pending, nets +2
+    h.app._paceWheelToCli(500, 300, 8);
     h.drain();
-    // Only the batch already on the wire went up; the gesture nets to zero.
-    expect(h.count(UP)).toBe(2);
-    expect(h.count(DOWN)).toBe(2);
+    expect(h.count(UP)).toBe(up); // the pending rest of the up-travel never went out
+    expect(h.count(DOWN)).toBe(up); // and the gesture nets to zero
   });
 
   it('never carries travel onto the tab the user switched to', () => {
@@ -290,7 +297,7 @@ describe('COD-464 pacing: immediate start, row-by-row drain', () => {
     h.app.activeSessionId = 'sess-2';
     h.drain();
     expect(h.sent.every((s) => s.id === 'sess-1')).toBe(true);
-    expect(h.count(UP)).toBe(onWire); // the pending remainder was dropped, not sent anywhere
+    expect(h.count(UP)).toBe(onWire);
   });
 
   it('addresses reports at the pointer cell, falling back to mid-screen', () => {
@@ -298,6 +305,100 @@ describe('COD-464 pacing: immediate start, row-by-row drain', () => {
     h.app._clientPointToCell = () => null;
     h.app._paceWheelToCli(Number.NaN, Number.NaN, -1);
     expect(h.sent[0].data).toBe('\x1b[<64;40;20M');
+  });
+});
+
+describe('COD-464 streak linearizer (Claude accelerates inside a streak of reports)', () => {
+  // Measured on Claude 2.1.286: the k-th report of a streak moves STEPS[k] rows
+  // (last repeats); a pause of 40 ms resets the streak, 30 ms does not.
+  const STEPS = [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6];
+  const claudeStreak = {
+    claude: { mode: 'version-gated', minVersion: '2.1.187', rows: 1, streak: { resetMs: 35, steps: STEPS } },
+  };
+  /** Replay what was sent through a simulated Claude: rows it would really move. */
+  const claudeRows = (sent: Array<{ data: string; at: number }>, resetAfterMs: number) => {
+    let k = 0;
+    let last = -Infinity;
+    let rows = 0;
+    for (const s of sent) {
+      if (s.at - last >= resetAfterMs) k = 0;
+      last = s.at;
+      const n = s.data.split(UP).length - 1;
+      for (let i = 0; i < n; i++) rows += STEPS[Math.min(k++, STEPS.length - 1)];
+    }
+    return rows;
+  };
+
+  it('sustained fast scrolling stays linear instead of running away', () => {
+    const h = harness({ rows: claudeStreak });
+    for (let i = 0; i < 60; i++) {
+      h.app._paceWheelToCli(500, 300, -1.5); // 90 rows over ~1 s at 60 fps
+      h.drain();
+      h.advance(16);
+    }
+    h.advance(200);
+    h.drain();
+    // Without the model every frame's report continues the streak: ~300 rows.
+    for (const reset of [35, 40, 60])
+      expect(Math.abs(claudeRows(h.sent, reset) - 90), String(reset)).toBeLessThanOrEqual(6);
+  });
+
+  it('slow scrolling lets the streak lapse, so every report is a single row', () => {
+    const h = harness({ rows: claudeStreak });
+    for (let i = 0; i < 10; i++) {
+      h.app._paceWheelToCli(500, 300, -1);
+      h.drain();
+      h.advance(100);
+    }
+    expect(h.count(UP)).toBe(10);
+    expect(claudeRows(h.sent, 35)).toBe(10);
+  });
+
+  it('never sends inside the ambiguous gap band: waits for a sure reset instead', () => {
+    const h = harness({ rows: claudeStreak });
+    for (let i = 0; i < 6; i++) {
+      // build a streak (k=6, next step 2)
+      h.app._paceWheelToCli(500, 300, -1);
+      h.drain();
+      h.advance(16);
+    }
+    const before = h.sent.length;
+    h.advance(20); // 36 ms since the last report: ambiguous
+    h.app._paceWheelToCli(500, 300, -1); // 1 row owed < next step 2
+    h.runFrame();
+    expect(h.sent.length).toBe(before);
+    h.advance(60); // past resetMs + reset margin
+    h.drain();
+    expect(h.sent.length).toBe(before + 1);
+    const lastGap = h.sent.at(-1)!.at - h.sent.at(-2)!.at;
+    expect(lastGap).toBeGreaterThanOrEqual(35 + 35);
+  });
+});
+
+describe('COD-464 1:1 distance and touch hold', () => {
+  const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+
+  it('converts wheel pixels to rows at the real row height, not 25px per line', () => {
+    const h = harness();
+    expect(h.app._wheelRowsFloat({ deltaY: -105, deltaMode: 0 })).toBeCloseTo(-5, 5); // 21px rows
+    expect(h.app._wheelRowsFloat({ deltaY: 3, deltaMode: 1 })).toBe(3);
+    expect(h.app._wheelRowsFloat({ deltaY: 1, deltaMode: 2 })).toBe(40);
+    h.app.terminal._core = undefined;
+    expect(h.app._wheelRowsFloat({ deltaY: -50, deltaMode: 0 })).toBe(-2); // fallback 25px
+  });
+
+  it('the wheel listener feeds rows (1:1), not lines, to the pacer', () => {
+    expect(src).toContain('this._paceWheelToCli(ev.clientX, ev.clientY, this._wheelRowsFloat(ev));');
+  });
+
+  it('lifting after holding still does not fling on the paced route', () => {
+    const touchend = src.slice(src.indexOf("'touchend',"));
+    const hold = touchend.indexOf(
+      'performance.now() - lastMoveAt > window.CodemanTerminalInput.TOUCH_HOLD_NO_FLING_MS'
+    );
+    expect(hold).toBeGreaterThan(-1);
+    expect(hold).toBeLessThan(touchend.indexOf('scrollFrame = requestAnimationFrame(scrollLoop);'));
+    expect(src).toContain('velocity = delta * 1.2;\n            lastMoveAt = performance.now();');
   });
 });
 

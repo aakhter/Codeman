@@ -2548,7 +2548,13 @@ export class WebServer extends EventEmitter {
     // clis.json can set it), so the payload goes through escapeScriptJson.
     const wheelForwardClis: Record<
       string,
-      { mode: string; minVersion?: string; rows: number; reversalDeadReports: number }
+      {
+        mode: string;
+        minVersion?: string;
+        rows: number;
+        reversalDeadReports: number;
+        streak?: { resetMs: number; steps: number[] };
+      }
     > = {};
     for (const entry of enabledClis()) {
       const wheel = entry.capabilities.wheelForward;
@@ -2558,6 +2564,7 @@ export class WebServer extends EventEmitter {
         ...(wheel.minVersion ? { minVersion: wheel.minVersion } : {}),
         rows: wheel.rows,
         reversalDeadReports: wheel.reversalDeadReports ?? 0,
+        ...(wheel.streak ? { streak: { resetMs: wheel.streak.resetMs, steps: [...wheel.streak.steps] } } : {}),
       };
     }
     const wheelForwardJson = escapeScriptJson(JSON.stringify(wheelForwardClis));
