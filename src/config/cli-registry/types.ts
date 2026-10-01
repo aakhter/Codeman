@@ -467,8 +467,26 @@ export interface CliCapabilities {
      */
     directPtyPromptTransition?: true;
   };
-  /** Forwarding the wheel to the CLI's own transcript. 'never' keeps local scrollback. */
-  wheelForward: { mode: 'never' | 'version-gated'; minVersion?: string };
+  /**
+   * Forwarding the desktop wheel to the CLI's own transcript as paced SGR wheel
+   * reports (COD-464). 'never' keeps local scrollback / the PageUp fallback.
+   * 'version-gated' forwards from `minVersion` on; 'mouse-tracking' forwards only
+   * while the CLI itself has turned mouse tracking on (`cliMouseTracking`), which is
+   * the CLI saying it handles mouse reports, and is false for panes Codeman cannot see
+   * into (remote wrappers).
+   *
+   * Both of the following are MEASURED against the real CLI, never guessed:
+   * `rows`: transcript rows moved per report. Required for forwarding.
+   * `reversalDeadReports`: reports the CLI ignores when one reverses its last effective
+   * scroll direction (a reversal debounce); paid on top of the first reversed batch, or
+   * the first event of every reversed gesture moves nothing.
+   */
+  wheelForward: {
+    mode: 'never' | 'version-gated' | 'mouse-tracking';
+    minVersion?: string;
+    rows?: number;
+    reversalDeadReports?: number;
+  };
   keyboardAccessory: 'agent' | 'shell';
   /** Multi-user: this CLI is a raw shell, so its commands need the privileged gate. */
   privilegedCommandGate: boolean;
@@ -750,7 +768,7 @@ export interface CliOverlays {
 /**
  * ⚠️ DECLARED-FOR-LATER: fields no code reads yet.
  *
- * `accent`, `overlays.credStore`, `capabilities.echo`, `capabilities.wheelForward`,
+ * `accent`, `overlays.credStore`, `capabilities.echo`,
  * `capabilities.keyboardAccessory` and `capabilities.maxFrameBytes` all describe FRONTEND
  * behaviour, and most of the frontend is deliberately untouched by the change that introduced
  * this registry — `app.js`, `terminal-ui.js`, `styles.css` and friends keep their own

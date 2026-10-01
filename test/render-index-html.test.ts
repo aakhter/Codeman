@@ -171,6 +171,20 @@ describe('WebServer.renderIndexHtml', () => {
     expect(map.shell).toBeUndefined();
   });
 
+  it('COD-464: injects the wheelForward map from the capability, solo windows included', async () => {
+    const { server } = makeServer();
+    for (const solo of [undefined, 'sess-123']) {
+      const html = await render(server, solo);
+      const match = html.match(/window\.__codemanWheelForward=(\{[^<]*\});/);
+      expect(match, String(solo)).not.toBeNull();
+      const map = JSON.parse(match![1]) as Record<string, Record<string, unknown>>;
+      expect(map.claude).toEqual({ mode: 'version-gated', minVersion: '2.1.187', rows: 1, reversalDeadReports: 1 });
+      expect(map.codex).toEqual({ mode: 'mouse-tracking', rows: 3, reversalDeadReports: 0 });
+      expect(map.shell).toBeUndefined();
+      expect(map.gemini).toBeUndefined();
+    }
+  });
+
   it('escapes the solo id so it cannot break out of the inline <script>', async () => {
     const { server } = makeServer({});
     const html = await render(server, 'a</script><b>');

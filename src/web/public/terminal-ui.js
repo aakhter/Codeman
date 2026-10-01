@@ -119,6 +119,19 @@
   // Bound on page keys emitted from one gesture batch, mirroring the SGR tick
   // cap: a fling must not build a backlog that keeps paging after it stops.
   const PAGE_KEY_MAX_PER_BATCH = 3;
+  // COD-464 paced wheel → CLI: per animation frame, send this share of the
+  // pending SGR reports (at least one), capped. One mouse notch on a 1-row/report
+  // CLI (4 reports) then lands as 1,1,1,1 over four frames, a gentle glide,
+  // while a fast flick still keeps up.
+  const WHEEL_PACE_EASE = 0.25;
+  const WHEEL_PACE_MAX_REPORTS_PER_FRAME = 4;
+  // A wheel event after this much quiet starts a NEW gesture, whose first event
+  // sends a report even when it is less than one report's worth of travel, so the
+  // screen answers the very first event (a trackpad's first deltas are a few px).
+  // The pre-paid travel is owed back by the rest of the gesture, never added.
+  const WHEEL_PACE_GESTURE_GAP_MS = 150;
+  // ...but not for sub-line jitter (0.1 line = 2.5px at Chrome's 25px/line).
+  const WHEEL_PACE_MIN_START_LINES = 0.1;
   const TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM = 4;
   // Composer navigation keys as xterm.js encodes user keystrokes: plain and
   // modified arrows (CSI A-D, CSI 1;mA-D, SS3 A-D), Home/End (CSI H/F, SS3
@@ -280,6 +293,10 @@
     KEY_PAGE_DOWN,
     PAGE_KEY_SCREEN_FRACTION,
     PAGE_KEY_MAX_PER_BATCH,
+    WHEEL_PACE_EASE,
+    WHEEL_PACE_MAX_REPORTS_PER_FRAME,
+    WHEEL_PACE_GESTURE_GAP_MS,
+    WHEEL_PACE_MIN_START_LINES,
     TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM,
     MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR,
     MOBILE_KEYBOARD_DISMISS_TAP_SLOP,
@@ -1367,6 +1384,15 @@ Object.assign(CodemanApp.prototype, {
             }
             this._handleUserScrollIntent(lines);
           });
+          return;
+        }
+        // COD-464: when the CLI's `wheelForward` capability applies right now,
+        // the wheel goes to it as PACED SGR reports (first report immediately,
+        // then one eased batch per frame) — on live-mirror tabs too, where it used
+        // to fall through to the half-screen PageUp fallback below.
+        if (this._shouldPaceWheelToCli(ev)) {
+          this._logScrollRouting('forward-sgr-paced');
+          this._paceWheelToCli(ev.clientX, ev.clientY, this._wheelScrollLinesFloat(ev));
           return;
         }
         if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
@@ -7494,12 +7520,147 @@ Object.assign(CodemanApp.prototype, {
   // scroll-speed multiplier and acceleration on top), and the queue is bounded
   // so a wild scroll can't build a backlog that keeps scrolling after the finger
   // stops. Flushed via _sendInputEphemeral — loss-tolerant, off the durable queue.
+  /**
+   * COD-464: this session's `wheelForward` capability, as the server injects it
+   * into `window.__codemanWheelForward` (never an id literal here), when it says
+   * the wheel goes to the CLI RIGHT NOW: `{ rows, reversalDeadReports }`, else
+   * null. 'version-gated' needs the probed CLI version; 'mouse-tracking' needs
+   * the CLI to have turned mouse tracking on itself (`cliMouseTracking`), which
+   * is false for panes Codeman cannot see into (remote wrappers), so those keep
+   * the PageUp fallback.
+   */
+  _wheelReportsFor(sessionId) {
+    const session = this.sessions?.get(sessionId);
+    const map = typeof window !== 'undefined' ? window.__codemanWheelForward : null;
+    const spec = session?.mode && map ? map[session.mode] : null;
+    if (!spec || !Number.isInteger(spec.rows) || spec.rows <= 0) return null;
+    if (spec.mode === 'version-gated') {
+      if (!spec.minVersion || !this._cliVersionAtLeast?.(session.cliVersion, spec.minVersion)) return null;
+    } else if (spec.mode === 'mouse-tracking') {
+      if (session.cliMouseTracking !== true) return null;
+    } else {
+      return null;
+    }
+    const dead = Number.isInteger(spec.reversalDeadReports) ? Math.max(0, spec.reversalDeadReports) : 0;
+    return { rows: spec.rows, reversalDeadReports: dead };
+  },
+
+  /**
+   * COD-464: should this desktop wheel event drive the CLI's own transcript
+   * through paced SGR reports? Measured (2026-10-01): on live-mirror tabs the
+   * wheel used to fall through to the PageUp fallback (the mirror buffer has no
+   * scrollback, so it always read as hollow): nothing moved until ~500px of
+   * wheel travel, then the CLI jumped half a screen, and a slow trackpad
+   * gesture moved nothing at all. Both CLIs whose `wheelForward` declares `rows`
+   * scroll by whole rows per report in 5-12 ms.
+   *
+   * Whether the CLI takes the wheel at all is its `wheelForward` capability
+   * (see _wheelReportsFor). Shift+wheel and the "Wheel scrolls local history"
+   * opt-out keep their meaning.
+   */
+  _shouldPaceWheelToCli(ev) {
+    if (!ev || ev.shiftKey || !this.activeSessionId || !this.terminal) return false;
+    if (this._viewMode === 'history') return false;
+    if (this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback) return false;
+    const tracking = this.terminal.modes?.mouseTrackingMode;
+    if (tracking && tracking !== 'none') return false;
+    if (this.terminal.buffer?.active?.type === 'alternate') return false;
+    return this._wheelReportsFor(this.activeSessionId) !== null;
+  },
+
+  /**
+   * COD-464 paced wheel → CLI. Gesture lines (fractional, see
+   * _wheelScrollLinesFloat) become whole SGR reports at the CLI's declared
+   * rows-per-report, with the remainder carried so a slow trackpad drag tracks
+   * the finger. The FIRST report of a gesture is sent synchronously (start
+   * latency is one WebSocket hop + one CLI repaint); the rest drain one batch
+   * per animation frame with easing, so the CLI repaints row by row instead of
+   * jumping once per 40ms batch. Each send is a WS frame that the server writes
+   * straight into the attached PTY, so per-frame sends are cheap. The backlog
+   * is capped at about one screen so a flick cannot keep scrolling after it
+   * stops, reversals cancel arithmetically, and travel never crosses tabs.
+   */
+  _paceWheelToCli(clientX, clientY, lines) {
+    const sessionId = this.activeSessionId;
+    const spec = this._wheelReportsFor(sessionId);
+    if (!sessionId || !spec || !lines) return;
+    const rowsPerReport = spec.rows;
+    if (this._wheelPaceSession !== sessionId) {
+      this._wheelPaceSession = sessionId;
+      this._wheelPacePending = 0;
+      this._wheelPaceCarry = 0;
+    }
+    // Snap a scrolled-up local viewport back first, like _forwardScrollToApp:
+    // reports address the live screen.
+    if (this._terminalViewportAtBottom && !this._terminalViewportAtBottom()) this.terminal.scrollToBottom();
+    this._wheelPaceX = clientX;
+    this._wheelPaceY = clientY;
+    const tuning = window.CodemanTerminalInput;
+    const now = performance.now();
+    const gestureStart =
+      typeof this._wheelPaceLastAt !== 'number' || now - this._wheelPaceLastAt > tuning.WHEEL_PACE_GESTURE_GAP_MS;
+    this._wheelPaceLastAt = now;
+    if (gestureStart) this._wheelPaceCarry = 0;
+    const carry = (this._wheelPaceCarry || 0) + lines / rowsPerReport;
+    // Epsilon: thirds do not add exactly (-2/3 + -4/3 is -1.999…), which would
+    // silently lose a report per gesture on a 3-rows-per-report CLI.
+    let whole = Math.trunc(carry + Math.sign(carry) * 1e-9);
+    if (!whole && gestureStart && Math.abs(lines) >= tuning.WHEEL_PACE_MIN_START_LINES) whole = Math.sign(carry);
+    this._wheelPaceCarry = carry - whole;
+    if (!whole) return;
+    const cap = Math.max(4, Math.ceil((this.terminal?.rows || 24) / rowsPerReport));
+    this._wheelPacePending = Math.max(-cap, Math.min(cap, (this._wheelPacePending || 0) + whole));
+    if (!this._wheelPaceFrame) this._drainWheelPace();
+  },
+
+  /** COD-464: send one eased batch of paced wheel reports; reschedules itself while any remain. */
+  _drainWheelPace() {
+    this._wheelPaceFrame = null;
+    const pending = this._wheelPacePending || 0;
+    if (!pending) return;
+    const sessionId = this.activeSessionId;
+    if (!sessionId || sessionId !== this._wheelPaceSession) {
+      this._wheelPacePending = 0;
+      this._wheelPaceCarry = 0;
+      return;
+    }
+    const tuning = window.CodemanTerminalInput;
+    const n = Math.min(
+      tuning.WHEEL_PACE_MAX_REPORTS_PER_FRAME,
+      Math.max(1, Math.ceil(Math.abs(pending) * tuning.WHEEL_PACE_EASE))
+    );
+    const count = pending < 0 ? -n : n;
+    this._wheelPacePending = pending - count;
+    const pos = this._clientPointToCell?.(this._wheelPaceX, this._wheelPaceY) || {
+      col: Math.max(1, Math.floor((this.terminal?.cols || 80) / 2)),
+      row: Math.max(1, Math.floor((this.terminal?.rows || 24) / 2)),
+    };
+    const btn = count < 0 ? 64 : 65;
+    // Reversal debounce (`reversalDeadReports`, measured on Claude): the CLI
+    // ignores the report(s) that reverse its last effective direction, so the
+    // first batch of a reversed gesture would move nothing. Pay them on top,
+    // never out of the user's travel. The CLI's direction outlives a tab switch,
+    // so it is remembered per session; unknown reads as "down" (a CLI starts at
+    // the bottom of its transcript), so the common first gesture, up, is primed.
+    const dir = count < 0 ? -1 : 1;
+    if (!this._wheelPaceDir) this._wheelPaceDir = new Map();
+    const lastDir = this._wheelPaceDir.get(sessionId) ?? 1;
+    const dead = lastDir !== dir ? this._wheelReportsFor(sessionId)?.reversalDeadReports || 0 : 0;
+    this._wheelPaceDir.set(sessionId, dir);
+    this._sendInputEphemeral(sessionId, `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(n + dead));
+    if (this._wheelPacePending) this._wheelPaceFrame = requestAnimationFrame(() => this._drainWheelPace());
+  },
+
   _sendSyntheticSgrWheel(clientX, clientY, lines) {
     if (!this.activeSessionId || !lines) return;
     const pos = this._clientPointToCell(clientX, clientY);
     if (!pos) return;
     const btn = lines < 0 ? 64 : 65;
     const ticks = Math.min(Math.abs(lines), 5);
+    // COD-464: keep the paced sender's view of the CLI's scroll direction true
+    // when a report leaves through this older path (touch, legacy forwarding).
+    if (!this._wheelPaceDir) this._wheelPaceDir = new Map();
+    this._wheelPaceDir.set(this.activeSessionId, lines < 0 ? -1 : 1);
     this._queueScrollBytes(`\x1b[<${btn};${pos.col};${pos.row}M`.repeat(ticks));
   },
 
