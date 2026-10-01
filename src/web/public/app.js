@@ -3825,6 +3825,10 @@ class CodemanApp {
       // Still inside the deadline: an abort here rejects the body stream, which
       // is exactly the case a header-only timeout could not reach.
       const json = await res.json();
+      // COD-463: every capture says whether a remote pane was served from the
+      // local copy (ssh backoff); the banner warns the view may not be live.
+      const captureSessionId = /\/api\/sessions\/([^/?]+)\/terminal/.exec(url)?.[1];
+      if (captureSessionId) this.noteRemoteCaptureState?.(decodeURIComponent(captureSessionId), json?.data);
       return { json, headers: res.headers, headersAt };
     } catch (err) {
       if (err?.name === 'AbortError') {
@@ -4080,6 +4084,7 @@ class CodemanApp {
     try {
       const res = await fetch(`/api/sessions/${sessionId}/terminal?frame=1`);
       const data = (await res.json())?.data ?? {};
+      this.noteRemoteCaptureState?.(sessionId, data);
       if (sessionId !== this.activeSessionId || this._viewMode === 'history' || this._isLoadingBuffer) return false;
       if (data.source !== 'mux-frame' || !data.terminalBuffer) return false;
       if (this._lastMirrorFrame?.id === sessionId && this._lastMirrorFrame.buf === data.terminalBuffer) return true;

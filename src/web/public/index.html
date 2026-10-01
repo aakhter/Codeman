@@ -239,6 +239,17 @@
       <button class="offline-banner-retry" id="hostWakeBannerAction" onclick="app.hostWakeAction()">Wake</button>
     </div>
 
+    <!-- COD-463: the remote host answers TCP but new ssh sessions hang, so pane
+         captures are in backoff and the terminal shows the LOCAL wrapper's copy.
+         That copy may not be live and holds about one screen of history, so the
+         user must be told. Populated by host-wake-ui.js. -->
+    <div class="offline-banner remote-capture-banner" id="remoteCaptureBanner" role="status" hidden>
+      <span class="offline-banner-dot" aria-hidden="true"></span>
+      <span class="offline-banner-text" id="remoteCaptureBannerText">Remote host is not responding: this view may not be live</span>
+      <span class="offline-banner-detail" id="remoteCaptureBannerDetail"></span>
+      <button class="offline-banner-retry" id="remoteCaptureBannerAction" onclick="app.remoteCaptureRetry()">Retry</button>
+    </div>
+
     <!-- Reboot-restore offer: shown when the server found sessions a host reboot
          killed and is asking whether to rebuild them. Populated by
          reboot-restore-ui.js; nothing is created until the user clicks. -->

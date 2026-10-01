@@ -36,6 +36,7 @@ import {
 import type { SpawnBridgeOptions } from './session-cli-registry-bridge.js';
 import { execSync, exec, execFile } from 'node:child_process';
 import { RemoteFrameSshPool } from './remote-frame-ssh-pool.js';
+import { RemoteCaptureBackoff } from './remote-capture-backoff.js';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -1030,6 +1031,41 @@ export function parseRemoteFrameCapture(stdout: string): string | null {
   }
   const raw = stdout.split(delim)[0].replace(/\n+$/g, '');
   return raw.length > 0 ? normalizeScrollbackEol(raw) : null;
+}
+
+/** COD-463 — backoff key: one entry per distinct ssh destination + connection options. */
+function remoteCaptureHostKey(sshArgv: string[], sshTarget: string): string {
+  return JSON.stringify([sshTarget, sshArgv]);
+}
+
+/**
+ * COD-463 — the combined remote full-history command: pane geometry, a
+ * delimiter line, then the scrollback capture. One ssh roundtrip (it used to be
+ * two fresh connections: capture, then a separate cursor query). Geometry goes
+ * FIRST so the delimiter is found before any captured text, which could contain
+ * anything.
+ */
+export function buildRemoteFullHistoryCommand(target: string, socket = 'codeman', lastLines?: number): string {
+  return (
+    `tmux -L ${socket} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'; ` +
+    `printf '${REMOTE_FRAME_GEOM_DELIM}\\n'; ` +
+    `tmux -L ${socket} capture-pane -p -e ${captureStartFlag(lastLines)} -t ${shellescape(target)}`
+  );
+}
+
+/**
+ * COD-463 — parse {@link buildRemoteFullHistoryCommand} output. A failed
+ * geometry query prints nothing before the delimiter and degrades to the
+ * cursor-less format. Returns null for an empty capture so callers fall back.
+ */
+export function parseRemoteFullHistoryCapture(stdout: string): string | null {
+  const delim = `${REMOTE_FRAME_GEOM_DELIM}\n`;
+  const delimIdx = stdout.indexOf(delim);
+  const geometry = delimIdx >= 0 ? parsePaneGeometry(stdout.slice(0, delimIdx)) : null;
+  // COD-190: same trailing-blank preservation as the local fullHistory path.
+  const buffer = (delimIdx >= 0 ? stdout.slice(delimIdx + delim.length) : stdout).replace(/\n$/, '');
+  if (buffer.length === 0) return null;
+  return formatFullHistoryCapture(buffer, geometry);
 }
 
 /** Characters unsafe in paths — shell metacharacters, quotes, and control chars */
@@ -2296,6 +2332,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   /** tmux 3.7+ can resize pane history after creation; older releases cannot. */
   private liveHistoryResizeSupported: boolean | null = null;
   private readonly remoteFrameSshPool = new RemoteFrameSshPool();
+  /** COD-463: skips blocking ssh captures for a host whose transport just timed out. */
+  private readonly remoteCaptureBackoff = new RemoteCaptureBackoff();
 
   constructor(
     options: {
@@ -4242,6 +4280,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.reconnectGuard.clear();
     this.remoteAliveCache.clear();
     this.remoteAliveInFlight.clear();
+    this.remoteCaptureBackoff.clear();
     void this.remoteFrameSshPool.close().catch(() => {});
   }
 
@@ -4834,23 +4873,27 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       console.error('[TmuxManager] Invalid remote session name in captureRemotePaneBuffer:', target);
       return null;
     }
+    const sshArgv = buildSshConnectionArgv(remote);
+    const sshTarget = remoteSshTarget(remote);
+    // COD-463: every capture rides the pooled ControlMaster transport and goes
+    // through the per-host backoff, so a host whose NEW ssh sessions hang costs
+    // one timeout, not one per tab switch. A null from the backoff means "host
+    // degraded, not tried": the caller serves its local fallback at once.
+    const hostKey = remoteCaptureHostKey(sshArgv, sshTarget);
+    const runCapture = (command: string) =>
+      this.remoteCaptureBackoff.run(hostKey, () =>
+        this.remoteFrameSshPool.capture(sshArgv, sshTarget, command, opts?.owner, {
+          timeout: REMOTE_CAPTURE_TIMEOUT_MS,
+          maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
+        })
+      );
     // COD-187 (live mirror) — visible-frame snapshot with cursor positioning,
     // parity with the local visible path (formatPaneSnapshot). ONE combined ssh
     // invocation fetches capture + geometry; a delimiter line separates them.
     if (opts?.visibleFrame) {
-      const frameCmd = withRemotePathBootstrap(buildRemoteFrameCommand(target, socket));
       try {
-        const stdout = await this.remoteFrameSshPool.capture(
-          buildSshConnectionArgv(remote),
-          remoteSshTarget(remote),
-          frameCmd,
-          opts.owner,
-          {
-            timeout: REMOTE_CAPTURE_TIMEOUT_MS,
-            maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
-          }
-        );
-        return parseRemoteFrameCapture(stdout);
+        const stdout = await runCapture(withRemotePathBootstrap(buildRemoteFrameCommand(target, socket)));
+        return stdout === null ? null : parseRemoteFrameCapture(stdout);
       } catch (err) {
         console.error('[TmuxManager] Remote frame capture failed (falling back to local wrapper):', err);
         return null;
@@ -4859,39 +4902,30 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // The remote login shell may not have tmux on PATH (macOS non-interactive
     // zsh lacks /opt/homebrew/bin) — bootstrap PATH exactly like the launcher.
     const captureCmd = withRemotePathBootstrap(
-      `tmux -L ${socket} capture-pane -p -e ${opts?.fullHistory ? `${captureStartFlag(opts?.lastLines)} ` : ''}-t ${shellescape(target)}`
+      opts?.fullHistory
+        ? buildRemoteFullHistoryCommand(target, socket, opts?.lastLines)
+        : `tmux -L ${socket} capture-pane -p -e -t ${shellescape(target)}`
     );
-    const argv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), captureCmd];
     try {
-      const { stdout } = await execFileAsync('ssh', argv, {
-        encoding: 'utf-8',
-        timeout: REMOTE_CAPTURE_TIMEOUT_MS,
-        maxBuffer: REMOTE_CAPTURE_MAX_BUFFER,
-      });
-      // COD-190: same trailing-blank preservation as the local fullHistory path.
-      const buffer = opts?.fullHistory ? stdout.replace(/\n$/, '') : stdout.replace(/\n+$/g, '');
-      if (!opts?.fullHistory) {
-        return normalizeScrollbackEol(buffer);
-      }
-      try {
-        const cursorCmd = withRemotePathBootstrap(
-          `tmux -L ${socket} display-message -p -t ${shellescape(target)} '#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}'`
-        );
-        const cursorArgv = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), cursorCmd];
-        const { stdout: cursor } = await execFileAsync('ssh', cursorArgv, {
-          encoding: 'utf-8',
-          timeout: REMOTE_CAPTURE_TIMEOUT_MS,
-          maxBuffer: 1024,
-        });
-        return formatFullHistoryCapture(buffer, parsePaneGeometry(cursor));
-      } catch (cursorErr) {
-        console.error('[TmuxManager] Remote pane cursor query failed after full-history capture:', cursorErr);
-        return formatFullHistoryCapture(buffer);
-      }
+      const stdout = await runCapture(captureCmd);
+      if (stdout === null) return null;
+      if (opts?.fullHistory) return parseRemoteFullHistoryCapture(stdout);
+      return normalizeScrollbackEol(stdout.replace(/\n+$/g, ''));
     } catch (err) {
       console.error('[TmuxManager] Remote pane capture failed (falling back to local):', err);
       return null;
     }
+  }
+
+  /**
+   * COD-463: true while this remote's host is in capture backoff — captures are
+   * being served from the local wrapper, which may not be live and holds only
+   * about one screen of history.
+   */
+  isRemoteCaptureDegraded(remote: SessionRemote): boolean {
+    return this.remoteCaptureBackoff.isDegraded(
+      remoteCaptureHostKey(buildSshConnectionArgv(remote), remoteSshTarget(remote))
+    );
   }
 
   /**
