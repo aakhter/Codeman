@@ -95,7 +95,7 @@ describe('docker-compose.yaml cap_add covers what entrypoint.sh and init:true ne
   });
 
   it('the user-facing docs quote the same cap_add list', () => {
-    for (const rel of ['docker/README.md', 'CLAUDE.md']) {
+    for (const rel of ['docker/README.md', 'AGENTS.md']) {
       const text = read(rel);
       const quoted = [...text.matchAll(/cap_add: \[([^\]]+)\]/g)].map((m) =>
         m[1]
