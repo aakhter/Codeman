@@ -299,8 +299,17 @@ const capabilitiesSchema = z
     altScreen: z.enum(['strip-full', 'strip-mux-only', 'preserve']),
     echo: echoSchema,
     checkpoint: checkpointSchema.optional(),
+    // COD-464: read by the desktop wheel (terminal-ui.js `_shouldPaceWheelToCli`)
+    // through `window.__codemanWheelForward`. `rows` and `reversalDeadReports` are
+    // MEASURED against the real CLI; a mode other than 'never' without `rows` is
+    // never forwarded.
     wheelForward: z
-      .object({ mode: z.enum(['never', 'version-gated']), minVersion: z.string().max(20).optional() })
+      .object({
+        mode: z.enum(['never', 'version-gated', 'mouse-tracking']),
+        minVersion: z.string().max(20).optional(),
+        rows: z.number().int().min(1).max(10).optional(),
+        reversalDeadReports: z.number().int().min(0).max(3).optional(),
+      })
       .strict(),
     keyboardAccessory: z.enum(['agent', 'shell']),
     privilegedCommandGate: z.boolean(),
