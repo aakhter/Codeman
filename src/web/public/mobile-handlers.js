@@ -864,7 +864,9 @@ const KeyboardHandler = {
     if (tag === 'textarea') return true;
     if (tag !== 'input') return false;
     const type = el.type?.toLowerCase();
-    return !['checkbox', 'radio', 'range', 'file', 'button', 'submit', 'reset', 'color', 'image', 'hidden'].includes(type);
+    return !['checkbox', 'radio', 'range', 'file', 'button', 'submit', 'reset', 'color', 'image', 'hidden'].includes(
+      type
+    );
   },
 
   isInputElement(el) {
