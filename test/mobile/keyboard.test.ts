@@ -1067,6 +1067,11 @@ describe('Virtual Keyboard', () => {
           )
         );
         app.terminal.focus();
+        // COD-467: "keyboard up" is focus AND a visible keyboard. Headless Chromium
+        // has no on-screen keyboard, so say so explicitly; focus alone is now the
+        // stale-focus case (keyboard gone, textarea still focused), where a tap
+        // must REOPEN the keyboard rather than run this close toggle.
+        KeyboardHandler.keyboardVisible = true;
 
         const screen = app.terminal.element?.querySelector('.xterm-screen');
         const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
@@ -1096,8 +1101,76 @@ describe('Virtual Keyboard', () => {
       // one on an inert row — the case that now closes the keyboard. Previously
       // it re-focused, which left the accessory bar's chevron as the only way to
       // dismiss. The prompt row is unaffected and still positions the caret.
-      const activeClass = await page.evaluate(() => document.activeElement?.className);
+      const activeClass = await page.evaluate(() => {
+        const cls = document.activeElement?.className;
+        KeyboardHandler.keyboardVisible = false; // never leak into the next test
+        return cls;
+      });
       expect(activeClass).not.toContain('xterm-helper-textarea');
+    });
+
+    // COD-467 (iPhone, Chrome = WebKit): iOS hides the keyboard on an app/tab
+    // switch while the hidden textarea KEEPS focus. WebKit ignores focus() on the
+    // already-focused element, so a tap used to do nothing (prompt row) or run the
+    // close toggle (transcript row) until a session switch blurred it. A tap in
+    // that state must produce a REAL focus change (blur then focus) and end
+    // focused. Headless Chromium cannot show the iOS keyboard, so the events on
+    // the textarea are the observable.
+    it('reopens the keyboard from stale focus: a tap is a real blur+focus, on the prompt and the transcript', async () => {
+      const setup = await page.evaluate(async () => {
+        app.activeSessionId = 'mobile-claude-stale-focus-test';
+        app.sessions.set('mobile-claude-stale-focus-test', {
+          id: 'mobile-claude-stale-focus-test',
+          mode: 'claude',
+          cliVersion: '2.1.220',
+          status: 'idle',
+          cliMouseTracking: true,
+        });
+        app._sendInputAsync = () => {};
+        app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = false;
+        app.saveAppSettingsToStorage(settings);
+        app._updateCjkInputState();
+        app.terminal.reset();
+        await new Promise<void>((resolve) =>
+          app.terminal.write(
+            'Transcript row one\r\nTranscript row two\r\nTranscript row three\r\nTranscript row four\r\nTranscript row five\r\nTranscript row six\r\n\r\n❯ ',
+            resolve
+          )
+        );
+        const screen = app.terminal.element?.querySelector('.xterm-screen');
+        const cell = app.terminal._core?._renderService?.dimensions?.css?.cell;
+        const rect = screen?.getBoundingClientRect();
+        if (!screen || !rect || !cell?.width || !cell?.height) return null;
+        const cursorRow = app.terminal.buffer.active.cursorY;
+        const at = (row: number) => ({ x: rect.left + cell.width * 2, y: rect.top + cell.height * (row + 0.5) });
+        const textarea = app.terminal.textarea;
+        window.__focusEvents = [];
+        textarea.addEventListener('blur', () => window.__focusEvents.push('blur'));
+        textarea.addEventListener('focus', () => window.__focusEvents.push('focus'));
+        return { prompt: at(cursorRow), transcript: at(1) };
+      });
+      expect(setup).not.toBeNull();
+
+      for (const target of ['prompt', 'transcript'] as const) {
+        await page.evaluate(() => {
+          // Stale focus: textarea focused, keyboard NOT up.
+          app.terminal.focus();
+          KeyboardHandler.keyboardVisible = false;
+          window.__focusEvents = [];
+        });
+        await page.touchscreen.tap(setup![target].x, setup![target].y);
+        const after = await page.evaluate(() => ({
+          events: window.__focusEvents.slice(),
+          active: document.activeElement?.className || '',
+        }));
+        expect(after.active, target).toContain('xterm-helper-textarea');
+        // A focus event AFTER a blur = a real focus change inside the tap.
+        const lastFocus = after.events.lastIndexOf('focus');
+        expect(lastFocus, `${target}: ${after.events.join(',')}`).toBeGreaterThan(after.events.indexOf('blur'));
+        expect(after.events.indexOf('blur'), target).toBeGreaterThan(-1);
+      }
     });
 
     it('prevents Claude subagent status taps from opening the hidden keyboard input', async () => {
