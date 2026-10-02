@@ -1629,7 +1629,11 @@ Object.assign(CodemanApp.prototype, {
           panAxis = null;
           isTouching = true;
           didScroll = false;
-          tapStartedWithTerminalFocus = this._isMobileTerminalInputFocused();
+          // COD-467: "keyboard up", not mere focus. iOS hides the keyboard on an
+          // app/tab switch while the textarea keeps focus; reading focus alone
+          // made the next transcript tap run the tap-to-CLOSE toggle on a
+          // keyboard that was not there, so it never opened.
+          tapStartedWithTerminalFocus = this._mobileKeyboardIsUp();
           // Classifying scans the whole viewport with translateToString, and
           // this runs at the start of EVERY gesture including scroll drags.
           // Cache the result for the touchend of this same gesture rather than
@@ -7227,12 +7231,32 @@ Object.assign(CodemanApp.prototype, {
 
   _focusMobileTerminalInput() {
     this._syncMobileHelperTextareaToCursor();
+    // COD-467: WebKit ignores focus() on the element that already has focus, so
+    // a textarea that kept focus after the keyboard went away (app/tab switch,
+    // lock) could never bring the keyboard back. Blur first, in the same tap
+    // handler, so the focus() below is a real focus change inside a user
+    // gesture, which is what iOS requires to show the keyboard. Only when the
+    // keyboard is actually down: with it up this would make it bounce.
+    if (this._isMobileTerminalInputFocused() && !this._mobileKeyboardIsUp()) this._blurMobileTerminalInput();
     const cjkInput = document.getElementById('cjkInput');
     if (cjkInput?.classList.contains('cjk-input-visible')) {
       cjkInput.focus();
     } else {
       this.terminal?.focus();
     }
+  },
+
+  /**
+   * COD-467: is the on-screen keyboard actually up for the terminal? Focus is
+   * not enough on a touch device (see _focusMobileTerminalInput), so it also
+   * needs KeyboardHandler's visibility. Without a touch KeyboardHandler (desktop,
+   * tests) it falls back to focus, the behaviour before this change.
+   */
+  _mobileKeyboardIsUp() {
+    if (!this._isMobileTerminalInputFocused()) return false;
+    const touch = typeof MobileDetection !== 'undefined' && MobileDetection.isTouchDevice?.();
+    if (!touch || typeof KeyboardHandler === 'undefined') return true;
+    return KeyboardHandler.keyboardVisible === true;
   },
 
   _handleMobileTerminalTap(touch, startedWithTerminalFocus, cachedIntent = null) {
