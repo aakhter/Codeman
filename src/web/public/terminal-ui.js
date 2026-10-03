@@ -7934,9 +7934,34 @@ Object.assign(CodemanApp.prototype, {
     if (this._pageKeySession !== this.activeSessionId) {
       this._pageKeySession = this.activeSessionId;
       this._pageKeyPending = 0;
+      this._pageKeyLastAt = undefined;
     }
     const tuning = window.CodemanTerminalInput;
     const perPage = Math.max(2, Math.round((this.terminal?.rows || 24) * tuning.PAGE_KEY_SCREEN_FRACTION));
+    // COD-470: the FIRST event of a gesture pages at once. Waiting for half a
+    // screen of travel (19 rows, ~475px on a 38-row pane) meant an ordinary
+    // trackpad flick never sent a key, so a remote codex tab, which always lands
+    // here, looked dead. The page is pre-paid: the travel it skipped is owed back
+    // by the rest of the gesture, so the rate stays one page per `perPage` rows.
+    // A pause or a direction change starts a new gesture (same rule as the paced
+    // wheel, WHEEL_PACE_GESTURE_GAP_MS).
+    const now = performance.now();
+    const dir = lines < 0 ? -1 : 1;
+    const gestureStart =
+      typeof this._pageKeyLastAt !== 'number' ||
+      now - this._pageKeyLastAt > tuning.WHEEL_PACE_GESTURE_GAP_MS ||
+      dir !== this._pageKeyDir;
+    this._pageKeyLastAt = now;
+    this._pageKeyDir = dir;
+    if (gestureStart) {
+      this._pageKeyPending = 0;
+      if (Math.abs(lines) >= tuning.WHEEL_PACE_MIN_START_ROWS && Math.abs(lines) < perPage) {
+        this._pageKeyPending = lines - dir * perPage;
+        this._queueScrollBytes(dir < 0 ? tuning.KEY_PAGE_UP : tuning.KEY_PAGE_DOWN);
+        this._logScrollRouting('page-keys');
+        return true;
+      }
+    }
     const pending = (this._pageKeyPending || 0) + lines;
     const pages = Math.trunc(pending / perPage);
     this._pageKeyPending = pending - pages * perPage;
