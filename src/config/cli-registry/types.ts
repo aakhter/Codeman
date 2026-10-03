@@ -753,8 +753,16 @@ export interface CliOverlays {
    * whose remote arm has always run a per-session builder. The CLIs without it reach a remote
    * host with their flags dropped — pre-registry behaviour, preserved deliberately here rather
    * than quietly widened, and parked as a question of its own (COD-416 wave 3e).
+   *
+   * `tmuxMouseAtStartupSeconds` (COD-471) is for a CLI that decides ONCE, at startup, whether to
+   * capture the mouse by reading tmux's `mouse` option: codex 0.159+ turns mouse tracking on only
+   * when it is on. The remote launch sets every session `mouse off`, so such a CLI never tracked
+   * the mouse remotely and the wheel fell back to page keys. Declared, the remote session starts
+   * `mouse on` and is switched `mouse off` this many seconds later (a delayed `run-shell -C`, no
+   * shell), the same end state a local session reaches through the mouse sync. The CLI keeps its
+   * startup decision; tmux then passes the wheel through because the pane asked for it.
    */
-  remote?: { command?: string; fromLaunchSpec?: true } | { disabled: true };
+  remote?: { command?: string; fromLaunchSpec?: true; tmuxMouseAtStartupSeconds?: number } | { disabled: true };
   /**
    * `rootCommand` is the same invocation for a container whose exec user is uid 0. Only
    * declare it when the normal `command` would be REFUSED as root: claude's carries
