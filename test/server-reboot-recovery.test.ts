@@ -43,6 +43,22 @@ function muxSession(id: string): MuxSession {
 }
 
 describe('server reboot recovery snapshot', () => {
+  it('registers recovery routes on the real web server', async () => {
+    const server = new WebServer(0, false, true) as unknown as {
+      setupRoutes: () => Promise<void>;
+      app: import('fastify').FastifyInstance;
+      stop: () => Promise<void>;
+    };
+    try {
+      await server.setupRoutes();
+      const response = await server.app.inject({ method: 'GET', url: '/api/session-recoveries' });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.recoveries).toEqual([]);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('carries a discovered Codex native ID into the reboot banner before pruning', () => {
     const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
     const saved = {
