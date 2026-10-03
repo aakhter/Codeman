@@ -2680,7 +2680,7 @@ export class WebServer extends EventEmitter {
     // Create run summary tracker for this session
     const summaryTracker = new RunSummaryTracker(session.id, session.name);
     this.runSummaryTrackers.set(session.id, summaryTracker);
-    summaryTracker.recordSessionStarted(session.mode, session.workingDir);
+    summaryTracker.recordSessionStarted(session.mode, session.workingDir, getCli(session.mode)?.label);
 
     // Set working directory for Ralph tracker to auto-load @fix_plan.md (not supported for external CLI
     // sessions). COD-416/Q23: was a hardcoded opencode|codex|gemini list, stale since pi/grok/
