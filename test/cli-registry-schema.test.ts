@@ -368,3 +368,18 @@ describe('capability shapes', () => {
     }, 'a transcript reader that does not exist would silently read nothing');
   });
 });
+
+describe('COD-471 overlays.remote.tmuxMouseAtStartupSeconds', () => {
+  const codex = STOCK_CLIS.find((entry) => entry.id === 'codex')!;
+  const withSeconds = (value: unknown) => ({
+    ...codex,
+    overlays: { ...codex.overlays, remote: { fromLaunchSpec: true, tmuxMouseAtStartupSeconds: value } },
+  });
+
+  it('accepts the stock codex value and rejects out-of-range or fractional ones', () => {
+    expect(CliEntrySchema.safeParse(withSeconds(8)).success).toBe(true);
+    for (const bad of [0, -1, 31, 2.5, '8']) {
+      expect(CliEntrySchema.safeParse(withSeconds(bad)).success, String(bad)).toBe(false);
+    }
+  });
+});

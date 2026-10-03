@@ -711,7 +711,14 @@ const CODEX: CliEntry = {
     // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
     // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
     // hand-written builder it replaces, not a new capability.
-    remote: { fromLaunchSpec: true },
+    //
+    // COD-471: codex 0.159+ captures the mouse only if tmux's `mouse` option is on when it
+    // starts (measured: same binary and config, flipping only that option toggles DECSET
+    // 1000/1002/1003/1006). Remote sessions are `mouse off`, so remote codex never tracked the
+    // mouse and its wheel fell back to page keys. 8 s covers a slow login shell (`$SHELL -i -l`)
+    // before codex reads the option; verified on tmux 3.4 and 3.6a that codex keeps tracking
+    // after the switch-off.
+    remote: { fromLaunchSpec: true, tmuxMouseAtStartupSeconds: 8 },
     // Codex appends its positional `resume <id>` (launch.resumeAppend) — but never onto a
     // case's own opaque `commands.codex`, where a trailing positional would land in the wrong
     // place. Refuse and let a human recover instead.

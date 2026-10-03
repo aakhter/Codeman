@@ -1587,13 +1587,28 @@ export function buildRemoteLaunchCommand(options: {
   // leaving the pane we just made on tmux's 2000-line default. Unlike
   // prefix/mouse/status it changes no interactive behavior of a sibling session —
   // only the scrollback budget of panes created from here on.
+  // COD-471: a CLI that reads tmux's `mouse` option once at startup to decide whether to capture
+  // the mouse (registry `overlays.remote.tmuxMouseAtStartupSeconds`, codex) starts with the
+  // session `mouse on`, then a delayed `run-shell -C` (a tmux command, no shell, needs tmux >= 3.2
+  // like remain-on-exit `failed` below) switches it off, which is where every other remote
+  // session sits. `-b` keeps the delay from holding the rest of the chain.
+  const remoteOverlay = getCli(mode)?.overlays.remote;
+  const mouseAtStartup =
+    remoteOverlay && !('disabled' in remoteOverlay) ? remoteOverlay.tmuxMouseAtStartupSeconds : undefined;
+  const mouseCommands =
+    mouseAtStartup && Number.isInteger(mouseAtStartup) && mouseAtStartup > 0
+      ? [
+          `set -t ${remoteName} mouse on`,
+          `run-shell -b -d ${mouseAtStartup} -C ${shellescape(`set -t ${remoteName} mouse off`)}`,
+        ]
+      : [`set -t ${remoteName} mouse off`];
   const historyLimitPrefix =
     historyLimit && Number.isFinite(historyLimit) ? [`set -g history-limit ${Math.floor(historyLimit)}`] : [];
   const tmuxInvocation = withRemotePathBootstrap(
     [
       `tmux -L ${REMOTE_TMUX_SOCKET} ${[...historyLimitPrefix, `new-session -A -s ${remoteName} -c ${shellescape(remote.remotePath)} ${shellescape(paneCommand)}`].join(' \\; ')}`,
       `set -t ${remoteName} status off`,
-      `set -t ${remoteName} mouse off`,
+      ...mouseCommands,
       `set -t ${remoteName} prefix C-q`,
       'set -s escape-time 0',
       // COD-106 — shared/collaborative sessions: tmux defaults to sizing a window
