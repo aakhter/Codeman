@@ -6630,6 +6630,36 @@ Object.assign(CodemanApp.prototype, {
     this._updateFilePreviewToolbar?.('none');
   },
 
+  _isFilePreviewOpen() {
+    return !!this.$('filePreviewOverlay')?.classList.contains('visible');
+  },
+
+  // Escape-key seam (COD-474), the file-preview twin of the Response Viewer's
+  // COD-229 seam. Returns true when the key belongs to the preview, so the global
+  // handler stops there and ESC never reaches xterm/the CLI. Innermost layer first:
+  // the annotation popover, then anything inside the preview that already took the
+  // key (an open docx comment card), then the preview itself.
+  _maybeCloseFilePreviewOnEscape(e) {
+    if (!this._isFilePreviewOpen()) return false;
+    if (e?.defaultPrevented) return true;
+    e?.preventDefault();
+    e?.stopPropagation();
+    if (document.getElementById('annotationPopover')) {
+      this._closeAnnotationPopover();
+      return true;
+    }
+    this.closeFilePreview();
+    // Cancelling the unsaved-edits prompt keeps the preview open; keep focus there.
+    if (!this._isFilePreviewOpen()) {
+      try {
+        this.terminal?.focus();
+      } catch {
+        /* terminal may be detached mid-teardown */
+      }
+    }
+    return true;
+  },
+
   copyFilePreviewContent() {
     if (this.filePreviewState?.previewKind === 'image') {
       return this._copyFilePreviewImage();

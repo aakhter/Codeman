@@ -1596,7 +1596,9 @@ class CodemanApp {
         // The View Response overlay is a top-level layer: close it first and
         // consume the key so ESC never reaches xterm/the CLI (where it has its own
         // cancel semantics), then restore terminal focus. Explicit close (not a
-        // toggle) so a second Escape can't reopen it (COD-229).
+        // toggle) so a second Escape can't reopen it (COD-229). The file preview
+        // stacks above it (z 5100 vs 5000), so it gets the key first (COD-474).
+        if (this._maybeCloseFilePreviewOnEscape?.(e)) return;
         if (this._maybeCloseResponseViewerOnEscape(e)) return;
         this.closeAllPanels();
         this.closeHelp();

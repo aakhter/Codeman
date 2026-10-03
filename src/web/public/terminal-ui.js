@@ -920,6 +920,11 @@ Object.assign(CodemanApp.prototype, {
       }
       if (ev.isComposing || ev.key === 'Process' || ev.keyCode === 229) return true;
 
+      // COD-474: a preview opened from a terminal link leaves focus in xterm, so
+      // Esc would reach the PTY before the document handler closes the preview.
+      // Returning false only stops xterm; the event still bubbles to that handler.
+      if (ev.type === 'keydown' && ev.key === 'Escape' && this._isFilePreviewOpen?.()) return false;
+
       // ── COD-187 history view keys ──
       // Esc EXITS the frozen history view and must NEVER reach the PTY (a
       // leaked \x1b cancels a running codex turn). Gated strictly on history.
