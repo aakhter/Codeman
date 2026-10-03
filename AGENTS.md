@@ -31,7 +31,7 @@ This file is the single source of truth for agent and contributor guidance in th
 **The working tree is shared with other agent sessions.** Several Codeman sessions run against THIS one checkout, so another session can `git checkout` a different branch, or leave half-finished untracked files, while you are mid-task.
 
 - **Always `git branch --show-current` immediately before committing.** Observed 2026-07-27: another session ran `git checkout -b feat/web-tabs`, a commit silently landed there instead of master, and the follow-up `git push origin master` cheerfully reported "Everything up-to-date".
-- To land a commit on `local` **without** switching branches (which would yank the tree out from under the other session): `git push origin HEAD:local` then `git branch -f local HEAD`. Never `git checkout local` to "fix" it.
+- To land a commit on `local` **without** switching branches (which would yank the tree out from under the other session): `git push bitbucket HEAD:local` then `git branch -f local HEAD`. Never `git checkout local` to "fix" it.
 - **Never `git add -A`/`git add .`** — stage explicit paths. A sweep will pick up another session's WIP.
 - Another session's broken WIP can block `npm run build`, since `tsc` is the first step and the build gates on it. That is not your bug to fix. ⚠️ `tsc` still EMITS on type errors, so a failed `npm run build` leaves a rebuilt `dist/index.js` compiled from their tree; check what it pulled in before restarting the service. To deploy frontend-only changes past a blocked `tsc`, run the asset stage of `scripts/build.mjs` (everything after the `tsc`/`chmod` lines is independent of it).
 - **A pre-push failure in a file you did not touch is another session's WIP.** Push with `CODEMAN_SKIP_PREPUSH=1 git push` and leave it alone. (The hook already skips itself when the tree has uncommitted changes in a path it checks, so this mostly happens once the other session has committed.)
@@ -70,7 +70,7 @@ When user says "COM":
 3. **Consume the changeset**: `npm run version-packages` (auto-bumps `package.json` files, updates `CHANGELOG.md`, runs `npm install --package-lock-only`, and verifies lockfile sync via `scripts/check-lockfile-sync.mjs` — all in one command; never hand-edit `CHANGELOG.md` or `package-lock.json` versions)
 4. **Sync AGENTS.md version**: Update the `**Version**` line below to match the new version from `package.json`
 5. **Commit and deploy**: verify the branch is `local` first (`git branch --show-current`), then stage EXPLICIT paths — never `git add -A`, which has swept another session's WIP into a release. `git status --short` and account for every line before committing:
-   `git add <paths> && git commit -m "chore: version packages" && git push origin local && npm run build && systemctl --user restart codeman-web`
+   `git add <paths> && git commit -m "chore: version packages" && git push bitbucket local && npm run build && systemctl --user restart codeman-web`
 6. **Wait for CI**: the push to `local` triggers Bitbucket Pipelines (`bitbucket-pipelines.yml`, the `full-gate` step). Confirm it passes before considering the release done.
 7. **Update Jira**: record the release version, commit and verification on the `COD` issue(s) it ships (see Fork Workflow).
 
@@ -85,8 +85,9 @@ Bitbucket Pipelines runs `npm run check:lockfile`, so lockfile drift fails the b
 The working and deploy repository for this box is Bitbucket:
 `https://bitbucket.org/aamer_akhter/codeman/src`. Treat `Ark0N/Codeman` as off-limits:
 do not create issues, branches, commits, PRs, comments, or any other resources there. The local remotes may vary, so check
-`git remote -v`; on this checkout `origin` is Bitbucket (`aamer_akhter/codeman`) and `upstream` is the read-only GitHub
-project (`Ark0N/Codeman`) for reference only. Recent history uses Conventional Commit-style subjects, often with Jira keys:
+`git remote -v`; on this checkout the Bitbucket remote is named `bitbucket` (`aamer_akhter/codeman`, which `local` tracks),
+`fork` is `aakhter/Codeman` on GitHub, and ⚠️ `origin` is the off-limits `Ark0N/Codeman`, read-only reference: never
+`git push origin`. Recent history uses Conventional Commit-style subjects, often with Jira keys:
 `fix(test): COD-25 stabilize mobile visual regression`, `feat: COD-18 add attachment history drawer`,
 `docs: COD-18 design session attachment history`. The Jira project key is `COD`; use `COD-###` in branch names, commit
 subjects, and PR titles for Jira-backed work. Never start implementation work on a bug or feature until a Jira issue exists
@@ -108,7 +109,7 @@ Codeman is a Claude Code session manager with web interface and autonomous Ralph
 
 **Requirements**: Node.js 22+, Claude CLI, tmux
 
-**Git**: The working and deploy branch is `local` on `origin` (Bitbucket); `upstream` (`Ark0N/Codeman`) is read-only reference, see Fork Workflow. Terminal session dashboard: `codeman tui` (`--list` to list, `codeman tui <n>` to attach).
+**Git**: The working and deploy branch is `local` on the `bitbucket` remote; `origin` (`Ark0N/Codeman`) is read-only reference, see Fork Workflow. Terminal session dashboard: `codeman tui` (`--list` to list, `codeman tui <n>` to attach).
 
 ## Additional Commands
 
