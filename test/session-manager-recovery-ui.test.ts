@@ -213,6 +213,9 @@ describe('Session Manager Recovery Queue', () => {
       'Copy hint',
       'Start new',
     ]);
+    expect(
+      elements.sessionRecoveryList.children[1].children.at(-1)?.children.map((button) => button.textContent)
+    ).toEqual(['Start new', 'Refresh', 'Dismiss']);
   });
 
   it('lets a user dismiss a recovered record after its replacement session exists', async () => {

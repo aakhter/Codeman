@@ -25,6 +25,7 @@ import fastifyCookie from '@fastify/cookie';
 let startShouldThrow = false;
 /** Ordering log, so a test can assert what ran before the pane spawned. */
 const callOrder: string[] = [];
+let lastConfig: Record<string, unknown> = {};
 
 vi.mock('../../src/session.js', () => ({
   Session: class {
@@ -35,6 +36,7 @@ vi.mock('../../src/session.js', () => ({
     owner?: string;
     claudeSessionId: string | null = null;
     constructor(config: { id: string; mode?: string; name?: string; workingDir: string; owner?: string }) {
+      lastConfig = config;
       this.id = config.id;
       this.mode = config.mode ?? 'claude';
       this.name = config.name;
@@ -86,6 +88,10 @@ function offerEntry(sessionId: string, owner?: string): RebootRestoreEntry {
 }
 
 async function createHarness(ctx: ReturnType<typeof createMockRouteContext>): Promise<FastifyInstance> {
+  Object.assign(ctx.store, {
+    getSessionRecoveries: vi.fn(() => []),
+    upsertSessionRecovery: vi.fn(),
+  });
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
   registerRebootRestoreRoutes(app, ctx as never);
@@ -163,6 +169,37 @@ describe('a rebuild that fails after the session is registered', () => {
 });
 
 describe('a rebuild that succeeds', () => {
+  it('resumes Codex through its native config while preserving its model', async () => {
+    const entry = offerEntry('codex-pane');
+    entry.mode = entry.state.mode = 'codex';
+    entry.resumeConversationId = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    entry.state.nativeResumeId = entry.resumeConversationId;
+    entry.state.codexConfig = { model: 'gpt-6', reasoningEffort: 'high' };
+    rebootRestoreRegistry.set([entry]);
+    const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
+    const app = await createHarness(ctx);
+    Object.assign(ctx.store, {
+      getSessionRecoveries: vi.fn(() => [
+        { id: 'recovery-codex-pane', sourceSessionId: entry.sessionId, status: 'resumable' },
+      ]),
+    });
+    const res = await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
+    expect(res.json().data.restored).toHaveLength(1);
+    expect(ctx.store.upsertSessionRecovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'recovered',
+        recoveredSessionId: entry.sessionId,
+      })
+    );
+    expect(lastConfig.codexConfig).toEqual({
+      model: 'gpt-6',
+      reasoningEffort: 'high',
+      resumeSessionId: entry.resumeConversationId,
+    });
+    expect(lastConfig.resumeSessionId).toBeUndefined();
+    await app.close();
+  });
+
   it('re-applies the persisted state before the record is written again', async () => {
     rebootRestoreRegistry.set([offerEntry('a')]);
     const ctx = createMockRouteContext({ workspaceHooksEnabled: false });

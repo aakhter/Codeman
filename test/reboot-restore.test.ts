@@ -151,6 +151,14 @@ describe('which dead sessions may be rebuilt', () => {
     expect(planRebootRestore(['d'], persisted, () => true).skipped[0].reason).toBe('remote-or-docker');
   });
 
+  it('offers Codex with a verified native conversation ID', () => {
+    const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    const persisted = { c: persistedSession({ id: 'c', mode: 'codex', nativeResumeId: id }) };
+    const plan = planRebootRestore(['c'], persisted, () => true);
+    expect(plan.restore).toHaveLength(1);
+    expect(plan.restore[0].resumeConversationId).toBe(id);
+  });
+
   it('skips a CLI whose history the claude transcript reader does not understand', () => {
     const persisted = { c: persistedSession({ id: 'c', mode: 'codex' }) };
     expect(planRebootRestore(['c'], persisted, () => true).skipped[0].reason).toBe('unsupported-mode');

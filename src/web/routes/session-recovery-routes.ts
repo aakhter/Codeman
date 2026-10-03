@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Session } from '../../session.js';
+import { resolveNativeResumeIdForRecovery } from '../../native-session-identity.js';
 import { ApiErrorCode, createErrorResponse, type SessionDocker, type SessionRemote } from '../../types.js';
 import type { SessionRecoveryRecord } from '../../types/session-recovery.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
@@ -74,9 +75,26 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
         return reply.code(409).send(conflict('Recovery has already created a replacement session'));
       }
       if (action === 'refresh') {
-        if (!['pending', 'reattachable', 'resumable'].includes(record.status)) {
+        const refreshLocalCodex =
+          record.transport === 'local' && record.mode === 'codex' && record.launch.kind === 'built-in';
+        if (
+          !['pending', 'reattachable', 'resumable'].includes(record.status) &&
+          !(refreshLocalCodex && record.status === 'unavailable')
+        ) {
           return reply.code(409).send(conflict('Recovery cannot be refreshed in its current state'));
         }
+        const nativeResumeId = refreshLocalCodex
+          ? await resolveNativeResumeIdForRecovery({
+              id: record.sourceSessionId,
+              pid: null,
+              status: 'idle',
+              currentTaskId: null,
+              mode: record.mode,
+              workingDir: record.workingDir,
+              createdAt: record.createdAt,
+              lastActivityAt: record.lastActivityAt ?? record.createdAt,
+            })
+          : record.nativeResumeId;
         const transport = await resolveTransport(record);
         if (isRecoveryDismissed(record.id))
           return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
@@ -87,6 +105,7 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
           return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
         const next = {
           ...record,
+          ...(nativeResumeId ? { nativeResumeId } : {}),
           status:
             record.transport === 'remote'
               ? live
@@ -94,8 +113,20 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
                 : record.nativeResumeId || record.claudeResumeId
                   ? ('resumable' as const)
                   : ('unavailable' as const)
-              : record.status,
+              : refreshLocalCodex
+                ? nativeResumeId
+                  ? ('resumable' as const)
+                  : ('unavailable' as const)
+                : record.status,
         };
+        const current = findRecovery(ctx, record.id, req);
+        if (
+          !current ||
+          current.status === 'recovered' ||
+          current.recoveredSessionId ||
+          activeRecoveryActions.has(record.id)
+        )
+          return reply.code(409).send(conflict('Recovery changed while refresh was in progress'));
         ctx.store.upsertSessionRecovery(next);
         return { recovery: next, live };
       }

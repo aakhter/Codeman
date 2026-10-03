@@ -1193,6 +1193,14 @@ Object.assign(CodemanApp.prototype, {
         button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
         actions.appendChild(button);
       }
+      if (record.status === 'unavailable' && record.transport === 'local' && record.mode === 'codex' && record.launch?.kind === 'built-in') {
+        const refresh = document.createElement('button');
+        refresh.type = 'button';
+        refresh.className = 'btn-toolbar';
+        refresh.textContent = 'Refresh';
+        refresh.addEventListener('click', () => this._runSessionRecoveryAction(record, 'refresh'));
+        actions.appendChild(refresh);
+      }
       const dismiss = document.createElement('button');
       dismiss.type = 'button';
       dismiss.className = 'btn-toolbar session-recovery-dismiss';

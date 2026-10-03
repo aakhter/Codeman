@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +48,54 @@ describe('native reboot recovery identity', () => {
     );
 
     await expect(resolveNativeResumeIdForRecovery(session({}))).resolves.toBe(id);
+  });
+
+  it('finds a Codex identity older than the 400-row history limit', async () => {
+    const dir = join(process.env.CODEX_HOME!, 'sessions', '2026', '09', '22');
+    mkdirSync(dir, { recursive: true });
+    const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    for (let i = 0; i <= 400; i++) {
+      const path = join(dir, `rollout-${i}.jsonl`);
+      writeFileSync(
+        path,
+        JSON.stringify({
+          type: 'session_meta',
+          payload: {
+            id: i === 0 ? id : `other-${i}`,
+            cwd: '/work/project',
+            originator: i === 0 ? 'codeman_codeman-session' : `codeman_other-${i}`,
+          },
+        }) + '\n'
+      );
+      utimesSync(path, 1000 + i, 1000 + i);
+    }
+    await expect(resolveNativeResumeIdForRecovery(session({}))).resolves.toBe(id);
+  });
+
+  it('ignores a newer child rollout that inherited the pane originator', async () => {
+    const dir = join(process.env.CODEX_HOME!, 'sessions', '2026', '09', '22');
+    mkdirSync(dir, { recursive: true });
+    const rootId = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    for (const [id, source, stamp] of [
+      [rootId, 'cli', 1000],
+      ['01a0c810-a5c4-7b32-be0b-1599d9d5995e', { subagent: { other: 'guardian' } }, 2000],
+    ] as const) {
+      const path = join(dir, `rollout-${id}.jsonl`);
+      writeFileSync(
+        path,
+        JSON.stringify({
+          type: 'session_meta',
+          payload: {
+            id,
+            cwd: '/work/project',
+            originator: 'codeman_codeman-session',
+            source,
+          },
+        }) + '\n'
+      );
+      utimesSync(path, stamp, stamp);
+    }
+    await expect(resolveNativeResumeIdForRecovery(session({}))).resolves.toBe(rootId);
   });
 
   it('selects one OpenCode root and ignores its child agents', async () => {

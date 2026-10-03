@@ -4161,6 +4161,13 @@ export class WebServer extends EventEmitter {
     if (dead.length === 0) return 0;
 
     const persisted = this.store.getSessions();
+    // Snapshot discovery found exact IDs before stale cleanup; carry them into the banner too.
+    for (const record of this.bootRecoveryRecords) {
+      const saved = persisted[record.sourceSessionId];
+      if (saved?.mode === 'codex' && record.nativeResumeId) {
+        persisted[record.sourceSessionId] = { ...saved, nativeResumeId: record.nativeResumeId };
+      }
+    }
     if (
       !looksLikeHostReboot({
         livePaneCount,

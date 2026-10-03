@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
 import { registerSessionRecoveryRoutes } from '../../src/web/routes/session-recovery-routes.js';
@@ -44,6 +47,40 @@ describe('session recovery routes', () => {
     expect(JSON.parse(response.body)).toEqual({ recoveries: [recovery] });
     expect(harness.ctx.addSession).not.toHaveBeenCalled();
     expect(harness.ctx.mux.createSession).not.toHaveBeenCalled();
+  });
+
+  it('refreshes an unavailable local Codex record from its exact on-disk identity', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'codex-recovery-refresh-'));
+    const previous = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = root;
+    try {
+      const dir = join(root, 'sessions', '2026', '10', '03');
+      mkdirSync(dir, { recursive: true });
+      const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+      writeFileSync(
+        join(dir, 'rollout-refresh.jsonl'),
+        JSON.stringify({
+          type: 'session_meta',
+          payload: {
+            id,
+            cwd: '/tmp/project',
+            originator: 'codeman_dead-1',
+            source: 'cli',
+          },
+        }) + '\n'
+      );
+      harness.ctx.store.getSessionRecoveries.mockReturnValue([
+        { ...recovery, transport: 'local', nativeResumeId: undefined, status: 'unavailable' },
+      ]);
+      const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/refresh' });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().recovery).toMatchObject({ status: 'resumable', nativeResumeId: id });
+      expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects malformed recovery ids before any recovery work', async () => {

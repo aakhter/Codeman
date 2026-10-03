@@ -246,6 +246,7 @@ function parseIdentity(head: string): RolloutIdentity {
         session_id?: string;
         cwd?: string;
         thread_source?: string;
+        source?: string | { subagent?: unknown };
         originator?: string;
         type?: string;
         role?: string;
@@ -263,7 +264,13 @@ function parseIdentity(head: string): RolloutIdentity {
     if (entry.type === 'session_meta' && p) {
       out.threadId ??= p.id || p.session_id;
       out.cwd ??= p.cwd;
-      out.threadSource ??= p.thread_source;
+      out.threadSource ??=
+        p.thread_source ??
+        (typeof p.source === 'object' && p.source?.subagent
+          ? 'subagent'
+          : typeof p.source === 'string'
+            ? p.source
+            : undefined);
       out.originator ??= p.originator;
     } else if (entry.type === 'turn_context' && p) {
       out.cwd ??= p.cwd;
@@ -330,12 +337,21 @@ async function listRollouts(root: string): Promise<Array<{ path: string; mtimeMs
  * something a person picks back up, and on a real store they outnumber the
  * threads that are.
  */
-export async function scanCodexSessionsHistory(): Promise<CodexHistorySession[]> {
+export function scanCodexSessionsHistory(): Promise<CodexHistorySession[]> {
+  return scanCodexSessions(MAX_ROLLOUTS, true);
+}
+
+/** Recovery must find exact pane identities even outside the bounded history list. */
+export function scanCodexSessionIdentities(): Promise<CodexHistorySession[]> {
+  return scanCodexSessions(Infinity, false);
+}
+
+async function scanCodexSessions(maxRows: number, readPrompts: boolean): Promise<CodexHistorySession[]> {
   const files = await listRollouts(codexSessionsRoot());
   const out: CodexHistorySession[] = [];
 
   for (const file of files) {
-    if (out.length >= MAX_ROLLOUTS) break;
+    if (out.length >= maxRows) break;
 
     let identity = identityCache.get(file.path);
     if (!identity) {
@@ -348,7 +364,9 @@ export async function scanCodexSessionsHistory(): Promise<CodexHistorySession[]>
     if (!identity.cwd) continue;
 
     const lastPrompt =
-      out.length < MAX_TAIL_READS ? parseLastPrompt(await readTail(file.path, file.size, TAIL_BYTES)) : undefined;
+      readPrompts && out.length < MAX_TAIL_READS
+        ? parseLastPrompt(await readTail(file.path, file.size, TAIL_BYTES))
+        : undefined;
 
     out.push({
       sessionId: identity.threadId,

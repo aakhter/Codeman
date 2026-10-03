@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { codexThreadBySessionId, scanCodexSessionsHistory } from './codex-transcript.js';
+import { codexThreadBySessionId, scanCodexSessionIdentities } from './codex-transcript.js';
 import type { SessionState } from './types/session.js';
 
 const CODEX_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -16,7 +16,7 @@ function opencodeDataHome(): string {
 }
 
 async function findCodexSessionId(session: Pick<SessionState, 'id' | 'workingDir'>): Promise<string | null> {
-  const rows = await scanCodexSessionsHistory();
+  const rows = await scanCodexSessionIdentities();
   const id = codexThreadBySessionId(rows).get(session.id);
   if (!id || !CODEX_SESSION_ID_PATTERN.test(id)) return null;
   const row = rows.find((candidate) => candidate.sessionId === id);
@@ -76,12 +76,12 @@ export async function resolveNativeResumeIdForRecovery(session: SessionState): P
 
 /** Reuse one Codex scan across a boot batch instead of rescanning every rollout per dead pane. */
 export function createNativeResumeIdResolver(): (session: SessionState) => Promise<string | null> {
-  let codexRowsPromise: ReturnType<typeof scanCodexSessionsHistory> | undefined;
+  let codexRowsPromise: ReturnType<typeof scanCodexSessionIdentities> | undefined;
   return async (session) => {
     if (session.nativeResumeId) return session.nativeResumeId;
     if (session.mode !== 'codex') return resolveNativeResumeIdForRecovery(session);
     if (session.codexConfig?.resumeSessionId) return session.codexConfig.resumeSessionId;
-    codexRowsPromise ??= scanCodexSessionsHistory();
+    codexRowsPromise ??= scanCodexSessionIdentities();
     const rows = await codexRowsPromise;
     const id = codexThreadBySessionId(rows).get(session.id);
     if (!id || !CODEX_SESSION_ID_PATTERN.test(id)) return null;

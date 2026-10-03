@@ -6,6 +6,7 @@ import type { SessionState } from '../src/types/session.js';
 import type { MuxSession } from '../src/mux-interface.js';
 import type { SessionRecoveryRecord } from '../src/types/session-recovery.js';
 import { createMockRouteContext } from './mocks/index.js';
+import { rebootRestoreRegistry } from '../src/web/reboot-restore-registry.js';
 
 function savedSession(id: string): SessionState {
   return {
@@ -42,6 +43,41 @@ function muxSession(id: string): MuxSession {
 }
 
 describe('server reboot recovery snapshot', () => {
+  it('carries a discovered Codex native ID into the reboot banner before pruning', () => {
+    const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    const saved = {
+      ...savedSession('banner-codex'),
+      status: 'idle' as const,
+      nativeResumeId: undefined,
+      workingDir: process.cwd(),
+    };
+    const server = new WebServer(0, false, true) as unknown as {
+      bootRecoveryRecords: SessionRecoveryRecord[];
+      store: { getSessions: () => Record<string, SessionState> };
+      planRebootRestoreOffer: (dead: string[], live: number) => number;
+    };
+    server.store = { getSessions: () => ({ 'banner-codex': saved }) };
+    server.bootRecoveryRecords = [
+      {
+        id: 'recovery-banner-codex',
+        sourceSessionId: saved.id,
+        mode: 'codex',
+        workingDir: saved.workingDir,
+        transport: 'local',
+        nativeResumeId: id,
+        status: 'resumable',
+        launch: { kind: 'built-in' },
+        createdAt: saved.createdAt,
+      },
+    ];
+    try {
+      expect(server.planRebootRestoreOffer([saved.id], 0)).toBe(1);
+      expect(rebootRestoreRegistry.list(() => true)[0].resumeConversationId).toBe(id);
+    } finally {
+      rebootRestoreRegistry.reset();
+    }
+  });
+
   it('automatically launches a newly-created resumable boot record when the setting is enabled', async () => {
     const ctx = createMockRouteContext();
     const record: SessionRecoveryRecord = {

@@ -122,10 +122,11 @@ screen's **Resume Conversation** list offers.
 A Codeman **server restart** is not a host reboot: if the local `tmux -L codeman` server is
 still running, Codeman reconciles and reattaches its existing panes as usual. A host reboot
 ends that local tmux server, including its panes and scrollback. On the next startup Codeman
-does **not** start agents or recreate those panes. Instead, it preserves a small, owner-scoped
-recovery record and shows eligible rows in the Session Manager's **Recovery Queue**.
+preserves a small, owner-scoped recovery record. With **Recover sessions after reboot** enabled,
+it automatically reconnects live remote sessions and resumes sessions with a verified native
+conversation ID. Other records remain in the Session Manager's **Recovery Queue**.
 
-Recovery is deliberately selective and always requires a confirmation of the original location:
+Manual Recovery Queue actions require confirmation of the original location:
 
 - A live remote tmux session can be **Reconnected** using its original remote identity. This
   attaches a new local wrapper to that exact remote tmux session; it does not launch another
@@ -145,7 +146,13 @@ Recovery is deliberately selective and always requires a confirmation of the ori
 Recovery records contain durable identifiers and case/host references, not credentials, raw SSH
 errors, environment overrides, or command strings. Completing, dismissing, or failing a recovery
 does not turn the old session into a live one. Recovery Queue actions create at most one new
-replacement pane and never bulk- or auto-resume work after an outage.
+replacement pane per record.
+
+The reboot restore banner also offers local Codex sessions when their native conversation
+ID is known. Recovery identifies the main conversation by its exact Codeman originator;
+child agent conversations are excluded. In the Recovery Queue, an unavailable local Codex
+record has a **Refresh** action to search its on-disk conversation metadata again. A verified
+match changes the action to **Resume**; refreshing starts no agent.
 
 ## State on disk
 
