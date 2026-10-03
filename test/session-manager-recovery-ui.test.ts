@@ -1,5 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { StateStore } from '../src/state-store.js';
+import { snapshotDeadSessionRecoveries, planAutomaticRecovery } from '../src/session-recovery.js';
+import type { SessionState } from '../src/types/session.js';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -126,6 +131,78 @@ describe('Session Manager Recovery Queue', () => {
     expect(details).toContain('Session name: Review architecture');
     expect(details).toContain('Codeman tab: w3-kb');
     expect(details).toContain('Needs recovery check');
+  });
+
+  it.each(['codex', 'claude'] as const)(
+    'retains historical %s evidence through pruning, store restart, decision and UI',
+    async (mode) => {
+      const root = mkdtempSync(join(tmpdir(), 'recovery-trace-'));
+      try {
+        const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+        const source = {
+          id: 'pane',
+          mode,
+          workingDir: '/work/project',
+          name: 'w4-work',
+          pid: null,
+          status: 'idle',
+          currentTaskId: null,
+          createdAt: 1000,
+          lastActivityAt: 2000,
+          ...(mode === 'codex' ? { codexConfig: { resumeSessionId: id } } : { claudeSessionChain: ['old', id] }),
+        } as SessionState;
+        const path = join(root, 'state.json');
+        const before = new StateStore(path);
+        before.setSession(source.id, source);
+        await snapshotDeadSessionRecoveries(before, [source.id], new Map());
+        before.removeSession(source.id);
+        before.saveNow();
+        const after = new StateStore(path);
+        const [record] = after.getSessionRecoveries();
+        expect(record).toMatchObject({
+          sourceSessionId: 'pane',
+          mode,
+          workingDir: '/work/project',
+          name: 'w4-work',
+          createdAt: 1000,
+          lastActivityAt: 2000,
+        });
+        expect(mode === 'codex' ? record.nativeResumeId : record.claudeResumeId).toBe(id);
+        expect(planAutomaticRecovery(record, false)).toBe('resume');
+        expect(record.restoreEvidence).toBeUndefined();
+        const { app, elements } = loadHarness(async () => ok({}));
+        app._renderSessionRecoveryList(elements.sessionRecoveryList, [record]);
+        const texts = elements.sessionRecoveryList.children[0].children[0].children.map((c) => c.textContent);
+        expect(texts).toContain(`Conversation ID: ${id}`);
+        expect(texts).toContain('Codeman tab: w4-work');
+        expect(texts).toContain(`${mode} · local · /work/project`);
+        expect(texts).toContain('Saved resume ID; availability not checked');
+        expect(texts).toContain('Created: 1970-01-01T00:00:01.000Z · Last recorded activity: 1970-01-01T00:00:02.000Z');
+        expect(elements.sessionRecoveryList.children[0].children[1].children.map((c) => c.textContent)).toEqual([
+          'Resume',
+          'Refresh',
+          'Dismiss',
+        ]);
+        before.flush();
+        after.flush();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('distinguishes metadata found from a conversation restore confirmed by the CLI', () => {
+    const { app, elements } = loadHarness(async () => ok({}));
+    app._renderSessionRecoveryList(elements.sessionRecoveryList, [
+      { ...resumableCodex, lastCheckedAt: 1 },
+      { ...resumableCodex, status: 'recovered', restoreEvidence: 'launch_returned' },
+    ]);
+    expect(elements.sessionRecoveryList.children[0].children[0].children.map((c) => c.textContent)).toContain(
+      'Conversation metadata found; resume not confirmed'
+    );
+    expect(elements.sessionRecoveryList.children[1].children[0].children.map((c) => c.textContent)).toContain(
+      'Session launch returned; conversation restore not confirmed'
+    );
   });
 
   it('offers Refresh for an unavailable local Claude recovery', async () => {

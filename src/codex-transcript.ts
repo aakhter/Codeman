@@ -342,18 +342,22 @@ export function scanCodexSessionsHistory(): Promise<CodexHistorySession[]> {
 }
 
 /** Recovery must find exact pane identities even outside the bounded history list. */
-export function scanCodexSessionIdentities(): Promise<CodexHistorySession[]> {
-  return scanCodexSessions(Infinity, false);
+export function scanCodexSessionIdentities(options: { fresh?: boolean } = {}): Promise<CodexHistorySession[]> {
+  return scanCodexSessions(Infinity, false, !options.fresh);
 }
 
-async function scanCodexSessions(maxRows: number, readPrompts: boolean): Promise<CodexHistorySession[]> {
+async function scanCodexSessions(
+  maxRows: number,
+  readPrompts: boolean,
+  useCache = true
+): Promise<CodexHistorySession[]> {
   const files = await listRollouts(codexSessionsRoot());
   const out: CodexHistorySession[] = [];
 
   for (const file of files) {
     if (out.length >= maxRows) break;
 
-    let identity = identityCache.get(file.path);
+    let identity = useCache ? identityCache.get(file.path) : undefined;
     if (!identity) {
       identity = parseIdentity(await readHead(file.path, HEAD_BYTES));
       if (shouldCacheIdentity(identity, file.size)) identityCache.set(file.path, identity);

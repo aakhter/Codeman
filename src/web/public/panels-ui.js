@@ -1180,15 +1180,34 @@ Object.assign(CodemanApp.prototype, {
       tabName.title = record.name || '';
       const identity = document.createElement('span');
       identity.className = 'session-recovery-location';
-      identity.textContent = `ID: ${record.sourceSessionId || record.id}`;
+      identity.textContent = `Codeman ID: ${record.sourceSessionId || record.id}`;
       const location = document.createElement('span');
       location.className = 'session-recovery-location';
       location.textContent = `${record.mode || 'unknown'} · ${record.transport || 'local'} · ${record.workingDir || 'Unknown location'}`;
       const status = document.createElement('span');
       status.className = 'session-recovery-status';
-      status.textContent = record.status === 'unavailable' ? 'Needs recovery check' : String(record.status || 'pending').replace(/_/g, ' ');
-      status.title = record.status === 'unavailable' ? 'A saved conversation ID has not been verified. Refresh searches again; Start new opens a new conversation.' : '';
-      details.append(title, tabName, location, identity, status);
+      status.textContent = record.status === 'unavailable' ? (record.lastCheckedAt ? 'Saved conversation or workspace unavailable' : 'Needs recovery check') : String(record.status || 'pending').replace(/_/g, ' ');
+      status.title = record.status === 'unavailable' ? 'Conversation metadata or the original workspace could not be verified. Refresh checks again; Start new opens a new conversation.' : '';
+      if (record.status === 'resumable') status.textContent = record.lastCheckedAt
+        ? 'Conversation metadata found; resume not confirmed'
+        : 'Saved resume ID; availability not checked';
+      if (record.status === 'recovered') status.textContent = record.restoreEvidence === 'remote_live'
+        ? 'Reconnected to live remote session'
+        : record.restoreEvidence === 'launch_returned' ? 'Session launch returned; conversation restore not confirmed' : 'Replacement session created; conversation restore not confirmed';
+      const nativeIdentity = document.createElement('span');
+      nativeIdentity.className = 'session-recovery-location';
+      nativeIdentity.textContent = `Conversation ID: ${record.mode === 'claude' ? record.claudeResumeId || record.displayConversationId || 'Not saved' : record.nativeResumeId || record.displayConversationId || 'Not saved'}`;
+      const activity = document.createElement('span');
+      activity.className = 'session-recovery-location';
+      const dateText = (value) => Number.isFinite(value) ? new Date(value).toISOString() : 'Not saved';
+      activity.textContent = `Created: ${dateText(record.createdAt)} · Last recorded activity: ${dateText(record.lastActivityAt)}`;
+      details.append(title, tabName, location, identity, nativeIdentity, activity, status);
+      if (record.providerSelection) {
+        const provider = document.createElement('span');
+        provider.className = 'session-recovery-location';
+        provider.textContent = `Provider: ${record.providerSelection.label || record.providerSelection.endpointId} · ${record.providerSelection.modelId}`;
+        details.appendChild(provider);
+      }
       if (record.status === 'unavailable') {
         const hint = document.createElement('span');
         hint.className = 'session-recovery-hint';
@@ -1210,7 +1229,7 @@ Object.assign(CodemanApp.prototype, {
         button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
         actions.appendChild(button);
       }
-      if (record.status === 'unavailable' && record.transport === 'local' && ['codex', 'claude'].includes(record.mode) && record.launch?.kind === 'built-in') {
+      if (['unavailable', 'resumable'].includes(record.status) && record.transport === 'local' && ['codex', 'claude'].includes(record.mode) && record.launch?.kind === 'built-in') {
         const refresh = document.createElement('button');
         refresh.type = 'button';
         refresh.className = 'btn-toolbar';

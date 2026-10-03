@@ -15,7 +15,7 @@ describe('session recovery routes', () => {
     sourceSessionId: 'dead-1',
     owner: 'alice',
     mode: 'codex' as const,
-    workingDir: '/tmp/project',
+    workingDir: '/tmp',
     transport: 'remote' as const,
     nativeResumeId: 'rollout-1',
     status: 'reattachable' as const,
@@ -63,7 +63,7 @@ describe('session recovery routes', () => {
           type: 'session_meta',
           payload: {
             id,
-            cwd: '/tmp/project',
+            cwd: '/tmp',
             originator: 'codeman_dead-1',
             source: 'cli',
           },
@@ -89,11 +89,11 @@ describe('session recovery routes', () => {
     process.env.CLAUDE_CONFIG_DIR = root;
     const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
     try {
-      const dir = join(root, 'projects', '-tmp-project');
+      const dir = join(root, 'projects', '-tmp');
       mkdirSync(dir, { recursive: true });
       writeFileSync(
         join(dir, `${id}.jsonl`),
-        JSON.stringify({ type: 'ai-title', aiTitle: 'Claude recovery work', sessionId: id }) + '\n'
+        JSON.stringify({ type: 'user', sessionId: id, cwd: '/tmp', message: { content: 'work' } }) + '\n'
       );
       harness.ctx.store.getSessionRecoveries.mockReturnValue([
         {
@@ -114,6 +114,47 @@ describe('session recovery routes', () => {
       else process.env.CLAUDE_CONFIG_DIR = previous;
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it.each(['codex', 'claude'] as const)(
+    'downgrades a stale persisted %s ID on Refresh without losing original identity',
+    async (mode) => {
+      const root = mkdtempSync(join(tmpdir(), 'stale-recovery-'));
+      const envKey = mode === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
+      const previous = process.env[envKey];
+      process.env[envKey] = root;
+      const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+      try {
+        const identity = mode === 'codex' ? { nativeResumeId: id } : { nativeResumeId: undefined, claudeResumeId: id };
+        harness.ctx.store.getSessionRecoveries.mockReturnValue([
+          { ...recovery, mode, transport: 'local', status: 'resumable', ...identity },
+        ]);
+        const response = await harness.app.inject({
+          method: 'POST',
+          url: '/api/session-recoveries/recovery-1/refresh',
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().recovery).toMatchObject({
+          status: 'unavailable',
+          ...(mode === 'codex' ? { nativeResumeId: id } : { claudeResumeId: id }),
+          lastCheckedAt: expect.any(Number),
+        });
+        expect(harness.ctx.addSession).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env[envKey];
+        else process.env[envKey] = previous;
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('refuses to resume into a missing local working directory', async () => {
+    harness.ctx.store.getSessionRecoveries.mockReturnValue([
+      { ...recovery, transport: 'local', status: 'resumable', workingDir: '/cod468-missing-directory' },
+    ]);
+    const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
+    expect(response.statusCode).toBe(409);
+    expect(harness.ctx.addSession).not.toHaveBeenCalled();
   });
 
   it('rejects malformed recovery ids before any recovery work', async () => {
@@ -161,7 +202,7 @@ describe('session recovery routes', () => {
       muxName: 'codeman-created',
       pid: 1,
       createdAt: Date.now(),
-      workingDir: '/tmp/project',
+      workingDir: '/tmp',
       mode: 'codex',
       attached: false,
     });
@@ -177,6 +218,7 @@ describe('session recovery routes', () => {
     expect((await first).statusCode).toBe(200);
     expect(harness.ctx.store.upsertSessionRecovery).toHaveBeenCalledTimes(1);
     expect(records[0].recoveredSessionId).toBeTruthy();
+    expect(records[0]).toMatchObject({ restoreEvidence: 'launch_returned' });
 
     const sequential = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/resume' });
     expect(sequential.statusCode).toBe(409);
@@ -199,7 +241,7 @@ describe('session recovery routes', () => {
             engine: 'docker',
             image: 'agent:latest',
             containerName: 'agent',
-            hostWorkspacePath: '/tmp/project',
+            hostWorkspacePath: '/tmp',
             containerWorkdir: '/workspace',
             network: 'bridge',
             mountCredentials: false,
@@ -222,7 +264,7 @@ describe('session recovery routes', () => {
             label: 'Remote',
             host: 'example.test',
             username: 'alice',
-            remotePath: '/tmp/project',
+            remotePath: '/tmp',
             owned: true,
           },
         }
@@ -236,7 +278,7 @@ describe('session recovery routes', () => {
       label: 'Remote',
       host: 'example.test',
       username: 'alice',
-      remotePath: '/tmp/project',
+      remotePath: '/tmp',
       owned: true,
     };
     harness.ctx.store.getSessionRecoveries.mockReturnValue([
@@ -278,7 +320,7 @@ describe('session recovery routes', () => {
       label: 'Remote',
       host: 'example.test',
       username: 'alice',
-      remotePath: '/tmp/project',
+      remotePath: '/tmp',
       owned: true,
     };
     harness.ctx.store.getSessionRecoveries.mockReturnValue([
@@ -353,7 +395,7 @@ describe('session recovery routes', () => {
     ]);
     Object.assign(harness.ctx, {
       resolveRecoveryTransport: vi.fn(async () => ({
-        remote: { hostId: 'r1', label: 'R', host: 'h', username: 'u', remotePath: '/tmp/project', owned: true },
+        remote: { hostId: 'r1', label: 'R', host: 'h', username: 'u', remotePath: '/tmp', owned: true },
       })),
       probeRecoveryTarget: vi.fn(async () => gate.promise),
     });
@@ -372,7 +414,7 @@ describe('session recovery routes', () => {
     ]);
     Object.assign(harness.ctx, {
       resolveRecoveryTransport: vi.fn(async () => ({
-        remote: { hostId: 'r1', label: 'R', host: 'h', username: 'u', remotePath: '/tmp/project', owned: true },
+        remote: { hostId: 'r1', label: 'R', host: 'h', username: 'u', remotePath: '/tmp', owned: true },
       })),
       probeRecoveryTarget: vi.fn(async () => true),
       cleanupRecoveryReconnectWrapper: vi.fn(async () => {}),

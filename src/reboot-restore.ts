@@ -108,7 +108,7 @@ export function resolveResumeConversationId(state: SessionState): string {
   if (state.mode === 'codex') return state.nativeResumeId || state.codexConfig?.resumeSessionId || '';
   const chain = state.claudeSessionChain;
   const chainTail = Array.isArray(chain) && chain.length > 0 ? chain[chain.length - 1] : undefined;
-  return chainTail || state.resumeSessionId || state.id;
+  return chainTail || state.claudeSessionId || state.resumeSessionId || state.id;
 }
 
 /**

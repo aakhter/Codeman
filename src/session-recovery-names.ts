@@ -8,7 +8,11 @@ import { codexThreadBySessionId, scanCodexSessionIdentities } from './codex-tran
 import { claudeProjectsDir } from './utils/claude-transcript.js';
 import type { SessionRecoveryRecord } from './types/session-recovery.js';
 
-export type RecoveryDisplayRecord = SessionRecoveryRecord & { nameFromLifecycle?: boolean; conversationName?: string };
+export type RecoveryDisplayRecord = SessionRecoveryRecord & {
+  nameFromLifecycle?: boolean;
+  conversationName?: string;
+  displayConversationId?: string;
+};
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function displayName(value: unknown): string | undefined {
   return typeof value === 'string' ? value.trim().slice(0, MAX_SESSION_NAME_LENGTH) || undefined : undefined;
@@ -27,7 +31,7 @@ async function metadataRows(path: string): Promise<Array<Record<string, unknown>
 
 /** Exact ID lookup, with bounded reads for the title; missing files remain unverified. */
 export async function readClaudeRecoveryDetails(
-  record: Pick<SessionRecoveryRecord, 'sourceSessionId' | 'claudeResumeId'>
+  record: Pick<SessionRecoveryRecord, 'sourceSessionId' | 'claudeResumeId' | 'workingDir'>
 ): Promise<{ resumeId?: string; conversationName?: string }> {
   const id = record.claudeResumeId || record.sourceSessionId;
   if (!UUID.test(id)) return {};
@@ -52,18 +56,33 @@ export async function readClaudeRecoveryDetails(
         const tailText = tail.subarray(0, last.bytesRead).toString('utf8');
         text += '\n' + tailText.slice(tailText.indexOf('\n') + 1);
       }
+      let validMessage = false;
       let custom: string | undefined;
       let ai: string | undefined;
       for (const line of text.split('\n')) {
         try {
-          const row = JSON.parse(line) as { type?: string; customTitle?: unknown; aiTitle?: unknown };
+          const row = JSON.parse(line) as {
+            type?: string;
+            customTitle?: unknown;
+            aiTitle?: unknown;
+            sessionId?: unknown;
+            cwd?: unknown;
+            isSidechain?: boolean;
+          };
+          if (
+            ['user', 'assistant'].includes(row.type ?? '') &&
+            row.sessionId === id &&
+            row.cwd === record.workingDir &&
+            !row.isSidechain
+          )
+            validMessage = true;
           if (row.type === 'custom-title') custom = displayName(row.customTitle);
           if (row.type === 'ai-title') ai = displayName(row.aiTitle);
         } catch {
           /* Partial window or malformed line. */
         }
       }
-      return { resumeId: id, ...(custom || ai ? { conversationName: custom || ai } : {}) };
+      return { ...(validMessage ? { resumeId: id } : {}), ...(custom || ai ? { conversationName: custom || ai } : {}) };
     } finally {
       await file.close();
     }
@@ -111,11 +130,15 @@ export async function enrichRecoveryNames(
       if (record.mode === 'codex') {
         const thread = record.nativeResumeId || paneThreads.get(record.sourceSessionId);
         if (thread && (record.nativeResumeId || workspaces.get(thread) === record.workingDir)) {
+          view.displayConversationId = thread;
           const name = titles.get(thread);
           if (name) view.conversationName = name;
         }
       } else if (record.mode === 'claude') {
-        const details = await readClaudeRecoveryDetails(record).catch(() => ({}) as { conversationName?: string });
+        const details = await readClaudeRecoveryDetails(record).catch(
+          () => ({}) as { conversationName?: string; resumeId?: string }
+        );
+        if (details.resumeId) view.displayConversationId = details.resumeId;
         if (details.conversationName) view.conversationName = details.conversationName;
       }
       return view;

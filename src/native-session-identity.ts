@@ -88,3 +88,15 @@ export function createNativeResumeIdResolver(): (session: SessionState) => Promi
     return rows.find((candidate) => candidate.sessionId === id)?.workingDir === session.workingDir ? id : null;
   };
 }
+
+/** Re-probe an exact persisted Codex identity, or discover one by exact pane originator. */
+export async function probeCodexRecoveryIdentity(record: {
+  sourceSessionId: string;
+  workingDir: string;
+  nativeResumeId?: string;
+}): Promise<string | null> {
+  const rows = await scanCodexSessionIdentities({ fresh: true });
+  const id = record.nativeResumeId ?? codexThreadBySessionId(rows).get(record.sourceSessionId);
+  if (!id || !CODEX_SESSION_ID_PATTERN.test(id)) return null;
+  return rows.some((row) => row.sessionId === id && row.workingDir === record.workingDir) ? id : null;
+}

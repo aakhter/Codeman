@@ -9615,14 +9615,10 @@ kbd {
 
 .session-recovery-details strong,
 .session-recovery-tab-name,
-.session-recovery-location {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+.session-recovery-location,
 .session-recovery-status {
-  text-transform: capitalize;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .session-recovery-actions {

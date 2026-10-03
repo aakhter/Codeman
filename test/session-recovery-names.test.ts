@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { enrichRecoveryNames } from '../src/session-recovery-names.js';
+import { enrichRecoveryNames, readClaudeRecoveryDetails } from '../src/session-recovery-names.js';
 import type { SessionRecoveryRecord } from '../src/types/session-recovery.js';
 
 const thread = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
@@ -75,6 +75,19 @@ describe('recovery display names', () => {
     const [view] = await enrichRecoveryNames([{ ...record, name: 'new-tab' }], () => null, root);
     expect(view.name).toBe('new-tab');
     expect(view.nameFromLifecycle).toBeUndefined();
+  });
+
+  it('requires message identity and workspace evidence for Claude Refresh, not a title or filename', async () => {
+    const dir = join(process.env.CLAUDE_CONFIG_DIR!, 'projects', '-work-project');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${thread}.jsonl`);
+    const target = { ...record, mode: 'claude' as const, sourceSessionId: thread };
+    writeFileSync(path, JSON.stringify({ type: 'ai-title', aiTitle: 'Title only' }) + '\n');
+    expect((await readClaudeRecoveryDetails(target)).resumeId).toBeUndefined();
+    writeFileSync(path, JSON.stringify({ type: 'user', sessionId: thread, cwd: '/other' }) + '\n');
+    expect((await readClaudeRecoveryDetails(target)).resumeId).toBeUndefined();
+    writeFileSync(path, JSON.stringify({ type: 'user', sessionId: thread, cwd: '/work/project' }) + '\n');
+    expect((await readClaudeRecoveryDetails(target)).resumeId).toBe(thread);
   });
 
   it('reads an exact Claude conversation title and leaves an unknown name absent', async () => {

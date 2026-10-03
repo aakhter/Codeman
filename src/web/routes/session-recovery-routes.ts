@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
+import { stat } from 'node:fs/promises';
 import { z } from 'zod';
 import { Session } from '../../session.js';
 import { enrichRecoveryNames, readClaudeRecoveryDetails } from '../../session-recovery-names.js';
-import { resolveNativeResumeIdForRecovery } from '../../native-session-identity.js';
+import { probeCodexRecoveryIdentity } from '../../native-session-identity.js';
 import { ApiErrorCode, createErrorResponse, type SessionDocker, type SessionRemote } from '../../types.js';
 import type { SessionRecoveryRecord } from '../../types/session-recovery.js';
 import { canAccessOwned, getAuthUser } from '../route-helpers.js';
@@ -89,18 +90,7 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
         ) {
           return reply.code(409).send(conflict('Recovery cannot be refreshed in its current state'));
         }
-        const nativeResumeId = refreshLocalCodex
-          ? await resolveNativeResumeIdForRecovery({
-              id: record.sourceSessionId,
-              pid: null,
-              status: 'idle',
-              currentTaskId: null,
-              mode: record.mode,
-              workingDir: record.workingDir,
-              createdAt: record.createdAt,
-              lastActivityAt: record.lastActivityAt ?? record.createdAt,
-            })
-          : record.nativeResumeId;
+        const nativeResumeId = refreshLocalCodex ? await probeCodexRecoveryIdentity(record) : record.nativeResumeId;
         const claudeResumeId = refreshLocalClaude
           ? (await readClaudeRecoveryDetails(record)).resumeId
           : record.claudeResumeId;
@@ -112,8 +102,11 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
         const live = transport.remote ? await probe(record, transport.remote) : false;
         if (isRecoveryDismissed(record.id))
           return reply.code(409).send(conflict('Recovery was dismissed while refresh was in progress'));
+        const localDirectoryAvailable =
+          record.transport !== 'local' || (await stat(record.workingDir).catch(() => null))?.isDirectory() === true;
         const next = {
           ...record,
+          lastCheckedAt: Date.now(),
           ...(nativeResumeId ? { nativeResumeId } : {}),
           ...(claudeResumeId ? { claudeResumeId } : {}),
           status:
@@ -124,7 +117,7 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
                   ? ('resumable' as const)
                   : ('unavailable' as const)
               : refreshLocalCodex || refreshLocalClaude
-                ? nativeResumeId || claudeResumeId
+                ? localDirectoryAvailable && (refreshLocalCodex ? nativeResumeId : claudeResumeId)
                   ? ('resumable' as const)
                   : ('unavailable' as const)
                 : record.status,

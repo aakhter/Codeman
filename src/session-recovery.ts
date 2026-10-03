@@ -41,14 +41,27 @@ export function createRecoveryRecord(
 ): SessionRecoveryRecord {
   const transport = options.transport ?? (session.docker ? 'docker' : session.remote ? 'remote' : 'local');
   const launch = sanitizeRecoveryLaunch(options.launch ?? deriveRecoveryLaunch(session));
-  const nativeResumeId = session.nativeResumeId ?? undefined;
-  const claudeResumeId = session.resumeSessionId ?? undefined;
+  const nativeResumeId =
+    session.nativeResumeId ?? (session.mode === 'codex' ? session.codexConfig?.resumeSessionId : undefined);
+  const claudeResumeId =
+    session.mode === 'claude'
+      ? (session.claudeSessionChain?.at(-1) ?? session.claudeSessionId ?? session.resumeSessionId)
+      : undefined;
   const status = classifyRecoveryStatus(transport, launch, nativeResumeId, claudeResumeId);
 
   return {
     id: `recovery-${session.id}`,
     sourceSessionId: session.id,
     ...(session.name ? { name: session.name } : {}),
+    ...(session.customModel
+      ? {
+          providerSelection: {
+            endpointId: session.customModel.endpointId,
+            modelId: session.customModel.modelId,
+            ...(session.customModel.label ? { label: session.customModel.label } : {}),
+          },
+        }
+      : {}),
     ...(session.owner ? { owner: session.owner } : {}),
     mode: session.mode ?? 'shell',
     workingDir: session.workingDir,
@@ -82,6 +95,24 @@ export function createRecoveryRecord(
  * manual action rather than a string rewrite.
  */
 function deriveRecoveryLaunch(session: SessionState): SessionRecoveryLaunch {
+  const privateState = session as SessionState & {
+    __codexProviderIdentity?: { credentialSource?: string; codexHome?: string };
+    __envOverrides?: Record<string, unknown>;
+    __customModel?: unknown;
+    __resolvedCodexCommand?: string;
+  };
+  // Recovery must not silently switch custom endpoints, credentials, homes or launchers.
+  if (
+    session.customModel ||
+    privateState.__customModel ||
+    Object.keys(privateState.__envOverrides ?? {}).length > 0 ||
+    privateState.__codexProviderIdentity?.codexHome ||
+    privateState.__codexProviderIdentity?.credentialSource === 'session-key' ||
+    session.codexConfig?.baseCommand ||
+    privateState.__resolvedCodexCommand
+  ) {
+    return { kind: 'manual_required', hint: SAFE_MANUAL_RECOVERY_HINT };
+  }
   if (session.mode !== 'codex') return { kind: 'built-in' };
 
   const remote = session.remote;

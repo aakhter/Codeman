@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { __clearCodexIdentityCache } from '../src/codex-transcript.js';
-import { resolveNativeResumeIdForRecovery } from '../src/native-session-identity.js';
+import { probeCodexRecoveryIdentity, resolveNativeResumeIdForRecovery } from '../src/native-session-identity.js';
 import type { SessionState } from '../src/types/session.js';
 
 function session(overrides: Partial<SessionState>): SessionState {
@@ -36,6 +36,29 @@ describe('native reboot recovery identity', () => {
     delete process.env.XDG_DATA_HOME;
     __clearCodexIdentityCache();
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('rechecks a persisted Codex ID on disk, bypassing cached identity after corruption', async () => {
+    const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    const dir = join(process.env.CODEX_HOME!, 'sessions', '2026', '09', '22');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'rollout-recheck.jsonl');
+    const record = { sourceSessionId: 'pane', nativeResumeId: id, workingDir: '/work/project' };
+    // Resumed sessions can have a different originator: the saved native ID is authoritative.
+    writeFileSync(
+      path,
+      JSON.stringify({ type: 'session_meta', payload: { id, cwd: '/work/project', source: 'cli' } }) + '\n'
+    );
+    await expect(probeCodexRecoveryIdentity(record)).resolves.toBe(id);
+    writeFileSync(path, JSON.stringify({ type: 'session_meta', payload: { id, cwd: '/other', source: 'cli' } }) + '\n');
+    await expect(probeCodexRecoveryIdentity(record)).resolves.toBeNull();
+    writeFileSync(
+      path,
+      JSON.stringify({ type: 'session_meta', payload: { id, cwd: '/work/project', source: { subagent: {} } } }) + '\n'
+    );
+    await expect(probeCodexRecoveryIdentity(record)).resolves.toBeNull();
+    writeFileSync(path, 'corrupt metadata');
+    await expect(probeCodexRecoveryIdentity(record)).resolves.toBeNull();
   });
 
   it('attributes the newest Codex rollout by its exact Codeman originator', async () => {

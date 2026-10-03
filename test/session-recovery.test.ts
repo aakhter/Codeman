@@ -4,7 +4,7 @@ import { createRecoveryRecord, planAutomaticRecovery } from '../src/session-reco
 import type { SessionState } from '../src/types/session.js';
 
 describe('createRecoveryRecord', () => {
-  it('creates a resumable local Codex record without private session data', () => {
+  it('keeps private session data out and requires manual recovery for lost overrides', () => {
     const record = createRecoveryRecord(
       {
         id: 'old-codex',
@@ -33,13 +33,48 @@ describe('createRecoveryRecord', () => {
       workingDir: '/workspace/project',
       transport: 'local',
       nativeResumeId: 'rollout-123',
-      status: 'resumable',
-      launch: { kind: 'built-in' },
+      status: 'manual_required',
+      launch: { kind: 'manual_required' },
       createdAt: 10,
       lastActivityAt: 20,
     });
     expect(JSON.stringify(record)).not.toContain('OPENAI_API_KEY');
     expect(JSON.stringify(record)).not.toContain('secret');
+  });
+
+  it('keeps authoritative Claude identity after clear rather than the original resume target', () => {
+    const source = {
+      id: 'pane',
+      mode: 'claude',
+      workingDir: '/work',
+      createdAt: 10,
+      lastActivityAt: 20,
+      name: 'w1-work',
+      claudeSessionId: 'current',
+      resumeSessionId: 'old',
+      claudeSessionChain: ['old', 'current'],
+    } as SessionState;
+    expect(createRecoveryRecord(source)).toMatchObject({
+      claudeResumeId: 'current',
+      name: 'w1-work',
+      lastActivityAt: 20,
+    });
+  });
+
+  it('retains configured Codex native identity and refuses to silently change a custom provider', () => {
+    const source = {
+      id: 'pane',
+      mode: 'codex',
+      workingDir: '/work',
+      createdAt: 10,
+      codexConfig: { resumeSessionId: 'native' },
+      customModel: { endpointId: 'enterprise', modelId: 'model' },
+    } as SessionState;
+    expect(createRecoveryRecord(source)).toMatchObject({
+      nativeResumeId: 'native',
+      providerSelection: { endpointId: 'enterprise', modelId: 'model' },
+      status: 'manual_required',
+    });
   });
 
   it('keeps remote reattachment distinct from Docker resume capability', () => {

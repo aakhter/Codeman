@@ -270,7 +270,12 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
             .getSessionRecoveries()
             .find((record) => record.sourceSessionId === entry.sessionId);
           if (recovery) {
-            ctx.store.upsertSessionRecovery({ ...recovery, status: 'recovered', recoveredSessionId: session.id });
+            ctx.store.upsertSessionRecovery({
+              ...recovery,
+              status: 'recovered',
+              restoreEvidence: 'launch_returned',
+              recoveredSessionId: session.id,
+            });
           }
           restored.push(toBannerItem(entry));
         } catch (err) {
