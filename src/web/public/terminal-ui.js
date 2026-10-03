@@ -3182,7 +3182,15 @@ Object.assign(CodemanApp.prototype, {
           return last ? { x: last.x + 1, y: last.y } : { x: index + 1, y: extentStart + 1 };
         };
 
-        if (!lineText || !lineText.includes('/')) {
+        // Paths codex word-wrapped inside a table cell (see terminalCellWrappedPaths
+        // in constants.js). They follow their own cell down the rows, which the
+        // linear stitch above cannot do for a multi-column table, so they are
+        // found from the buffer directly and claim their cells over the rest.
+        const cellWrappedPaths = (
+          window.CodemanTerminalLines?.terminalCellWrappedPaths?.(buffer, bufferLineNumber - 1, 4) ?? []
+        ).filter((hit) => !/(^|\/)\.\.(\/|$)/.test(hit.path));
+
+        if ((!lineText || !lineText.includes('/')) && cellWrappedPaths.length === 0) {
           callback(undefined);
           return;
         }
@@ -3379,6 +3387,35 @@ Object.assign(CodemanApp.prototype, {
         // Pattern 4: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
+        const activateFilePath = (text) => {
+          // Tailing a PNG in the log viewer shows binary noise; the file preview
+          // already renders images, PDFs, documents and media inline. The
+          // extension list is previewsInFileViewer() in constants.js — shared
+          // with the response viewer and pinned to the attachment registry by
+          // test/media-extension-parity.test.ts, so an in-workspace .m4a can no
+          // longer route to the log viewer while the same file in /tmp plays.
+          //
+          // Routing is by EXTENSION, not by workspace containment: text still
+          // goes to the log viewer even from outside the workspace, because it
+          // follows a file that is still being written and its allowlist covers
+          // /var/log and ~/logs (COD-232 pins those). A previewable path outside
+          // the workspace has to be registered as an attachment first — the
+          // workspace-confined routes can only 404 on it — which is what
+          // openExternalPathPreview does before previewing by id.
+          if (previewsInFileViewer(text)) {
+            if (self._isExternalPreviewPath?.(text, originatingSessionId)) {
+              const pending = self.openExternalPathPreview(text, originatingSessionId);
+              if (pending && typeof pending.catch === 'function') {
+                pending.catch((err) => console.error('Failed to open external path preview:', err));
+              }
+              return;
+            }
+            self.openFilePreview(text, originatingSessionId);
+            return;
+          }
+          self.openLogViewerWindow(text, originatingSessionId);
+        };
+
         const addLogLink = (filePath, matchIndex) => {
           // A path with a `..` segment never makes a good link: the log viewer's
           // allowlist and the attachment guard both realpath and then refuse the
@@ -3400,32 +3437,7 @@ Object.assign(CodemanApp.prototype, {
             range: { start, end },
             decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
-              // Tailing a PNG in the log viewer shows binary noise; the file preview
-              // already renders images, PDFs, documents and media inline. The
-              // extension list is previewsInFileViewer() in constants.js — shared
-              // with the response viewer and pinned to the attachment registry by
-              // test/media-extension-parity.test.ts, so an in-workspace .m4a can no
-              // longer route to the log viewer while the same file in /tmp plays.
-              //
-              // Routing is by EXTENSION, not by workspace containment: text still
-              // goes to the log viewer even from outside the workspace, because it
-              // follows a file that is still being written and its allowlist covers
-              // /var/log and ~/logs (COD-232 pins those). A previewable path outside
-              // the workspace has to be registered as an attachment first — the
-              // workspace-confined routes can only 404 on it — which is what
-              // openExternalPathPreview does before previewing by id.
-              if (previewsInFileViewer(text)) {
-                if (self._isExternalPreviewPath?.(text, originatingSessionId)) {
-                  const pending = self.openExternalPathPreview(text, originatingSessionId);
-                  if (pending && typeof pending.catch === 'function') {
-                    pending.catch((err) => console.error('Failed to open external path preview:', err));
-                  }
-                  return;
-                }
-                self.openFilePreview(text, originatingSessionId);
-                return;
-              }
-              self.openLogViewerWindow(text, originatingSessionId);
+              activateFilePath(text);
             },
             hover() {
               self._linkHovered = true;
@@ -3505,6 +3517,43 @@ Object.assign(CodemanApp.prototype, {
         extPattern.lastIndex = 0;
         while ((match = extPattern.exec(lineText)) !== null) {
           addLogLink(match[1], match.index);
+        }
+
+        // One link per row segment, each opening the WHOLE path (the COD-448 URL
+        // rule). A fragment of the same cells linked by another detector (a
+        // relative `243/after-overview.png`, say) would open the wrong file, so
+        // the cell-wrapped path displaces it.
+        if (cellWrappedPaths.length > 0) {
+          const claimed = cellWrappedPaths.flatMap((hit) => hit.segments);
+          const overlapsClaim = (link) =>
+            claimed.some((seg) => {
+              const y = seg.row + 1;
+              if (y < link.range.start.y || y > link.range.end.y) return false;
+              const from = y === link.range.start.y ? link.range.start.x : 1;
+              const to = y === link.range.end.y ? link.range.end.x : Number.MAX_SAFE_INTEGER;
+              return from <= seg.endCol && to >= seg.startCol + 1;
+            });
+          for (let i = links.length - 1; i >= 0; i--) {
+            if (overlapsClaim(links[i])) links.splice(i, 1);
+          }
+          for (const hit of cellWrappedPaths) {
+            for (const seg of hit.segments) {
+              links.push({
+                text: hit.path,
+                range: { start: { x: seg.startCol + 1, y: seg.row + 1 }, end: { x: seg.endCol, y: seg.row + 1 } },
+                decorations: { pointerCursor: true, underline: true },
+                activate() {
+                  activateFilePath(hit.path);
+                },
+                hover() {
+                  self._linkHovered = true;
+                },
+                leave() {
+                  self._linkHovered = false;
+                },
+              });
+            }
+          }
         }
 
         if (links.length > 0) {
