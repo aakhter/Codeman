@@ -137,6 +137,7 @@ export async function executeSessionRecovery(
   const session = new Session({
     workingDir: record.workingDir,
     mode: record.mode,
+    name: record.name,
     mux: ctx.mux,
     useMux: true,
     ...recoverySessionConfig(record, action, transport),

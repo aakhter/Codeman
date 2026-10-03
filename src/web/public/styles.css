@@ -9579,6 +9579,8 @@ kbd {
 .session-recovery-heading span,
 .session-recovery-empty,
 .session-recovery-location,
+.session-recovery-hint,
+.session-recovery-tab-name,
 .session-recovery-status {
   color: var(--text-muted);
   font-size: 0.76rem;
@@ -9612,6 +9614,7 @@ kbd {
 }
 
 .session-recovery-details strong,
+.session-recovery-tab-name,
 .session-recovery-location {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -48,6 +48,7 @@ export function createRecoveryRecord(
   return {
     id: `recovery-${session.id}`,
     sourceSessionId: session.id,
+    ...(session.name ? { name: session.name } : {}),
     ...(session.owner ? { owner: session.owner } : {}),
     mode: session.mode ?? 'shell',
     workingDir: session.workingDir,

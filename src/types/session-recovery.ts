@@ -39,6 +39,8 @@ export interface RecoveryDockerTarget {
 export interface SessionRecoveryRecord {
   id: string;
   sourceSessionId: string;
+  /** Codeman tab name, preserved before the session record is pruned. */
+  name?: string;
   owner?: string;
   mode: SessionMode;
   workingDir: string;

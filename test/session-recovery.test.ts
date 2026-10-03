@@ -8,6 +8,7 @@ describe('createRecoveryRecord', () => {
     const record = createRecoveryRecord(
       {
         id: 'old-codex',
+        name: 'w3-recovery-work',
         pid: null,
         status: 'stopped',
         workingDir: '/workspace/project',
@@ -26,6 +27,7 @@ describe('createRecoveryRecord', () => {
     expect(record).toMatchObject({
       id: 'recovery-old-codex',
       sourceSessionId: 'old-codex',
+      name: 'w3-recovery-work',
       owner: 'alice',
       mode: 'codex',
       workingDir: '/workspace/project',

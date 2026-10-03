@@ -116,6 +116,46 @@ describe('Session Manager Recovery Queue', () => {
     expect(app.sessions.has('lost-codex')).toBe(false);
   });
 
+  it('shows conversation and tab names separately with a clear unavailable status', async () => {
+    const record = { ...resumableCodex, name: 'w3-kb', conversationName: 'Review architecture', status: 'unavailable' };
+    const { app, elements } = loadHarness(async (url) =>
+      url === '/api/session-recoveries' ? ok({ recoveries: [record] }) : ok({ success: true, data: { sessions: [] } })
+    );
+    await app._loadSessionManagerList('');
+    const details = elements.sessionRecoveryList.children[0].children[0].children.map((child) => child.textContent);
+    expect(details).toContain('Session name: Review architecture');
+    expect(details).toContain('Codeman tab: w3-kb');
+    expect(details).toContain('Needs recovery check');
+  });
+
+  it('offers Refresh for an unavailable local Claude recovery', async () => {
+    const { app, elements } = loadHarness(async (url) =>
+      url === '/api/session-recoveries'
+        ? ok({ recoveries: [{ ...resumableCodex, mode: 'claude', status: 'unavailable' }] })
+        : ok({ success: true, data: { sessions: [] } })
+    );
+    await app._loadSessionManagerList('');
+    expect(
+      elements.sessionRecoveryList.children[0].children.at(-1)?.children.map((child) => child.textContent)
+    ).toEqual(['Start new', 'Refresh', 'Dismiss']);
+  });
+
+  it('renders the recovery queue before a slow unified history request finishes', async () => {
+    let resolveHistory: (value: ReturnType<typeof ok>) => void;
+    const history = new Promise<ReturnType<typeof ok>>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const { app, elements } = loadHarness(async (url) =>
+      url === '/api/session-recoveries' ? ok({ recoveries: [resumableCodex] }) : history
+    );
+    const loading = app._loadSessionManagerList('');
+    await vi.waitFor(() => expect(elements.sessionRecoveryList.children[0]?.dataset.recoveryId).toBe('lost-codex'), {
+      timeout: 100,
+    });
+    resolveHistory!(ok({ success: true, data: { sessions: [] } }));
+    await loading;
+  });
+
   it('renders recovery records from the session-recoveries success envelope', async () => {
     const { app, elements } = loadHarness(async (url) => {
       if (url.startsWith('/api/sessions/unified')) {

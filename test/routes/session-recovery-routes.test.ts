@@ -83,6 +83,39 @@ describe('session recovery routes', () => {
     }
   });
 
+  it('refreshes a local Claude recovery using its exact transcript ID', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'claude-recovery-refresh-'));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = root;
+    const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    try {
+      const dir = join(root, 'projects', '-tmp-project');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `${id}.jsonl`),
+        JSON.stringify({ type: 'ai-title', aiTitle: 'Claude recovery work', sessionId: id }) + '\n'
+      );
+      harness.ctx.store.getSessionRecoveries.mockReturnValue([
+        {
+          ...recovery,
+          sourceSessionId: id,
+          mode: 'claude',
+          transport: 'local',
+          nativeResumeId: undefined,
+          status: 'unavailable',
+        },
+      ]);
+      const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/recovery-1/refresh' });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().recovery).toMatchObject({ status: 'resumable', claudeResumeId: id });
+      expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects malformed recovery ids before any recovery work', async () => {
     const response = await harness.app.inject({ method: 'POST', url: '/api/session-recoveries/not valid/resume' });
     expect(response.statusCode).toBe(400);

@@ -1172,14 +1172,31 @@ Object.assign(CodemanApp.prototype, {
       const details = document.createElement('div');
       details.className = 'session-recovery-details';
       const title = document.createElement('strong');
-      title.textContent = record.name || record.sourceSessionId || 'Interrupted session';
+      title.textContent = `Session name: ${record.conversationName || 'Name not saved'}`;
+      title.title = record.conversationName || '';
+      const tabName = document.createElement('span');
+      tabName.className = 'session-recovery-tab-name';
+      tabName.textContent = `${record.nameFromLifecycle ? 'Codeman tab (last recorded)' : 'Codeman tab'}: ${record.name || 'Name not saved'}`;
+      tabName.title = record.name || '';
+      const identity = document.createElement('span');
+      identity.className = 'session-recovery-location';
+      identity.textContent = `ID: ${record.sourceSessionId || record.id}`;
       const location = document.createElement('span');
       location.className = 'session-recovery-location';
-      location.textContent = `${record.transport || 'local'} · ${record.workingDir || 'Unknown location'}`;
+      location.textContent = `${record.mode || 'unknown'} · ${record.transport || 'local'} · ${record.workingDir || 'Unknown location'}`;
       const status = document.createElement('span');
       status.className = 'session-recovery-status';
-      status.textContent = String(record.status || 'pending').replace(/_/g, ' ');
-      details.append(title, location, status);
+      status.textContent = record.status === 'unavailable' ? 'Needs recovery check' : String(record.status || 'pending').replace(/_/g, ' ');
+      status.title = record.status === 'unavailable' ? 'A saved conversation ID has not been verified. Refresh searches again; Start new opens a new conversation.' : '';
+      details.append(title, tabName, location, identity, status);
+      if (record.status === 'unavailable') {
+        const hint = document.createElement('span');
+        hint.className = 'session-recovery-hint';
+        hint.textContent = record.transport === 'local' && ['codex', 'claude'].includes(record.mode) && record.launch?.kind === 'built-in'
+          ? 'Refresh looks for a saved conversation. Start new opens a new one.'
+          : 'No verified resume target is saved for this record.';
+        details.appendChild(hint);
+      }
       row.appendChild(details);
 
       const actions = document.createElement('div');
@@ -1193,7 +1210,7 @@ Object.assign(CodemanApp.prototype, {
         button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
         actions.appendChild(button);
       }
-      if (record.status === 'unavailable' && record.transport === 'local' && record.mode === 'codex' && record.launch?.kind === 'built-in') {
+      if (record.status === 'unavailable' && record.transport === 'local' && ['codex', 'claude'].includes(record.mode) && record.launch?.kind === 'built-in') {
         const refresh = document.createElement('button');
         refresh.type = 'button';
         refresh.className = 'btn-toolbar';
@@ -1287,27 +1304,22 @@ Object.assign(CodemanApp.prototype, {
     if (!list) return;
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
-      const [sessionResult, recoveryResult] = await Promise.allSettled([fetch(url), fetch('/api/session-recoveries')]);
+      this._setSessionRecoveryMessage(recoveryList, 'Loading recovery queue…');
+      const sessionRequest = fetch(url);
+      const recoveryRequest = fetch('/api/session-recoveries').then(async (recoveryRes) => {
+        if (!recoveryList) return;
+        const recoveryData = await recoveryRes.json().catch(() => null);
+        if (recoveryRes.ok && recoveryData?.success !== false) {
+          const recoveries = recoveryData?.data?.recoveries ?? recoveryData?.recoveries;
+          this._renderSessionRecoveryList(recoveryList, Array.isArray(recoveries) ? recoveries : []);
+        } else {
+          this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
+        }
+      }).catch(() => this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable'));
+      const [sessionResult] = await Promise.allSettled([sessionRequest, recoveryRequest]);
       if (sessionResult.status === 'rejected') throw sessionResult.reason;
       const res = sessionResult.value;
       const data = await res.json().catch(() => null);
-      if (recoveryList) {
-        if (recoveryResult.status === 'fulfilled') {
-          const recoveryRes = recoveryResult.value;
-          const recoveryData = await recoveryRes.json().catch(() => null);
-          if (recoveryRes.ok && recoveryData?.success !== false) {
-            const recoveries = recoveryData?.data?.recoveries ?? recoveryData?.recoveries;
-            this._renderSessionRecoveryList(
-              recoveryList,
-              Array.isArray(recoveries) ? recoveries : []
-            );
-          } else {
-            this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
-          }
-        } else {
-          this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable');
-        }
-      }
       if (!res.ok || !data || data.success === false || !data.data) {
         this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
         return;

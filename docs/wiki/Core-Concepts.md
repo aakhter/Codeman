@@ -150,9 +150,14 @@ replacement pane per record.
 
 The reboot restore banner also offers local Codex sessions when their native conversation
 ID is known. Recovery identifies the main conversation by its exact Codeman originator;
-child agent conversations are excluded. In the Recovery Queue, an unavailable local Codex
+child agent conversations are excluded. In the Recovery Queue, an unavailable local Claude or Codex
 record has a **Refresh** action to search its on-disk conversation metadata again. A verified
 match changes the action to **Resume**; refreshing starts no agent.
+
+Recovery rows show the native conversation name separately from the Codeman tab name.
+Older tab names recovered from the lifecycle log are labeled **last recorded**; a name
+that is no longer saved is shown as **Name not saved**. **Needs recovery check** means a
+resume target has not been verified, rather than that the conversation was deleted.
 
 ## State on disk
 
