@@ -25,9 +25,9 @@ Implementation uses one implementer at a time, followed by independent specifica
 ## Task 1 — COD-478: durable Markdown storage
 
 - [x] Verify clean feature checkout with existing persistence regression: npm test -- test/intent-store.test.ts. Baseline: 17 passed.
-- [ ] Write real temporary-directory tests for create/read after fresh-store construction, owner isolation, session-independent persistence, stale-revision conflict after an external edit, current-byte revision hashing, recoverable malformed Markdown, and project moves.
-- [ ] Run npm test -- test/session-notes-store.test.ts and record the expected missing-feature failure before implementation.
-- [ ] Implement the type and store contract below using this instance's dataPath('notes') as the default root. Use an injectable root only for callers that explicitly supply one, including tests.
+- [x] Write real temporary-directory tests for create/read after fresh-store construction, owner isolation, session-independent persistence, stale-revision conflict after an external edit, current-byte revision hashing, recoverable malformed Markdown, and project moves.
+- [x] Run npm test -- test/session-notes-store.test.ts and record the expected missing-feature failure before implementation.
+- [x] Implement the type and store contract below using this instance's dataPath('notes') as the default root. Use an injectable root only for callers that explicitly supply one, including tests.
 
 ```ts
 interface SessionNoteMetadata {
@@ -51,13 +51,13 @@ interface SessionNote {
 }
 ```
 
-- [ ] Expose create, read, list, save, export, and reassign operations. Each takes the owner from trusted server context. Updates require the revision loaded by the caller. Throw a typed conflict with the current readable version; distinguish not-found and malformed metadata without losing the file.
-- [ ] Store Markdown under notes/<owner-key>/projects/<project-id>/<notebook-id>.md. Frontmatter is versioned; IDs are validated path components. File-byte hashing provides revisions even when an external editor leaves metadata timestamps unchanged. Use restrictive permissions and guard symlink/path escapes.
-- [ ] Serialize writes within the process and protect competing store instances with an on-disk mutation boundary. Preserve the actual displaced version during replacement and restore or surface conflicts if an external writer changes the target. Journal recoverable moves; startup/access recovery never chooses an old version over a newer externally written target without preserving both.
-- [ ] Add failure-injection or filesystem regression cases proving failed persistence is reported and interrupted moves retain content. Keep filesystem dependencies narrow and exercise real files wherever possible.
-- [ ] Run the new targeted tests; fix failures, then run typecheck, lint, format:check, and check:lockfile. Format only changed files when needed.
-- [ ] Have an independent specification reviewer compare COD-478 to the storage, durability, external-edit, and owner-isolation portions of the design; resolve gaps before requesting code-quality review.
-- [ ] Commit explicit files with a COD-478 subject. Update Jira with commit, branch, verification, and remaining scope; do not mark Done before repository landing requirements are met.
+- [x] Expose create, read, list, save, export, and reassign operations. Each takes the owner from trusted server context. Updates require the revision loaded by the caller. Throw a typed conflict with the current readable version; distinguish not-found and malformed metadata without losing the file.
+- [x] Store Markdown under notes/<owner-key>/projects/<project-id>/<notebook-id>.md. Frontmatter is versioned; IDs are validated path components. File-byte hashing provides revisions even when an external editor leaves metadata timestamps unchanged. Use restrictive permissions and guard symlink/path escapes.
+- [x] Serialize writes within the process and protect competing store instances with an on-disk mutation boundary. Preserve the actual displaced version during replacement and restore or surface conflicts if an external writer changes the target. Journal recoverable moves; startup/access recovery never chooses an old version over a newer externally written target without preserving both.
+- [x] Add failure-injection or filesystem regression cases proving failed persistence is reported and interrupted moves retain content. Keep filesystem dependencies narrow and exercise real files wherever possible.
+- [x] Run the new targeted tests; fix failures, then run typecheck, lint, format:check, and check:lockfile. Format only changed files when needed.
+- [x] Have an independent specification reviewer compare COD-478 to the storage, durability, external-edit, and owner-isolation portions of the design; resolve gaps before requesting code-quality review.
+- [x] Commit explicit files with a COD-478 subject. Update Jira with commit, branch, verification, and remaining scope; do not mark Done before repository landing requirements are met.
 
 ## Task 2 — COD-479: projects and reassignment
 
@@ -97,3 +97,7 @@ interface SessionNote {
 ## Progress reporting
 
 The initial implementation milestone is COD-478. Report precisely which subtasks are implemented, reviewed, or still queued; no UI or deployed-feature claims are justified by storage tests. The user has authorized implementation, so continue without repeating design approval questions.
+
+## COD-478 verification receipt
+
+Implemented and independently approved for specification and code quality at `3ea99c89`. The focused storage suite passes 20 tests, including separate-process contention, interrupted writes and moves, external-edit conflicts, malformed journal preservation, and stale lock recovery. Typecheck, format check, and lockfile check pass. Lint passes with an existing `src/web/server.ts` warning. Project resolution, API, UI, and explicit sharing remain pending; the feature is not deployed.
