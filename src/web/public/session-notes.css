@@ -1,0 +1,306 @@
+/* Notes share theme tokens and remain independent from terminal/agent input. */
+.session-notes-shell {
+  background: var(--bg-dark, #171b22);
+  color: var(--text, #e8edf4);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 14px;
+}
+.notes-shell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border, #455064);
+  flex-shrink: 0;
+}
+.notes-shell-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.notes-shell-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.session-notes-panel {
+  /* Docked monitor/subagent panels use z-index:100. Keep notes controls reachable above them. */
+  z-index: 101;
+  flex: 0 0 auto;
+  position: relative;
+  border-left: 1px solid var(--border, #455064);
+  padding-left: 6px;
+  height: 100%;
+}
+.terminal-wrap.notes-open {
+  display: flex;
+  flex-direction: row;
+}
+.terminal-wrap.notes-open > #terminalContainer {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.notes-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.notes-resizer:hover,
+.notes-resizer:focus-visible {
+  background: var(--accent, #3ec8ee);
+}
+.session-notes-browser {
+  position: fixed;
+  inset: 0;
+  z-index: 10020;
+  height: 100dvh;
+}
+.notes-projects {
+  width: 185px;
+  flex: 0 0 auto;
+  overflow: auto;
+  padding: 12px;
+  border-right: 1px solid var(--border, #455064);
+}
+.notes-projects > button,
+.notes-project-row {
+  margin-bottom: 10px;
+  width: 100%;
+}
+.notes-project-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.notes-projects button[aria-pressed='true'] {
+  border-color: var(--accent, #3ec8ee);
+}
+.notes-list-column {
+  width: 290px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border, #455064);
+}
+.notes-filters {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.notes-filters label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.notes-list {
+  overflow: auto;
+  padding: 10px;
+  flex: 1;
+}
+.notes-list-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border, #455064);
+  overflow-wrap: anywhere;
+}
+.notes-list-row > button {
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+}
+.notes-list-row small {
+  opacity: 0.8;
+}
+.notes-checklist-item {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: baseline;
+}
+.notes-checklist-item button {
+  text-align: left;
+}
+.notes-editor {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: auto;
+}
+.notes-editor input,
+.notes-editor select,
+.notes-filters input {
+  color: inherit;
+  background: var(--bg-input, #212631);
+  border: 1px solid var(--border, #455064);
+  border-radius: 5px;
+  padding: 8px;
+  min-width: 0;
+}
+.notes-editor input[aria-label='Notebook title'] {
+  font-weight: 600;
+  font-size: 16px;
+}
+.notes-editor textarea {
+  color: inherit;
+  background: var(--bg-input, #212631);
+  border: 1px solid var(--border, #455064);
+  border-radius: 5px;
+  padding: 12px;
+  min-height: 140px;
+  flex: 1;
+  resize: none;
+  width: 100%;
+  box-sizing: border-box;
+  font:
+    14px/1.6 ui-monospace,
+    monospace;
+}
+.notes-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.notes-editor-actions a {
+  text-decoration: none;
+}
+.notes-save-status {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.notes-preview {
+  overflow: auto;
+  overflow-wrap: anywhere;
+  flex: 1;
+  padding: 12px;
+  line-height: 1.6;
+}
+.notes-preview img {
+  max-width: 100%;
+}
+.notes-error {
+  color: var(--red, #ee8b8b);
+  padding: 0 12px;
+  white-space: pre-wrap;
+}
+.notes-error:empty {
+  display: none;
+}
+.notes-conflict {
+  padding: 10px;
+  border: 1px solid var(--yellow, #dfa444);
+  max-height: 45%;
+  overflow: auto;
+  flex-shrink: 0;
+}
+.notes-conflict button {
+  margin: 4px;
+}
+.session-notes-shell pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    12px/1.5 ui-monospace,
+    monospace;
+}
+.session-notes-shell [hidden] {
+  display: none !important;
+}
+.tab-notes {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+@media (max-width: 767px) {
+  .session-notes-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 10020;
+    width: 100% !important;
+    height: 100dvh;
+    padding: 0;
+    border: 0;
+  }
+  .session-notes-shell {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .notes-shell-header {
+    padding-top: max(10px, env(safe-area-inset-top));
+  }
+  .session-notes-browser .notes-shell-body {
+    flex-wrap: wrap;
+    overflow: auto;
+  }
+  .notes-projects {
+    width: 100%;
+    display: flex;
+    gap: 8px;
+    overflow: auto;
+    flex: 0 0 auto;
+    max-height: 85px;
+    padding: 8px;
+    border: 0;
+  }
+  .notes-projects > button,
+  .notes-project-row {
+    width: auto;
+    white-space: nowrap;
+    margin: 0;
+    flex-shrink: 0;
+  }
+  .notes-project-row {
+    flex-wrap: nowrap;
+  }
+  .notes-list-column {
+    width: 100%;
+    min-height: 160px;
+    max-height: 34%;
+    border: 0;
+  }
+  .notes-filters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 8px;
+  }
+  .session-notes-browser .notes-editor {
+    flex: 1 0 100%;
+    min-height: 320px;
+    box-sizing: border-box;
+  }
+  .session-notes-panel .notes-editor {
+    height: 100%;
+  }
+  .notes-editor-actions .btn-toolbar {
+    min-height: 36px;
+  }
+  .btn-notes {
+    font-size: 12px;
+    padding: 4px;
+  }
+}
+
+.header-brand .btn-notes {
+  margin-left: 10px;
+  width: auto;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+
+.header-brand .btn-notes:hover {
+  transform: none;
+}

@@ -503,6 +503,8 @@ export const SessionOrderChanged = 'session:orderChanged' as const;
  *  re-fetches the list rather than patching from the payload. `owner` is the web
  *  tab's owner (`'@single'` when multi-user mode is off); in multi-user mode the
  *  event is delivered only to that owner and admins (`deriveWebviewSseHint`). */
+export const NotesChanged = 'notes:changed' as const;
+
 export const WebviewChanged = 'webview:changed' as const;
 /** Owner-scoped layout change. New payloads include `{ owner, version, layout }` for inline adoption;
  *  legacy `{ owner, version }` payloads remain invalidations that make the client re-fetch. */
@@ -733,6 +735,7 @@ export const SseEvent = {
   SessionOrderChanged,
 
   // Web tabs (dashboard URLs)
+  NotesChanged,
   WebviewChanged,
   TabLayoutChanged,
 } as const;

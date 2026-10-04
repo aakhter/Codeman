@@ -1473,6 +1473,7 @@ const SSE_EVENTS = {
   SESSION_ORDER_CHANGED: 'session:orderChanged',
 
   // Web tabs (dashboard URLs)
+  NOTES_CHANGED: 'notes:changed',
   WEBVIEW_CHANGED: 'webview:changed',
   TAB_LAYOUT_CHANGED: 'tab:layoutChanged',
 };

@@ -346,6 +346,7 @@ Object.assign(CodemanApp.prototype, {
       })) || [];
     placementActions.unshift(...(this._tabRefPlacementActions?.(ref) || []));
     const actions = [
+      { label: 'Notes', run: () => this.openSessionNotes(sessionId) },
       { label: 'Session options', run: () => this.openSessionOptions(sessionId) },
       this._tabRefFocusAction(ref),
       ...placementActions,

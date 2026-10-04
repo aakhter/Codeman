@@ -376,6 +376,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.TAB_LAYOUT_CHANGED, '_onTabLayoutChanged'],
 
   // Web tabs (dashboard URLs)
+  [SSE_EVENTS.NOTES_CHANGED, '_onNotesChanged'],
   [SSE_EVENTS.WEBVIEW_CHANGED, '_onWebviewChanged'],
 ];
 
@@ -8636,7 +8637,7 @@ class CodemanApp {
       const paneExitBadge = paneExitLabel(session.paneExit);
 
       const inlineSessionActions = this.shouldInlineSessionActions();
-      const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
+      const tabActionsHtml = `<span class="tab-actions"><button type="button" class="tab-notes" onclick="event.stopPropagation(); app.openSessionNotes(${escapeHtml(JSON.stringify(id))})" title="Session notes" aria-label="Open session notes">&#x270E;</button><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
 
       parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
           <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
@@ -9852,6 +9853,7 @@ class CodemanApp {
   }
 
   async selectSession(sessionId, options = {}) {
+    if (this._notesMode === 'panel' && this._notesShell) this.closeSessionNotes();
     // A session choice supersedes any webview response still in flight. The
     // request may finish and leave that dashboard open in the background, but
     // it must not mount or steal the active surface after this intent.

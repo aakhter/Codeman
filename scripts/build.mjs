@@ -170,11 +170,21 @@ run(
   'npx esbuild dist/web/public/mobile.css --minify --outfile=dist/web/public/mobile.css --allow-overwrite'
 );
 
+for (const asset of ['session-notes-editor.js', 'session-notes-ui.js', 'session-notes.css']) {
+  run(
+    'minify ' + asset,
+    `npx esbuild dist/web/public/${asset} --minify --outfile=dist/web/public/${asset} --allow-overwrite`
+  );
+}
+
 // 5. Content-hash cache busting
 console.log('\n[build] content-hash cache busting');
 {
   const distPublic = join(ROOT, 'dist/web/public');
   const HASHABLE = [
+    'session-notes-editor.js',
+    'session-notes-ui.js',
+    'session-notes.css',
     'styles.css',
     'mobile.css',
     'constants.js',
