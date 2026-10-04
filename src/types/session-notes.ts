@@ -27,6 +27,11 @@ export interface SessionNoteEntry {
   projectId: string;
   note?: SessionNote;
   repairable: boolean;
+  /** Filesystem mtime reflects external edits even when frontmatter timestamps do not. */
+  lastModified?: number;
+  unfinishedCount?: number;
+  checklist?: Array<{ line: number; checked: boolean; text: string }>;
+  sessionAliases?: string[];
   raw?: string;
   error?: string;
   conflict?: string;

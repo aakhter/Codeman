@@ -745,6 +745,8 @@ export interface PaneExit {
 }
 
 export interface SessionState {
+  /** Trusted configured case snapshot retained at launch for later notebook assignment. */
+  notesLaunchCase?: import('./api.js').CaseInfo;
   /** Unique session identifier */
   id: string;
   /** Process ID of the PTY process, null if not running */

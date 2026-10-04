@@ -367,6 +367,9 @@ import {
   tryWebviewRefererFallback,
   registerCliRegistryRoutes,
 } from './routes/index.js';
+import { SessionNotesService, type SessionNotesSource } from '../session-notes-service.js';
+import { registerSessionNotesRoutes } from './routes/session-notes-routes.js';
+import { listCaseView } from './routes/case-routes.js';
 import { registerCodexCommandProfileRoutes } from './routes/codex-command-profile-routes.js';
 import { registerPerfTraceRoutes } from './routes/perf-trace-routes.js';
 import { mobileInputTraceCollector } from '../perf/mobile-input-trace.js';
@@ -501,6 +504,11 @@ export class WebServer extends EventEmitter {
   private sse: SseStreamManager;
   private store = getStore();
   private tabLayouts!: TabLayoutService;
+  private sessionNotes!: SessionNotesService;
+  private notesSourceResolver?: (
+    id: string,
+    owner?: string
+  ) => Promise<(SessionNotesSource & { owner?: string }) | null>;
   private port: number;
   private host: string;
   private https: boolean;
@@ -644,6 +652,9 @@ export class WebServer extends EventEmitter {
       },
       this.cleanup
     );
+    this.sessionNotes = new SessionNotesService({
+      onChanged: (ownerKey) => this.sse.broadcast('notes:changed', { ownerKey }, { strictOwnerKey: ownerKey }),
+    });
     this.tabLayouts = new TabLayoutService({
       store: this.store,
       sessions: this.sessions,
@@ -1404,6 +1415,11 @@ export class WebServer extends EventEmitter {
 
   /** Register a live session only inside its owner layout queue, rolling activity state back on failure. */
   private async registerSessionWithLayout(session: Session, options: SessionCreationOptions = {}) {
+    if (options.caseName && !session.toState().notesLaunchCase) {
+      const cases = await this.listNotesCases(session.owner);
+      const chosen = cases.find((info) => info.name === options.caseName);
+      if (chosen) session.setNotesLaunchCase(chosen);
+    }
     this.attachAgentActivity(session);
     let activityAttached = true;
     try {
@@ -1425,6 +1441,17 @@ export class WebServer extends EventEmitter {
     }
   }
 
+  private async listNotesCases(owner?: string) {
+    return listCaseView({ store: this.store }, { username: owner ?? 'admin', role: 'user' }, true);
+  }
+
+  private async getNotesSource(id: string, owner?: string): Promise<(SessionNotesSource & { owner?: string }) | null> {
+    const state = this.sessions.get(id)?.toState() ?? this.store.getSessions()[id];
+    if (state && isMultiUserMode() && state.owner !== owner) return null;
+    if (this.notesSourceResolver) return this.notesSourceResolver(id, owner);
+    return state ? { ...state, resumeId: state.claudeSessionId } : null;
+  }
+
   /**
    * Build a route context object satisfying all 5 port interfaces.
    * Single object with zero runtime cost — ISP enforced at the type level.
@@ -1437,6 +1464,9 @@ export class WebServer extends EventEmitter {
       sessions: this.sessions as ReadonlyMap<string, Session>,
       addSession: this.registerSessionWithLayout.bind(this),
       tabLayouts: this.tabLayouts,
+      sessionNotes: this.sessionNotes,
+      getNotesSource: this.getNotesSource.bind(this),
+      listNotesCases: this.listNotesCases.bind(this),
       cleanupSession: this.cleanupSession.bind(this),
       cleanupRecoveryReconnectWrapper: async (sessionId: string) => {
         await this.mux.detachRemoteWrapper?.(sessionId);
@@ -1893,7 +1923,12 @@ export class WebServer extends EventEmitter {
     registerCodexCommandProfileRoutes(this.app, ctx);
     // The registry's lifetime is the server's: it drops per-session wake state on every
     // cleanup path and resolves in-flight wakes on shutdown.
-    this.remoteWake = registerSessionRoutes(this.app, ctx);
+    this.remoteWake = registerSessionRoutes(this.app, ctx, {
+      registerNotesSourceResolver: (resolver) => {
+        this.notesSourceResolver = resolver;
+      },
+    });
+    registerSessionNotesRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);
     registerPlanRoutes(this.app, ctx);
@@ -3400,6 +3435,10 @@ export class WebServer extends EventEmitter {
    * session-scoped prefixes so a missed field starves rather than leaks.
    */
   private deriveSseHint(event: string, data: unknown): import('./sse-stream-manager.js').SseRoutingHint | undefined {
+    if (event.startsWith('notes:')) {
+      const ownerKey = (data as { ownerKey?: unknown } | null)?.ownerKey;
+      return { strictOwnerKey: typeof ownerKey === 'string' ? ownerKey : 'unresolved' };
+    }
     // Machine-level / host-wide: admins only.
     if (
       event.startsWith('docker:') ||
@@ -4256,6 +4295,7 @@ export class WebServer extends EventEmitter {
     options?: { rearmAutoResumeSchedule?: boolean }
   ): Promise<void> {
     if (phase === 'before-spawn') {
+      if (saved.notesLaunchCase) session.setNotesLaunchCase(saved.notesLaunchCase);
       // The custom-model env has to be rebuilt from the endpoint store: the persist
       // deliberately keeps the injected VALUES out of state.json, so only the
       // bookkeeping survives a restart and the values are re-derived here.
@@ -4603,6 +4643,7 @@ export class WebServer extends EventEmitter {
               // that did NOT come back is harmless: the frontend draws an edge only
               // when both tabs are on screen.
               parentSessionId: savedState?.parentSessionId,
+              notesLaunchCase: savedState?.notesLaunchCase,
             });
 
             // Custom-model selection survives the restart. The tmux session still carries
@@ -5041,6 +5082,8 @@ export class WebServer extends EventEmitter {
     this.cleanup.dispose();
 
     // Gracefully close all SSE connections and clear batching state
+    this.sessionNotes.close();
+    this.notesSourceResolver = undefined;
     this.sse.stop();
 
     // Release every pending long-poll waiter. Their timers are deliberately not

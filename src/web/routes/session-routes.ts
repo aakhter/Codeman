@@ -4,6 +4,7 @@
  * auto-clear, auto-compact, image watcher, flicker filter, and logout.
  */
 
+import type { SessionNotesSource } from '../../session-notes-service.js';
 import { FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { join, dirname, extname, basename, resolve, posix as pathPosix } from 'node:path';
@@ -1016,7 +1017,12 @@ export function registerSessionRoutes(
   app: FastifyInstance,
   ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & RespawnPort & AgentActivityPort & TabLayoutPort,
   /** Test seam: inject a registry with fake IO instead of the real TCP/WoL probes. */
-  options: { remoteWake?: RemoteWakeRegistry } = {}
+  options: {
+    remoteWake?: RemoteWakeRegistry;
+    registerNotesSourceResolver?: (
+      resolver: (id: string, owner?: string) => Promise<(SessionNotesSource & { owner?: string }) | null>
+    ) => void;
+  } = {}
 ): RemoteWakeRegistry {
   // Wake-on-LAN for sleeping remote hosts (see remote-wake.ts). One registry per
   // route registration (= one web server) — the same shape as the process-wide
@@ -5517,6 +5523,39 @@ export function registerSessionRoutes(
     const liveIds = new Set(ctx.sessions.keys());
     setHistorySessionIndex(buildHistorySessionIndexItems(merged, ownerById, liveIds));
   }
+
+  // Notebook opens use these same trusted inputs. Unowned transcript rows fail closed in multi-user mode.
+  options.registerNotesSourceResolver?.(async (id, owner) => {
+    const states = ctx.store.getSessions();
+    const direct = ctx.sessions.get(id)?.toState() ?? states[id];
+    if (direct && isMultiUserMode() && direct.owner !== owner) return null;
+    const inputs = await gatherUnifiedInputs();
+    const merged = mergeUnifiedSessions(inputs);
+    const rows = merged.filter((row) => row.sessionId === id || row.claudeSessionId === id || row.resumeId === id);
+    if (rows.length > 1) return null;
+    const row = rows[0];
+    const authoritative =
+      direct ?? (row ? (ctx.sessions.get(row.sessionId)?.toState() ?? states[row.sessionId]) : undefined);
+    if (isMultiUserMode() && (!authoritative?.owner || authoritative.owner !== owner)) return null;
+    if (authoritative)
+      return {
+        ...authoritative,
+        worktreeRepo: row?.worktreeRepo,
+        resumeId: row?.resumeId,
+        sessionAliases: [row?.sessionId, row?.claudeSessionId, row?.resumeId].filter(
+          (alias): alias is string => !!alias
+        ),
+      };
+    if (!row?.workingDir || row.remote) return null;
+    return {
+      id: row.sessionId,
+      workingDir: row.workingDir,
+      name: row.name,
+      claudeSessionId: row.claudeSessionId,
+      resumeId: row.resumeId,
+      worktreeRepo: row.worktreeRepo,
+    };
+  });
 
   // Rebuild hook for the search route: it kicks this (fire-and-forget) when the
   // snapshot goes stale, so a search never pays for the scan itself.

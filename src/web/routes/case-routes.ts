@@ -387,10 +387,7 @@ async function ensureCaseImage(
   return { ok: true, imageBuilding: true };
 }
 
-export function registerCaseRoutes(
-  app: FastifyInstance,
-  ctx: EventPort & ConfigPort & SessionPort & TabLayoutPort
-): void {
+function createCaseSelectionMetadata(ctx: Pick<ConfigPort, 'store'>) {
   const localSelectionMetadata = (
     owner: string | undefined,
     viewer: string | undefined,
@@ -438,6 +435,150 @@ export function registerCaseRoutes(
     }
     return { kind: 'default' as const };
   };
+
+  return { localSelectionMetadata, selectionMetadata };
+}
+
+/** Shared case enumeration; notebooks request an exact-owner view even for administrators. */
+export async function listCaseView(
+  ctx: Pick<ConfigPort, 'store'>,
+  user: AuthUser,
+  strictOwner = false
+): Promise<CaseInfo[]> {
+  const { localSelectionMetadata, selectionMetadata } = createCaseSelectionMetadata(ctx);
+  const cases: CaseInfo[] = [];
+  const viewer = isMultiUserMode() ? user.username : undefined;
+  const admin = !isMultiUserMode() || (!strictOwner && user.role === 'admin');
+  // Non-admins enumerate their OWN case space; admins see the shared CASES_DIR.
+  const listBase = resolveCasesDir(user);
+
+  // Get cases from the user's (or shared) cases dir
+  try {
+    const entries = await fs.readdir(listBase, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory() && SAFE_CASE_NAME.test(e.name)) {
+        const casePath = join(listBase, e.name);
+        // Only a directory Codeman scaffolded for an agent spawn carries a marker,
+        // so this stays absent for every human-created, linked or cloned case.
+        const marker = await readAgentCaseMarker(casePath);
+        cases.push({
+          name: e.name,
+          path: casePath,
+          hasClaudeMd: await boundedPathExists(join(casePath, 'CLAUDE.md')),
+          location: 'local',
+          codexCommandSelection: localSelectionMetadata(viewer, viewer, e.name),
+          ...(marker ? { agentCreated: agentCreatedInfo(marker) } : {}),
+        });
+      }
+    }
+  } catch {
+    // dir may not exist yet
+  }
+
+  // Linked cases (v1 registry has no owner) are admin-only in multi-user mode.
+  const linkedCases = await readLinkedCases();
+  const existingNames = new Set(cases.map((c) => c.name));
+  if (admin) {
+    for (const [name, path] of Object.entries(linkedCases)) {
+      if (!existingNames.has(name) && SAFE_CASE_NAME.test(name) && (await boundedPathExists(path))) {
+        cases.push({
+          name,
+          path,
+          hasClaudeMd: await boundedPathExists(join(path, 'CLAUDE.md')),
+          linked: true,
+          location: 'linked-local',
+          codexCommandSelection: localSelectionMetadata(viewer, viewer, name),
+        });
+      }
+    }
+  }
+
+  // Get remote cases (owner-scoped; legacy no-owner = admin-only)
+  const remoteHosts = await readRemoteHosts(CODEMAN_CONFIG_DIR);
+  const remoteHostMap = new Map(remoteHosts.map((host) => [host.id, host]));
+  for (const remoteCase of await readRemoteCases(CODEMAN_CONFIG_DIR)) {
+    const host = remoteHostMap.get(remoteCase.hostId);
+    if (!host || !SAFE_CASE_NAME.test(remoteCase.name)) continue;
+    if (strictOwner && isMultiUserMode() && remoteCase.owner !== viewer) continue;
+    if (!admin && !canAccessOwned(user, remoteCase.owner)) continue;
+    existingNames.add(remoteCase.name);
+    const remoteCaseInfo: CaseInfo = {
+      name: remoteCase.name,
+      path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
+      hasClaudeMd: false,
+      location: 'remote',
+      codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, viewer),
+      remote: {
+        hostId: host.id,
+        host: host.host,
+        username: host.username,
+        path: remoteCase.remotePath,
+        commands: remoteCase.commands ?? host.commands,
+        codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, viewer),
+      },
+    };
+    const existingIndex = cases.findIndex((item) => item.name === remoteCase.name);
+    if (existingIndex === -1) {
+      cases.push(remoteCaseInfo);
+    } else {
+      cases[existingIndex] = remoteCaseInfo;
+    }
+  }
+
+  // Get docker cases
+  const dockerHosts = await readDockerHosts(CODEMAN_CONFIG_DIR);
+  const dockerHostMap = new Map(dockerHosts.map((host) => [host.id, host]));
+  for (const dockerCase of await readDockerCases(CODEMAN_CONFIG_DIR)) {
+    const host = dockerHostMap.get(dockerCase.hostId);
+    if (!host || !SAFE_CASE_NAME.test(dockerCase.name)) continue;
+    if (strictOwner && isMultiUserMode() && dockerCase.owner !== viewer) continue;
+    if (!admin && !canAccessOwned(user, dockerCase.owner)) continue;
+    existingNames.add(dockerCase.name);
+    const container = dockerCase.container ?? dockerContainerName(dockerCase.name);
+    const dockerCaseInfo: CaseInfo = {
+      name: dockerCase.name,
+      path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
+      hasClaudeMd: await boundedPathExists(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
+      location: 'docker',
+      docker: {
+        hostId: host.id,
+        container,
+        image: host.image,
+        path: dockerCase.hostWorkspacePath,
+        containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
+        network: host.network ?? 'bridge',
+        ...(dockerCase.availableModes ? { availableModes: dockerCase.availableModes } : {}),
+        ...(dockerCase.owned === false ? { owned: false } : {}),
+      },
+    };
+    const existingIndex = cases.findIndex((item) => item.name === dockerCase.name);
+    if (existingIndex === -1) {
+      cases.push(dockerCaseInfo);
+    } else {
+      cases[existingIndex] = dockerCaseInfo;
+    }
+  }
+
+  // Sort by persisted caseOrder from settings.json
+  const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'settings', {});
+  const caseOrder = Array.isArray(settings.caseOrder) ? (settings.caseOrder as string[]) : [];
+  if (caseOrder.length > 0) {
+    const orderMap = new Map(caseOrder.map((name, idx) => [name, idx]));
+    cases.sort((a, b) => {
+      const ai = orderMap.get(a.name) ?? Number.MAX_SAFE_INTEGER;
+      const bi = orderMap.get(b.name) ?? Number.MAX_SAFE_INTEGER;
+      return ai - bi;
+    });
+  }
+
+  return cases;
+}
+
+export function registerCaseRoutes(
+  app: FastifyInstance,
+  ctx: EventPort & ConfigPort & SessionPort & TabLayoutPort
+): void {
+  const { localSelectionMetadata, selectionMetadata } = createCaseSelectionMetadata(ctx);
 
   const applyCodexSelection = (
     remoteCase: { codexCommandProfileId?: string; commands?: Record<string, string> },
@@ -609,132 +750,7 @@ export function registerCaseRoutes(
 
   // ========== List Cases ==========
 
-  app.get('/api/cases', async (req): Promise<CaseInfo[]> => {
-    const cases: CaseInfo[] = [];
-    const user = getAuthUser(req);
-    const admin = isAdmin(req);
-    // Non-admins enumerate their OWN case space; admins see the shared CASES_DIR.
-    const listBase = resolveCasesDir(user);
-
-    // Get cases from the user's (or shared) cases dir
-    try {
-      const entries = await fs.readdir(listBase, { withFileTypes: true });
-      for (const e of entries) {
-        if (e.isDirectory() && SAFE_CASE_NAME.test(e.name)) {
-          const casePath = join(listBase, e.name);
-          // Only a directory Codeman scaffolded for an agent spawn carries a marker,
-          // so this stays absent for every human-created, linked or cloned case.
-          const marker = await readAgentCaseMarker(casePath);
-          cases.push({
-            name: e.name,
-            path: casePath,
-            hasClaudeMd: await boundedPathExists(join(casePath, 'CLAUDE.md')),
-            location: 'local',
-            codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), e.name),
-            ...(marker ? { agentCreated: agentCreatedInfo(marker) } : {}),
-          });
-        }
-      }
-    } catch {
-      // dir may not exist yet
-    }
-
-    // Linked cases (v1 registry has no owner) are admin-only in multi-user mode.
-    const linkedCases = await readLinkedCases();
-    const existingNames = new Set(cases.map((c) => c.name));
-    if (admin) {
-      for (const [name, path] of Object.entries(linkedCases)) {
-        if (!existingNames.has(name) && SAFE_CASE_NAME.test(name) && (await boundedPathExists(path))) {
-          cases.push({
-            name,
-            path,
-            hasClaudeMd: await boundedPathExists(join(path, 'CLAUDE.md')),
-            linked: true,
-            location: 'linked-local',
-            codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), name),
-          });
-        }
-      }
-    }
-
-    // Get remote cases (owner-scoped; legacy no-owner = admin-only)
-    const remoteHosts = await readRemoteHosts(CODEMAN_CONFIG_DIR);
-    const remoteHostMap = new Map(remoteHosts.map((host) => [host.id, host]));
-    for (const remoteCase of await readRemoteCases(CODEMAN_CONFIG_DIR)) {
-      const host = remoteHostMap.get(remoteCase.hostId);
-      if (!host || !SAFE_CASE_NAME.test(remoteCase.name)) continue;
-      if (!admin && !canAccessOwned(user, remoteCase.owner)) continue;
-      existingNames.add(remoteCase.name);
-      const remoteCaseInfo: CaseInfo = {
-        name: remoteCase.name,
-        path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
-        hasClaudeMd: false,
-        location: 'remote',
-        codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, ownerFor(req)),
-        remote: {
-          hostId: host.id,
-          host: host.host,
-          username: host.username,
-          path: remoteCase.remotePath,
-          commands: remoteCase.commands ?? host.commands,
-          codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, ownerFor(req)),
-        },
-      };
-      const existingIndex = cases.findIndex((item) => item.name === remoteCase.name);
-      if (existingIndex === -1) {
-        cases.push(remoteCaseInfo);
-      } else {
-        cases[existingIndex] = remoteCaseInfo;
-      }
-    }
-
-    // Get docker cases
-    const dockerHosts = await readDockerHosts(CODEMAN_CONFIG_DIR);
-    const dockerHostMap = new Map(dockerHosts.map((host) => [host.id, host]));
-    for (const dockerCase of await readDockerCases(CODEMAN_CONFIG_DIR)) {
-      const host = dockerHostMap.get(dockerCase.hostId);
-      if (!host || !SAFE_CASE_NAME.test(dockerCase.name)) continue;
-      if (!admin && !canAccessOwned(user, dockerCase.owner)) continue;
-      existingNames.add(dockerCase.name);
-      const container = dockerCase.container ?? dockerContainerName(dockerCase.name);
-      const dockerCaseInfo: CaseInfo = {
-        name: dockerCase.name,
-        path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
-        hasClaudeMd: await boundedPathExists(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
-        location: 'docker',
-        docker: {
-          hostId: host.id,
-          container,
-          image: host.image,
-          path: dockerCase.hostWorkspacePath,
-          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
-          network: host.network ?? 'bridge',
-          ...(dockerCase.availableModes ? { availableModes: dockerCase.availableModes } : {}),
-          ...(dockerCase.owned === false ? { owned: false } : {}),
-        },
-      };
-      const existingIndex = cases.findIndex((item) => item.name === dockerCase.name);
-      if (existingIndex === -1) {
-        cases.push(dockerCaseInfo);
-      } else {
-        cases[existingIndex] = dockerCaseInfo;
-      }
-    }
-
-    // Sort by persisted caseOrder from settings.json
-    const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'settings', {});
-    const caseOrder = Array.isArray(settings.caseOrder) ? (settings.caseOrder as string[]) : [];
-    if (caseOrder.length > 0) {
-      const orderMap = new Map(caseOrder.map((name, idx) => [name, idx]));
-      cases.sort((a, b) => {
-        const ai = orderMap.get(a.name) ?? Number.MAX_SAFE_INTEGER;
-        const bi = orderMap.get(b.name) ?? Number.MAX_SAFE_INTEGER;
-        return ai - bi;
-      });
-    }
-
-    return cases;
-  });
+  app.get('/api/cases', async (req): Promise<CaseInfo[]> => listCaseView(ctx, getAuthUser(req)));
 
   // ========== Agent-created cases (cleanup listing) ==========
 

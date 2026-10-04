@@ -1,7 +1,7 @@
 /** @fileoverview Durable owner-scoped Markdown notebooks with revision conflicts and recoverable filesystem transactions. */
 
 import { randomUUID } from 'node:crypto';
-import { chmod, link, readdir, rename, unlink } from 'node:fs/promises';
+import { chmod, link, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { dataPath } from './config/instance.js';
 import {
@@ -116,10 +116,18 @@ export class SessionNotesStore extends SessionNotesFilesystem {
               projectId: project,
               note: await this.readAt(owner, this.notePath(owner, project, id)),
               repairable: false,
+              lastModified: (await stat(this.notePath(owner, project, id))).mtimeMs,
             });
           } catch (error) {
             if (!(error instanceof SessionNotesMalformedError)) throw error;
-            result.push({ id, projectId: project, repairable: true, raw: error.raw, error: error.message });
+            result.push({
+              id,
+              projectId: project,
+              repairable: true,
+              raw: error.raw,
+              error: error.message,
+              lastModified: (await stat(this.notePath(owner, project, id))).mtimeMs,
+            });
           }
         }
       }
@@ -171,6 +179,55 @@ export class SessionNotesStore extends SessionNotesFilesystem {
       const bytes = serializeSessionNote({ ...loaded.metadata, projectId, updatedAt: Date.now() }, loaded.markdown);
       await this.replace(owner, source, target, bytes, note.revision);
       return parseSessionNote(bytes);
+    });
+  }
+
+  /** Explicit malformed-file repair using retained server provenance and a full-byte revision. */
+  async repair(owner: string, trusted: SessionNote, revision: string, markdown: string): Promise<SessionNote> {
+    this.authorize(owner, trusted);
+    return this.locked(owner, async (conflicts) => {
+      const path = this.notePath(owner, trusted.metadata.projectId, trusted.metadata.id);
+      await this.requireResolved(owner, path, conflicts);
+      await this.checkRevision(owner, path, revision);
+      if (!((await this.current(owner, path)) instanceof SessionNotesMalformedError))
+        throw new Error('Only malformed notebooks require repair');
+      const bytes = serializeSessionNote({ ...trusted.metadata, updatedAt: Date.now() }, markdown);
+      const note = parseSessionNote(bytes);
+      await this.replace(owner, path, path, bytes, revision);
+      return note;
+    });
+  }
+
+  /** Recover provenance for a malformed legacy notebook from this store's retained good snapshots. */
+  async retainedNote(owner: string, id: string): Promise<SessionNote | null> {
+    safeId(id);
+    return this.locked(owner, async () => {
+      const history = join(this.ownerPath(owner), '.history');
+      let files: string[];
+      try {
+        files = await readdir(history);
+      } catch (error) {
+        if (isMissing(error)) return null;
+        throw error;
+      }
+      const candidates: SessionNote[] = [];
+      for (const file of files.filter((file) => /^[a-f0-9-]+\.(?:md|staged)$/.test(file))) {
+        const bytes = await this.bytes(join(history, file));
+        try {
+          const note = parseSessionNote(bytes);
+          this.authorize(owner, note);
+          if (note.metadata.id === id) candidates.push(note);
+        } catch {
+          /* Preserve malformed history, and never use it as trusted provenance. */
+        }
+      }
+      const origins = new Set(
+        candidates.map(({ metadata }) =>
+          JSON.stringify([metadata.sessionId, metadata.workingDir, metadata.executionLocation, metadata.createdAt])
+        )
+      );
+      if (origins.size > 1) throw new Error('Ambiguous retained notebook provenance');
+      return candidates.sort((a, b) => b.metadata.updatedAt - a.metadata.updatedAt)[0] ?? null;
     });
   }
 

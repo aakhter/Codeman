@@ -1018,6 +1018,7 @@ export class Session extends EventEmitter {
   // route before it reaches here, so this is always either an id that existed at
   // create time or undefined. Decoration only — see SessionState.parentSessionId.
   private readonly _parentSessionId?: string;
+  private _notesLaunchCase?: import('./types/api.js').CaseInfo;
 
   // Session color for visual differentiation
   private _color: import('./types.js').SessionColor = 'default';
@@ -1144,6 +1145,7 @@ export class Session extends EventEmitter {
       owner?: string;
       /** Session that spawned this one — tab lineage decoration, resolved by the caller. */
       parentSessionId?: string;
+      notesLaunchCase?: import('./types/api.js').CaseInfo;
     }
   ) {
     super();
@@ -1335,6 +1337,7 @@ export class Session extends EventEmitter {
     // Never self-parent: a session pointing at itself would draw a zero-length
     // lineage arc under its own tab. Only reachable via the recovery path, where
     // both the id and the saved parent come from disk.
+    this._notesLaunchCase = config.notesLaunchCase ? structuredClone(config.notesLaunchCase) : undefined;
     this._parentSessionId = config.parentSessionId === this.id ? undefined : config.parentSessionId;
     if (config.attachmentHistory && config.attachmentHistory.length > 0) {
       this.restoreAttachmentHistory(config.attachmentHistory);
@@ -2620,6 +2623,11 @@ export class Session extends EventEmitter {
 
   // ─────────────────────────────────────────────────────────────────────────
 
+  /** Only trusted launch/restoration code supplies this snapshot; never derived from live cwd. */
+  setNotesLaunchCase(info: import('./types/api.js').CaseInfo): void {
+    if (!this._notesLaunchCase) this._notesLaunchCase = structuredClone(info);
+  }
+
   toState(): SessionState {
     return {
       id: this.id,
@@ -2631,6 +2639,7 @@ export class Session extends EventEmitter {
       docker: this._docker,
       owner: this._owner,
       parentSessionId: this._parentSessionId,
+      notesLaunchCase: this._notesLaunchCase ? structuredClone(this._notesLaunchCase) : undefined,
       currentTaskId: this._currentTaskId,
       createdAt: this.createdAt,
       // The wire twin, not the private stamp: it survives the post-recovery

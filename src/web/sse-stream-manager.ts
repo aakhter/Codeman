@@ -16,6 +16,7 @@
  */
 
 import type { FastifyReply } from 'fastify';
+import { sessionNotesOwnerKey } from '../session-notes-projects.js';
 import type { BackgroundTask } from '../session.js';
 import type { SessionOrderProjectionChange } from '../tab-layout-service.js';
 import type { AuthUser } from '../types.js';
@@ -51,6 +52,8 @@ interface SseStreamManagerDeps {
  * before delegation. When absent, an event is delivered to all clients (global).
  */
 export interface SseRoutingHint {
+  /** Private notebook events match this hashed owner exactly, even for administrators. */
+  strictOwnerKey?: string;
   /** Deliver only to this session's owner (+ admins). */
   owner?: string;
   /** Deliver only to admins (machine-level events: docker builds, tunnel, update). */
@@ -179,6 +182,7 @@ export class SseStreamManager {
    */
   private canDeliver(reply: FastifyReply, hint?: SseRoutingHint): boolean {
     const identity = this.sseClientIdentity.get(reply);
+    if (hint?.strictOwnerKey !== undefined) return hint.strictOwnerKey === sessionNotesOwnerKey(identity?.username);
     if (!identity || identity.role === 'admin') return true;
     if (!hint) return true;
     if (hint.adminOnly) return false;
