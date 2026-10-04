@@ -1,5 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { StateStore } from '../src/state-store.js';
+import { snapshotDeadSessionRecoveries, planAutomaticRecovery } from '../src/session-recovery.js';
+import type { SessionState } from '../src/types/session.js';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -116,6 +121,121 @@ describe('Session Manager Recovery Queue', () => {
     expect(app.sessions.has('lost-codex')).toBe(false);
   });
 
+  it('shows conversation and tab names separately with a clear unavailable status', async () => {
+    const record = { ...resumableCodex, name: 'w3-kb', conversationName: 'Review architecture', status: 'unavailable' };
+    const { app, elements } = loadHarness(async (url) =>
+      url === '/api/session-recoveries' ? ok({ recoveries: [record] }) : ok({ success: true, data: { sessions: [] } })
+    );
+    await app._loadSessionManagerList('');
+    const details = elements.sessionRecoveryList.children[0].children[0].children.map((child) => child.textContent);
+    expect(details).toContain('Session name: Review architecture');
+    expect(details).toContain('Codeman tab: w3-kb');
+    expect(details).toContain('Needs recovery check');
+  });
+
+  it.each(['codex', 'claude'] as const)(
+    'retains historical %s evidence through pruning, store restart, decision and UI',
+    async (mode) => {
+      const root = mkdtempSync(join(tmpdir(), 'recovery-trace-'));
+      try {
+        const id = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+        const source = {
+          id: 'pane',
+          mode,
+          workingDir: '/work/project',
+          name: 'w4-work',
+          pid: null,
+          status: 'idle',
+          currentTaskId: null,
+          createdAt: 1000,
+          lastActivityAt: 2000,
+          ...(mode === 'codex' ? { codexConfig: { resumeSessionId: id } } : { claudeSessionChain: ['old', id] }),
+        } as SessionState;
+        const path = join(root, 'state.json');
+        const before = new StateStore(path);
+        before.setSession(source.id, source);
+        await snapshotDeadSessionRecoveries(before, [source.id], new Map());
+        before.removeSession(source.id);
+        before.saveNow();
+        const after = new StateStore(path);
+        const [record] = after.getSessionRecoveries();
+        expect(record).toMatchObject({
+          sourceSessionId: 'pane',
+          mode,
+          workingDir: '/work/project',
+          name: 'w4-work',
+          createdAt: 1000,
+          lastActivityAt: 2000,
+        });
+        expect(mode === 'codex' ? record.nativeResumeId : record.claudeResumeId).toBe(id);
+        expect(planAutomaticRecovery(record, false)).toBe('resume');
+        expect(record.restoreEvidence).toBeUndefined();
+        const { app, elements } = loadHarness(async () => ok({}));
+        app._renderSessionRecoveryList(elements.sessionRecoveryList, [record]);
+        const texts = elements.sessionRecoveryList.children[0].children[0].children.map((c) => c.textContent);
+        expect(texts).toContain(`Conversation ID: ${id}`);
+        expect(texts).toContain('Codeman tab: w4-work');
+        expect(texts).toContain(`${mode} · local · /work/project`);
+        expect(texts).toContain('Saved resume ID; availability not checked');
+        expect(texts).toContain(
+          'Created: Thu, 1970-01-01T00:00:01.000Z · Last recorded activity: Thu, 1970-01-01T00:00:02.000Z'
+        );
+        expect(elements.sessionRecoveryList.children[0].children.at(-1)!.children.map((c) => c.textContent)).toEqual([
+          'Resume',
+          'Refresh',
+          'Preview',
+          'Dismiss',
+        ]);
+        before.flush();
+        after.flush();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('distinguishes metadata found from a conversation restore confirmed by the CLI', () => {
+    const { app, elements } = loadHarness(async () => ok({}));
+    app._renderSessionRecoveryList(elements.sessionRecoveryList, [
+      { ...resumableCodex, lastCheckedAt: 1 },
+      { ...resumableCodex, status: 'recovered', restoreEvidence: 'launch_returned' },
+    ]);
+    expect(elements.sessionRecoveryList.children[0].children[0].children.map((c) => c.textContent)).toContain(
+      'Conversation metadata found; resume not confirmed'
+    );
+    expect(elements.sessionRecoveryList.children[1].children[0].children.map((c) => c.textContent)).toContain(
+      'Session launch returned; conversation restore not confirmed'
+    );
+  });
+
+  it('offers Refresh for an unavailable local Claude recovery', async () => {
+    const { app, elements } = loadHarness(async (url) =>
+      url === '/api/session-recoveries'
+        ? ok({ recoveries: [{ ...resumableCodex, mode: 'claude', status: 'unavailable' }] })
+        : ok({ success: true, data: { sessions: [] } })
+    );
+    await app._loadSessionManagerList('');
+    expect(
+      elements.sessionRecoveryList.children[0].children.at(-1)?.children.map((child) => child.textContent)
+    ).toEqual(['Start new', 'Refresh', 'Preview', 'Dismiss']);
+  });
+
+  it('renders the recovery queue before a slow unified history request finishes', async () => {
+    let resolveHistory: (value: ReturnType<typeof ok>) => void;
+    const history = new Promise<ReturnType<typeof ok>>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const { app, elements } = loadHarness(async (url) =>
+      url === '/api/session-recoveries' ? ok({ recoveries: [resumableCodex] }) : history
+    );
+    const loading = app._loadSessionManagerList('');
+    await vi.waitFor(() => expect(elements.sessionRecoveryList.children[0]?.dataset.recoveryId).toBe('lost-codex'), {
+      timeout: 100,
+    });
+    resolveHistory!(ok({ success: true, data: { sessions: [] } }));
+    await loading;
+  });
+
   it('renders recovery records from the session-recoveries success envelope', async () => {
     const { app, elements } = loadHarness(async (url) => {
       if (url.startsWith('/api/sessions/unified')) {
@@ -213,6 +333,9 @@ describe('Session Manager Recovery Queue', () => {
       'Copy hint',
       'Start new',
     ]);
+    expect(
+      elements.sessionRecoveryList.children[1].children.at(-1)?.children.map((button) => button.textContent)
+    ).toEqual(['Start new', 'Refresh', 'Preview', 'Dismiss']);
   });
 
   it('lets a user dismiss a recovered record after its replacement session exists', async () => {
@@ -229,7 +352,9 @@ describe('Session Manager Recovery Queue', () => {
     });
 
     await app._loadSessionManagerList('');
-    const dismiss = elements.sessionRecoveryList.children[0].children.at(-1)!.children[0];
+    const dismiss = elements.sessionRecoveryList.children[0].children
+      .at(-1)!
+      .children.find((button) => button.textContent === 'Dismiss')!;
     expect(dismiss.textContent).toBe('Dismiss');
     await dismiss.click();
 
@@ -242,5 +367,66 @@ describe('Session Manager Recovery Queue', () => {
     expect(elements.sessionRecoveryList.children).toHaveLength(0);
     expect(app.sessions.has('lost-codex')).toBe(false);
     expect(app.selectSession).not.toHaveBeenCalled();
+  });
+  it('loads a read-only preview for just the selected row and toggles it without re-fetching', async () => {
+    const { app, elements, fetch } = loadHarness(async (url) => {
+      if (url.startsWith('/api/sessions/unified')) return ok({ sessions: [] });
+      if (url === '/api/session-recoveries') return ok({ recoveries: [resumableCodex] });
+      if (url.endsWith('/preview'))
+        return ok({
+          available: true,
+          promptCount: 3,
+          prompts: [
+            { position: 'First prompt', ordinal: 1, text: '<script>literal prompt</script>', truncated: false },
+            { position: 'Middle prompt', ordinal: 2, text: 'middle', truncated: false },
+            { position: 'Last prompt', ordinal: 3, text: 'last', truncated: true },
+          ],
+        });
+      throw new Error(`unexpected request ${url}`);
+    });
+    await app._loadSessionManagerList('');
+    const row = elements.sessionRecoveryList.children[0];
+    const button = row.children.at(-1)!.children.find((child) => child.textContent === 'Preview')!;
+    const panel = row.children.find((child) => child.className === 'session-recovery-preview')!;
+    await button.click();
+    expect(fetch).toHaveBeenCalledWith('/api/session-recoveries/lost-codex/preview');
+    expect(panel.children.map((child) => child.textContent)).toContain('<script>literal prompt</script>');
+    expect(panel.children.map((child) => child.textContent)).toContain('last\n[Excerpt shortened]');
+    await button.click();
+    await button.click();
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/preview'))).toHaveLength(1);
+  });
+  it('shows candidate prompts in the same row when the original conversation link is missing', async () => {
+    const { app, elements } = loadHarness(async (url) => {
+      if (url.startsWith('/api/sessions/unified')) return ok({ sessions: [] });
+      if (url === '/api/session-recoveries') return ok({ recoveries: [resumableCodex] });
+      if (url.endsWith('/preview'))
+        return ok({
+          available: false,
+          message: 'Candidates, not confirmed matches.',
+          candidates: [
+            {
+              conversationId: 'candidate-1',
+              lastModified: 1000,
+              preview: {
+                available: true,
+                promptCount: 1,
+                prompts: [{ position: 'Only prompt', ordinal: 1, text: '<b>literal candidate</b>', truncated: false }],
+              },
+            },
+          ],
+        });
+      throw new Error(`unexpected request ${url}`);
+    });
+    await app._loadSessionManagerList('');
+    const row = elements.sessionRecoveryList.children[0];
+    await row.children
+      .at(-1)!
+      .children.find((child) => child.textContent === 'Preview')!
+      .click();
+    const panel = row.children.find((child) => child.className === 'session-recovery-preview')!;
+    expect(panel.children[0].textContent).toBe('Candidates, not confirmed matches.');
+    expect(panel.children[1].children[0].textContent).toContain('Candidate conversation candidate-1');
+    expect(panel.children[1].children.at(-1)!.textContent).toBe('<b>literal candidate</b>');
   });
 });

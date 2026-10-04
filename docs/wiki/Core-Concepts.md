@@ -122,10 +122,11 @@ screen's **Resume Conversation** list offers.
 A Codeman **server restart** is not a host reboot: if the local `tmux -L codeman` server is
 still running, Codeman reconciles and reattaches its existing panes as usual. A host reboot
 ends that local tmux server, including its panes and scrollback. On the next startup Codeman
-does **not** start agents or recreate those panes. Instead, it preserves a small, owner-scoped
-recovery record and shows eligible rows in the Session Manager's **Recovery Queue**.
+preserves a small, owner-scoped recovery record. With **Recover sessions after reboot** enabled,
+it automatically reconnects live remote sessions and attempts to resume sessions with a recorded native
+conversation ID. A saved ID alone does not verify transcript availability or confirm that the CLI restored it. Other records remain in the Session Manager's **Recovery Queue**.
 
-Recovery is deliberately selective and always requires a confirmation of the original location:
+Manual Recovery Queue actions require confirmation of the original location:
 
 - A live remote tmux session can be **Reconnected** using its original remote identity. This
   attaches a new local wrapper to that exact remote tmux session; it does not launch another
@@ -145,7 +146,30 @@ Recovery is deliberately selective and always requires a confirmation of the ori
 Recovery records contain durable identifiers and case/host references, not credentials, raw SSH
 errors, environment overrides, or command strings. Completing, dismissing, or failing a recovery
 does not turn the old session into a live one. Recovery Queue actions create at most one new
-replacement pane and never bulk- or auto-resume work after an outage.
+replacement pane per record.
+
+The reboot restore banner also offers local Codex sessions when their native conversation
+ID is known. Recovery identifies the main conversation by its exact Codeman originator;
+child agent conversations are excluded. In the Recovery Queue, both unavailable and resumable
+local Claude and Codex records have **Refresh**. Codex rereads main rollout metadata, bypassing
+the identity cache, and checks the exact saved ID (or exact pane originator when unknown) and
+working directory. Claude checks an exact transcript ID and a main message carrying the same
+ID and working directory. Both check that the local directory exists. Refresh starts no agent.
+A missing target downgrades the record while keeping its original identity for inspection.
+A successful check means **Conversation metadata found; resume not confirmed**. Before a check,
+a saved-ID record reads **Saved resume ID; availability not checked**.
+
+Recovery rows show the native conversation name separately from the Codeman tab name.
+Older tab names recovered from the lifecycle log are labeled **last recorded**; a name
+that is no longer saved is shown as **Name not saved**. **Needs recovery check** means a
+resume target has not been verified, rather than that the conversation was deleted. Rows also
+show the CLI type, working directory, Codeman ID, native conversation ID, creation time and
+last recorded activity time. These times describe the original session, not the new pane.
+A completed launch reads **Session launch returned; conversation restore not confirmed**;
+Codeman does not yet wait for an authoritative native CLI resume acknowledgement. Legacy
+replacement records have no such acknowledgement either. Custom providers, per-session
+credentials/homes and custom commands require manual queue recovery to avoid silently switching
+to an ambient provider.
 
 ## State on disk
 

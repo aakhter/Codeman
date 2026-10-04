@@ -84,7 +84,11 @@ const TERMINAL_SESSION_RECOVERY_STATUSES: ReadonlySet<SessionRecoveryStatus> = n
 ]);
 
 function cloneSessionRecoveryRecord(recovery: SessionRecoveryRecord): SessionRecoveryRecord {
-  return { ...recovery, launch: sanitizeRecoveryLaunch(recovery.launch) };
+  return {
+    ...recovery,
+    launch: sanitizeRecoveryLaunch(recovery.launch),
+    ...(recovery.providerSelection ? { providerSelection: { ...recovery.providerSelection } } : {}),
+  };
 }
 
 export class StateStore {

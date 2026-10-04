@@ -9540,7 +9540,8 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  overflow: hidden;
+  min-height: 0;
+  overflow-y: auto;
   padding: 1rem;
 }
 
@@ -9548,11 +9549,52 @@ kbd {
   flex: 0 0 auto;
 }
 
+.session-manager-filters {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 0.4rem;
+}
+
+.session-manager-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.session-manager-filter-label {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-right: 0.2rem;
+}
+
+.session-manager-filter-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  padding: 0.22rem 0.55rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.session-manager-filter-chip[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .session-manager-list {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 0.35rem;
-  overflow-y: auto;
+}
+
+.session-manager-history-heading {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 0.84rem;
 }
 
 .session-recovery-queue {
@@ -9579,6 +9621,8 @@ kbd {
 .session-recovery-heading span,
 .session-recovery-empty,
 .session-recovery-location,
+.session-recovery-hint,
+.session-recovery-tab-name,
 .session-recovery-status {
   color: var(--text-muted);
   font-size: 0.76rem;
@@ -9588,6 +9632,8 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  max-height: 32vh;
+  overflow-y: auto;
 }
 
 .session-recovery-empty {
@@ -9596,6 +9642,7 @@ kbd {
 
 .session-recovery-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.6rem;
@@ -9607,24 +9654,22 @@ kbd {
 
 .session-recovery-details {
   display: grid;
+  flex: 1 1 18rem;
   min-width: 0;
   gap: 0.12rem;
 }
 
 .session-recovery-details strong,
-.session-recovery-location {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+.session-recovery-tab-name,
+.session-recovery-location,
 .session-recovery-status {
-  text-transform: capitalize;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .session-recovery-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.35rem;
@@ -22277,4 +22322,28 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
   padding: 8px 10px;
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.session-recovery-preview {
+  order: 1;
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.session-recovery-preview p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.4rem 0 0.8rem;
+}
+
+@media (max-width: 390px) {
+  .session-recovery-details,
+  .session-recovery-preview {
+    flex: 0 1 auto;
+  }
 }

@@ -105,9 +105,10 @@ export function looksLikeHostReboot(evidence: RebootEvidence): boolean {
  * conversation for everything else.
  */
 export function resolveResumeConversationId(state: SessionState): string {
+  if (state.mode === 'codex') return state.nativeResumeId || state.codexConfig?.resumeSessionId || '';
   const chain = state.claudeSessionChain;
   const chainTail = Array.isArray(chain) && chain.length > 0 ? chain[chain.length - 1] : undefined;
-  return chainTail || state.resumeSessionId || state.id;
+  return chainTail || state.claudeSessionId || state.resumeSessionId || state.id;
 }
 
 /**
@@ -224,11 +225,13 @@ export function planRebootRestore(
       skipped.push({ sessionId, reason: 'remote-or-docker' });
       continue;
     }
-    // Capability, not a CLI id: this pass resumes by handing the CLI a conversation
-    // id through the top-level `resumeSessionId`, which only a CLI whose history the
-    // claude-jsonl reader understands can consume that way. Others carry their thread
-    // id in their own `<Mode>Config`, which this pass does not thread through.
-    if (getCli(state.mode ?? 'claude')?.capabilities.transcript !== 'claude-jsonl') {
+    // Claude-compatible CLIs consume the top-level resume ID. Codex consumes its
+    // verified native ID through codexConfig; never fall back to the Codeman ID.
+    const isCodex = state.mode === 'codex';
+    const codexResumeId = isCodex ? resolveResumeConversationId(state) : '';
+    const verifiedCodex =
+      isCodex && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(codexResumeId);
+    if (!verifiedCodex && getCli(state.mode ?? 'claude')?.capabilities.transcript !== 'claude-jsonl') {
       skipped.push({ sessionId, reason: 'unsupported-mode' });
       continue;
     }
