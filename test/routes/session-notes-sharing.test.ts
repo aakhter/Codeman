@@ -246,3 +246,36 @@ it('appends a human-readable trusted source reference with Markdown punctuation 
     source.name = previous;
   }
 });
+
+it('accepts the UTF-8 byte boundary and rejects multibyte overflow before preview or response append dispatch', async () => {
+  const note = await notebook();
+  const url = '/api/session-notes/' + note.metadata.id;
+  const exactBytes = '😀'.repeat(16383) + 'abc';
+  expect(Buffer.byteLength(exactBytes, 'utf8')).toBe(65535);
+  const accepted = await app.inject({
+    method: 'POST',
+    url: url + '/send-preview',
+    payload: { destinationId: 'destination', text: exactBytes },
+  });
+  expect(accepted.statusCode).toBe(200);
+  expect(accepted.json().data.text).toBe(exactBytes);
+  for (const text of ['😀'.repeat(16384), 'é'.repeat(32768)]) {
+    expect(text.length).toBeLessThan(65535);
+    expect(Buffer.byteLength(text, 'utf8')).toBe(65536);
+    const preview = await app.inject({
+      method: 'POST',
+      url: url + '/send-preview',
+      payload: { destinationId: 'destination', text },
+    });
+    expect(preview.statusCode).toBe(400);
+    expect(preview.json().data).toBeUndefined();
+    const append = await app.inject({
+      method: 'POST',
+      url: url + '/append-response',
+      payload: { revision: note.revision, sourceSessionId: source.id, text },
+    });
+    expect(append.statusCode).toBe(400);
+  }
+  expect(input).not.toHaveBeenCalled();
+  expect((await app.inject(url)).json().data.markdown).toBe(note.markdown);
+});

@@ -59,6 +59,7 @@ export function registerSessionNotesRoutes(app: FastifyInstance, ctx: SessionNot
     .string()
     .min(1)
     .max(MAX_INPUT_LENGTH - 1)
+    .refine((text) => Buffer.byteLength(text, 'utf8') <= MAX_INPUT_LENGTH - 1, 'Selected text exceeds UTF-8 byte limit')
     .refine((text) => !!text.trim())
     .refine(
       (text) =>

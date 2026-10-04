@@ -66,7 +66,7 @@ Notes are not automatically added to prompts, checkpoints, recovery instructions
 
 In the notebook editor, select text and choose **Send to session**. The dialog shows exactly that selection. With no selection, choose **Use whole notebook** explicitly; Codeman does not assume you meant the whole notebook. The dialog identifies the destination by name, mode, and session ID. For an inactive source, choose an active destination owned by you. Sharing does not start, wake, or resume a session.
 
-Review the preview and choose **Confirm send**. Each preview has one confirmation, expires after five minutes, and is invalid after a server restart. Double clicks and replayed confirmations do not send twice. Multiline text uses literal bracketed paste followed by Enter, preserving line breaks and spaces. Terminal control bytes are rejected.
+Review the preview and choose **Confirm send**. Each preview has one confirmation, expires after five minutes, and is invalid after a server restart. Double clicks and replayed confirmations do not send twice. Multiline text uses literal bracketed paste followed by Enter, preserving line breaks and spaces. Selections are limited to 65,535 UTF-8 bytes and 65,535 JavaScript characters; multibyte characters use more than one byte. Oversized selections and terminal control bytes are rejected rather than changed or truncated.
 
 A submitted status acknowledges the input transport; it does not confirm that the agent processed the text. A failed destination check sends nothing. A missing delivery acknowledgment is reported as unknown: inspect the destination before deliberately creating another send. Codeman does not automatically retry an ambiguous send. Unsaved notebook drafts are retained.
 
