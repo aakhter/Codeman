@@ -61,11 +61,11 @@ interface SessionNote {
 
 ## Task 2 — COD-479: projects and reassignment
 
-- [ ] Write resolver tests for exact/nested roots, path boundaries, supplied configured project, established worktree root, local/SSH/container identity, unmatched fallback, rename, and manual assignment.
-- [ ] Run npm test -- test/session-notes-projects.test.ts and confirm expected missing-feature failures.
-- [ ] Implement a persistent owner-scoped registry with stable IDs and editable labels. Consume existing case/session metadata. Prefer the chosen configured case, then most-specific matching root in the same execution location, then a directory fallback.
-- [ ] Reuse known originating session/conversation aliases when looking up notebooks; do not merge unknown sessions based on titles. Invoke the store's recoverable reassign operation for explicit user reassignment; retain original session/cwd.
-- [ ] Run focused tests and required checks, obtain specification and quality reviews, and commit with COD-479.
+- [x] Write resolver tests for exact/nested roots, path boundaries, supplied configured project, established worktree root, local/SSH/container identity, unmatched fallback, rename, and manual assignment.
+- [x] Run npm test -- test/session-notes-projects.test.ts and confirm expected missing-feature failures.
+- [x] Implement a persistent owner-scoped registry with stable IDs and editable labels. Consume existing case/session metadata. Prefer the chosen configured case, then most-specific matching root in the same execution location, then a directory fallback.
+- [x] Reuse known originating session/conversation aliases when looking up notebooks; do not merge unknown sessions based on titles. Invoke the store's recoverable reassign operation for explicit user reassignment; retain original session/cwd.
+- [x] Run focused tests and required checks, obtain specification and quality reviews, and commit with COD-479.
 
 ## Task 3 — COD-480: API, index and checklist projections
 
@@ -101,3 +101,7 @@ The initial implementation milestone is COD-478. Report precisely which subtasks
 ## COD-478 verification receipt
 
 Implemented and independently approved for specification and code quality at `3ea99c89`. The focused storage suite passes 20 tests, including separate-process contention, interrupted writes and moves, external-edit conflicts, malformed journal preservation, and stale lock recovery. Typecheck, format check, and lockfile check pass. Lint passes with an existing `src/web/server.ts` warning. Project resolution, API, UI, and explicit sharing remain pending; the feature is not deployed.
+
+## COD-479 verification receipt
+
+Implemented at `98d4b130`, independently approved for specification and code quality. Both scoped suites pass 37 tests (17 projects and 20 storage). Root independently reran typecheck, format check and lockfile check successfully. Project registry preserves stable identity across renames/removal and keeps interrupted staged bytes recoverable. API, launch metadata capture, editor and sharing remain pending. COD-480 is now in progress.
