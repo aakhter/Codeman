@@ -44,6 +44,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { localWorkspaceMatcher } from './utils/local-workspace-match.js';
 import { LRUMap } from './utils/lru-map.js';
 
 /** Covers `session_meta` (~19 KiB) plus the first user message (~69 KiB behind it). */
@@ -422,15 +423,14 @@ export async function findCodexRecoveryTranscript(record: {
   sourceSessionId: string;
   workingDir: string;
 }): Promise<string | undefined> {
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
   for (const file of await listRollouts(codexSessionsRoot())) {
     const identity = parseIdentity(await readHead(file.path, HEAD_BYTES));
-    if (!identity.threadId || identity.threadSource === 'subagent' || identity.cwd !== record.workingDir) continue;
-    if (
-      record.nativeResumeId
-        ? identity.threadId === record.nativeResumeId
-        : identity.originator === `codeman_${record.sourceSessionId}`
-    )
-      return file.path;
+    if (!identity.threadId || identity.threadSource === 'subagent') continue;
+    const matchesIdentity = record.nativeResumeId
+      ? identity.threadId === record.nativeResumeId
+      : identity.originator === `codeman_${record.sourceSessionId}`;
+    if (matchesIdentity && matchesWorkspace(identity.cwd)) return file.path;
   }
   return undefined;
 }

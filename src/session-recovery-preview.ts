@@ -2,6 +2,7 @@
 import { open, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { findCodexRecoveryTranscript, userPromptFromLine } from './codex-transcript.js';
+import { localWorkspaceMatcher } from './utils/local-workspace-match.js';
 import { claudeProjectsDir } from './utils/claude-transcript.js';
 import type { SessionRecoveryRecord } from './types/session-recovery.js';
 
@@ -28,11 +29,16 @@ export async function readRecoveryPreview(record: SessionRecoveryRecord): Promis
   const unavailable = (message: string): RecoveryPreview => ({ available: false, message });
   if (record.transport !== 'local' || record.launch.kind !== 'built-in')
     return unavailable('Preview is available for local built-in Claude and Codex conversations only.');
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
   const paths: string[] = [];
   const claudeId = record.claudeResumeId || record.sourceSessionId;
   if (record.mode === 'codex') {
     const path = await findCodexRecoveryTranscript(record);
     if (path) paths.push(path);
+    else if (!record.nativeResumeId)
+      return unavailable(
+        'The original Codex conversation ID was not saved, and no local transcript identifies this Codeman session. Search Saved sessions below to find the conversation.'
+      );
   } else if (record.mode === 'claude' && UUID.test(claudeId)) {
     for (const dir of await readdir(claudeProjectsDir(), { withFileTypes: true }).catch(() => [])) {
       if (dir.isDirectory()) paths.push(join(claudeProjectsDir(), dir.name, `${claudeId}.jsonl`));
@@ -82,7 +88,7 @@ export async function readRecoveryPreview(record: SessionRecoveryRecord): Promis
           }
           text = prompt.text;
         } else {
-          if (row.sessionId !== claudeId || row.cwd !== record.workingDir || row.isSidechain) continue;
+          if (row.sessionId !== claudeId || !matchesWorkspace(row.cwd) || row.isSidechain) continue;
           if (row.type === 'user' || row.type === 'assistant') validClaude = true;
           if (row.type !== 'user') continue;
           if (typeof row.uuid === 'string') {

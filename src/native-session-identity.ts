@@ -1,5 +1,6 @@
 /** Exact, secret-free native conversation identity discovery for reboot recovery. */
 
+import { localWorkspaceMatcher } from './utils/local-workspace-match.js';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -98,5 +99,6 @@ export async function probeCodexRecoveryIdentity(record: {
   const rows = await scanCodexSessionIdentities({ fresh: true });
   const id = record.nativeResumeId ?? codexThreadBySessionId(rows).get(record.sourceSessionId);
   if (!id || !CODEX_SESSION_ID_PATTERN.test(id)) return null;
-  return rows.some((row) => row.sessionId === id && row.workingDir === record.workingDir) ? id : null;
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
+  return rows.some((row) => row.sessionId === id && matchesWorkspace(row.workingDir)) ? id : null;
 }

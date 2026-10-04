@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { getDataDir } from './config/instance.js';
 import { MAX_SESSION_NAME_LENGTH } from './config/terminal-limits.js';
 import { codexThreadBySessionId, scanCodexSessionIdentities } from './codex-transcript.js';
+import { localWorkspaceMatcher } from './utils/local-workspace-match.js';
 import { claudeProjectsDir } from './utils/claude-transcript.js';
 import type { SessionRecoveryRecord } from './types/session-recovery.js';
 
@@ -33,6 +34,7 @@ async function metadataRows(path: string): Promise<Array<Record<string, unknown>
 export async function readClaudeRecoveryDetails(
   record: Pick<SessionRecoveryRecord, 'sourceSessionId' | 'claudeResumeId' | 'workingDir'>
 ): Promise<{ resumeId?: string; conversationName?: string }> {
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
   const id = record.claudeResumeId || record.sourceSessionId;
   if (!UUID.test(id)) return {};
   const root = claudeProjectsDir();
@@ -72,7 +74,7 @@ export async function readClaudeRecoveryDetails(
           if (
             ['user', 'assistant'].includes(row.type ?? '') &&
             row.sessionId === id &&
-            row.cwd === record.workingDir &&
+            matchesWorkspace(row.cwd) &&
             !row.isSidechain
           )
             validMessage = true;
@@ -129,7 +131,7 @@ export async function enrichRecoveryNames(
       if (record.transport !== 'local') return view;
       if (record.mode === 'codex') {
         const thread = record.nativeResumeId || paneThreads.get(record.sourceSessionId);
-        if (thread && (record.nativeResumeId || workspaces.get(thread) === record.workingDir)) {
+        if (thread && (record.nativeResumeId || localWorkspaceMatcher(record.workingDir)(workspaces.get(thread)))) {
           view.displayConversationId = thread;
           const name = titles.get(thread);
           if (name) view.conversationName = name;

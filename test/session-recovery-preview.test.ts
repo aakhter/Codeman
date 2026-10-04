@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, truncateSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, truncateSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { probeCodexRecoveryIdentity } from '../src/native-session-identity.js';
+import { readClaudeRecoveryDetails } from '../src/session-recovery-names.js';
 import { readRecoveryPreview } from '../src/session-recovery-preview.js';
 import type { SessionRecoveryRecord } from '../src/types/session-recovery.js';
 
@@ -133,5 +135,41 @@ describe('read-only recovery previews', () => {
       available: false,
       message: 'This transcript exceeds the 64 MiB preview limit.',
     });
+  });
+  it('matches an exact Codex identity through a symlink without guessing another conversation', async () => {
+    const actual = join(root, 'actual');
+    const alias = join(root, 'alias');
+    mkdirSync(actual);
+    symlinkSync(actual, alias, 'dir');
+    codex([event('symlink prompt')], { cwd: actual });
+    expect(await readRecoveryPreview({ ...record, workingDir: alias })).toMatchObject({
+      available: true,
+      prompts: [{ text: 'symlink prompt' }],
+    });
+    expect(await probeCodexRecoveryIdentity({ ...record, workingDir: alias })).toBe(id);
+    expect(
+      (await readRecoveryPreview({ ...record, workingDir: alias, sourceSessionId: 'different-pane' })).available
+    ).toBe(false);
+    expect((await readRecoveryPreview({ ...record, workingDir: alias, nativeResumeId: 'missing' })).available).toBe(
+      false
+    );
+  });
+  it('matches Claude prompt workspace aliases while retaining the native identity requirement', async () => {
+    const actual = join(root, 'actual');
+    const alias = join(root, 'alias');
+    mkdirSync(actual);
+    symlinkSync(actual, alias, 'dir');
+    const dir = join(process.env.CLAUDE_CONFIG_DIR!, 'projects', 'workspace');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${id}.jsonl`),
+      JSON.stringify({ type: 'user', sessionId: id, cwd: actual, message: { content: 'Claude symlink prompt' } })
+    );
+    expect(await readClaudeRecoveryDetails({ ...record, claudeResumeId: id, workingDir: alias })).toMatchObject({
+      resumeId: id,
+    });
+    expect(
+      await readRecoveryPreview({ ...record, mode: 'claude', claudeResumeId: id, workingDir: alias })
+    ).toMatchObject({ available: true, prompts: [{ text: 'Claude symlink prompt' }] });
   });
 });
