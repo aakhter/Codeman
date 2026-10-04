@@ -6,6 +6,7 @@ import { SessionNotesBindings } from './session-notes-bindings.js';
 import { createHash } from 'node:crypto';
 import { outsideNotesTransaction, safeNotesId } from './session-notes-filesystem.js';
 import {
+  SessionNotesInputError,
   checklistItems,
   filterSessionNotes,
   setChecklistItem,
@@ -151,6 +152,29 @@ export class SessionNotesService {
     if (result) await this.bindings.observe(owner, result, [], true);
     await this.observe(owner);
     return result;
+  }
+  appendResponse(
+    owner: string,
+    id: string,
+    revision: string,
+    text: string,
+    source: SessionNotesSource
+  ): Promise<SessionNote> {
+    return this.store.transaction(owner, async () => {
+      const note = await this.atRevision(owner, id, revision);
+      const label = (value: string) => value.replace(/[\r\n]/g, ' ').replace(/[\\`*_{}[\]<>#()+.!|-]/g, '\\$&');
+      const reference = source.name ? label(source.name) + ' · ' + label(source.id) : label(source.id);
+      const appended =
+        note.markdown +
+        '\n\n---\nSaved response · ' +
+        new Date().toISOString() +
+        '\nSource session: ' +
+        reference +
+        '\n\n' +
+        text;
+      if (appended.length > 1024 * 1024) throw new SessionNotesInputError('Append exceeds the notebook size limit');
+      return (await this.saveWithinTransaction(owner, id, revision, appended))!;
+    });
   }
   list(owner: string, filter: SessionNotesFilter = {}): Promise<SessionNoteEntry[]> {
     return this.store.transaction(owner, () => this.listWithinTransaction(owner, filter));

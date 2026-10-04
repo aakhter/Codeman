@@ -168,6 +168,7 @@
       return shell;
     },
     closeSessionNotes() {
+      this._closeNotesSharing?.();
       this._notesNavigation = (this._notesNavigation || 0) + 1;
       this._notesListSequence = (this._notesListSequence || 0) + 1;
       clearTimeout(this._notesFilterTimer);
@@ -400,6 +401,7 @@
       }
     },
     _mountNotesEditor(note) {
+      this._closeNotesSharing();
       this._notesErrorElement.textContent = '';
       const host = this._notesEditorHost;
       host.replaceChildren();
@@ -433,7 +435,14 @@
         if (!state.markdown.trim()) this._notesController.edit('# Notes\n\n## Ideas\n\n## Next steps\n\n', state.title);
       });
       const retry = button('Save now / Retry', () => this._notesController.flush());
-      actions.append(previewButton, retry, template, exportLink);
+      actions.append(
+        previewButton,
+        retry,
+        template,
+        exportLink,
+        button('Send to session', () => this.sendNotesToSession()),
+        button('Save response to notes', () => this.saveResponseToNotes())
+      );
       const markdown = field('textarea', 'Markdown notes');
       markdown.spellcheck = true;
       const preview = node('div', undefined, 'notes-preview');
@@ -642,7 +651,254 @@
       }
       if (isCurrentView()) await this._refreshNotesList();
     },
-    // Explicit sharing can read this selection in COD-482; no automatic prompt injection.
+    _closeNotesSharing() {
+      const dialog = this._notesShare;
+      if (!dialog) return;
+      this._notesShare = null;
+      dialog.trap?.deactivate({ restoreFocus: false });
+      window.visualViewport?.removeEventListener('resize', dialog.viewport);
+      window.visualViewport?.removeEventListener('scroll', dialog.viewport);
+      dialog.element.remove();
+      if (dialog.focus?.isConnected) dialog.focus.focus();
+    },
+    _notesSharingDialog(title) {
+      this._closeNotesSharing();
+      const focus = document.activeElement;
+      const overlay = node('div', undefined, 'notes-share-overlay');
+      const element = node('section', undefined, 'notes-share-dialog');
+      element.setAttribute('role', 'dialog');
+      element.setAttribute('aria-modal', 'true');
+      element.setAttribute('aria-label', title);
+      const header = node('header');
+      header.append(
+        node('h2', title),
+        button('Cancel', () => this._closeNotesSharing())
+      );
+      const message = node('p', '', 'notes-share-status');
+      message.setAttribute('role', 'status');
+      element.append(header, message);
+      overlay.append(element);
+      document.body.append(overlay);
+      const dialog = { element: overlay, content: element, focus, message, busy: false };
+      this._notesShare = dialog;
+      dialog.current = () => this._notesShare === dialog && overlay.isConnected;
+      overlay.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          this._closeNotesSharing();
+        }
+      });
+      dialog.viewport = () => {
+        overlay.style.height = (window.visualViewport?.height || window.innerHeight) + 'px';
+        overlay.style.top = (window.visualViewport?.offsetTop || 0) + 'px';
+      };
+      window.visualViewport?.addEventListener('resize', dialog.viewport);
+      window.visualViewport?.addEventListener('scroll', dialog.viewport);
+      dialog.viewport();
+      if (typeof FocusTrap !== 'undefined') {
+        dialog.trap = new FocusTrap(overlay);
+        dialog.trap.activate();
+      }
+      header.querySelector('button').focus();
+      return dialog;
+    },
+    async sendNotesToSession() {
+      const selection = this.getNotesSelection();
+      const state = this._notesController?.current;
+      if (!selection || !state) return;
+      const isCurrentView = this._captureNotesView();
+      const wholeText = state.markdown;
+      const dialog = this._notesSharingDialog('Send to session');
+      const current = () => dialog.current() && isCurrentView() && this._notesController.current === state;
+      const text = node('pre', selection.text);
+      text.setAttribute('aria-label', 'Text to send');
+      const destination = field('select', 'Destination session');
+      destination.append(node('option', 'Choose an active destination'));
+      destination.firstChild.value = '';
+      const summary = node('p', 'Choose a destination. No session will be started or resumed.');
+      const confirm = button('Confirm send', async () => {
+        if (!current() || dialog.busy || !dialog.preview) return;
+        const preview = dialog.preview;
+        dialog.busy = true;
+        confirm.disabled = true;
+        destination.disabled = true;
+        try {
+          const result = await this._notesRequest(
+            '/' + encodeURIComponent(selection.notebookId) + '/send',
+            { token: preview.token },
+            'POST'
+          );
+          if (!current()) return;
+          dialog.message.textContent =
+            result.delivery === 'submitted'
+              ? 'Submitted to ' + preview.destination.name + '. Agent processing is not confirmed.'
+              : result.message || 'Nothing was sent. The destination is unavailable.';
+        } catch (error) {
+          if (current())
+            dialog.message.textContent =
+              error.message + ' Delivery may be unknown. Inspect the destination before sending again.';
+        }
+        // Confirmation is single-use, even after a failed or ambiguous request. No automatic retry.
+      });
+      confirm.disabled = true;
+      let previewSequence = 0;
+      const prepare = async () => {
+        const sequence = ++previewSequence;
+        dialog.preview = null;
+        confirm.disabled = true;
+        if (!current() || dialog.busy || !destination.value || !text.textContent.trim()) return;
+        try {
+          const preview = await this._notesRequest(
+            '/' + encodeURIComponent(selection.notebookId) + '/send-preview',
+            { destinationId: destination.value, text: text.textContent },
+            'POST'
+          );
+          if (!current() || sequence !== previewSequence) return;
+          dialog.preview = preview;
+          text.textContent = preview.text;
+          summary.textContent = 'Destination: ' + preview.destination.name + ' (' + preview.destination.id + ')';
+          dialog.message.textContent = '';
+          confirm.disabled = false;
+        } catch (error) {
+          if (current() && sequence === previewSequence) dialog.message.textContent = error.message;
+        }
+      };
+      destination.addEventListener('change', prepare);
+      const whole = button('Use whole notebook', () => {
+        if (dialog.busy) return;
+        text.textContent = wholeText;
+        dialog.message.textContent = wholeText.trim()
+          ? 'Whole notebook chosen. Choose a destination and review before sending.'
+          : 'The notebook is empty. Add note text before sending.';
+        prepare();
+      });
+      if (!selection.text) dialog.message.textContent = 'Select note text, or explicitly choose the whole notebook.';
+      dialog.content.append(summary, destination, text, whole, confirm);
+      try {
+        const destinations = await this._notesRequest('/destinations');
+        if (!current()) return;
+        for (const item of destinations) {
+          const option = node('option', item.name + ' · ' + (item.mode || 'session') + ' · ' + item.id);
+          option.value = item.id;
+          destination.append(option);
+        }
+        if (destinations.some((item) => item.id === selection.sessionId)) {
+          destination.value = selection.sessionId;
+          await prepare();
+        } else if (!destinations.length)
+          dialog.message.textContent = 'No active destination owned by you. Notes remain editable.';
+      } catch (error) {
+        if (current()) dialog.message.textContent = error.message;
+      }
+    },
+    async saveResponseToNotes() {
+      if (this.terminalLoadStates?.has(this.activeSessionId)) {
+        this.showToast?.('Wait for the active terminal to finish loading, then select response text.', 'error');
+        return;
+      }
+      // Capture the user's actual xterm selection synchronously, before focus/navigation changes.
+      const raw = this.terminal?.getSelection?.() || '';
+      const selectedText = this.cleanedTerminalSelection ? this.cleanedTerminalSelection(raw) : raw;
+      const sourceSessionId = this.activeSessionId;
+      if (!selectedText.trim() || !sourceSessionId) {
+        this.showToast?.('Select terminal response text before saving it to notes.', 'error');
+        return;
+      }
+      const dialog = this._notesSharingDialog('Save response to notes');
+      const source = node('p', 'Source session: ' + sourceSessionId);
+      const text = node('pre', selectedText);
+      text.setAttribute('aria-label', 'Selected response');
+      const notebook = field('select', 'Destination notebook');
+      const targetPreview = node('pre', '');
+      targetPreview.setAttribute('aria-label', 'Current notebook');
+      const label = node('p', 'Append to the current saved notebook. Local editor drafts are retained.');
+      let target = null,
+        sequence = 0;
+      const loadTarget = async () => {
+        const requestSequence = ++sequence;
+        confirm.disabled = true;
+        target = null;
+        if (!notebook.value || dialog.busy) return;
+        try {
+          const note = await this._notesRequest('/' + encodeURIComponent(notebook.value));
+          if (!dialog.current() || requestSequence !== sequence) return;
+          target = note;
+          targetPreview.textContent = note.markdown;
+          dialog.message.textContent = 'Review the current notebook, then confirm append.';
+          confirm.disabled = false;
+        } catch (error) {
+          if (dialog.current() && requestSequence === sequence) {
+            dialog.message.textContent = error.message + ' Selected response is retained here.';
+            targetPreview.textContent = error.data?.raw || '';
+          }
+        }
+      };
+      const confirm = button('Confirm append', async () => {
+        if (!dialog.current() || dialog.busy || !target) return;
+        const captured = target;
+        dialog.busy = true;
+        confirm.disabled = true;
+        notebook.disabled = true;
+        reload.disabled = true;
+        try {
+          const saved = await this._notesRequest(
+            '/' + encodeURIComponent(captured.metadata.id) + '/append-response',
+            { revision: captured.revision, sourceSessionId, text: selectedText },
+            'POST'
+          );
+          if (!dialog.current()) return;
+          const state = this._notesController?.current;
+          if (state?.id === saved.metadata.id && this._notesEditorElements?.id === state.id)
+            this._notesController.external(saved);
+          dialog.message.textContent = 'Selected response appended. Any local draft is retained.';
+          this._refreshNotesList();
+        } catch (error) {
+          if (!dialog.current()) return;
+          dialog.message.textContent =
+            error.message + ' Selected response is retained. Review current content before confirming again.';
+          targetPreview.textContent =
+            error.current?.markdown ?? error.current?.raw ?? error.data?.raw ?? captured.markdown;
+          target = null;
+          dialog.busy = false;
+          notebook.disabled = false;
+          reload.disabled = false;
+        }
+      });
+      confirm.disabled = true;
+      const reload = button('Review current notebook again', loadTarget);
+      notebook.addEventListener('change', loadTarget);
+      dialog.content.append(
+        source,
+        text,
+        label,
+        notebook,
+        node('h3', 'Current saved notebook'),
+        targetPreview,
+        reload,
+        confirm
+      );
+      try {
+        await this._initSessionNotes();
+        if (!dialog.current()) return;
+        const currentNote = this._notesController?.current?.note;
+        const sourceNote = currentNote || (await this._notesRequest('/open', { sessionId: sourceSessionId }, 'POST'));
+        const entries = await this._notesRequest('');
+        if (!dialog.current()) return;
+        const choices = new Map([[sourceNote.metadata.id, sourceNote]]);
+        for (const entry of entries) if (entry.note) choices.set(entry.id, entry.note);
+        for (const note of choices.values()) {
+          const option = node('option', note.metadata.title + ' · ' + note.metadata.sessionId);
+          option.value = note.metadata.id;
+          notebook.append(option);
+        }
+        notebook.value = sourceNote.metadata.id;
+        await loadTarget();
+      } catch (error) {
+        if (dialog.current()) dialog.message.textContent = error.message + ' Selected response is retained here.';
+      }
+    },
+    // Selection is an explicit snapshot; sharing never injects notes automatically.
     getNotesSelection() {
       const state = this._notesController?.current;
       const editor = this._notesEditorElements?.markdown;

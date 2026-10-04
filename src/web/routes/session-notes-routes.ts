@@ -1,6 +1,8 @@
 /** @fileoverview Strict owner-private notebook API; browser input contains only editable content and revisions. */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
+import { MAX_INPUT_LENGTH } from '../../config/terminal-limits.js';
 import { SessionNotesInputError } from '../../session-notes-index.js';
 import { sessionNotesOwnerKey } from '../../session-notes-projects.js';
 import {
@@ -49,6 +51,88 @@ async function handled(reply: FastifyReply, operation: () => Promise<unknown>): 
 }
 const success = (data: unknown) => ({ success: true, data });
 export function registerSessionNotesRoutes(app: FastifyInstance, ctx: SessionNotesPort): void {
+  const previews = new Map<
+    string,
+    { owner: string; notebookId: string; destinationId: string; text: string; expires: number }
+  >();
+  const selectedText = z
+    .string()
+    .min(1)
+    .max(MAX_INPUT_LENGTH - 1)
+    .refine((text) => !!text.trim())
+    .refine(
+      (text) =>
+        [...text].every((character) => {
+          const code = character.charCodeAt(0);
+          return (code >= 32 && code !== 127) || [9, 10, 13].includes(code);
+        }),
+      'Selected text contains terminal controls'
+    );
+  app.get('/api/session-notes/destinations', async (req, reply) =>
+    handled(reply, async () => success((await ctx.listNotesDestinations?.(ownerFor(req))) ?? []))
+  );
+  app.post('/api/session-notes/:id/send-preview', { bodyLimit: 2 * 1024 * 1024 }, async (req, reply) =>
+    handled(reply, async () => {
+      const notebookId = z.object({ id }).parse(req.params).id;
+      const body = z.object({ destinationId: id, text: selectedText }).strict().parse(req.body);
+      const owner = ownerFor(req);
+      await ctx.sessionNotes.read(sessionNotesOwnerKey(owner), notebookId);
+      const destination = ((await ctx.listNotesDestinations?.(owner)) ?? []).find(
+        (item) => item.id === body.destinationId
+      );
+      if (!destination) throw new SessionNotesNotFoundError('Active destination not found');
+      for (const [token, preview] of previews) if (preview.expires <= Date.now()) previews.delete(token);
+      if (previews.size >= 256)
+        throw new SessionNotesInputError('Too many pending previews. Wait five minutes before reserving another.');
+      const token = randomUUID();
+      previews.set(token, {
+        owner: sessionNotesOwnerKey(owner),
+        notebookId,
+        destinationId: destination.id,
+        text: body.text,
+        expires: Date.now() + 300000,
+      });
+      return success({ token, text: body.text, destination });
+    })
+  );
+  app.post('/api/session-notes/:id/send', async (req, reply) =>
+    handled(reply, async () => {
+      const notebookId = z.object({ id }).parse(req.params).id;
+      const body = z.object({ token: z.string().uuid() }).strict().parse(req.body);
+      const owner = ownerFor(req);
+      const preview = previews.get(body.token);
+      if (
+        !preview ||
+        preview.expires <= Date.now() ||
+        preview.owner !== sessionNotesOwnerKey(owner) ||
+        preview.notebookId !== notebookId
+      )
+        throw new SessionNotesInputError(
+          'Preview expired or already used. Inspect the destination before creating a new send.'
+        );
+      // Consume synchronously before any await: even an ambiguous delivery cannot be replayed.
+      previews.delete(body.token);
+      await ctx.sessionNotes.read(sessionNotesOwnerKey(owner), notebookId);
+      if (!ctx.sendNotesInput) throw new SessionNotesInputError('Notes delivery unavailable');
+      return success(await ctx.sendNotesInput(preview.destinationId, owner, preview.text));
+    })
+  );
+  app.post('/api/session-notes/:id/append-response', { bodyLimit: 2 * 1024 * 1024 }, async (req, reply) =>
+    handled(reply, async () => {
+      const notebookId = z.object({ id }).parse(req.params).id;
+      const body = z
+        .object({ revision, sourceSessionId: z.string().min(1).max(256), text: selectedText })
+        .strict()
+        .parse(req.body);
+      const owner = ownerFor(req);
+      const source = await ctx.getNotesSource(body.sourceSessionId, owner);
+      if (!source || (owner !== undefined && source.owner !== owner))
+        throw new SessionNotesNotFoundError('Source session not found');
+      return success(
+        await ctx.sessionNotes.appendResponse(sessionNotesOwnerKey(owner), notebookId, body.revision, body.text, source)
+      );
+    })
+  );
   app.get('/api/session-notes/context', async (req, reply) =>
     handled(reply, async () => success(await ctx.sessionNotes.context(sessionNotesOwnerKey(ownerFor(req)))))
   );

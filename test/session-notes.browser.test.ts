@@ -20,6 +20,8 @@ let api: ReturnType<typeof Fastify>;
 let failSave = false;
 let available = true;
 let savedId: string;
+let sentTexts: string[] = [];
+let destinationLive = true;
 const owner = sessionNotesOwnerKey();
 const source = { id: 'session1', workingDir: '/repo', name: 'Retained source' };
 beforeAll(async () => {
@@ -34,10 +36,19 @@ beforeEach(async () => {
   notes = new SessionNotesService({ root });
   failSave = false;
   available = true;
+  sentTexts = [];
+  destinationLive = true;
   api = Fastify();
   registerSessionNotesRoutes(api, {
     sessionNotes: notes,
     getNotesSource: async () => (available ? source : null),
+    listNotesDestinations: async () =>
+      destinationLive ? [{ id: 'destination', name: 'Live destination', mode: 'claude' }] : [],
+    sendNotesInput: async (id, _owner, text) => {
+      if (!destinationLive || id !== 'destination') return { delivery: 'failed', message: 'Destination unavailable' };
+      sentTexts.push(text);
+      return { delivery: 'submitted' };
+    },
     listNotesCases: async () => [
       { name: 'Repo', path: '/repo', hasClaudeMd: false },
       { name: 'Other', path: '/other', hasClaudeMd: false },
@@ -95,6 +106,7 @@ async function boot() {
   // Match safe shell initialization: dismiss loading skeleton without constructing runtime/PTY controllers.
   await page.evaluate(() => document.body.classList.add('app-loaded'));
   await page.addStyleTag({ content: read('styles.css') + '\n' + read('session-notes.css') });
+  await page.addStyleTag({ content: '@media (max-width: 1023px) {\n' + read('mobile.css') + '\n}' });
   const bootstrap =
     "document.addEventListener('DOMContentLoaded', () => {\n  app = new CodemanApp();\n  window.app = app;\n});";
   const appSource = read('app.js').replace(bootstrap, '');
@@ -269,4 +281,138 @@ it('malformed canonical bytes remain visible and require an explicit repair acti
   await page.getByRole('button', { name: 'Repair notebook', exact: true }).click();
   await page.locator('textarea[aria-label="Markdown notes"]').waitFor();
   expect((await notes.read(owner, savedId)).markdown).toBe('repaired body');
+});
+
+it('explicit sharing previews selected text, requires live destination choice and blocks repeated confirmation', async () => {
+  await sessionEditor();
+  const editor = page.getByRole('textbox', { name: 'Markdown notes', exact: true });
+  await editor.fill('private before\nSELECTED ONLY\nprivate after');
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(15, 28));
+  await page.getByRole('button', { name: 'Send to session', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Send to session', exact: true });
+  await expect.poll(() => dialog.locator('pre').textContent()).toBe('SELECTED ONLY');
+  await expect.poll(() => dialog.getByRole('combobox').inputValue()).toBe('');
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm send' }).isDisabled()).toBe(true);
+  expect(sentTexts).toEqual([]);
+  await dialog.getByRole('combobox').selectOption('destination');
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm send' }).isDisabled()).toBe(false);
+  await page.screenshot({ path: '/tmp/cod477-ui-review/desktop-sharing.png' });
+  await dialog.getByRole('button', { name: 'Confirm send' }).evaluate((element: HTMLButtonElement) => {
+    element.click();
+    element.click();
+  });
+  await expect.poll(() => dialog.getByRole('status').textContent()).toContain('Submitted to');
+  expect(sentTexts).toEqual(['SELECTED ONLY']);
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm send' }).isDisabled()).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect.poll(() => dialog.count()).toBe(0);
+  await expect
+    .poll(() =>
+      page
+        .getByRole('button', { name: 'Send to session', exact: true })
+        .evaluate((element) => element === document.activeElement)
+    )
+    .toBe(true);
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(0, 0));
+  await page.getByRole('button', { name: 'Send to session', exact: true }).click();
+  await expect.poll(() => dialog.locator('pre').textContent()).toBe('');
+  await dialog.getByRole('button', { name: 'Use whole notebook' }).click();
+  await expect.poll(() => dialog.locator('pre').textContent()).toBe('private before\nSELECTED ONLY\nprivate after');
+  await dialog.getByRole('combobox').selectOption('destination');
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm send' }).isDisabled()).toBe(false);
+  await page.screenshot({ path: '/tmp/cod477-ui-review/desktop-sharing-whole.png' });
+});
+
+it('selected response append retains capture on external revision conflict and malformed target until explicit review', async () => {
+  await sessionEditor();
+  const editor = page.getByRole('textbox', { name: 'Markdown notes', exact: true });
+  await editor.fill('existing bytes\n');
+  await page.getByRole('button', { name: 'Save now / Retry', exact: true }).click();
+  await expect.poll(() => page.getByRole('status').filter({ hasText: 'Saved' }).isVisible()).toBe(true);
+  await page.evaluate(() => {
+    const app = (window as any).app;
+    app.terminal = { getSelection: () => 'selected response ONLY' };
+    app.cleanedTerminalSelection = (text: string) => text;
+  });
+  await page.getByRole('button', { name: 'Save response to notes', exact: true }).last().click();
+  const dialog = page.getByRole('dialog', { name: 'Save response to notes', exact: true });
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm append' }).isDisabled()).toBe(false);
+  await expect.poll(() => dialog.locator('pre').first().textContent()).toBe('selected response ONLY');
+  const note = (await notes.list(owner))[0].note!;
+  await notes.save(owner, note.metadata.id, note.revision, 'external retained\r\n');
+  await dialog.getByRole('button', { name: 'Confirm append' }).click();
+  await expect.poll(() => dialog.getByRole('status').textContent()).toContain('Selected response is retained');
+  await expect.poll(() => dialog.locator('pre').last().textContent()).toBe('external retained\r\n');
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm append' }).isDisabled()).toBe(true);
+  await dialog.getByRole('button', { name: 'Review current notebook again' }).click();
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm append' }).isDisabled()).toBe(false);
+  const current = await notes.read(owner, note.metadata.id);
+  await writeFile(
+    join(root, owner, 'projects', current.metadata.projectId, current.metadata.id + '.md'),
+    'broken target'
+  );
+  await dialog.getByRole('button', { name: 'Confirm append' }).click();
+  await expect.poll(() => dialog.getByRole('status').textContent()).toContain('Selected response is retained');
+  await expect.poll(() => dialog.locator('pre').first().textContent()).toBe('selected response ONLY');
+  await notes.repair(
+    owner,
+    current.metadata.id,
+    (await api.inject('/api/session-notes/' + current.metadata.id)).json().data.revision,
+    'external retained\r\n'
+  );
+  await dialog.getByRole('button', { name: 'Review current notebook again' }).click();
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm append' }).isDisabled()).toBe(false);
+  await dialog.getByRole('button', { name: 'Confirm append' }).click();
+  await expect.poll(() => dialog.getByRole('status').textContent()).toContain('Selected response appended');
+  const saved = await notes.read(owner, note.metadata.id);
+  expect(saved.markdown.startsWith('external retained\r\n')).toBe(true);
+  expect(saved.markdown).toContain('selected response ONLY');
+  expect(sentTexts).toEqual([]);
+  await page.screenshot({ path: '/tmp/cod477-ui-review/desktop-response-append.png' });
+});
+
+it('mobile global notes entry and sharing dialog fit the shipping CSS cascade and retain keyboard focus', async () => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await sessionEditor();
+  const editor = page.getByRole('textbox', { name: 'Markdown notes', exact: true });
+  await editor.fill('mobile notes');
+  await page.getByRole('button', { name: 'Save now / Retry', exact: true }).click();
+  await expect.poll(() => page.getByRole('status').filter({ hasText: 'Saved' }).isVisible()).toBe(true);
+  await page.getByRole('button', { name: 'Back to session', exact: true }).click();
+  await page.getByRole('button', { name: 'Open notes browser', exact: true }).click();
+  await page.getByRole('button', { name: 'Retained source notes', exact: true }).click();
+  const sendButtonBox = await page.getByRole('button', { name: 'Send to session', exact: true }).boundingBox();
+  expect(sendButtonBox!.height).toBeGreaterThanOrEqual(44);
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(0, 6));
+  await page.getByRole('button', { name: 'Send to session', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Send to session', exact: true });
+  await dialog.getByRole('combobox').selectOption('destination');
+  await expect.poll(() => dialog.getByRole('button', { name: 'Confirm send' }).isDisabled()).toBe(false);
+  const box = await dialog.boundingBox();
+  expect(box!.width).toBeLessThanOrEqual(390);
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  for (const name of ['Cancel', 'Confirm send']) {
+    const targetBox = await dialog.getByRole('button', { name, exact: true }).boundingBox();
+    expect(targetBox!.height).toBeGreaterThanOrEqual(44);
+    expect(targetBox!.width).toBeGreaterThanOrEqual(44);
+  }
+  await dialog.getByRole('button', { name: 'Cancel' }).focus();
+  await page.keyboard.press('Shift+Tab');
+  await expect
+    .poll(() =>
+      dialog.getByRole('button', { name: 'Confirm send' }).evaluate((element) => element === document.activeElement)
+    )
+    .toBe(true);
+  await page.screenshot({ path: '/tmp/cod477-ui-review/mobile-sharing.png' });
+  await page.keyboard.press('Escape');
+  await expect.poll(() => dialog.count()).toBe(0);
+  await expect.poll(() => page.getByRole('dialog', { name: 'Notes browser', exact: true }).isVisible()).toBe(true);
+  await expect
+    .poll(() =>
+      page
+        .getByRole('button', { name: 'Send to session', exact: true })
+        .evaluate((element) => element === document.activeElement)
+    )
+    .toBe(true);
+  expect(sentTexts).toEqual([]);
 });

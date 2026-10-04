@@ -64,6 +64,7 @@ codeman web    # then open http://localhost:3000
 | [The Dashboard](The-Dashboard)             | What is the UI telling me?                                 |
 | [Agent CLIs](Agent-CLIs)                   | Which agent should this session run, and how do I set it up? |
 | [Working With Files](Working-With-Files)   | How do I read, edit, and attach files?                     |
+| [Session Notes](Session-Notes) | How do I keep private notes and explicitly share selected text? |
 | [Input And Voice](Input-And-Voice)         | How do I talk to an agent, including by voice?             |
 | [Mobile Guide](Mobile-Guide)               | How well does this work on a phone?                        |
 | [Keyboard Shortcuts](Keyboard-Shortcuts)   | What can I drive from the keyboard?                        |

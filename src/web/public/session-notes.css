@@ -304,3 +304,61 @@
 .header-brand .btn-notes:hover {
   transform: none;
 }
+.notes-share-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10040;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0009;
+  padding: 12px;
+  box-sizing: border-box;
+}
+.notes-share-dialog {
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  background: var(--bg-dark, #171b22);
+  color: var(--text, #e8edf4);
+  border: 1px solid var(--border, #455064);
+  border-radius: 8px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+.notes-share-dialog header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.notes-share-dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border, #455064);
+  padding: 10px;
+}
+.notes-share-dialog select {
+  width: 100%;
+}
+.notes-share-dialog button {
+  margin: 4px;
+}
+@media (max-width: 1023px) {
+  /* Match the shipping mobile cascade; these selectors outrank generic toolbar controls. */
+  .session-notes-shell .btn-toolbar,
+  .notes-share-dialog .btn-toolbar {
+    min-height: 44px !important;
+    max-height: none !important;
+    height: auto !important;
+    min-width: 44px;
+    font-size: 14px !important;
+    padding: 8px 12px !important;
+    line-height: 1.4;
+  }
+  .notes-share-dialog select {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}

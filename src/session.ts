@@ -5448,6 +5448,27 @@ export class Session extends EventEmitter {
     }
   }
 
+  /** Explicit private-note submission preserves literal multiline content using bracketed paste. */
+  async writeNotesInput(text: string, canWrite: () => boolean = () => true): Promise<boolean> {
+    if (this._isStopped || !canWrite()) return false;
+    const eligible = () => !this._isStopped && canWrite();
+    const paste = '\x1b[200~' + text + '\x1b[201~';
+    if (this._mux && this._muxSession) {
+      if (!this._mux.sendNotesInput) return false;
+      const sent = await this._mux.sendNotesInput(this.id, text, eligible);
+      if (sent) this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
+      return sent;
+    }
+    if (!this.ptyProcess) return false;
+    const transport = this.ptyProcess;
+    transport.write(paste);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (this.ptyProcess !== transport || !eligible()) return false;
+    transport.write('\r');
+    this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
+    return true;
+  }
+
   /**
    * Sends input via the terminal multiplexer's direct input mechanism.
    *

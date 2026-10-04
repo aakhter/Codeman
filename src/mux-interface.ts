@@ -288,6 +288,8 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Send input to a session via tmux send-keys.
    */
   sendInput(sessionId: string, input: string): Promise<boolean>;
+  /** Literal bracketed paste plus explicit Enter; no retries after partial delivery. */
+  sendNotesInput?(sessionId: string, text: string, canWrite?: () => boolean): Promise<boolean>;
 
   /**
    * Submit one checkpoint command with duplicate-safe text/Enter acknowledgements.

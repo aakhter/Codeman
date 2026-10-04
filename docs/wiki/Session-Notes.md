@@ -1,6 +1,6 @@
 # Session Notes
 
-> Feature branch draft for COD-477. The editor is implemented and reviewed; sharing actions and final integration are under development; this page does not describe a deployed release yet.
+> Reviewable feature branch for COD-477, including COD-482 explicit sharing. This page describes the branch implementation; it is not a deployed release. Final integration review is pending.
 
 Session notes are a private Markdown notebook for your notes, ideas, and next steps. A notebook belongs to its originating session and an assigned project. Session, project, and global views open the same notebook.
 
@@ -64,9 +64,17 @@ Malformed frontmatter or altered session provenance is shown as a repairable fil
 
 Notes are not automatically added to prompts, checkpoints, recovery instructions, or agent memory. Agent responses are not automatically captured. Reads, searches, edits, exports, and change notifications are scoped to the owning user, including administrators.
 
-**Send to session** previews the chosen text and destination before sending. For an inactive source, explicitly choose an active destination; sharing does not silently resume the source session.
+In the notebook editor, select text and choose **Send to session**. The dialog shows exactly that selection. With no selection, choose **Use whole notebook** explicitly; Codeman does not assume you meant the whole notebook. The dialog identifies the destination by name, mode, and session ID. For an inactive source, choose an active destination owned by you. Sharing does not start, wake, or resume a session.
 
-**Save response to notes** appends only the response text you selected, with a timestamp and source reference. It uses the current notebook revision so an external edit cannot be overwritten.
+Review the preview and choose **Confirm send**. Each preview has one confirmation, expires after five minutes, and is invalid after a server restart. Double clicks and replayed confirmations do not send twice. Multiline text uses literal bracketed paste followed by Enter, preserving line breaks and spaces. Terminal control bytes are rejected.
+
+A submitted status acknowledges the input transport; it does not confirm that the agent processed the text. A failed destination check sends nothing. A missing delivery acknowledgment is reported as unknown: inspect the destination before deliberately creating another send. Codeman does not automatically retry an ambiguous send. Unsaved notebook drafts are retained.
+
+Select response text in the active terminal, then choose **Save response to notes** in the notebook editor or **Save response** in the header. With no terminal selection, Codeman asks you to select text; it never guesses the last response or captures the terminal tail.
+
+The dialog previews the selected text and source session and lets you choose a destination notebook. The visible current notebook is the default when open; otherwise the source session notebook is the default. Review the current saved notebook and choose **Confirm append**. Codeman preserves the existing Markdown body and appends the selection with a server timestamp and trusted source session reference. This action does not send agent input.
+
+If the file changed or requires repair, the selection stays in the dialog and no overwrite occurs. Review or repair the current file, then choose **Review current notebook again** and explicitly confirm against the new version. Local editor drafts remain available for conflict resolution. After an ambiguous network error, inspect the current notebook for the capture before confirming again.
 
 This workflow privacy does not isolate files from a process running as the same operating-system user.
 

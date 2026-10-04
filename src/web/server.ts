@@ -368,6 +368,7 @@ import {
   registerCliRegistryRoutes,
 } from './routes/index.js';
 import { SessionNotesService, type SessionNotesSource } from '../session-notes-service.js';
+import { deliverNotesInput, notesDestination } from './notes-input.js';
 import { registerSessionNotesRoutes } from './routes/session-notes-routes.js';
 import { listCaseView } from './routes/case-routes.js';
 import { registerCodexCommandProfileRoutes } from './routes/codex-command-profile-routes.js';
@@ -1467,6 +1468,12 @@ export class WebServer extends EventEmitter {
       sessionNotes: this.sessionNotes,
       getNotesSource: this.getNotesSource.bind(this),
       listNotesCases: this.listNotesCases.bind(this),
+      listNotesDestinations: async (owner?: string) =>
+        [...this.sessions.values()]
+          .filter((session) => notesDestination(session, owner))
+          .map((session) => ({ id: session.id, name: session.name, mode: session.mode })),
+      sendNotesInput: (id: string, owner: string | undefined, text: string) =>
+        deliverNotesInput(this.sessions, this.mux, this.remoteWake, id, owner, text),
       cleanupSession: this.cleanupSession.bind(this),
       cleanupRecoveryReconnectWrapper: async (sessionId: string) => {
         await this.mux.detachRemoteWrapper?.(sessionId);

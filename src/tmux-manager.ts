@@ -2343,6 +2343,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private trueColorConfigured = false;
   private readonly checkpointExecutor?: (command: string) => Promise<void>;
   private readonly checkpointDelayMs: number;
+  private readonly notesExecutor?: (command: string) => Promise<void>;
+  private readonly notesDelayMs: number;
   private readonly paneTextExecutor: TmuxPaneTextExecutor;
   /** tmux 3.7+ can resize pane history after creation; older releases cannot. */
   private liveHistoryResizeSupported: boolean | null = null;
@@ -2354,12 +2356,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     options: {
       checkpointExecutor?: (command: string) => Promise<void>;
       checkpointDelayMs?: number;
+      notesExecutor?: (command: string) => Promise<void>;
+      notesDelayMs?: number;
       paneTextExecutor?: TmuxPaneTextExecutor;
     } = {}
   ) {
     super();
     this.checkpointExecutor = options.checkpointExecutor;
     this.checkpointDelayMs = options.checkpointDelayMs ?? 50;
+    this.notesExecutor = options.notesExecutor;
+    this.notesDelayMs = options.notesDelayMs ?? 50;
     this.paneTextExecutor = options.paneTextExecutor ?? executePaneTextCapture;
     this.setMaxListeners(50);
     if (!IS_TEST_MODE) {
@@ -4338,6 +4344,27 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (session) {
       session.ralphEnabled = enabled;
       this.saveSessions();
+    }
+  }
+
+  /** Notes-only literal paste: preserve bytes and separate submission; never replay a partial paste. */
+  async sendNotesInput(sessionId: string, text: string, canWrite: () => boolean = () => true): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !isValidMuxName(session.muxName) || !canWrite()) return false;
+    if (IS_TEST_MODE && !this.notesExecutor) return true;
+    const execute = async (command: string) => {
+      if (this.notesExecutor) await this.notesExecutor(command);
+      else await execAsync(command, { timeout: EXEC_TIMEOUT_MS });
+    };
+    try {
+      const paste = '\x1b[200~' + text + '\x1b[201~';
+      await execute(`${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(paste)}`);
+      if (this.notesDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.notesDelayMs));
+      if (this.sessions.get(sessionId) !== session || !canWrite()) return false;
+      await execute(`${this.tmux()} send-keys -t "${session.muxName}" Enter`);
+      return true;
+    } catch {
+      return false;
     }
   }
 
