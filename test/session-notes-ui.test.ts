@@ -265,3 +265,216 @@ it('a deferred repair failure cannot render an error on a subsequently selected 
   expect(app._notesErrorElement.textContent).toBe('');
   expect(app._notesController.current.id).toBe('two');
 });
+for (const status of [422, 500]) {
+  for (const navigation of ['switch', 'reopen']) {
+    it(`ignores a deferred SSE ${status} failure after ${navigation} without presenting stale content or errors`, async () => {
+      const { app } = repairingApp();
+      app._mountNotesEditor(note('one', 'r1', 'first notebook'));
+      app._notesScope = { ownerKey: 'owner' };
+      let reject: any;
+      const request = new Promise((_resolve, rejectRequest) => {
+        reject = rejectRequest;
+      });
+      app._notesRequest = vi.fn((path: string) =>
+        path === '/one' ? request : Promise.resolve(note('two', 'r2', 'second notebook'))
+      );
+      const notification = app._onNotesChanged({ ownerKey: 'owner' });
+      if (navigation === 'switch') await app.openNotesNotebook('two');
+      else {
+        app.closeSessionNotes();
+        app._createNotesShell('browser');
+      }
+      reject(
+        Object.assign(new Error('stale failed read'), {
+          status,
+          data: { id: 'one', raw: 'stale broken bytes', revision: 'bad', repairable: true },
+        })
+      );
+      await notification;
+      expect(app._notesErrorElement.textContent).toBe('');
+      expect(app._notesEditorHost.textContent).not.toContain('stale broken bytes');
+      expect(app._refreshNotesList).not.toHaveBeenCalled();
+      if (navigation === 'switch') expect(app._notesController.current.id).toBe('two');
+      app._notesRequest = vi.fn(async () => note(app._notesController.current.id, 'fresh', 'current owner update'));
+      await app._onNotesChanged({ ownerKey: 'owner' });
+      expect(app._refreshNotesList).toHaveBeenCalledTimes(1);
+      if (navigation === 'switch') expect(app._notesEditorElements.markdown.value).toBe('current owner update');
+    });
+  }
+}
+it('successful save clears only its own snapshot and preserves another controller failed draft', async () => {
+  let finish: any;
+  const a = create(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+  );
+  const b = create(vi.fn().mockRejectedValue(new Error('failed B')));
+  a.load(note());
+  b.load(note());
+  a.edit('draft A', 'one');
+  const saving = a.flush();
+  b.edit('private failed B', 'one');
+  await b.flush();
+  finish(note('one', 'r2', 'draft A'));
+  await saving;
+  const restored = create();
+  restored.load(note('one', 'r2', 'draft A'));
+  expect(restored.current.markdown).toBe('private failed B');
+  expect(b.current.status).toBe('Save failed');
+});
+it('reload resolution clears only its own stored draft, preserving another controller draft', () => {
+  const a = create(),
+    b = create();
+  a.load(note());
+  b.load(note());
+  a.edit('draft A', 'one');
+  a.external(note('one', 'r2', 'external'));
+  b.edit('draft B', 'one');
+  a.resolve('reload');
+  const restored = create();
+  restored.load(note('one', 'r2', 'external'));
+  expect(restored.current.markdown).toBe('draft B');
+});
+it('a deferred failed save cannot overwrite another controller newer stored draft', async () => {
+  let reject: any;
+  const a = create(
+    () =>
+      new Promise((_resolve, failure) => {
+        reject = failure;
+      })
+  );
+  const b = create();
+  a.load(note());
+  b.load(note());
+  a.edit('draft A', 'one');
+  const saving = a.flush();
+  b.edit('draft B', 'one');
+  reject(new Error('failed A'));
+  await saving;
+  const restored = create();
+  restored.load(note());
+  expect(restored.current.markdown).toBe('draft B');
+});
+it('successful inflight save bookkeeping cannot replace another controller newer stored draft', async () => {
+  let finish: any;
+  const a = create(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+  );
+  const b = create();
+  a.load(note());
+  b.load(note());
+  a.edit('sent A', 'one');
+  const saving = a.flush();
+  a.edit('newer A', 'one');
+  b.edit('newer B', 'one');
+  finish(note('one', 'r2', 'sent A'));
+  await saving;
+  const restored = create();
+  restored.load(note('one', 'r2', 'sent A'));
+  expect(restored.current.markdown).toBe('newer B');
+  expect(a.current.markdown).toBe('newer A');
+});
+it('a stale list failure cannot display an error in a reopened browser', async () => {
+  const { app } = repairingApp();
+  app._mountNotesBrowser();
+  delete app._refreshNotesList;
+  let reject: any;
+  const request = new Promise((_resolve, failure) => {
+    reject = failure;
+  });
+  app._notesRequest = vi.fn(() => request);
+  const pending = app._refreshNotesList();
+  app.closeSessionNotes();
+  app._createNotesShell('browser');
+  reject(new Error('stale list failure'));
+  await pending;
+  expect(app._notesErrorElement.textContent).toBe('');
+});
+it('a stale recovery failure cannot display an error in a reopened browser', async () => {
+  const { app } = repairingApp();
+  let reject: any;
+  app._notesRequest = vi.fn(
+    () =>
+      new Promise((_resolve, failure) => {
+        reject = failure;
+      })
+  );
+  const pending = app._resolveNotesRecovery({ id: 'one', projectId: 'project', note: note() }, 'external');
+  app.closeSessionNotes();
+  app._createNotesShell('browser');
+  reject(new Error('stale recovery failure'));
+  await pending;
+  expect(app._notesErrorElement.textContent).toBe('');
+});
+it('a stale project rename failure cannot display an error in a reopened browser', async () => {
+  const { app } = repairingApp();
+  app._notesProjects = [{ id: 'project', name: 'Project' }];
+  app._mountNotesBrowser();
+  let reject: any;
+  app._notesRequest = vi.fn(
+    () =>
+      new Promise((_resolve, failure) => {
+        reject = failure;
+      })
+  );
+  const prompt = vi.spyOn(window, 'prompt').mockReturnValue('Renamed');
+  (document.querySelector('[aria-label="Rename project Project"]') as HTMLButtonElement).click();
+  app.closeSessionNotes();
+  app._createNotesShell('browser');
+  reject(new Error('stale rename failure'));
+  await vi.advanceTimersByTimeAsync(0);
+  prompt.mockRestore();
+  expect(app._notesErrorElement.textContent).toBe('');
+});
+it('a stale project reassignment failure cannot display an error in a reopened browser', async () => {
+  const { app } = repairingApp();
+  app._notesProjects = [
+    { id: 'project', name: 'Project' },
+    { id: 'other', name: 'Other' },
+  ];
+  app._mountNotesEditor(note());
+  let reject: any;
+  app._notesRequest = vi.fn(
+    () =>
+      new Promise((_resolve, failure) => {
+        reject = failure;
+      })
+  );
+  app._notesEditorElements.project.value = 'other';
+  app._notesEditorElements.project.dispatchEvent(new Event('change'));
+  await vi.advanceTimersByTimeAsync(0);
+  app.closeSessionNotes();
+  app._createNotesShell('browser');
+  reject(new Error('stale move failure'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(app._notesErrorElement.textContent).toBe('');
+});
+it('a stale checklist failure cannot display an error in a reopened browser', async () => {
+  const { app } = repairingApp();
+  app._mountNotesBrowser();
+  delete app._refreshNotesList;
+  app._notesRequest = vi.fn(async (path: string) =>
+    path === '/recovery'
+      ? []
+      : [{ id: 'one', projectId: 'project', note: note(), checklist: [{ line: 1, checked: false, text: 'task' }] }]
+  );
+  await app._refreshNotesList();
+  let reject: any;
+  app._notesRequest = vi.fn(
+    () =>
+      new Promise((_resolve, failure) => {
+        reject = failure;
+      })
+  );
+  (document.querySelector('[aria-label="Complete task"]') as HTMLInputElement).dispatchEvent(new Event('change'));
+  app.closeSessionNotes();
+  app._createNotesShell('browser');
+  reject(new Error('stale checklist failure'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(app._notesErrorElement.textContent).toBe('');
+});

@@ -60,6 +60,18 @@
       await this._notesReady;
       this._notesProjects = await this._notesRequest('/projects');
     },
+    _captureNotesView(trackSelection = true) {
+      const navigation = this._notesNavigation;
+      const selection = this._notesNotebookSequence;
+      const shell = this._notesShell;
+      const host = this._notesEditorHost;
+      return () =>
+        Boolean(shell) &&
+        this._notesNavigation === navigation &&
+        (!trackSelection || this._notesNotebookSequence === selection) &&
+        this._notesShell === shell &&
+        this._notesEditorHost === host;
+    },
     _notesError(error) {
       if (this._notesShell) {
         this._notesErrorElement.textContent = error.message || 'Notes unavailable';
@@ -259,13 +271,16 @@
         const rename = button('Rename', async () => {
           const name = window.prompt('Project display name', project.name);
           if (!name?.trim()) return;
+          const isCurrentView = this._captureNotesView();
           try {
             await this._notesRequest('/projects/' + encodeURIComponent(project.id), { name }, 'PATCH');
-            this._notesProjects = await this._notesRequest('/projects');
+            const projects = await this._notesRequest('/projects');
+            if (!isCurrentView()) return;
+            this._notesProjects = projects;
             this._renderNotesProjects();
             await this._refreshNotesList();
           } catch (error) {
-            this._notesError(error);
+            if (isCurrentView()) this._notesError(error);
           }
         });
         rename.setAttribute('aria-label', 'Rename project ' + project.name);
@@ -275,6 +290,7 @@
     },
     async _refreshNotesList() {
       if (!this._notesShell || this._notesMode !== 'browser' || !this._notesFilters) return;
+      const isCurrentView = this._captureNotesView(false);
       const sequence = (this._notesListSequence = (this._notesListSequence || 0) + 1);
       const filters = this._notesFilters;
       const query = new URLSearchParams();
@@ -287,7 +303,7 @@
           this._notesRequest('?' + query),
           this._notesRequest('/recovery'),
         ]);
-        if (!this._notesShell || sequence !== this._notesListSequence || this._notesMode !== 'browser') return;
+        if (!isCurrentView() || sequence !== this._notesListSequence || this._notesMode !== 'browser') return;
         this._notesList.replaceChildren();
         if (!entries.length) this._notesList.append(node('p', 'No matching notebooks'));
         for (const entry of entries) {
@@ -316,6 +332,7 @@
             const check = field('input', 'Complete ' + item.text);
             check.type = 'checkbox';
             check.addEventListener('change', async () => {
+              const isCurrentAction = this._captureNotesView();
               check.disabled = true;
               try {
                 const saved = await this._notesRequest(
@@ -323,9 +340,11 @@
                   { revision: entry.note.revision, line: item.line, checked: true },
                   'PATCH'
                 );
+                if (!isCurrentAction()) return;
                 if (this._notesController.current?.id === entry.id) this._notesController.external(saved);
                 await this._refreshNotesList();
               } catch (error) {
+                if (!isCurrentAction()) return;
                 check.checked = false;
                 check.disabled = false;
                 this._notesError(error);
@@ -349,19 +368,20 @@
           this._notesList.append(details);
         }
       } catch (error) {
-        this._notesError(error);
+        if (isCurrentView() && sequence === this._notesListSequence) this._notesError(error);
       }
     },
     async _resolveNotesRecovery(entry, choice) {
+      const isCurrentView = this._captureNotesView();
       try {
         await this._notesRequest(
           '/' + encodeURIComponent(entry.id) + '/resolve-recovery',
           { revision: entry.revision || entry.note?.revision, projectId: entry.projectId, choice },
           'POST'
         );
-        await this._refreshNotesList();
+        if (isCurrentView()) await this._refreshNotesList();
       } catch (error) {
-        this._notesError(error);
+        if (isCurrentView()) this._notesError(error);
       }
     },
     async openNotesNotebook(id) {
@@ -443,11 +463,13 @@
       markdown.addEventListener('input', edit);
       title.addEventListener('input', edit);
       project.addEventListener('change', async () => {
+        const isCurrentView = this._captureNotesView();
         const state = this._notesController.current;
         const wanted = project.value;
         project.disabled = true;
         try {
           await this._notesController.flush(state);
+          if (!isCurrentView()) return;
           if (state.dirty || state.conflict)
             throw new Error('Save or resolve the draft before reassigning its project.');
           const saved = await this._notesRequest(
@@ -455,9 +477,11 @@
             { revision: state.revision, projectId: wanted },
             'POST'
           );
+          if (!isCurrentView()) return;
           if (this._notesController.current === state) this._notesController.external(saved);
           await this._refreshNotesList();
         } catch (error) {
+          if (!isCurrentView()) return;
           this._notesError(error);
           project.value = state.note.metadata.projectId;
         } finally {
@@ -525,15 +549,8 @@
         host.append(
           markdown,
           button('Repair notebook', async () => {
-            const navigation = this._notesNavigation;
-            const selection = this._notesNotebookSequence;
-            const shell = this._notesShell;
-            const isCurrentRepair = () =>
-              this._notesNavigation === navigation &&
-              this._notesNotebookSequence === selection &&
-              this._notesShell === shell &&
-              this._notesEditorHost === host &&
-              host.contains(markdown);
+            const isCurrentView = this._captureNotesView();
+            const isCurrentRepair = () => isCurrentView() && host.contains(markdown);
             try {
               const note = await this._notesRequest(
                 '/' + encodeURIComponent(data.id) + '/repair',
@@ -601,16 +618,21 @@
     },
     async _onNotesChanged(event) {
       if (!this._notesScope || event.ownerKey !== this._notesScope.ownerKey || !this._notesShell) return;
+      const isCurrentView = this._captureNotesView();
       const state = this._notesController.current;
       if (state && this._notesEditorElements) {
+        let revision;
         try {
           if (state.saving) await state.saving;
-          const revision = state.revision;
+          if (!isCurrentView()) return;
+          revision = state.revision;
           const note = await this._notesRequest('/' + encodeURIComponent(state.id));
+          if (!isCurrentView()) return;
           if (this._notesController.current === state && state.revision === revision)
             this._notesController.external(note);
         } catch (error) {
-          if (error.status === 422 && this._notesController.current === state) {
+          if (!isCurrentView() || this._notesController.current !== state || state.revision !== revision) return;
+          if (error.status === 422) {
             if (state.dirty) {
               state.conflict = error.data;
               this._renderNotesState(state);
@@ -618,7 +640,7 @@
           } else this._notesError(error);
         }
       }
-      await this._refreshNotesList();
+      if (isCurrentView()) await this._refreshNotesList();
     },
     // Explicit sharing can read this selection in COD-482; no automatic prompt injection.
     getNotesSelection() {

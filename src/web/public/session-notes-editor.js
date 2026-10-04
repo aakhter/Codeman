@@ -11,14 +11,24 @@
     key(id) {
       return 'codeman:notes:' + JSON.stringify([this.scope.instanceKey, this.scope.ownerKey, id]);
     }
-    persist(state) {
+    persist(state, bookkeeping = false) {
       try {
-        this.storage.setItem(
-          this.key(state.id),
-          JSON.stringify({ revision: state.revision, markdown: state.markdown, title: state.title })
-        );
+        if (bookkeeping && this.storage.getItem(this.key(state.id)) !== state.draftSnapshot) return;
+        const snapshot = JSON.stringify({ revision: state.revision, markdown: state.markdown, title: state.title });
+        this.storage.setItem(this.key(state.id), snapshot);
+        state.draftSnapshot = snapshot;
       } catch {
         state.storageError = 'Browser draft storage unavailable. Keep this page open until saved.';
+      }
+    }
+    clearDraft(state) {
+      try {
+        if (state.draftSnapshot && this.storage.getItem(this.key(state.id)) === state.draftSnapshot) {
+          this.storage.removeItem(this.key(state.id));
+          state.draftSnapshot = null;
+        }
+      } catch {
+        /* Canonical content remains available when browser storage is unavailable. */
       }
     }
     notify(state) {
@@ -39,7 +49,8 @@
           version: 0,
         };
         try {
-          const draft = JSON.parse(this.storage.getItem(this.key(id)) || 'null');
+          state.draftSnapshot = this.storage.getItem(this.key(id));
+          const draft = JSON.parse(state.draftSnapshot || 'null');
           if (draft && typeof draft.markdown === 'string' && typeof draft.title === 'string') {
             state.markdown = draft.markdown;
             state.title = draft.title;
@@ -92,21 +103,17 @@
           if (version === state.version) {
             state.dirty = false;
             state.status = 'Saved';
-            try {
-              this.storage.removeItem(this.key(state.id));
-            } catch {
-              /* Canonical save already succeeded. */
-            }
+            this.clearDraft(state);
           } else {
             state.status = 'Unsaved';
-            this.persist(state);
+            this.persist(state, true);
           }
           state.error = '';
         } catch (error) {
           state.status = 'Save failed';
           state.error = error.message || 'Could not save notes';
           if (error.status === 409) state.conflict = error.current || { unavailable: true };
-          this.persist(state);
+          // The draft was persisted by the explicit edit; a failed completion must not replace another tab's draft.
         } finally {
           state.saving = null;
           this.notify(state);
@@ -142,11 +149,7 @@
         state.title = current.metadata.title;
         state.dirty = false;
         state.status = 'Saved';
-        try {
-          this.storage.removeItem(this.key(state.id));
-        } catch {
-          /* Canonical content remains available. */
-        }
+        this.clearDraft(state);
         this.notify(state);
       } else {
         this.edit(choice === 'combine' ? current.markdown + '\n\n' + draft : draft, state.title);
