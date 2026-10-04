@@ -22,6 +22,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { SessionNotesInputBusyError } from './session-notes-delivery.js';
 import { MAX_INPUT_LENGTH } from './config/terminal-limits.js';
 import { collectDescendants } from './proc-tree.js';
 import { getCli } from './config/cli-registry/registry.js';
@@ -2346,6 +2347,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   private readonly checkpointDelayMs: number;
   private readonly notesExecutor?: (file: string, args: string[]) => Promise<void>;
   private readonly notesDelayMs: number;
+  private readonly notesInputsInFlight = new Set<string>();
   private readonly paneTextExecutor: TmuxPaneTextExecutor;
   /** tmux 3.7+ can resize pane history after creation; older releases cannot. */
   private liveHistoryResizeSupported: boolean | null = null;
@@ -4358,7 +4360,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       Buffer.byteLength(text, 'utf8') > MAX_INPUT_LENGTH - 1
     )
       return false;
+    if (this.notesInputsInFlight.has(sessionId)) throw new SessionNotesInputBusyError();
     if (IS_TEST_MODE && !this.notesExecutor) return true;
+    this.notesInputsInFlight.add(sessionId);
     const targetArgs = ['-L', this.tmuxSocket, 'send-keys', '-t', session.muxName];
     const execute = async (args: string[]) => {
       if (this.notesExecutor) await this.notesExecutor('tmux', args);
@@ -4373,6 +4377,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       return true;
     } catch {
       return false;
+    } finally {
+      this.notesInputsInFlight.delete(sessionId);
     }
   }
 

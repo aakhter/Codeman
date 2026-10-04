@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SessionNotesService } from '../../src/session-notes-service.js';
+import { Session } from '../../src/session.js';
+import { TmuxManager } from '../../src/tmux-manager.js';
+import { deliverNotesInput } from '../../src/web/notes-input.js';
 import { registerSessionNotesRoutes } from '../../src/web/routes/session-notes-routes.js';
 let root: string;
 let notes: SessionNotesService;
@@ -11,15 +14,17 @@ let app: ReturnType<typeof Fastify>;
 let username = 'alice';
 let destinationOwner = 'alice';
 let live = true;
-const input = vi.fn(async (_id: string, owner?: string) => ({
+const defaultInput = async (_id: string, owner?: string, _text?: string) => ({
   delivery: live && owner === destinationOwner ? 'submitted' : 'failed',
-}));
+});
+const input = vi.fn(defaultInput);
 const source = { id: 'origin', owner: 'alice', workingDir: '/repo', name: 'Source title' };
 beforeEach(async () => {
   vi.stubEnv('CODEMAN_MULTIUSER', '1');
   username = destinationOwner = 'alice';
   live = true;
-  input.mockClear();
+  input.mockReset();
+  input.mockImplementation(defaultInput);
   root = await mkdtemp(join(tmpdir(), 'notes-sharing-'));
   notes = new SessionNotesService({ root });
   app = Fastify();
@@ -278,4 +283,65 @@ it('accepts the UTF-8 byte boundary and rejects multibyte overflow before previe
   }
   expect(input).not.toHaveBeenCalled();
   expect((await app.inject(url)).json().data.markdown).toBe(note.markdown);
+});
+
+it('consumes distinct concurrent confirmation tokens and reports the overlapping send definitely unsent', async () => {
+  const note = await notebook();
+  const url = '/api/session-notes/' + note.metadata.id;
+  const previews = await Promise.all(
+    ['first', 'overlap'].map((text) =>
+      app.inject({ method: 'POST', url: url + '/send-preview', payload: { destinationId: 'destination', text } })
+    )
+  );
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const reachedPaste = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const commands: string[][] = [];
+  const manager = new TmuxManager({
+    notesDelayMs: 0,
+    notesExecutor: async (_file, args) => {
+      commands.push(args);
+      if (commands.length === 1) {
+        started();
+        await gate;
+      }
+    },
+  });
+  manager.registerSession({
+    sessionId: 'destination',
+    muxName: 'codeman-12345678',
+    pid: 123,
+    createdAt: Date.now(),
+    workingDir: '/tmp',
+    mode: 'claude',
+    attached: false,
+  });
+  const session = new Session({ id: 'destination', owner: 'alice', workingDir: '/tmp', mode: 'claude' });
+  const access = session as any;
+  access._pid = 123;
+  access._mux = manager;
+  access._muxSession = { muxName: 'codeman-12345678' };
+  input.mockImplementation((id, owner, text) =>
+    deliverNotesInput(new Map([['destination', session]]), { isPaneDead: async () => false }, null, id, owner, text!)
+  );
+  const confirm = (token: string) => app.inject({ method: 'POST', url: url + '/send', payload: { token } });
+  const first = confirm(previews[0].json().data.token);
+  try {
+    await reachedPaste;
+    const rejected = await confirm(previews[1].json().data.token);
+    expect(rejected.statusCode).toBe(200);
+    expect(rejected.json().data.delivery).toBe('failed');
+    expect(rejected.json().data.message).toContain('Nothing was sent');
+    expect(commands).toHaveLength(1);
+    expect((await confirm(previews[1].json().data.token)).statusCode).toBe(400);
+  } finally {
+    release();
+    expect((await first).json().data.delivery).toBe('submitted');
+    manager.destroy();
+  }
+  expect(commands.map((args) => args.at(-1))).toEqual(['\x1b[200~first\x1b[201~', 'Enter']);
 });

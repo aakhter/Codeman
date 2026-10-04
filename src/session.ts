@@ -150,6 +150,7 @@ import {
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
+import { SessionNotesInputBusyError } from './session-notes-delivery.js';
 import { isGeneratedSessionName, SubmittedPromptTracker } from './session-auto-name.js';
 import { parseTerminalAttachmentRequests } from './attachment-magic.js';
 import {
@@ -696,6 +697,7 @@ export class Session extends EventEmitter {
    * (`startMode: 'shell'`), so a shell tab is not renamed after every `ls`.
    */
   private readonly _submittedPromptTracker = new SubmittedPromptTracker();
+  private _notesInputInFlight = false;
   private readonly _acceptsPrompts: boolean;
   private ptyProcess: pty.IPty | null = null;
   private _pid: number | null = null;
@@ -5451,22 +5453,28 @@ export class Session extends EventEmitter {
   /** Explicit private-note submission preserves literal multiline content using bracketed paste. */
   async writeNotesInput(text: string, canWrite: () => boolean = () => true): Promise<boolean> {
     if (this._isStopped || !canWrite()) return false;
-    const eligible = () => !this._isStopped && canWrite();
-    const paste = '\x1b[200~' + text + '\x1b[201~';
-    if (this._mux && this._muxSession) {
-      if (!this._mux.sendNotesInput) return false;
-      const sent = await this._mux.sendNotesInput(this.id, text, eligible);
-      if (sent) this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
-      return sent;
+    if (this._notesInputInFlight) throw new SessionNotesInputBusyError();
+    this._notesInputInFlight = true;
+    try {
+      const eligible = () => !this._isStopped && canWrite();
+      const paste = '\x1b[200~' + text + '\x1b[201~';
+      if (this._mux && this._muxSession) {
+        if (!this._mux.sendNotesInput) return false;
+        const sent = await this._mux.sendNotesInput(this.id, text, eligible);
+        if (sent) this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
+        return sent;
+      }
+      if (!this.ptyProcess) return false;
+      const transport = this.ptyProcess;
+      transport.write(paste);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (this.ptyProcess !== transport || !eligible()) return false;
+      transport.write('\r');
+      this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
+      return true;
+    } finally {
+      this._notesInputInFlight = false;
     }
-    if (!this.ptyProcess) return false;
-    const transport = this.ptyProcess;
-    transport.write(paste);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    if (this.ptyProcess !== transport || !eligible()) return false;
-    transport.write('\r');
-    this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
-    return true;
   }
 
   /**

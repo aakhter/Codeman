@@ -1,4 +1,5 @@
 /** Owner-private explicit notes delivery through the ordinary session input primitives. */
+import { SessionNotesInputBusyError } from '../session-notes-delivery.js';
 import type { Session } from '../session.js';
 import type { TerminalMultiplexer } from '../mux-interface.js';
 import type { RemoteWakeRegistry } from '../remote-wake.js';
@@ -38,7 +39,8 @@ export async function deliverNotesInput(
           delivery: 'unknown',
           message: 'Delivery was not acknowledged. Inspect the destination before sending again.',
         };
-  } catch {
+  } catch (error) {
+    if (error instanceof SessionNotesInputBusyError) return { delivery: 'failed', message: error.message };
     return {
       delivery: 'unknown',
       message: 'Delivery was not acknowledged. Inspect the destination before sending again.',
