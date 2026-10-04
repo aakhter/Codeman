@@ -2,6 +2,8 @@
 
 The feature is implemented on `feat/COD-477-session-notes`. These results describe the review branch, not a deployed release. Jira parent: [COD-477](https://aakhter.atlassian.net/browse/COD-477); implementation issues: COD-478 through COD-482.
 
+Delivery: [Bitbucket draft PR #2](https://bitbucket.org/aamer_akhter/codeman/pull-requests/2), targeting `local`. The source branch was pushed after pre-push static checks passed. No merge or deployment was performed.
+
 ## Acceptance evidence
 
 | Design criterion                                               | Evidence                                                                                                                              | Scope and limits                                                                                           |
