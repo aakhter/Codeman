@@ -115,6 +115,37 @@ export const FILE_PEEK_BYTES = 8 * 1024 - 1; // 8KB (inclusive end offset)
 export const MAX_PASTE_IMAGE_BYTES = parseInt(process.env.CODEMAN_MAX_PASTE_IMAGE_BYTES || '') || 50 * 1024 * 1024; // 50MB
 
 // ============================================================================
+// Document Version History Limits (COD-457)
+// ============================================================================
+
+/**
+ * Maximum bytes of revision history kept for ONE previewed document (one
+ * session + file) by `document-version-store.ts`. Oldest versions are evicted
+ * until the history fits; a single version larger than this is not recorded
+ * at all (and the file is not even read for capture).
+ *
+ * 16MB: a full 50-version ring of a typical 20-300KB markdown/docx draft fits
+ * with room to spare, and so does one snapshot of the largest text file the
+ * preview will show (10MB, `MAX_TEXT_FILE_SIZE` in file-routes.ts), while one
+ * pathological document can no longer pin 50 x its size in RSS.
+ * Bytes are counted as UTF-8 content + raw Buffer (docx keeps both).
+ * Override: CODEMAN_DOC_VERSION_MAX_FILE_BYTES (bytes)
+ */
+export const DOCUMENT_VERSION_MAX_FILE_BYTES =
+  parseInt(process.env.CODEMAN_DOC_VERSION_MAX_FILE_BYTES || '') || 16 * 1024 * 1024; // 16MB
+
+/**
+ * Maximum bytes of document revision history across ALL sessions and files.
+ * Past it, the least-recently-touched (session, file) histories are dropped
+ * whole. 64MB = four full per-file histories: the same order as the 1MB text
+ * buffer x 20-session budget above plus headroom, and a small fraction of the
+ * 640MB terminal-buffer worst case, so the feature can never dominate RSS.
+ * Override: CODEMAN_DOC_VERSION_MAX_TOTAL_BYTES (bytes)
+ */
+export const DOCUMENT_VERSION_MAX_TOTAL_BYTES =
+  parseInt(process.env.CODEMAN_DOC_VERSION_MAX_TOTAL_BYTES || '') || 64 * 1024 * 1024; // 64MB
+
+// ============================================================================
 // File Download Limits
 // ============================================================================
 

@@ -94,6 +94,7 @@ import {
   findSessionOrFail,
   getAuthUser,
   isAdmin,
+  isPlainPromptInput,
   isWorkingDirAllowed,
   ownerFor,
   parseBody,
@@ -203,6 +204,19 @@ const LINKED_CASES_FILE = dataPath('linked-cases.json');
 const CODEMAN_CONFIG_DIR = getDataDir();
 const INFERABLE_LOCAL_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
 const SINGLE_USER_OWNER = '@single';
+
+/**
+ * COD-463 — flag a /terminal response whose remote capture was skipped because
+ * the host is in ssh backoff: the body is the local wrapper's copy, which may
+ * not be live and holds about one screen of history. The client warns on it.
+ */
+function remoteCaptureDegradedFields(
+  ctx: { mux: { isRemoteCaptureDegraded?(remote: SessionRemote): boolean } },
+  session: { remote?: SessionRemote }
+): { remoteCaptureDegraded?: true } {
+  if (!session.remote || ctx.mux.isRemoteCaptureDegraded?.(session.remote) !== true) return {};
+  return { remoteCaptureDegraded: true };
+}
 
 function remoteProfileLibraryOwner(remoteCaseOwner: string | undefined, requestOwner: string | undefined): string {
   return remoteCaseOwner ?? requestOwner ?? SINGLE_USER_OWNER;
@@ -2242,10 +2256,18 @@ export function registerSessionRoutes(
     // the wrong recovery — wait longer, when the truth is "restart the worker".
     let delivered = false;
 
+    // A plain prompt (`<text>\r`) goes through the mux even when the caller did not
+    // ask for it: written straight into the pane it arrives as one burst, and Claude
+    // Code takes a long burst as a paste whose `\r` becomes a newline, so the prompt
+    // sat unsent (see isPlainPromptInput). The mux path types the text, presses Enter
+    // separately and arms the SubmitVerifier. An explicit `useMux: false` keeps the
+    // raw write for a caller that really wants it.
+    const autoMux = useMux === undefined && isPlainPromptInput(inputStr);
+
     if (duplicate) {
       // Redelivery of an already-applied input: skip the write, but still honor the
       // wait, since the caller's question ("tell me when this settles") is unanswered.
-    } else if (useMux && waitPromise) {
+    } else if ((useMux || autoMux) && waitPromise) {
       // The response is already staying open for the wait, so the tmux write can be
       // awaited here. This is the ONE path where a writeViaMux failure is observable.
       const ok = await session.writeViaMux(inputStr, { fromUser: true }).catch(() => false);
@@ -2255,6 +2277,16 @@ export function registerSessionRoutes(
         console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
         delivered = session.write(inputStr, { fromUser: true });
         if (!delivered) undoOnFailure();
+      }
+    } else if (autoMux) {
+      // Awaited, unlike the explicit useMux branch below. This shape also reaches here
+      // from the browser's POST fallback, which sends its frames one at a time and
+      // waits for each 2xx; answering only once Enter has gone out is what keeps the
+      // next keystroke from overtaking it.
+      const ok = await session.writeViaMux(inputStr, { fromUser: true }).catch(() => false);
+      if (!ok) {
+        console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
+        if (!session.write(inputStr, { fromUser: true })) undoOnFailure();
       }
     } else if (useMux) {
       // Fire-and-forget: don't block the HTTP response on a tmux child process.
@@ -3308,6 +3340,7 @@ export function registerSessionRoutes(
         fullSize: frameBuffer.length,
         truncated: false,
         source: frameBuffer.length > 0 ? ('mux-frame' as const) : ('history' as const),
+        ...remoteCaptureDegradedFields(ctx, session),
       };
     }
 
@@ -3378,6 +3411,7 @@ export function registerSessionRoutes(
       liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, {
         fullHistory: true,
         lastLines,
+        owner: ownerFor(req),
       });
       if (liveMuxBuffer === null || liveMuxBuffer.length === 0) {
         remoteCaptureFailed = true;
@@ -3577,6 +3611,7 @@ export function registerSessionRoutes(
       // damage that does not exist.
       captureCols: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.cols : undefined,
       captureRows: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.rows : undefined,
+      ...remoteCaptureDegradedFields(ctx, session),
     };
   });
 

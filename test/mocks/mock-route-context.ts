@@ -66,6 +66,9 @@ export function createMockRouteContext(options?: {
       reconcileAfterRestoration: vi.fn(async () => {}),
     },
     cleanupSession: vi.fn(async () => {}),
+    cleanupRecoveryReconnectWrapper: vi.fn(async (id: string) => {
+      sessions.delete(id);
+    }),
     setupSessionListeners: vi.fn(async () => {}),
     persistSessionState: vi.fn(),
     persistSessionStateNow: vi.fn(),
@@ -73,7 +76,48 @@ export function createMockRouteContext(options?: {
     discardPartiallyBuiltSession: vi.fn(async (id: string) => {
       sessions.delete(id);
     }),
-    getSessionStateWithRespawn: vi.fn((s: MockSession) => s.toState()),
+    getSessionStateWithRespawn: vi.fn((s: MockSession) => ({
+      ...s.toState(),
+      activityStatus: s.status,
+      activityStatusSince: null,
+    })),
+
+    // -- AgentActivityPort --
+    // COD-350. Defaults mirror a session with no background agents: every hook
+    // event is presented to the human, and the projection is the session's
+    // `activityProjection` when a test sets one, else its own status (what the
+    // real server returns for a session it has no adapter for). Upstream merges
+    // have dropped this block before (4a5a9d14); the completeness test guards it.
+    agentActivity: {
+      attachSession: vi.fn(),
+      detachSession: vi.fn(),
+      identityChanged: vi.fn(),
+      terminalActivity: vi.fn(),
+      sessionExited: vi.fn(),
+      setTrackingEnabled: vi.fn(),
+      allocateEvent: vi.fn((s: MockSession, kind: string, externalSourceSequence?: number) => ({
+        sessionId: s.id,
+        identityGeneration: 0,
+        trackingGeneration: 0,
+        sequence: 1,
+        kind,
+        ...(externalSourceSequence !== undefined ? { externalSourceSequence } : {}),
+      })),
+      decideEvent: vi.fn(async (_s: MockSession, event: unknown) => ({
+        event,
+        settleEndedEarly: false,
+        presentToHuman: true,
+        autonomyBlocked: false,
+        quarantined: false,
+        ambiguous: false,
+        observation: 'none' as const,
+        liveEvidence: null,
+      })),
+      project: vi.fn(
+        (s: MockSession & { activityProjection?: { activityStatus: string; activityStatusSince: number | null } }) =>
+          s.activityProjection ?? { activityStatus: s.status, activityStatusSince: null }
+      ),
+    },
 
     // -- EventPort --
     broadcast: vi.fn(),
@@ -174,7 +218,6 @@ export function createMockRouteContext(options?: {
       getSession: vi.fn(() => null),
       clearRespawnConfig: vi.fn(),
       updateRespawnConfig: vi.fn(),
-      setHistoryLimit: vi.fn(async () => {}),
       startStatsCollection: vi.fn(),
     },
     runSummaryTrackers: new Map(),

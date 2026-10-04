@@ -48,7 +48,7 @@ const STATE_STUCK_CHECK_INTERVAL = CLEANUP_CHECK_INTERVAL_MS;
  *
  * // Record events
  * tracker.addEvent('session_started', 'info', 'Session started');
- * tracker.addEvent('idle_detected', 'success', 'Claude is idle');
+ * tracker.addEvent('idle_detected', 'success', 'Codex is idle');
  *
  * // Get the summary
  * const summary = tracker.getSummary();
@@ -57,6 +57,8 @@ const STATE_STUCK_CHECK_INTERVAL = CLEANUP_CHECK_INTERVAL_MS;
 export class RunSummaryTracker {
   private sessionId: string;
   private sessionName: string;
+  /** Who the idle/working rows name, e.g. 'Codex'. Set from the CLI registry at session start. */
+  private agentLabel: string = 'Agent';
   private startedAt: number;
   private lastUpdatedAt: number;
   private events: RunSummaryEvent[] = [];
@@ -153,7 +155,7 @@ export class RunSummaryTracker {
   }
 
   /**
-   * Record when Claude becomes idle.
+   * Record when the agent becomes idle.
    */
   recordIdle(): void {
     const now = Date.now();
@@ -167,13 +169,13 @@ export class RunSummaryTracker {
     this.lastStatusChangeAt = now;
     this.stats.lastIdleAt = now;
 
-    this.addEvent('idle_detected', 'success', 'Claude is idle', undefined, {
+    this.addEvent('idle_detected', 'success', `${this.agentLabel} is idle`, undefined, {
       activeTimeMs: this.stats.totalTimeActiveMs,
     });
   }
 
   /**
-   * Record when Claude starts working.
+   * Record when the agent starts working.
    */
   recordWorking(): void {
     const now = Date.now();
@@ -189,7 +191,7 @@ export class RunSummaryTracker {
     this.lastStatusChangeAt = now;
     this.stats.lastWorkingAt = now;
 
-    this.addEvent('working_detected', 'info', 'Claude is working');
+    this.addEvent('working_detected', 'info', `${this.agentLabel} is working`);
   }
 
   /**
@@ -304,9 +306,11 @@ export class RunSummaryTracker {
   }
 
   /**
-   * Record session started.
+   * Record session started. `agentLabel` is the run mode's display name (the CLI
+   * registry's `label`); later idle/working rows use it instead of a fixed 'Claude'.
    */
-  recordSessionStarted(mode: string, workingDir: string): void {
+  recordSessionStarted(mode: string, workingDir: string, agentLabel?: string): void {
+    if (agentLabel) this.agentLabel = agentLabel;
     this.addEvent('session_started', 'success', 'Session started', `Mode: ${mode}, Dir: ${workingDir}`, {
       mode,
       workingDir,

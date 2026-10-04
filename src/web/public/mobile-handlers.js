@@ -277,6 +277,14 @@ const KeyboardHandler = {
   lastViewportWidth: 0,
   keyboardVisible: false,
   initialViewportHeight: 0,
+  // COD-467: lowest visual-viewport height seen while the keyboard is up. A
+  // rise of more than KEYBOARD_GONE_GROWTH_PX above it is the keyboard leaving,
+  // whatever the pre-keyboard baseline says (see handleViewportResize).
+  _keyboardMinHeight: 0,
+  KEYBOARD_GONE_GROWTH_PX: 150,
+  // After focus leaves every editable element, how long the keyboard gets to
+  // finish closing before its state is cleared regardless of resize events.
+  KEYBOARD_FOCUS_SETTLE_MS: 350,
   _viewportSettleTimer: null,
   _settleRestoreScroll: false,
   _settlePending: false,
@@ -290,6 +298,10 @@ const KeyboardHandler = {
   init() {
     // Only initialize on touch devices
     if (!MobileDetection.isTouchDevice()) return;
+
+    // init() is reached from more than one boot path; register once.
+    if (this._initialized) return;
+    this._initialized = true;
 
     this.initialViewportHeight = window.visualViewport?.height || window.innerHeight;
     this.lastViewportHeight = this.initialViewportHeight;
@@ -308,6 +320,35 @@ const KeyboardHandler = {
       }, 400);
     };
     document.addEventListener('focusin', this._focusinHandler);
+
+    // COD-467: a phone keyboard cannot be up with nothing editable focused. When
+    // focus leaves the last editable element and the closing resize did not
+    // clear the state (no event, or one the detector misread), clear it here,
+    // or throttledResize and the mobile resize retry keep skipping and the
+    // terminal never grows back. The settle lets a refocus land first (the
+    // accessory bar and the keyboard tap fix both hand focus straight back).
+    this._focusoutHandler = () => {
+      clearTimeout(this._focusSettleTimer);
+      this._focusSettleTimer = setTimeout(() => {
+        this._focusSettleTimer = null;
+        if (this.keyboardVisible && !this._editableHasFocus()) this.forceKeyboardHidden();
+      }, this.KEYBOARD_FOCUS_SETTLE_MS);
+    };
+    document.addEventListener('focusout', this._focusoutHandler);
+
+    // COD-467: iOS hides the keyboard when the page goes to the background (app
+    // switch, tab switch, lock) and never brings it back, but the terminal's
+    // hidden textarea KEEPS focus. A later tap then re-focuses the element that
+    // already has it, which WebKit ignores, so the keyboard would not open until
+    // something else took focus first (switching sessions did, via
+    // handleSessionTabClick's blur). Release it on return.
+    this._visibilityHandler = () => {
+      if (document.visibilityState !== 'visible') return;
+      const active = document.activeElement;
+      if (this._isTerminalInput(active)) active.blur?.();
+      this.forceKeyboardHidden();
+    };
+    document.addEventListener('visibilitychange', this._visibilityHandler);
 
     // Use visualViewport to detect keyboard and reposition toolbar
     if (window.visualViewport) {
@@ -336,6 +377,17 @@ const KeyboardHandler = {
 
   /** Remove event listeners */
   cleanup() {
+    this._initialized = false;
+    if (this._focusoutHandler) {
+      document.removeEventListener('focusout', this._focusoutHandler);
+      this._focusoutHandler = null;
+    }
+    if (this._visibilityHandler) {
+      document.removeEventListener('visibilitychange', this._visibilityHandler);
+      this._visibilityHandler = null;
+    }
+    clearTimeout(this._focusSettleTimer);
+    this._focusSettleTimer = null;
     if (this._focusinHandler) {
       document.removeEventListener('focusin', this._focusinHandler);
       this._focusinHandler = null;
@@ -392,6 +444,7 @@ const KeyboardHandler = {
     // branches are skipped on a shape change, whichever way the height moved.
     if (!shapeChanged && heightDiff > 150 && !this.keyboardVisible) {
       this.keyboardVisible = true;
+      this._keyboardMinHeight = currentHeight;
       document.body.classList.add('keyboard-visible');
       // While the keyboard is open, size the app to the visual viewport so
       // xterm's bottom row and cursor sit above the OS keyboard.
@@ -400,8 +453,18 @@ const KeyboardHandler = {
     }
     // Keyboard hidden (viewport grew back close to initial)
     // Use 100px threshold (not 50) to handle iOS address bar drift,
-    // iOS 26's persistent 24px discrepancy, and Safari bottom bar changes
-    else if (!shapeChanged && heightDiff < 100 && this.keyboardVisible) {
+    // iOS 26's persistent 24px discrepancy, and Safari bottom bar changes.
+    // COD-467: OR the viewport rose far above the lowest height seen while the
+    // keyboard was up. Chrome on iOS restores its own toolbars as the keyboard
+    // leaves, landing >100px short of a baseline taken with them collapsed, so
+    // the baseline rule alone left keyboardVisible latched (and every terminal
+    // resize skipped). Toolbars and keyboard size changes (predictive bar,
+    // emoji) move tens of px; a keyboard leaving moves ~300.
+    else if (
+      !shapeChanged &&
+      this.keyboardVisible &&
+      (heightDiff < 100 || currentHeight - this._keyboardMinHeight > this.KEYBOARD_GONE_GROWTH_PX)
+    ) {
       this.keyboardVisible = false;
       document.body.classList.remove('keyboard-visible');
       this.onKeyboardHide();
@@ -434,6 +497,7 @@ const KeyboardHandler = {
       this.initialViewportHeight = currentHeight;
     }
     if (this.keyboardVisible) {
+      this._keyboardMinHeight = Math.min(this._keyboardMinHeight || currentHeight, currentHeight);
       document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
     }
 
@@ -766,6 +830,45 @@ const KeyboardHandler = {
   },
 
   /** Check if element is an input that triggers keyboard (excludes terminal) */
+  /**
+   * COD-467: leave keyboard mode NOW, whatever the resize detector last saw.
+   * The baseline becomes the current height, so if the keyboard is still
+   * animating closed the next resize only grows past it (no false re-show).
+   */
+  forceKeyboardHidden() {
+    if (!this.keyboardVisible) return;
+    this.keyboardVisible = false;
+    this._keyboardMinHeight = 0;
+    document.body.classList.remove('keyboard-visible');
+    this.initialViewportHeight = window.visualViewport?.height || window.innerHeight;
+    this.onKeyboardHide();
+    MobileDetection.updateAppHeight();
+    this.updateLayoutForKeyboard();
+  },
+
+  /** The terminal's own text inputs (xterm's helper textarea, the CJK textarea). */
+  _isTerminalInput(el) {
+    return !!el && (el.classList?.contains('xterm-helper-textarea') || el.id === 'cjkInput');
+  },
+
+  /**
+   * Anything that can hold the on-screen keyboard open. Unlike isInputElement()
+   * this INCLUDES the terminal's textarea (that one excludes it on purpose: it
+   * decides what to scroll into view, not whether a keyboard can be up).
+   */
+  _editableHasFocus() {
+    const el = document.activeElement;
+    if (!el) return false;
+    if (this._isTerminalInput(el) || el.isContentEditable) return true;
+    const tag = el.tagName?.toLowerCase();
+    if (tag === 'textarea') return true;
+    if (tag !== 'input') return false;
+    const type = el.type?.toLowerCase();
+    return !['checkbox', 'radio', 'range', 'file', 'button', 'submit', 'reset', 'color', 'image', 'hidden'].includes(
+      type
+    );
+  },
+
   isInputElement(el) {
     if (!el) return false;
 

@@ -135,6 +135,7 @@ const MIME_TYPES: Record<string, string> = {
   jpeg: 'image/jpeg',
   gif: 'image/gif',
   webp: 'image/webp',
+  avif: 'image/avif',
   ico: 'image/x-icon',
   bmp: 'image/bmp',
   // Media needs a real type, not the octet-stream fallback: a <video>/<audio>
@@ -1002,6 +1003,9 @@ async function captureDocumentVersion(sessionId: string, filePath: string, exten
   if (!isDiffableDocExtension(extension)) return;
   try {
     const stat = await fs.stat(filePath);
+    // Over the per-file history budget: the store would refuse it anyway, so do
+    // not read (and, for docx, convert) it on every 1.5s poll (COD-457).
+    if (stat.size > documentVersionStore.maxVersionBytes) return;
     const latest = documentVersionStore.latest(sessionId, filePath);
     if (latest && latest.mtimeMs === (stat.mtimeMs ?? 0) && latest.size === stat.size) return;
     if (isBinaryDocExtension(extension)) {
@@ -1706,7 +1710,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       // breadth of formats the attachments viewer renders (image/audio/video/pdf)
       // so the file viewer can open the same files.
       const ext = filePath.split('.').pop()?.toLowerCase() || '';
-      const imageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
+      const imageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'bmp', 'ico']);
       // Shared with the attachment registry so a video plays the same whether it
       // sits in the workspace or is reached by id from outside it.
       const videoExts = VIDEO_ATTACHMENT_EXTENSIONS;

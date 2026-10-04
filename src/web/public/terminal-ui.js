@@ -119,6 +119,32 @@
   // Bound on page keys emitted from one gesture batch, mirroring the SGR tick
   // cap: a fling must not build a backlog that keeps paging after it stops.
   const PAGE_KEY_MAX_PER_BATCH = 3;
+  // COD-464 paced wheel → CLI. Per animation frame, send at most this share of
+  // the rows still owed (always at least one report's worth). Small amounts, which
+  // is everything a trackpad or a finger produces, go out at once, so the content
+  // stops when the input stops; only a big jump (a mouse notch, ~5 rows) is spread
+  // over a few frames, halving each frame, instead of landing in one repaint.
+  const WHEEL_PACE_EASE = 0.5;
+  const WHEEL_PACE_MAX_REPORTS_PER_FRAME = 6;
+  // Streak timing margins. A CLI that accelerates within a streak (`wheelForward.
+  // streak`, measured on Claude: reset between 30 and 40 ms) is only ever sent a
+  // report while the streak is CLEARLY alive (gap < resetMs - continue margin) or
+  // CLEARLY reset (gap >= resetMs + reset margin), never in between. ASYMMETRIC on
+  // purpose: the browser → WS → server → tmux path compresses gaps (a flick whose
+  // sends were 47-52 ms apart moved 68 rows, which only fits Claude NOT resetting
+  // at those gaps), and wrongly assuming a reset over-delivers (the runaway feel)
+  // while wrongly assuming a continuation merely under-delivers.
+  const WHEEL_STREAK_CONTINUE_MARGIN_MS = 12;
+  const WHEEL_STREAK_RESET_MARGIN_MS = 35;
+  // Finger still for this long before lifting = a hold, not a flick (iOS does the same).
+  const TOUCH_HOLD_NO_FLING_MS = 80;
+  // A wheel event after this much quiet starts a NEW gesture, whose first event
+  // sends a report even when it is less than one report's worth of travel, so the
+  // screen answers the very first event (a trackpad's first deltas are a few px).
+  // The pre-paid travel is owed back by the rest of the gesture, never added.
+  const WHEEL_PACE_GESTURE_GAP_MS = 150;
+  // ...but not for sub-row jitter (0.1 row, ~2px).
+  const WHEEL_PACE_MIN_START_ROWS = 0.1;
   const TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM = 4;
   // Composer navigation keys as xterm.js encodes user keystrokes: plain and
   // modified arrows (CSI A-D, CSI 1;mA-D, SS3 A-D), Home/End (CSI H/F, SS3
@@ -280,6 +306,13 @@
     KEY_PAGE_DOWN,
     PAGE_KEY_SCREEN_FRACTION,
     PAGE_KEY_MAX_PER_BATCH,
+    WHEEL_PACE_EASE,
+    WHEEL_PACE_MAX_REPORTS_PER_FRAME,
+    WHEEL_PACE_GESTURE_GAP_MS,
+    WHEEL_PACE_MIN_START_ROWS,
+    WHEEL_STREAK_CONTINUE_MARGIN_MS,
+    WHEEL_STREAK_RESET_MARGIN_MS,
+    TOUCH_HOLD_NO_FLING_MS,
     TUI_PROMPT_DEFAULT_ROWS_FROM_BOTTOM,
     MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR,
     MOBILE_KEYBOARD_DISMISS_TAP_SLOP,
@@ -887,6 +920,11 @@ Object.assign(CodemanApp.prototype, {
       }
       if (ev.isComposing || ev.key === 'Process' || ev.keyCode === 229) return true;
 
+      // COD-474: a preview opened from a terminal link leaves focus in xterm, so
+      // Esc would reach the PTY before the document handler closes the preview.
+      // Returning false only stops xterm; the event still bubbles to that handler.
+      if (ev.type === 'keydown' && ev.key === 'Escape' && this._isFilePreviewOpen?.()) return false;
+
       // ── COD-187 history view keys ──
       // Esc EXITS the frozen history view and must NEVER reach the PTY (a
       // leaked \x1b cancels a running codex turn). Gated strictly on history.
@@ -1292,8 +1330,9 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Mouse wheel: forward to the TUI only for sessions verified to handle SGR
-    // wheel reports (claude 2.1.187+ — see _shouldForwardWheelToApp), local
-    // scrollback otherwise. Claude Code 2.1.187+ scrolls its own
+    // wheel reports (claude 2.1.187+ while it tracks the mouse, which only its
+    // fullscreen renderer does; see _shouldForwardWheelToApp), local scrollback
+    // otherwise. Claude Code 2.1.187+ scrolls its own
     // transcript on SGR wheel reports — scrolled-away tool blocks re-render
     // live and stay clickable — and its select menus no longer capture wheel
     // as option navigation (verified against 2.1.202: /model menu highlight
@@ -1369,6 +1408,15 @@ Object.assign(CodemanApp.prototype, {
           });
           return;
         }
+        // COD-464: when the CLI's `wheelForward` capability applies right now,
+        // the wheel goes to it as PACED SGR reports (first report immediately,
+        // then one eased batch per frame) — on live-mirror tabs too, where it used
+        // to fall through to the half-screen PageUp fallback below.
+        if (this._shouldPaceWheelToCli(ev)) {
+          this._logScrollRouting('forward-sgr-paced');
+          this._paceWheelToCli(ev.clientX, ev.clientY, this._wheelRowsFloat(ev));
+          return;
+        }
         if (!isLiveMirror && this._shouldForwardWheelToApp(ev)) {
           this._logScrollRouting('forward-sgr');
           this._forwardScrollToApp(ev.clientX, ev.clientY, this._wheelScrollLines(ev));
@@ -1416,7 +1464,7 @@ Object.assign(CodemanApp.prototype, {
     // phone/tablet swipe scrolls the local buffer of stale repaint frames and
     // drags the CLI's pinned input box off the screen (issue #205's mobile
     // half). Same gate, so Shift has no touch analog but the local-scrollback
-    // opt-out setting and the CLI-version gate apply to touch exactly as they
+    // opt-out setting and the version/tracking gate apply to touch exactly as they
     // do to the wheel — including the PageUp/PageDown fallback the wheel uses
     // when that gate is false and there is no local scrollback to scroll
     // (_maybePageCliTranscript), which is what keeps a swipe from being a
@@ -1445,6 +1493,9 @@ Object.assign(CodemanApp.prototype, {
       let touchLastY = 0;
       let velocity = 0;
       let lastTime = 0;
+      // COD-464: when the finger last MOVED. Lifting after holding still must
+      // not fling (measured: drag, hold 300 ms, lift → 664 ms of momentum).
+      let lastMoveAt = 0;
       let scrollFrame = null;
       let isTouching = false;
 
@@ -1469,6 +1520,14 @@ Object.assign(CodemanApp.prototype, {
             } else {
               this._sendForegroundTuiWheel(velocity, touchLastX, touchLastY);
             }
+            velocity *= 0.92;
+            scrollFrame = requestAnimationFrame(scrollLoop);
+            return;
+          }
+          // COD-464: flick momentum keeps feeding the paced CLI route with
+          // fractional lines per frame (the pacer carries and caps).
+          if (this._shouldPaceWheelToCli({ shiftKey: false })) {
+            this._paceWheelToCli(touchLastX, touchLastY, velocity / cellHeight());
             velocity *= 0.92;
             scrollFrame = requestAnimationFrame(scrollLoop);
             return;
@@ -1575,7 +1634,11 @@ Object.assign(CodemanApp.prototype, {
           panAxis = null;
           isTouching = true;
           didScroll = false;
-          tapStartedWithTerminalFocus = this._isMobileTerminalInputFocused();
+          // COD-467: "keyboard up", not mere focus. iOS hides the keyboard on an
+          // app/tab switch while the textarea keeps focus; reading focus alone
+          // made the next transcript tap run the tap-to-CLOSE toggle on a
+          // keyboard that was not there, so it never opened.
+          tapStartedWithTerminalFocus = this._mobileKeyboardIsUp();
           // Classifying scans the whole viewport with translateToString, and
           // this runs at the start of EVERY gesture including scroll drags.
           // Cache the result for the touchend of this same gesture rather than
@@ -1668,6 +1731,7 @@ Object.assign(CodemanApp.prototype, {
             const delta = touchLastY - touchY; // positive = scroll down
             pixelAccum += delta;
             velocity = delta * 1.2;
+            lastMoveAt = performance.now();
             touchLastX = touchX;
             touchLastY = touchY;
             if (this._shouldForwardScrollToForegroundTui()) {
@@ -1704,6 +1768,18 @@ Object.assign(CodemanApp.prototype, {
             }
             pixelAccum += delta;
           if (Math.abs(pixelAccum) < getThreshold()) return;
+          // COD-464: same paced route as the desktop wheel. Measured on iPhone
+          // emulation with real CLIs: a swipe on a Claude/Codex mirror tab opened
+          // the frozen history view, which holds ONE screen for these CLIs (their
+          // transcript lives in the CLI, not in tmux), so nothing older than the
+          // last screen was reachable at all. The finger's own pixel travel is
+          // fed (delta / row height, fractional; the pacer carries the rest), not
+          // `pixelAccum`, which counts each delta twice on this path.
+          if (this._shouldPaceWheelToCli({ shiftKey: false })) {
+            this._logScrollRouting('forward-sgr-paced');
+            this._paceWheelToCli(touchLastX, touchLastY, delta / cellHeight());
+            return;
+          }
           if (getIsOpencodeMobile()) {
               pendingDelta += pixelAccum;
               if (touchMoveRaf) return;
@@ -1774,6 +1850,12 @@ Object.assign(CodemanApp.prototype, {
           const touch = this._endTerminalTouchGesture(touchGesture, ev.changedTouches, ev.touches);
           isTouching = false;
           if (touchMoveRaf) { cancelAnimationFrame(touchMoveRaf); touchMoveRaf = 0; pendingDelta = 0; }
+          if (
+            this._shouldPaceWheelToCli({ shiftKey: false }) &&
+            performance.now() - lastMoveAt > window.CodemanTerminalInput.TOUCH_HOLD_NO_FLING_MS
+          ) {
+            velocity = 0;
+          }
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
@@ -3105,7 +3187,15 @@ Object.assign(CodemanApp.prototype, {
           return last ? { x: last.x + 1, y: last.y } : { x: index + 1, y: extentStart + 1 };
         };
 
-        if (!lineText || !lineText.includes('/')) {
+        // Paths codex word-wrapped inside a table cell (see terminalCellWrappedPaths
+        // in constants.js). They follow their own cell down the rows, which the
+        // linear stitch above cannot do for a multi-column table, so they are
+        // found from the buffer directly and claim their cells over the rest.
+        const cellWrappedPaths = (
+          window.CodemanTerminalLines?.terminalCellWrappedPaths?.(buffer, bufferLineNumber - 1, 4) ?? []
+        ).filter((hit) => !/(^|\/)\.\.(\/|$)/.test(hit.path));
+
+        if ((!lineText || !lineText.includes('/')) && cellWrappedPaths.length === 0) {
           callback(undefined);
           return;
         }
@@ -3302,6 +3392,35 @@ Object.assign(CodemanApp.prototype, {
         // Pattern 4: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
 
+        const activateFilePath = (text) => {
+          // Tailing a PNG in the log viewer shows binary noise; the file preview
+          // already renders images, PDFs, documents and media inline. The
+          // extension list is previewsInFileViewer() in constants.js — shared
+          // with the response viewer and pinned to the attachment registry by
+          // test/media-extension-parity.test.ts, so an in-workspace .m4a can no
+          // longer route to the log viewer while the same file in /tmp plays.
+          //
+          // Routing is by EXTENSION, not by workspace containment: text still
+          // goes to the log viewer even from outside the workspace, because it
+          // follows a file that is still being written and its allowlist covers
+          // /var/log and ~/logs (COD-232 pins those). A previewable path outside
+          // the workspace has to be registered as an attachment first — the
+          // workspace-confined routes can only 404 on it — which is what
+          // openExternalPathPreview does before previewing by id.
+          if (previewsInFileViewer(text)) {
+            if (self._isExternalPreviewPath?.(text, originatingSessionId)) {
+              const pending = self.openExternalPathPreview(text, originatingSessionId);
+              if (pending && typeof pending.catch === 'function') {
+                pending.catch((err) => console.error('Failed to open external path preview:', err));
+              }
+              return;
+            }
+            self.openFilePreview(text, originatingSessionId);
+            return;
+          }
+          self.openLogViewerWindow(text, originatingSessionId);
+        };
+
         const addLogLink = (filePath, matchIndex) => {
           // A path with a `..` segment never makes a good link: the log viewer's
           // allowlist and the attachment guard both realpath and then refuse the
@@ -3323,32 +3442,7 @@ Object.assign(CodemanApp.prototype, {
             range: { start, end },
             decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
-              // Tailing a PNG in the log viewer shows binary noise; the file preview
-              // already renders images, PDFs, documents and media inline. The
-              // extension list is previewsInFileViewer() in constants.js — shared
-              // with the response viewer and pinned to the attachment registry by
-              // test/media-extension-parity.test.ts, so an in-workspace .m4a can no
-              // longer route to the log viewer while the same file in /tmp plays.
-              //
-              // Routing is by EXTENSION, not by workspace containment: text still
-              // goes to the log viewer even from outside the workspace, because it
-              // follows a file that is still being written and its allowlist covers
-              // /var/log and ~/logs (COD-232 pins those). A previewable path outside
-              // the workspace has to be registered as an attachment first — the
-              // workspace-confined routes can only 404 on it — which is what
-              // openExternalPathPreview does before previewing by id.
-              if (previewsInFileViewer(text)) {
-                if (self._isExternalPreviewPath?.(text, originatingSessionId)) {
-                  const pending = self.openExternalPathPreview(text, originatingSessionId);
-                  if (pending && typeof pending.catch === 'function') {
-                    pending.catch((err) => console.error('Failed to open external path preview:', err));
-                  }
-                  return;
-                }
-                self.openFilePreview(text, originatingSessionId);
-                return;
-              }
-              self.openLogViewerWindow(text, originatingSessionId);
+              activateFilePath(text);
             },
             hover() {
               self._linkHovered = true;
@@ -3428,6 +3522,43 @@ Object.assign(CodemanApp.prototype, {
         extPattern.lastIndex = 0;
         while ((match = extPattern.exec(lineText)) !== null) {
           addLogLink(match[1], match.index);
+        }
+
+        // One link per row segment, each opening the WHOLE path (the COD-448 URL
+        // rule). A fragment of the same cells linked by another detector (a
+        // relative `243/after-overview.png`, say) would open the wrong file, so
+        // the cell-wrapped path displaces it.
+        if (cellWrappedPaths.length > 0) {
+          const claimed = cellWrappedPaths.flatMap((hit) => hit.segments);
+          const overlapsClaim = (link) =>
+            claimed.some((seg) => {
+              const y = seg.row + 1;
+              if (y < link.range.start.y || y > link.range.end.y) return false;
+              const from = y === link.range.start.y ? link.range.start.x : 1;
+              const to = y === link.range.end.y ? link.range.end.x : Number.MAX_SAFE_INTEGER;
+              return from <= seg.endCol && to >= seg.startCol + 1;
+            });
+          for (let i = links.length - 1; i >= 0; i--) {
+            if (overlapsClaim(links[i])) links.splice(i, 1);
+          }
+          for (const hit of cellWrappedPaths) {
+            for (const seg of hit.segments) {
+              links.push({
+                text: hit.path,
+                range: { start: { x: seg.startCol + 1, y: seg.row + 1 }, end: { x: seg.endCol, y: seg.row + 1 } },
+                decorations: { pointerCursor: true, underline: true },
+                activate() {
+                  activateFilePath(hit.path);
+                },
+                hover() {
+                  self._linkHovered = true;
+                },
+                leave() {
+                  self._linkHovered = false;
+                },
+              });
+            }
+          }
         }
 
         if (links.length > 0) {
@@ -5228,9 +5359,9 @@ Object.assign(CodemanApp.prototype, {
   /**
    * Post-scroll companion to _noteTerminalUserScroll: hitting the TOP of the
    * buffer while scrolling up gives the app a chance to pull the rest of tmux's
-   * scrollback (issue #205, see _maybeRefetchFullHistory). Shell sessions decline
-   * automatic pulls because their captures can be large; their banner button is
-   * the explicit path. Must be called AFTER scrollLines(), since the check is on
+   * scrollback (issue #205, see _maybeRefetchFullHistory). Shell sessions pull a
+   * bounded window because their captures can be large; their banner button is
+   * the unbounded path. Must be called AFTER scrollLines(), since the check is on
    * the resulting position, and it is deliberately not folded into
    * _noteTerminalUserScroll for exactly that reason.
    */
@@ -5278,13 +5409,17 @@ Object.assign(CodemanApp.prototype, {
    * below the last line, and _estimateReplayRows can only approximate wrapping.
    * Only a capture that is worse by more than a full screen counts as a
    * downgrade, which leaves every genuine recovery case untouched.
+   *
+   * A caller that already estimated the capture's rows passes them as
+   * `estimatedRows`, so a megabyte capture is not scanned twice.
    */
-  _replayWouldShrinkBuffer(capture) {
+  _replayWouldShrinkBuffer(capture, estimatedRows) {
     const term = this.terminal;
     const rowsNow = term?.buffer?.active?.length || 0;
     if (!rowsNow) return false;
     const screen = term?.rows || 24;
-    return this._estimateReplayRows(capture, term?.cols) + screen < rowsNow;
+    const rows = estimatedRows ?? this._estimateReplayRows(capture, term?.cols);
+    return rows + screen < rowsNow;
   },
 
   /**
@@ -7150,12 +7285,32 @@ Object.assign(CodemanApp.prototype, {
 
   _focusMobileTerminalInput() {
     this._syncMobileHelperTextareaToCursor();
+    // COD-467: WebKit ignores focus() on the element that already has focus, so
+    // a textarea that kept focus after the keyboard went away (app/tab switch,
+    // lock) could never bring the keyboard back. Blur first, in the same tap
+    // handler, so the focus() below is a real focus change inside a user
+    // gesture, which is what iOS requires to show the keyboard. Only when the
+    // keyboard is actually down: with it up this would make it bounce.
+    if (this._isMobileTerminalInputFocused() && !this._mobileKeyboardIsUp()) this._blurMobileTerminalInput();
     const cjkInput = document.getElementById('cjkInput');
     if (cjkInput?.classList.contains('cjk-input-visible')) {
       cjkInput.focus();
     } else {
       this.terminal?.focus();
     }
+  },
+
+  /**
+   * COD-467: is the on-screen keyboard actually up for the terminal? Focus is
+   * not enough on a touch device (see _focusMobileTerminalInput), so it also
+   * needs KeyboardHandler's visibility. Without a touch KeyboardHandler (desktop,
+   * tests) it falls back to focus, the behaviour before this change.
+   */
+  _mobileKeyboardIsUp() {
+    if (!this._isMobileTerminalInputFocused()) return false;
+    const touch = typeof MobileDetection !== 'undefined' && MobileDetection.isTouchDevice?.();
+    if (!touch || typeof KeyboardHandler === 'undefined') return true;
+    return KeyboardHandler.keyboardVisible === true;
   },
 
   _handleMobileTerminalTap(touch, startedWithTerminalFocus, cachedIntent = null) {
@@ -7398,9 +7553,10 @@ Object.assign(CodemanApp.prototype, {
 
   // Wheel forwarding gate for the container wheel handler: no Shift override,
   // xterm's own encoder dormant, viewport at the bottom, and a TUI VERIFIED to
-  // scroll its transcript on SGR wheel reports — which today is claude 2.1.187+
-  // and nothing else (older Claude Code captures wheel as select-menu option
-  // navigation; an unknown version is treated as older). Gemini and codex are
+  // scroll its transcript on SGR wheel reports, which today is claude 2.1.187+
+  // with mouse tracking on (fullscreen) and nothing else (older Claude Code
+  // captures wheel as select-menu option navigation, an unknown version is
+  // treated as older, and inline Claude ignores it). Gemini and codex are
   // strip modes too but keep the local wheel — taps/clicks are still forwarded
   // for them (harmless no-ops at worst).
   //
@@ -7434,6 +7590,21 @@ Object.assign(CodemanApp.prototype, {
   /** Unrounded variant for the smooth local-scroll path, which accumulates
    *  sub-line fractions across events instead of forcing every tiny trackpad
    *  delta to a whole ±1 line. Same unit handling and Shift-axis trap. */
+  /**
+   * COD-464: the wheel delta in CONTENT ROWS at 1:1 pixels, so the transcript
+   * moves as far as a web page would for the same input. `_wheelScrollLinesFloat`
+   * uses a fixed 25px per line, but a row is ~21px on desktop, so content moved
+   * ~0.84x the trackpad. Line/page units keep their meaning.
+   */
+  _wheelRowsFloat(ev) {
+    const delta = ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+    if (!delta) return 0;
+    if (ev.deltaMode === 1) return delta;
+    if (ev.deltaMode === 2) return delta * (this.terminal?.rows || 24);
+    const rowPx = this.terminal?._core?._renderService?.dimensions?.css?.cell?.height;
+    return delta / (Number.isFinite(rowPx) && rowPx > 0 ? rowPx : 25);
+  },
+
   _wheelScrollLinesFloat(ev) {
     const delta = ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
     if (!delta) return 0;
@@ -7467,6 +7638,15 @@ Object.assign(CodemanApp.prototype, {
     const sessionMode = session?.mode || 'claude';
     if (sessionMode !== 'claude') return false;
     if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
+    // Only while Claude is actually listening for the mouse. In its default
+    // inline renderer (2.1.280 measured: alternate_on=0, mouse_any_flag=0) the
+    // transcript lives in real scrollback, like codex, and SGR wheel reports are
+    // ignored, so forwarding made every swipe and wheel tick dead. Fullscreen
+    // (CLAUDE_CODE_NO_FLICKER=1, or "tui": "fullscreen" in ~/.claude/settings.json)
+    // turns on alt-screen + mode 1003/1006, which the server records as
+    // cliMouseTracking. A stale-false flag after a server restart falls through
+    // to _maybePageCliTranscript, so it never goes dead.
+    if (session?.cliMouseTracking !== true) return false;
     // Deliberately NOT gated on _terminalViewportAtBottom(). It used to be, so
     // that leaving the bottom handed the wheel back to local scrollback and both
     // histories stayed reachable without a mode switch. In practice that inverted
@@ -7494,12 +7674,207 @@ Object.assign(CodemanApp.prototype, {
   // scroll-speed multiplier and acceleration on top), and the queue is bounded
   // so a wild scroll can't build a backlog that keeps scrolling after the finger
   // stops. Flushed via _sendInputEphemeral — loss-tolerant, off the durable queue.
+  /**
+   * COD-464: this session's `wheelForward` capability, as the server injects it
+   * into `window.__codemanWheelForward` (never an id literal here), when it says
+   * the wheel goes to the CLI RIGHT NOW: `{ rows, reversalDeadReports }`, else
+   * null. Every forwarding mode needs the CLI to have turned mouse tracking on
+   * itself (`cliMouseTracking`, false for claude's inline renderer, older codex
+   * and panes Codeman cannot see into, which keep the local/PageUp routes);
+   * 'version-gated' additionally needs the probed CLI version.
+   */
+  _wheelReportsFor(sessionId) {
+    const session = this.sessions?.get(sessionId);
+    const map = typeof window !== 'undefined' ? window.__codemanWheelForward : null;
+    const spec = session?.mode && map ? map[session.mode] : null;
+    if (!spec || !Number.isInteger(spec.rows) || spec.rows <= 0) return null;
+    // #498: a pane that never turned mouse tracking on ignores wheel reports
+    // (claude's default inline renderer, older codex, remote wrappers), so EVERY
+    // forwarding mode needs it; forwarding there made every wheel tick dead.
+    if (session.cliMouseTracking !== true) return null;
+    if (spec.mode === 'version-gated') {
+      if (!spec.minVersion || !this._cliVersionAtLeast?.(session.cliVersion, spec.minVersion)) return null;
+    } else if (spec.mode !== 'mouse-tracking') {
+      return null;
+    }
+    const dead = Number.isInteger(spec.reversalDeadReports) ? Math.max(0, spec.reversalDeadReports) : 0;
+    const streak =
+      spec.streak && Number.isFinite(spec.streak.resetMs) && Array.isArray(spec.streak.steps) && spec.streak.steps.length
+        ? { resetMs: spec.streak.resetMs, steps: spec.streak.steps }
+        : null;
+    return { rows: spec.rows, reversalDeadReports: dead, streak };
+  },
+
+  /**
+   * COD-464: should this desktop wheel event drive the CLI's own transcript
+   * through paced SGR reports? Measured (2026-10-01): on live-mirror tabs the
+   * wheel used to fall through to the PageUp fallback (the mirror buffer has no
+   * scrollback, so it always read as hollow): nothing moved until ~500px of
+   * wheel travel, then the CLI jumped half a screen, and a slow trackpad
+   * gesture moved nothing at all. Both CLIs whose `wheelForward` declares `rows`
+   * scroll by whole rows per report in 5-12 ms.
+   *
+   * Whether the CLI takes the wheel at all is its `wheelForward` capability
+   * (see _wheelReportsFor). Shift+wheel and the "Wheel scrolls local history"
+   * opt-out keep their meaning.
+   */
+  _shouldPaceWheelToCli(ev) {
+    if (!ev || ev.shiftKey || !this.activeSessionId || !this.terminal) return false;
+    if (this._viewMode === 'history') return false;
+    if (this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback) return false;
+    const tracking = this.terminal.modes?.mouseTrackingMode;
+    if (tracking && tracking !== 'none') return false;
+    if (this.terminal.buffer?.active?.type === 'alternate') return false;
+    return this._wheelReportsFor(this.activeSessionId) !== null;
+  },
+
+  /**
+   * COD-464 paced wheel/touch → CLI, in CONTENT ROWS (fractional): what the
+   * input asks the transcript to move, at 1:1 with its pixels (see
+   * _wheelRowsFloat; touch passes finger pixels / row height).
+   *
+   * Measured "not natural" (isolated real Claude 2.1.286 + Codex 0.159.3): the
+   * content moved ~0.82x the input, a notch kept gliding ~120 ms after the wheel
+   * stopped, and Claude ACCELERATES inside a streak of reports (step per report
+   * 1,1,1,1,2,2,2,3,3,3,3,4,4,4,5,5,6…; reset by a 35-40 ms pause), so a phone
+   * flick moved 8.5x the finger and sustained scrolling sped up the longer it
+   * ran. So the rows still OWED are tracked, and each frame sends only the
+   * reports whose measured step (`_wheelPaceStep`, from the CLI's `streak`
+   * curve, else its fixed `rows`) the debt covers: Claude stays linear while
+   * fast input still gets bigger steps. Rules:
+   *  - the first event of a gesture moves at once (pre-paid, owed back);
+   *  - overshoot from a coarse step is CREDIT against the next same-direction
+   *    input, never sent back the other way (that would jitter and trip
+   *    Claude's reversal debounce);
+   *  - the backlog is capped at one screen; travel never crosses tabs.
+   */
+  _paceWheelToCli(clientX, clientY, rows) {
+    const sessionId = this.activeSessionId;
+    const spec = this._wheelReportsFor(sessionId);
+    if (!sessionId || !spec || !rows) return;
+    if (this._wheelPaceSession !== sessionId) {
+      this._wheelPaceSession = sessionId;
+      this._wheelPaceOwed = 0;
+      this._wheelPaceForce = false;
+      this._wheelPaceStreakK = 0;
+      this._wheelPaceSentAt = undefined;
+    }
+    // Snap a scrolled-up local viewport back first, like _forwardScrollToApp:
+    // reports address the live screen.
+    if (this._terminalViewportAtBottom && !this._terminalViewportAtBottom()) this.terminal.scrollToBottom();
+    this._wheelPaceX = clientX;
+    this._wheelPaceY = clientY;
+    const tuning = window.CodemanTerminalInput;
+    const now = performance.now();
+    const gestureStart =
+      typeof this._wheelPaceLastAt !== 'number' || now - this._wheelPaceLastAt > tuning.WHEEL_PACE_GESTURE_GAP_MS;
+    this._wheelPaceLastAt = now;
+    if (gestureStart) {
+      // A stale sub-step remainder (or credit) belongs to the gesture that made it.
+      this._wheelPaceOwed = 0;
+      if (Math.abs(rows) >= tuning.WHEEL_PACE_MIN_START_ROWS) this._wheelPaceForce = true;
+    }
+    this._wheelPaceInputDir = rows < 0 ? -1 : 1;
+    const cap = Math.max(4, this.terminal?.rows || 24);
+    this._wheelPaceOwed = Math.max(-cap, Math.min(cap, (this._wheelPaceOwed || 0) + rows));
+    if (!this._wheelPaceFrame) this._drainWheelPace();
+  },
+
+  /** COD-464: rows the k-th report of a streak moves (0-based), from the CLI's measured curve. */
+  _wheelPaceStep(spec, k) {
+    const steps = spec?.streak?.steps;
+    if (Array.isArray(steps) && steps.length) return steps[Math.min(k, steps.length - 1)];
+    return spec?.rows || 1;
+  },
+
+  /** COD-464: send this frame's reports for the owed rows; reschedules while a report can still be earned. */
+  _drainWheelPace() {
+    this._wheelPaceFrame = null;
+    const sessionId = this.activeSessionId;
+    const spec = sessionId ? this._wheelReportsFor(sessionId) : null;
+    if (!sessionId || sessionId !== this._wheelPaceSession || !spec) {
+      this._wheelPaceOwed = 0;
+      this._wheelPaceForce = false;
+      return;
+    }
+    let owed = this._wheelPaceOwed || 0;
+    const dir = this._wheelPaceInputDir || (owed < 0 ? -1 : 1);
+    // Only ever move in the direction the input is going. An opposite-signed
+    // remainder is overshoot credit, held for the next input.
+    if (!owed || Math.sign(owed) !== dir) return;
+    const tuning = window.CodemanTerminalInput;
+    const force = this._wheelPaceForce === true;
+    const now = performance.now();
+    if (!this._wheelPaceDir) this._wheelPaceDir = new Map();
+    const reversed = (this._wheelPaceDir.get(sessionId) ?? 1) !== dir;
+    let k = this._wheelPaceStreakK || 0;
+    if (spec.streak) {
+      const gap = typeof this._wheelPaceSentAt === 'number' ? now - this._wheelPaceSentAt : Infinity;
+      const resetMs = spec.streak.resetMs;
+      if (reversed || gap >= resetMs + tuning.WHEEL_STREAK_RESET_MARGIN_MS) {
+        k = 0;
+      } else if (gap > resetMs - tuning.WHEEL_STREAK_CONTINUE_MARGIN_MS) {
+        // Ambiguous: wait a frame or two for a sure reset rather than guess.
+        this._wheelPaceFrame = requestAnimationFrame(() => this._drainWheelPace());
+        return;
+      }
+    }
+    const budget = Math.max(this._wheelPaceStep(spec, k), Math.abs(owed) * tuning.WHEEL_PACE_EASE);
+    let n = 0;
+    let sent = 0;
+    while (n < tuning.WHEEL_PACE_MAX_REPORTS_PER_FRAME) {
+      const step = this._wheelPaceStep(spec, k);
+      if (!(Math.abs(owed) >= step / 2 || (force && n === 0))) break;
+      if (n > 0 && sent + step > budget + step / 2) break;
+      n++;
+      k++;
+      sent += step;
+      owed -= dir * step;
+    }
+    this._wheelPaceForce = false;
+    if (n) {
+      const pos = this._clientPointToCell?.(this._wheelPaceX, this._wheelPaceY) || {
+        col: Math.max(1, Math.floor((this.terminal?.cols || 80) / 2)),
+        row: Math.max(1, Math.floor((this.terminal?.rows || 24) / 2)),
+      };
+      const btn = dir < 0 ? 64 : 65;
+      // Reversal debounce (`reversalDeadReports`, measured on Claude): the CLI
+      // ignores the report(s) that reverse its last effective direction, so the
+      // first batch of a reversed gesture would move nothing. Pay them on top,
+      // never out of the user's travel. The CLI's direction outlives a tab
+      // switch, so it is remembered per session; unknown reads as "down" (a CLI
+      // starts at the bottom of its transcript), so the common first gesture,
+      // up, is primed.
+      const dead = reversed ? spec.reversalDeadReports || 0 : 0;
+      this._wheelPaceDir.set(sessionId, dir);
+      this._wheelPaceSentAt = now;
+      this._sendInputEphemeral(sessionId, `\x1b[<${btn};${pos.col};${pos.row}M`.repeat(n + dead));
+    }
+    this._wheelPaceStreakK = k;
+    this._wheelPaceOwed = owed;
+    // Keep going while a report can still be earned in the input's direction:
+    // the next step is covered, or at least a whole first-step is owed (then the
+    // streak is let lapse so the next report is small again). Anything less stays
+    // as carry for the next input: waiting out a streak for a fraction of a row is
+    // what made a single notch trail ~150 ms and land one row long.
+    const first = this._wheelPaceStep(spec, 0);
+    const next = this._wheelPaceStep(spec, k);
+    const left = Math.sign(owed) === dir ? Math.abs(owed) : 0;
+    if (left >= first / 2 && (left >= next / 2 || left >= first)) {
+      this._wheelPaceFrame = requestAnimationFrame(() => this._drainWheelPace());
+    }
+  },
+
   _sendSyntheticSgrWheel(clientX, clientY, lines) {
     if (!this.activeSessionId || !lines) return;
     const pos = this._clientPointToCell(clientX, clientY);
     if (!pos) return;
     const btn = lines < 0 ? 64 : 65;
     const ticks = Math.min(Math.abs(lines), 5);
+    // COD-464: keep the paced sender's view of the CLI's scroll direction true
+    // when a report leaves through this older path (touch, legacy forwarding).
+    if (!this._wheelPaceDir) this._wheelPaceDir = new Map();
+    this._wheelPaceDir.set(this.activeSessionId, lines < 0 ? -1 : 1);
     this._queueScrollBytes(`\x1b[<${btn};${pos.col};${pos.row}M`.repeat(ticks));
   },
 
@@ -7520,15 +7895,13 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * True when this session's LOCAL scrollback is structurally empty: a Claude
-   * pane in repaint mode, where tmux reports `history_size≈0` and every frame
-   * overwrites the last, so xterm's normal buffer never grows past one screen
-   * (`baseY === 0`). Scrolling that buffer is a no-op no matter how the gesture
-   * is routed — the "wheel does nothing at all" half of the #205 retest.
+   * True when the local buffer has no history and the CLI can page its own
+   * transcript. Claude repaints in place; Codex 0.157.1 uses tmux's alternate
+   * screen. Both can leave xterm at baseY 0 while the CLI has older output.
    */
   _localScrollbackIsHollow() {
     const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
-    if (mode !== 'claude') return false;
+    if (mode !== 'claude' && mode !== 'codex') return false;
     const buf = this.terminal?.buffer?.active;
     if (!buf || buf.type === 'alternate') return false;
     return (buf.baseY || 0) === 0;
@@ -7540,15 +7913,21 @@ Object.assign(CodemanApp.prototype, {
    *
    * The rescue path for every way `_shouldForwardWheelToApp` can come back false
    * on a Claude session that has no local history to fall back on: the CLI
-   * version probe failed or is genuinely older than 2.1.187, or the user turned
-   * on "Wheel scrolls local history" (which pins the wheel to a buffer that,
-   * for a repaint-mode CLI, is empty — the setting's footgun). Before this, all
-   * of those produced a completely dead gesture; the #205 reporter proved the
-   * keyboard route works by paging back through intact text with Fn+Up.
+   * version probe failed or is genuinely older than 2.1.187, the CLI's mouse
+   * tracking flag is unset (the inline renderer, or fullscreen right after a
+   * server restart), or the user turned on "Wheel scrolls local history" (which
+   * pins the wheel to a buffer that, for a repaint-mode CLI, is empty: the
+   * setting's footgun). Before this, all of those produced a completely dead
+   * gesture; the #205 reporter proved the keyboard route works by paging back
+   * through intact text with Fn+Up.
    *
-   * Triple-guarded (claude mode + gate false + `baseY === 0`), so a session with
-   * real local scrollback is never touched. Shift is excluded on purpose: it is
-   * the explicit "give me local scrollback" gesture and must keep that meaning.
+   * Codex also reaches it when its alternate-screen transcript has no xterm
+   * history: measured on 0.157.1, PageUp changes the visible transcript while
+   * SGR wheel reports and local scrolling do nothing.
+   *
+   * Guarded by CLI mode, normal buffer, and `baseY === 0`, so a session with
+   * real local scrollback is never touched. Shift is excluded on purpose: it
+   * explicitly selects local scrollback.
    *
    * @returns true when the gesture was consumed here (the caller must not also
    *          scroll locally).
@@ -7560,9 +7939,34 @@ Object.assign(CodemanApp.prototype, {
     if (this._pageKeySession !== this.activeSessionId) {
       this._pageKeySession = this.activeSessionId;
       this._pageKeyPending = 0;
+      this._pageKeyLastAt = undefined;
     }
     const tuning = window.CodemanTerminalInput;
     const perPage = Math.max(2, Math.round((this.terminal?.rows || 24) * tuning.PAGE_KEY_SCREEN_FRACTION));
+    // COD-470: the FIRST event of a gesture pages at once. Waiting for half a
+    // screen of travel (19 rows, ~475px on a 38-row pane) meant an ordinary
+    // trackpad flick never sent a key, so a remote codex tab, which always lands
+    // here, looked dead. The page is pre-paid: the travel it skipped is owed back
+    // by the rest of the gesture, so the rate stays one page per `perPage` rows.
+    // A pause or a direction change starts a new gesture (same rule as the paced
+    // wheel, WHEEL_PACE_GESTURE_GAP_MS).
+    const now = performance.now();
+    const dir = lines < 0 ? -1 : 1;
+    const gestureStart =
+      typeof this._pageKeyLastAt !== 'number' ||
+      now - this._pageKeyLastAt > tuning.WHEEL_PACE_GESTURE_GAP_MS ||
+      dir !== this._pageKeyDir;
+    this._pageKeyLastAt = now;
+    this._pageKeyDir = dir;
+    if (gestureStart) {
+      this._pageKeyPending = 0;
+      if (Math.abs(lines) >= tuning.WHEEL_PACE_MIN_START_ROWS && Math.abs(lines) < perPage) {
+        this._pageKeyPending = lines - dir * perPage;
+        this._queueScrollBytes(dir < 0 ? tuning.KEY_PAGE_UP : tuning.KEY_PAGE_DOWN);
+        this._logScrollRouting('page-keys');
+        return true;
+      }
+    }
     const pending = (this._pageKeyPending || 0) + lines;
     const pages = Math.trunc(pending / perPage);
     this._pageKeyPending = pending - pages * perPage;
@@ -7588,14 +7992,19 @@ Object.assign(CodemanApp.prototype, {
     const session = this.sessions?.get(sessionId);
     const optOut = !!this.loadAppSettingsFromStorage?.()?.terminalWheelLocalScrollback;
     const tracking = this.terminal?.modes?.mouseTrackingMode || 'none';
+    // xterm's own mode above stays 'none' for a strip mode (the server removes
+    // the DECSETs), so the CLI's real tracking state is reported separately.
+    const cliTracking = session?.cliMouseTracking === true;
     const baseY = this.terminal?.buffer?.active?.baseY ?? -1;
-    const signature = `${decision}|${session?.mode}|${session?.cliVersion}|${optOut}|${tracking}|${baseY > 0}`;
+    const signature =
+      `${decision}|${session?.mode}|${session?.cliVersion}|${optOut}|${tracking}|${cliTracking}|${baseY > 0}`;
     if (!this._scrollRoutingLogged) this._scrollRoutingLogged = new Map();
     if (this._scrollRoutingLogged.get(sessionId) === signature) return;
     this._scrollRoutingLogged.set(sessionId, signature);
     console.log(
       `[scroll] ${sessionId} → ${decision} (mode=${session?.mode || '?'}, cliVersion=${session?.cliVersion || 'unknown'}, ` +
-        `localScrollbackOptOut=${optOut}, mouseTracking=${tracking}, localScrollbackRows=${baseY})`
+        `localScrollbackOptOut=${optOut}, mouseTracking=${tracking}, cliMouseTracking=${cliTracking}, ` +
+        `localScrollbackRows=${baseY})`
     );
   },
 

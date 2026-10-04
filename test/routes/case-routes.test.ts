@@ -241,6 +241,10 @@ describe('case-routes', () => {
       ] as never);
       // No CLAUDE.md exists
       mockedExistsSync.mockReturnValue(false);
+      mockedStat.mockImplementation(async (path) => {
+        if (String(path).endsWith('/CLAUDE.md')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return { isDirectory: () => true } as never;
+      });
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -293,6 +297,27 @@ describe('case-routes', () => {
       const body = JSON.parse(res.body);
       // Should have both regular and linked cases
       expect(body.data.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('answers the case list when a linked NFS path never answers stat', async () => {
+      mockedReaddir.mockResolvedValue([] as never);
+      mockedReadFile.mockResolvedValueOnce(JSON.stringify({ tcc: '/mnt/stalled/tcc' }) as never);
+      let release!: () => void;
+      mockedStat.mockImplementation((path) => {
+        if (String(path) === '/mnt/stalled/tcc') {
+          return new Promise((resolve) => {
+            release = () => resolve({ isDirectory: () => true } as never);
+          });
+        }
+        return Promise.resolve({ isDirectory: () => true } as never);
+      });
+
+      const list = harness.app.inject({ method: 'GET', url: '/api/cases' });
+      const res = await list;
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data).toEqual([]);
+      expect(mockedStat).toHaveBeenCalledWith('/mnt/stalled/tcc');
+      release();
     });
   });
 
@@ -1072,6 +1097,7 @@ describe('case-routes', () => {
     it('returns error when case not found anywhere', async () => {
       mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
       mockedExistsSync.mockReturnValue(false);
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -1161,6 +1187,7 @@ describe('case-routes', () => {
 
     it('returns NOT_FOUND for an absent case before reading layout metadata', async () => {
       mockedExistsSync.mockReturnValue(false);
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/cases/absent/default-group' });
 
@@ -1176,6 +1203,7 @@ describe('case-routes', () => {
       harness = await createEnvelopeHarness({ username: 'alice', role: 'user' });
       vi.clearAllMocks();
       mockedExistsSync.mockReturnValue(false);
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
       mockedReadFile.mockImplementation(async (path) => {
         const value = String(path);
         if (value.endsWith('remote-cases.json')) {
@@ -1376,6 +1404,7 @@ describe('case-routes', () => {
     it('returns exists=false when no fix plan file', async () => {
       mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
       mockedExistsSync.mockReturnValue(false);
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
       const res = await harness.app.inject({
         method: 'GET',

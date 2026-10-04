@@ -165,6 +165,24 @@ describe('workDetect.workingLine is guarded like every other config regex', () =
       expect(compileVersionRegex(src), `${entry.id} declares a watchingLine the guard refuses`).not.toBeNull();
     }
   });
+
+  it('holds the optional awaitingLine to the same guard', () => {
+    expectRejected((e) => {
+      (e.capabilities as Record<string, unknown>).workDetect = {
+        promptGlyph: '>',
+        workingLine: 'working',
+        awaitingLine: '(a+)+b',
+      };
+    }, 'it is tested against a pane row every time a session settles');
+  });
+
+  it('accepts every shipped awaitingLine', () => {
+    for (const entry of STOCK_CLIS) {
+      const src = entry.capabilities.workDetect?.awaitingLine;
+      if (!src) continue;
+      expect(compileVersionRegex(src), `${entry.id} declares an awaitingLine the guard refuses`).not.toBeNull();
+    }
+  });
 });
 
 describe('no shell text can reach the command line', () => {
@@ -348,5 +366,20 @@ describe('capability shapes', () => {
     expectRejected((e) => {
       (e.capabilities as Record<string, unknown>).transcript = 'some-future-format';
     }, 'a transcript reader that does not exist would silently read nothing');
+  });
+});
+
+describe('COD-471 overlays.remote.tmuxMouseAtStartupSeconds', () => {
+  const codex = STOCK_CLIS.find((entry) => entry.id === 'codex')!;
+  const withSeconds = (value: unknown) => ({
+    ...codex,
+    overlays: { ...codex.overlays, remote: { fromLaunchSpec: true, tmuxMouseAtStartupSeconds: value } },
+  });
+
+  it('accepts the stock codex value and rejects out-of-range or fractional ones', () => {
+    expect(CliEntrySchema.safeParse(withSeconds(8)).success).toBe(true);
+    for (const bad of [0, -1, 31, 2.5, '8']) {
+      expect(CliEntrySchema.safeParse(withSeconds(bad)).success, String(bad)).toBe(false);
+    }
   });
 });

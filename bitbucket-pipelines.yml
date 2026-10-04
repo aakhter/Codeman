@@ -12,7 +12,7 @@
 # permanent merge-conflict site. This file is downstream-only and upstream never touches it.
 #
 # Bitbucket requires this filename at the repo ROOT — it is one of the tool-mandated
-# root files the "keep the repo root short" rule in CLAUDE.md explicitly allows for.
+# root files the "keep the repo root short" rule in AGENTS.md explicitly allows for.
 #
 # ⚠ THIS RUNS ONLY IF PIPELINES IS ENABLED for the repo (Repository settings →
 # Pipelines → Settings → Enable Pipelines). It is inert until then.

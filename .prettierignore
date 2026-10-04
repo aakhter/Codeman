@@ -28,4 +28,5 @@ src/web/public/upload.html
 scripts/remotion/
 
 # Hand-maintained; Prettier escapes underscores in glob paths and corrupts paragraphs.
+AGENTS.md
 CLAUDE.md

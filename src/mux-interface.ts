@@ -448,6 +448,11 @@ export interface TerminalMultiplexer extends EventEmitter {
     muxName: string,
     opts?: { fullHistory?: boolean; visibleFrame?: boolean; lastLines?: number; owner?: string }
   ): Promise<string | null>;
-  /** Close only the SSH control masters owned by visible-frame capture. */
+  /**
+   * COD-463 — true while captures for this remote's host are in backoff after an
+   * ssh transport failure, i.e. being served from the local wrapper instead.
+   */
+  isRemoteCaptureDegraded?(remote: SessionRemote): boolean;
+  /** Close only the SSH control masters owned by remote pane capture. */
   closeRemoteFrameConnections?(): Promise<void>;
 }

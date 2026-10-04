@@ -23,12 +23,14 @@ import { describe, expect, it, vi } from 'vitest';
 function loadTerminalUiHarness() {
   const CodemanApp = function CodemanApp(this: any) {};
   const logs: string[] = [];
+  // Mutable so a test can move time (gesture gaps); defaults to a frozen clock.
+  const clock = { now: () => 1_000 };
   const context = vm.createContext({
     window: {},
     CodemanApp,
     console: { warn: vi.fn(), log: (msg: string) => logs.push(msg) },
     _crashDiag: { log: vi.fn() },
-    performance: { now: () => 1_000 },
+    performance: clock,
     requestAnimationFrame: (_fn: () => void) => 1,
     setTimeout: (_fn: () => void) => 1,
     Blob: function Blob() {},
@@ -43,15 +45,17 @@ function loadTerminalUiHarness() {
 
   const code = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
   vm.runInContext(code, context, { filename: 'terminal-ui.js' });
-  return { app: new (CodemanApp as any)(), logs };
+  return { app: new (CodemanApp as any)(), logs, clock };
 }
 
 /** A Claude session whose local buffer holds exactly one screen (baseY 0). */
-function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number } = {}) {
-  const { app, logs } = loadTerminalUiHarness();
+function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number; cliMouseTracking?: boolean } = {}) {
+  const { app, logs, clock } = loadTerminalUiHarness();
   const sent: Array<{ id: string; data: string }> = [];
   app.activeSessionId = 'sess-1';
-  app.sessions = new Map([['sess-1', { mode: 'claude', cliVersion: overrides.cliVersion }]]);
+  app.sessions = new Map([
+    ['sess-1', { mode: 'claude', cliVersion: overrides.cliVersion, cliMouseTracking: overrides.cliMouseTracking }],
+  ]);
   app._sendInputEphemeral = (id: string, data: string) => sent.push({ id, data });
   app.terminal = {
     cols: 80,
@@ -59,7 +63,7 @@ function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number } = {})
     modes: { mouseTrackingMode: 'none' },
     buffer: { active: { type: 'normal', viewportY: 0, baseY: 0, length: 36 } },
   };
-  return { app, sent, logs };
+  return { app, sent, logs, clock };
 }
 
 describe('full-history re-pull downgrade guard (issue #205 round 2)', () => {
@@ -111,12 +115,20 @@ describe('full-history re-pull downgrade guard (issue #205 round 2)', () => {
     // Anchor on the open paren, not the full empty signature: the method takes
     // options since #258 ({ force }) and this guard is about ORDER, not arity.
     const start = source.indexOf('async _maybeRefetchFullHistory(');
-    const guard = source.indexOf('this._replayWouldShrinkBuffer(buffer)', start);
+    // Also anchored on the open paren: the guard is handed the rows the caller
+    // already estimated, and this test is about ORDER, not the argument list.
+    const guard = source.indexOf('this._replayWouldShrinkBuffer(buffer', start);
+    const boundedSkip = source.indexOf('boundedShellPull && (windowRows <= rowsNow || browserFull)', start);
     const reset = source.indexOf('this._resetTerminalForReplay()', start);
 
     expect(start).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(start);
     expect(guard).toBeLessThan(reset); // refuse first, only then reset+rewrite
+    // A bounded shell window is skipped BEFORE the guard sees it: the guard reads
+    // "smaller than the browser" as "tmux has nothing more", which a window cut at
+    // the tail size does not mean (see shell-scroll-history-pull.test.ts).
+    expect(boundedSkip).toBeGreaterThan(start);
+    expect(boundedSkip).toBeLessThan(guard);
     // A hollow pane must also stop re-fetching megabytes on every scroll-up.
     expect(source).toContain('this._fullHistoryRepullUseless');
     expect(source).toContain('this._fullHistoryRepullUseless?.has(sessionId) ? 60000 : 4000');
@@ -138,16 +150,44 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
     expect(sent[1]).toEqual({ id: 'sess-1', data: '\x1b[6~' });
   });
 
-  it('accumulates sub-page travel instead of dropping or over-sending it', () => {
+  it('answers the first event of a gesture at once and owes the travel back (COD-470)', () => {
     const { app, sent } = hollowClaudeApp();
 
-    expect(app._maybePageCliTranscript({ shiftKey: false }, -10)).toBe(true); // consumed…
-    app._flushWheelSgrQueue();
-    expect(sent).toEqual([]); // …but below the threshold, so nothing sent yet
-
-    app._maybePageCliTranscript({ shiftKey: false }, -8); // -18 total → one page
+    // A trackpad flick is far less than half a screen (18 rows here). It used to
+    // send nothing at all, which made a remote codex tab look dead.
+    expect(app._maybePageCliTranscript({ shiftKey: false }, -10)).toBe(true);
     app._flushWheelSgrQueue();
     expect(sent).toEqual([{ id: 'sess-1', data: '\x1b[5~' }]);
+
+    // The pre-paid page is owed back: the rest of this page's travel sends nothing…
+    app._maybePageCliTranscript({ shiftKey: false }, -8);
+    app._flushWheelSgrQueue();
+    expect(sent).toHaveLength(1);
+
+    // …and the next page arrives after a further half screen, so the rate is unchanged.
+    app._maybePageCliTranscript({ shiftKey: false }, -17);
+    app._flushWheelSgrQueue();
+    expect(sent).toHaveLength(1);
+    app._maybePageCliTranscript({ shiftKey: false }, -1);
+    app._flushWheelSgrQueue();
+    expect(sent).toEqual([
+      { id: 'sess-1', data: '\x1b[5~' },
+      { id: 'sess-1', data: '\x1b[5~' },
+    ]);
+  });
+
+  it('starts a new gesture after a pause or a direction change (COD-470)', () => {
+    const { app, sent, clock } = hollowClaudeApp();
+    let now = 1_000;
+    clock.now = () => now;
+
+    app._maybePageCliTranscript({ shiftKey: false }, -2); // first event: one PageUp
+    app._maybePageCliTranscript({ shiftKey: false }, 2); // reversal: one PageDown at once
+    now += 1_000;
+    app._maybePageCliTranscript({ shiftKey: false }, 2); // after a pause: another at once
+    app._maybePageCliTranscript({ shiftKey: false }, 0.05); // sub-row jitter in the same gesture: nothing
+    app._flushWheelSgrQueue();
+    expect(sent).toEqual([{ id: 'sess-1', data: '\x1b[5~\x1b[6~\x1b[6~' }]);
   });
 
   it('caps the keys one gesture batch can emit', () => {
@@ -169,11 +209,10 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
     app.terminal.buffer.active.baseY = 0;
 
-    // Non-Claude modes keep their existing behavior (shell scrolls tmux history
-    // through the alt-screen strip; codex/gemini page keys are unverified).
+    // Shell and Gemini retain their existing local-scroll behavior.
     app.sessions = new Map([['sess-1', { mode: 'shell' }]]);
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
-    app.sessions = new Map([['sess-1', { mode: 'codex' }]]);
+    app.sessions = new Map([['sess-1', { mode: 'gemini' }]]);
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
 
     // An alternate-screen pane belongs to xterm's own alt-scroll handling.
@@ -182,11 +221,25 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
   });
 
+  it('pages a Codex transcript only while its local scrollback is empty', () => {
+    const { app, sent } = hollowClaudeApp();
+    app.sessions = new Map([['sess-1', { mode: 'codex' }]]);
+
+    expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(true);
+    app._flushWheelSgrQueue();
+    expect(sent).toEqual([{ id: 'sess-1', data: '\x1b[5~' }]);
+
+    app.terminal.buffer.active.baseY = 40;
+    expect(app._maybePageCliTranscript({ shiftKey: false }, 18)).toBe(false);
+    expect(app._maybePageCliTranscript({ shiftKey: true }, 18)).toBe(false);
+  });
+
   it('rescues the local-scrollback opt-out footgun instead of silently dying', () => {
     // "Wheel scrolls local history" ON pins the wheel to a buffer that, for a
     // repaint-mode CLI, is empty — a user who flipped it while hunting for a fix
     // on 1.11.x would have ended up with a completely dead wheel on 1.12.0.
-    const { app, sent } = hollowClaudeApp({ cliVersion: '2.1.223' }); // gate would forward…
+    // Version and tracking both qualify, so the opt-out is the only thing saying no.
+    const { app, sent } = hollowClaudeApp({ cliVersion: '2.1.223', cliMouseTracking: true }); // gate would forward…
     app.loadAppSettingsFromStorage = () => ({ terminalWheelLocalScrollback: true });
 
     expect(app._shouldForwardWheelToApp({ shiftKey: false })).toBe(false); // …but the opt-out wins
@@ -198,12 +251,17 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   it('drops travel accumulated on another tab', () => {
     const { app, sent } = hollowClaudeApp();
 
-    app._maybePageCliTranscript({ shiftKey: false }, -17); // just short of a page
+    app._maybePageCliTranscript({ shiftKey: false }, -1); // first event pages sess-1 at once
+    app._maybePageCliTranscript({ shiftKey: false }, -34); // just short of sess-1's second page
+    app._flushWheelSgrQueue();
     app.activeSessionId = 'sess-2';
     app.sessions.set('sess-2', { mode: 'claude' });
-    app._maybePageCliTranscript({ shiftKey: false }, -1); // must not complete sess-1's page
+    app._maybePageCliTranscript({ shiftKey: false }, -1); // a NEW gesture on sess-2, never sess-1's page
     app._flushWheelSgrQueue();
-    expect(sent).toEqual([]);
+    expect(sent).toEqual([
+      { id: 'sess-1', data: '\x1b[5~' },
+      { id: 'sess-2', data: '\x1b[5~' },
+    ]);
   });
 
   it('is reachable from both the wheel and the touch paths', () => {
@@ -228,10 +286,19 @@ describe('scroll routing diagnostic (issue #205 round 2)', () => {
     expect(logs[0]).toContain('cliVersion=2.1.100');
     expect(logs[0]).toContain('localScrollbackOptOut=false');
     expect(logs[0]).toContain('mouseTracking=none');
+    // The gate's real tracking input: xterm's own mode above is always 'none'
+    // for Claude, since the server strips the DECSETs.
+    expect(logs[0]).toContain('cliMouseTracking=false');
 
     app._logScrollRouting('page-keys'); // a changed route still prints
     expect(logs).toHaveLength(2);
     expect(logs[1]).toContain('page-keys');
+
+    // The CLI turning tracking on changes the gate, so it prints again.
+    app.sessions.get('sess-1').cliMouseTracking = true;
+    app._logScrollRouting('page-keys');
+    expect(logs).toHaveLength(3);
+    expect(logs[2]).toContain('cliMouseTracking=true');
   });
 
   it('reports an unknown CLI version, the false-path that disables forwarding', () => {

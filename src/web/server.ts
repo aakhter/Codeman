@@ -88,6 +88,7 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
+import { documentVersionStore } from '../document-version-store.js';
 import { getCli, enabledClis, listClis } from '../config/cli-registry/registry.js';
 import { isCliEntryInstalled, probeStockCliAvailability } from '../utils/cli-installed-probes.js';
 import { readCustomModelHosts } from '../custom-model-hosts.js';
@@ -2224,6 +2225,11 @@ export class WebServer extends EventEmitter {
     // Clear batches, per-session timers, and pending state updates
     this.sse.cleanupSessionBatches(sessionId);
 
+    // Drop the session's document revision history (full bodies + raw docx
+    // bytes). Outside the `if (session)` block on purpose: the store is keyed by
+    // id alone, and nothing else would ever free it (COD-457).
+    documentVersionStore.clearSession(sessionId);
+
     // Reset Ralph tracker on the session before cleanup
     if (session) {
       session.ralphTracker.fullReset();
@@ -2537,6 +2543,34 @@ export class WebServer extends EventEmitter {
       '</head>',
       () => `<script>window.__codemanTranscriptGutter=${JSON.stringify(gutterClis)};</script>\n</head>`
     );
+    // COD-464: the `wheelForward` capability for every CLI that forwards the
+    // wheel (mode other than 'never', measured `rows` present). Outside the
+    // solo-window guard for the same reason as the gutter map: a detached session
+    // window scrolls too. `minVersion` is a config-supplied string (a user's
+    // clis.json can set it), so the payload goes through escapeScriptJson.
+    const wheelForwardClis: Record<
+      string,
+      {
+        mode: string;
+        minVersion?: string;
+        rows: number;
+        reversalDeadReports: number;
+        streak?: { resetMs: number; steps: number[] };
+      }
+    > = {};
+    for (const entry of enabledClis()) {
+      const wheel = entry.capabilities.wheelForward;
+      if (wheel.mode === 'never' || typeof wheel.rows !== 'number') continue;
+      wheelForwardClis[entry.id] = {
+        mode: wheel.mode,
+        ...(wheel.minVersion ? { minVersion: wheel.minVersion } : {}),
+        rows: wheel.rows,
+        reversalDeadReports: wheel.reversalDeadReports ?? 0,
+        ...(wheel.streak ? { streak: { resetMs: wheel.streak.resetMs, steps: [...wheel.streak.steps] } } : {}),
+      };
+    }
+    const wheelForwardJson = escapeScriptJson(JSON.stringify(wheelForwardClis));
+    html = html.replace('</head>', () => `<script>window.__codemanWheelForward=${wheelForwardJson};</script>\n</head>`);
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
       html = html.replace('</head>', () => `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
       if (settings.gestureControlEnabled === true) {
@@ -2648,7 +2682,7 @@ export class WebServer extends EventEmitter {
     // Create run summary tracker for this session
     const summaryTracker = new RunSummaryTracker(session.id, session.name);
     this.runSummaryTrackers.set(session.id, summaryTracker);
-    summaryTracker.recordSessionStarted(session.mode, session.workingDir);
+    summaryTracker.recordSessionStarted(session.mode, session.workingDir, getCli(session.mode)?.label);
 
     // Set working directory for Ralph tracker to auto-load @fix_plan.md (not supported for external CLI
     // sessions). COD-416/Q23: was a hardcoded opencode|codex|gemini list, stale since pi/grok/
@@ -3384,9 +3418,9 @@ export class WebServer extends EventEmitter {
     if (event.startsWith('tab:')) {
       return deriveTabLayoutSseHint(data);
     }
-    // Saved-webview invalidations carry only the trusted affected owner and
-    // resource identity. Admin edits of foreign records route to that resource
-    // owner (plus admins), never to the requesting admin's personal workspace.
+    // Saved-webview invalidations carry the trusted resource owner. Route them to
+    // that owner (plus admins), so an admin editing a user's web tab notifies the
+    // user, and no other user learns the ids of someone else's web tabs.
     if (event.startsWith('webview:')) {
       return deriveWebviewSseHint(data);
     }
@@ -4339,6 +4373,7 @@ export class WebServer extends EventEmitter {
     // otherwise meet the retry, which reuses the same session id by design.
     this.stopTranscriptWatcher(sessionId);
     attachmentRegistry.clearSession(sessionId);
+    documentVersionStore.clearSession(sessionId);
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');

@@ -104,7 +104,12 @@ describe('tmux full-history pane capture (COD-47)', () => {
     expect(body).toContain('REMOTE_TMUX_SOCKET');
     expect(body).toContain('remoteTmuxSessionName(sessionId)');
     expect(body).toContain('`tmux -L ${socket} capture-pane');
-    expect(body).toContain('`tmux -L ${socket} display-message');
+    // COD-463: the full-history capture + cursor query are ONE ssh call, built
+    // by buildRemoteFullHistoryCommand with the same socket/target.
+    expect(body).toContain('buildRemoteFullHistoryCommand(target, socket, opts?.lastLines)');
+    const builder = source.slice(source.indexOf('export function buildRemoteFullHistoryCommand('));
+    expect(builder.slice(0, 800)).toContain('`tmux -L ${socket} display-message');
+    expect(builder.slice(0, 800)).toContain('`tmux -L ${socket} capture-pane');
   });
 });
 

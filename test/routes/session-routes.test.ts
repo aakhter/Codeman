@@ -2191,6 +2191,51 @@ and effort involved in moving workloads.
       expect(body.data.source).toBe('mux-visible');
     });
 
+    it('COD-463: flags full and frame responses while the remote host is in capture backoff', async () => {
+      harness.ctx._session.mode = 'codex';
+      const remote = { hostId: 'ubuntu-worker', host: '192.168.20.91', username: 'ubuntu', remotePath: '/tmp/case' };
+      (harness.ctx._session as { remote?: unknown }).remote = remote;
+      const degraded = vi.fn(() => true);
+      const mux = harness.ctx.mux as Record<string, unknown>;
+      mux.captureRemotePaneBuffer = vi.fn(async () => null);
+      mux.captureActivePaneBuffer = vi.fn(() => 'local wrapper single screen');
+      mux.isRemoteCaptureDegraded = degraded;
+
+      for (const query of ['?full=1', '?frame=1']) {
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal${query}`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.remoteCaptureDegraded, query).toBe(true);
+        expect(body.data.terminalBuffer, query).toContain('local wrapper single screen');
+      }
+      expect(degraded).toHaveBeenCalledWith(remote);
+
+      degraded.mockReturnValue(false);
+      const healthy = JSON.parse(
+        (await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1` }))
+          .body
+      );
+      expect(healthy.data.remoteCaptureDegraded).toBeUndefined();
+    });
+
+    it('COD-463: local sessions never carry the remote-capture flag', async () => {
+      harness.ctx._session.mode = 'codex';
+      const degraded = vi.fn(() => true);
+      const mux = harness.ctx.mux as Record<string, unknown>;
+      mux.captureActivePaneBuffer = vi.fn(() => 'local full capture');
+      mux.isRemoteCaptureDegraded = degraded;
+
+      const body = JSON.parse(
+        (await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1` }))
+          .body
+      );
+      expect(body.data.remoteCaptureDegraded).toBeUndefined();
+      expect(degraded).not.toHaveBeenCalled();
+    });
+
     it('COD-180: local sessions never attempt a remote capture', async () => {
       harness.ctx._session.terminalBuffer = 'local history';
       harness.ctx._session.mode = 'codex';
@@ -2575,6 +2620,53 @@ and effort involved in moving workloads.
       expect(body.data.source).toBe('mux-full-history');
       expect(typeof body.data.fullSize).toBe('number');
       expect(res.headers['server-timing']).toMatch(/^capture;dur=\d+\.\d, prepare;dur=\d+\.\d, total;dur=\d+\.\d$/);
+    });
+
+    it('full reload with a tail (?full=1&tail=) cuts the full capture to its newest bytes, cursor restore intact', async () => {
+      // A Shell scroll-to-top asks for exactly this (`_maybeRefetchFullHistory`):
+      // tmux's whole scrollback, bounded to the tab-switch tail size. The client
+      // relies on all three answers below, so a refactor that dropped the tail on
+      // a full capture (an unbounded pull from an ordinary scroll) or cut off the
+      // closing cursor move (a caret parked below the prompt) must fail here.
+      const tail = 1024 * 1024;
+      const oldestMarker = 'BOUNDED_OLDEST_LINE_00001';
+      const newestMarker = 'BOUNDED_NEWEST_LINE_40000';
+      const rows: string[] = [oldestMarker];
+      for (let i = 2; i < 40_000; i++) rows.push(`shell history line ${String(i).padStart(5, '0')} lorem ipsum`);
+      rows.push(newestMarker);
+      // What formatCursorRestore appends: up from the last row, then the column.
+      const cursorRestore = '\x1b[3A\r\x1b[2C';
+      const fullHistoryCapture = `${rows.join('\r\n')}${cursorRestore}`;
+      expect(fullHistoryCapture.length).toBeGreaterThan(tail);
+
+      harness.ctx._session.mode = 'shell';
+      harness.ctx._session.terminalBuffer = '';
+      const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+        opts?.fullHistory ? fullHistoryCapture : 'only the visible frame'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1&tail=${tail}`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      // Still the scrollback, not the visible frame a plain `?tail=` gets.
+      expect(captureSpy).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.objectContaining({ fullHistory: true })
+      );
+      expect(body.data.source).toBe('mux-full-history');
+      // Recoverable, not 'capped': Load full history can still bring the rest back.
+      expect(body.data.truncated).toBe(true);
+      expect(body.data.truncationReason).toBe('tail');
+      expect(body.data.fullSize).toBe(fullHistoryCapture.length);
+      expect(body.data.terminalBuffer.length).toBeLessThanOrEqual(tail);
+      expect(body.data.terminalBuffer).toContain(newestMarker);
+      expect(body.data.terminalBuffer).not.toContain(oldestMarker);
+      expect(body.data.terminalBuffer.endsWith(`${newestMarker}${cursorRestore}`)).toBe(true);
     });
 
     it('full reload (?full=1) returns the tmux capture ALONE — byte history is not duplicated', async () => {

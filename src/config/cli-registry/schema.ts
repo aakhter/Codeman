@@ -299,8 +299,26 @@ const capabilitiesSchema = z
     altScreen: z.enum(['strip-full', 'strip-mux-only', 'preserve']),
     echo: echoSchema,
     checkpoint: checkpointSchema.optional(),
+    // COD-464: read by the desktop wheel (terminal-ui.js `_shouldPaceWheelToCli`)
+    // through `window.__codemanWheelForward`. `rows` and `reversalDeadReports` are
+    // MEASURED against the real CLI; a mode other than 'never' without `rows` is
+    // never forwarded.
     wheelForward: z
-      .object({ mode: z.enum(['never', 'version-gated']), minVersion: z.string().max(20).optional() })
+      .object({
+        mode: z.enum(['never', 'version-gated', 'mouse-tracking']),
+        minVersion: z.string().max(20).optional(),
+        rows: z.number().int().min(1).max(10).optional(),
+        reversalDeadReports: z.number().int().min(0).max(3).optional(),
+        // The CLI's own wheel acceleration, MEASURED: rows moved by the k-th
+        // report of a streak (last entry repeats), and the pause that resets it.
+        streak: z
+          .object({
+            resetMs: z.number().int().min(10).max(500),
+            steps: z.array(z.number().int().min(1).max(20)).min(1).max(32),
+          })
+          .strict()
+          .optional(),
+      })
       .strict(),
     keyboardAccessory: z.enum(['agent', 'shell']),
     privilegedCommandGate: z.boolean(),
@@ -356,6 +374,15 @@ const capabilitiesSchema = z
         // Bounded hard: this is how far up the screen a config file may push the search,
         // and every row it adds is one more row the agent itself may be able to write.
         watchingLines: z.number().int().min(1).max(8).optional(),
+        // Same guard again: tested against a pane row every time a session settles.
+        awaitingLine: z
+          .string()
+          .min(1)
+          .refine(
+            (src) => compileVersionRegex(src) !== null,
+            'awaitingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
+          )
+          .optional(),
       })
       .strict()
       // A window with nothing to search is a typo, not a configuration. Refused at LOAD
@@ -487,6 +514,9 @@ const overlayTargetSchema = z.union([
       command: commandLine.optional(),
       rootCommand: commandLine.optional(),
       fromLaunchSpec: z.literal(true).optional(),
+      // COD-471: remote only (see CliOverlays.remote); bounded so a config typo cannot leave a
+      // remote session `mouse on` for minutes.
+      tmuxMouseAtStartupSeconds: z.number().int().min(1).max(30).optional(),
       resume: dockerResumeSchema.optional(),
     })
     .strict(),

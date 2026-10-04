@@ -355,7 +355,10 @@ Object.assign(CodemanApp.prototype, {
         // one `/`, and refuse whatever still opens a second one. The proxied form
         // is refused server-side as well (resolveUpstreamUrl).
         const path = data.path.replace(/[\t\n\r]/g, '').replace(/^[/\\]+/, '/');
-        void this.openWebview(id, { path: path.startsWith('/') && !/^\/[/\\]/.test(path) ? path : '/' });
+        void this.openWebview(id, {
+          path: path.startsWith('/') && !/^\/[/\\]/.test(path) ? path : '/',
+          auto: true,
+        });
         return;
       }
     };
@@ -539,15 +542,23 @@ Object.assign(CodemanApp.prototype, {
    */
   /**
    * @param {string} id
-   * @param {{path?: string}} [options] `path` (pathname+search+hash) opens a
+   * @param {{path?: string, auto?: boolean}} [options] `path` (pathname+search+hash) opens a
    *   deep link inside the dashboard: appended to the proxy prefix, or resolved
    *   against the real URL in direct mode. A mounted frame is navigated there
-   *   rather than left on whatever page it was showing.
+   *   rather than left on whatever page it was showing. `auto: true` marks an
+   *   open the APP made (a frame recovering itself, the fallback after the
+   *   active web tab closes), as on selectSession().
    */
   async openWebview(id, options = {}) {
     const webview = this.webviews.get(id);
     if (!webview) return;
     const intent = this._beginWebviewOpenIntent(id);
+
+    // Opening a web tab yourself is choosing something else, so a
+    // `#session=<id>` link still waiting for its session must not take the
+    // screen from this tab later. Retired before the await below, which a
+    // session:created could otherwise land inside.
+    if (options.auto !== true) this._retireUrlSession?.();
 
     const data = await this._apiJson(`/api/webviews/${encodeURIComponent(id)}/open`, { method: 'POST' });
     if (!data) {
@@ -720,7 +731,7 @@ Object.assign(CodemanApp.prototype, {
         completeBefore.slice(targetIndex + 1).find(isRenderable) ||
         completeBefore.slice(0, Math.max(0, targetIndex)).reverse().find(isRenderable);
       if (next?.kind === 'session') this.selectSession?.(next.id);
-      else if (next?.kind === 'webview') this.openWebview(next.id);
+      else if (next?.kind === 'webview') this.openWebview(next.id, { auto: true });
       else if (this.activeSessionId) this._updateActiveTabImmediate(this.activeSessionId);
       else this.showWelcome?.();
     }

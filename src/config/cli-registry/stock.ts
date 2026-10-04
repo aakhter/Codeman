@@ -235,7 +235,24 @@ const CLAUDE: CliEntry = {
       // carry a count. A footer that ever drew the chip as its only item would report no
       // watching rather than open that door. See `watchingLabel()` in
       // `session-activity.ts`.
-      watchingLine: String.raw`·\s*(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?|Artifact comment monitors?))`,
+      // ⚠️ An Artifact comment monitor is the one chip that waits on the user. The agent
+      // has published a page and hears nothing until somebody comments on it, so the
+      // lookahead refuses the whole row while that chip is on it, whatever else is
+      // running beside it. The `^` is what makes the lookahead judge the row once:
+      // without it the engine retries from each later position, and a start past the
+      // chip reports the shell beside it. The lookahead keys on "Artifact" alone, so a
+      // footer cut off mid-chip (`· 1 Artifact…`, `· 1 Artifact comm…`) is still refused;
+      // no other chip on this row says "Artifact". Counting the chip as watching kept the
+      // idle alert quiet for a session that was waiting for a human.
+      watchingLine: String.raw`^(?!.*Artifact).*?·\s*(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?))`,
+      // When a turn ends while background agents or an ultracode workflow are still
+      // running, Claude swaps its `✻ Brewed for 1m 18s` closing row for
+      // `✻ Waiting for 2 background agents and 1 dynamic workflow to finish` and resumes
+      // by itself when they report back. Read from the 2.1.283 bundle (the turn-duration
+      // renderer) and a live pane on 2026-09-28. The row is a snapshot taken at turn end
+      // and never redrawn, which is why only the newest row above the composer counts.
+      // Anchored on column 0: Claude's own rows start there, the agent's prose never does.
+      awaitingLine: String.raw`^✻ Waiting for \d+ (?:background agents?|dynamic workflows?)\b`,
     },
     requiresMux: false,
     // Claude installs Codeman's own hooks block into every workspace it runs in, so its
@@ -244,7 +261,25 @@ const CLAUDE: CliEntry = {
     transcript: 'claude-jsonl',
     altScreen: 'strip-full',
     echo: { policy: 'buffer', anchor: { kind: 'glyph', glyph: '❯', offset: 2 } },
-    wheelForward: { mode: 'version-gated', minVersion: '2.1.187' },
+    // COD-464, measured on 2.1.286 FULLSCREEN (isolated pane, real SGR writes): one
+    // transcript row per report (5-13 ms repaint), and the ONE report that reverses
+    // the last effective direction is ignored (U U U D→0 D D U→0 U …; only wheel
+    // reports change that state, not typing or Ctrl+End). Claude also accelerates once
+    // reports keep arriving under ~35 ms apart; that is its own feel, left alone.
+    // #498: the default INLINE renderer turns no mouse tracking on and ignores wheel
+    // reports, so every forwarding mode also requires `cliMouseTracking` (frontend
+    // `_wheelReportsFor`), which fullscreen claude sets and inline claude does not.
+    // Acceleration, measured the same way (one write per burst, and single writes at
+    // fixed spacing): the k-th report of a streak moves 1,1,1,1,2,2,2,3,3,3,3,4,4,4,5,5
+    // rows, then 6 for every later one (bursts of 16/20/24/28/32 moved 44/67/91/115/139),
+    // and a pause of 40 ms resets the streak while 30 ms does not.
+    wheelForward: {
+      mode: 'version-gated',
+      minVersion: '2.1.187',
+      rows: 1,
+      reversalDeadReports: 1,
+      streak: { resetMs: 35, steps: [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6] },
+    },
     keyboardAccessory: 'agent',
     privilegedCommandGate: false,
     startMode: 'interactive',
@@ -628,7 +663,14 @@ const CODEX: CliEntry = {
     transcript: 'codex-rollout',
     altScreen: 'strip-full',
     echo: { policy: 'predict', anchor: { kind: 'cursor' }, predictProfile: 'codex' },
-    wheelForward: { mode: 'never' }, // #227: codex ignores SGR wheel reports, never forward
+    // #227 measured codex-cli 0.147.0 never enabling mouse tracking and ignoring SGR
+    // wheel reports (inline viewport, transcript in tmux scrollback), and COD-458
+    // saw the same on 0.157.1. COD-464 re-measured 0.159.3: it turns mouse tracking
+    // on (`mouse_any_flag=1`, alternate screen) and scrolls exactly 3 rows per
+    // report at any rate (5-12 ms repaint), no reversal debounce. 'mouse-tracking'
+    // forwards ONLY while the pane has asked for mouse reports, so the older
+    // versions keep the PageUp/local fallback by construction.
+    wheelForward: { mode: 'mouse-tracking', rows: 3 },
     maxFrameBytes: 32 * 1024,
     // codex's own bare-spawn default (no config sent) is already safe (no bypass flag), so
     // the multi-user clamp only needs to force an EXPLICITLY-SENT bypass back off.
@@ -638,7 +680,15 @@ const CODEX: CliEntry = {
     // does. codex is the entry where the two names differ (`bypassApprovals` here,
     // `dangerouslyBypassApprovals` on the wire), so it is the one that would have caught a
     // regression; `schema.ts` now rejects a name that is not a declared param.
-    privilegedParams: [{ param: 'bypassApprovals', clampTo: false }],
+    privilegedParams: [
+      { param: 'bypassApprovals', clampTo: false },
+      // COD-416: codex's OTHER privilege switch, and it was NOT clamped before — only its
+      // sibling was, so a non-granted multi-user owner could send
+      // `codexConfig.dangerouslyBypassHookTrust: true` and get the flag. Same only-if-sent
+      // shape: codex's bare spawn already omits it, so the clamp forces a sent one back off.
+      // Downstream-only: upstream merge e5164a43 dropped this entry once (COD-453).
+      { param: 'hookTrust', clampTo: false },
+    ],
     // Verified by hand against a real llama.cpp server. Written to an isolated CODEX_HOME
     // so the user's real ~/.codex/config.toml is never touched.
     customModelInjection: {
@@ -661,7 +711,14 @@ const CODEX: CliEntry = {
     // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
     // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
     // hand-written builder it replaces, not a new capability.
-    remote: { fromLaunchSpec: true },
+    //
+    // COD-471: codex 0.159+ captures the mouse only if tmux's `mouse` option is on when it
+    // starts (measured: same binary and config, flipping only that option toggles DECSET
+    // 1000/1002/1003/1006). Remote sessions are `mouse off`, so remote codex never tracked the
+    // mouse and its wheel fell back to page keys. 8 s covers a slow login shell (`$SHELL -i -l`)
+    // before codex reads the option; verified on tmux 3.4 and 3.6a that codex keeps tracking
+    // after the switch-off.
+    remote: { fromLaunchSpec: true, tmuxMouseAtStartupSeconds: 8 },
     // Codex appends its positional `resume <id>` (launch.resumeAppend) — but never onto a
     // case's own opaque `commands.codex`, where a trailing positional would land in the wrong
     // place. Refuse and let a human recover instead.

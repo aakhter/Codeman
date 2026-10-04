@@ -374,6 +374,19 @@ export interface CliCapabilities {
      * alert. See `watchingLabel()` in `session-activity.ts`.
      */
     watchingLines?: number;
+    /**
+     * Source of a regex matching the row this CLI closes a turn with when it ended that
+     * turn to WAIT for workers it started and will resume on its own once they finish,
+     * e.g. Claude's `✻ Waiting for 1 dynamic workflow to finish`. A pane showing it counts
+     * as working, not idle: nothing is being asked of the user, and the next turn starts
+     * without them.
+     *
+     * Unlike `workingLine` this is never searched across the pane. The CLI prints the row
+     * once and never updates it, so the copy from an earlier turn is still on screen after
+     * the workers are done. Only the newest transcript row directly above the composer is
+     * tested. See `isAwaitingWorkers()` in `session-activity.ts`.
+     */
+    awaitingLine?: string;
   };
   /**
    * How many columns this CLI indents its transcript body by, so a copy taken from its
@@ -467,8 +480,32 @@ export interface CliCapabilities {
      */
     directPtyPromptTransition?: true;
   };
-  /** Forwarding the wheel to the CLI's own transcript. 'never' keeps local scrollback. */
-  wheelForward: { mode: 'never' | 'version-gated'; minVersion?: string };
+  /**
+   * Forwarding the desktop wheel to the CLI's own transcript as paced SGR wheel
+   * reports (COD-464). 'never' keeps local scrollback / the PageUp fallback.
+   * EVERY forwarding mode also requires the CLI itself to have turned mouse tracking
+   * on (`cliMouseTracking`): that is the CLI saying it handles mouse reports, and it is
+   * false for claude's default inline renderer (#498), older codex and panes Codeman
+   * cannot see into (remote wrappers). 'version-gated' additionally needs `minVersion`;
+   * 'mouse-tracking' needs nothing more.
+   *
+   * Both of the following are MEASURED against the real CLI, never guessed:
+   * `rows`: transcript rows moved per report. Required for forwarding.
+   * `reversalDeadReports`: reports the CLI ignores when one reverses its last effective
+   * scroll direction (a reversal debounce); paid on top of the first reversed batch, or
+   * the first event of every reversed gesture moves nothing.
+   * `streak`: the CLI's own wheel ACCELERATION. `steps[k]` is how many rows the k-th
+   * report of a streak moves (the last entry repeats), and a pause of `resetMs`
+   * starts a new streak. The pacer reads it to keep scrolling linear (send a report
+   * only when the owed rows cover its step). Absent = every report moves `rows`.
+   */
+  wheelForward: {
+    mode: 'never' | 'version-gated' | 'mouse-tracking';
+    minVersion?: string;
+    rows?: number;
+    reversalDeadReports?: number;
+    streak?: { resetMs: number; steps: number[] };
+  };
   keyboardAccessory: 'agent' | 'shell';
   /** Multi-user: this CLI is a raw shell, so its commands need the privileged gate. */
   privilegedCommandGate: boolean;
@@ -716,8 +753,16 @@ export interface CliOverlays {
    * whose remote arm has always run a per-session builder. The CLIs without it reach a remote
    * host with their flags dropped — pre-registry behaviour, preserved deliberately here rather
    * than quietly widened, and parked as a question of its own (COD-416 wave 3e).
+   *
+   * `tmuxMouseAtStartupSeconds` (COD-471) is for a CLI that decides ONCE, at startup, whether to
+   * capture the mouse by reading tmux's `mouse` option: codex 0.159+ turns mouse tracking on only
+   * when it is on. The remote launch sets every session `mouse off`, so such a CLI never tracked
+   * the mouse remotely and the wheel fell back to page keys. Declared, the remote session starts
+   * `mouse on` and is switched `mouse off` this many seconds later (a delayed `run-shell -C`, no
+   * shell), the same end state a local session reaches through the mouse sync. The CLI keeps its
+   * startup decision; tmux then passes the wheel through because the pane asked for it.
    */
-  remote?: { command?: string; fromLaunchSpec?: true } | { disabled: true };
+  remote?: { command?: string; fromLaunchSpec?: true; tmuxMouseAtStartupSeconds?: number } | { disabled: true };
   /**
    * `rootCommand` is the same invocation for a container whose exec user is uid 0. Only
    * declare it when the normal `command` would be REFUSED as root: claude's carries
@@ -750,7 +795,7 @@ export interface CliOverlays {
 /**
  * ⚠️ DECLARED-FOR-LATER: fields no code reads yet.
  *
- * `accent`, `overlays.credStore`, `capabilities.echo`, `capabilities.wheelForward`,
+ * `accent`, `overlays.credStore`, `capabilities.echo`,
  * `capabilities.keyboardAccessory` and `capabilities.maxFrameBytes` all describe FRONTEND
  * behaviour, and most of the frontend is deliberately untouched by the change that introduced
  * this registry — `app.js`, `terminal-ui.js`, `styles.css` and friends keep their own

@@ -1606,7 +1606,7 @@ function computeRewriteScrollLine(input) {
  * a `/g` regex, so {@link absoluteFilePathPattern} mints a fresh one per call.
  */
 const FILE_PATH_LINK_PATTERN =
-  /(\/(?:home|Users|tmp|var|private|opt|mnt|srv|media|data|workspace)\/[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|ya?ml|csv|xml|sh|py|tsx|ts|jsx|js|mjs|cjs|css|html|toml|ini|sql|png|jpe?g|gif|webp|bmp|svg|pdf|docx|pptx|mp4|webm|mov|mp3|wav))\b/g;
+  /(\/(?:home|Users|tmp|var|private|opt|mnt|srv|media|data|workspace)\/[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|ya?ml|csv|xml|sh|py|tsx|ts|jsx|js|mjs|cjs|css|html|toml|ini|sql|png|jpe?g|gif|webp|avif|bmp|ico|svg|pdf|docx|pptx|mp4|webm|mov|mp3|wav))\b/g;
 
 /** A fresh, zero-state instance of {@link FILE_PATH_LINK_PATTERN}. */
 function absoluteFilePathPattern() {
@@ -1624,7 +1624,7 @@ function absoluteFilePathPattern() {
  * file in /tmp played fine. test/media-extension-parity.test.ts pins the sync.
  */
 const FILE_PREVIEW_EXTENSIONS = new Set(
-  ('png jpg jpeg gif webp bmp svg pdf docx pptx mp4 webm mov m4v ogv mp3 wav ogg oga m4a aac flac opus').split(' ')
+  ('png jpg jpeg gif webp avif bmp ico svg pdf docx pptx mp4 webm mov m4v ogv mp3 wav ogg oga m4a aac flac opus').split(' ')
 );
 
 /** Whether a path's extension is one {@link FILE_PREVIEW_EXTENSIONS} covers. */
@@ -1879,6 +1879,99 @@ function terminalUrlContinuationExtent(buffer, row, cols, maxRows) {
     start = above.startRow;
   }
   return null;
+}
+
+/**
+ * Absolute file paths the CLI word-wrapped INSIDE a table cell (codex markdown
+ * tables), returned as one link per path with a segment per row.
+ *
+ *    Before screenshot (/tmp/x/docs/review/          After screenshot (/tmp/x/review/BLDMESH-
+ *    BLDMESH-243/before-overview.png)                243/after-overview.png)
+ *
+ * Neither fragment matches FILE_PATH_LINK_PATTERN alone (the first has no
+ * extension, the second no absolute root), and a linear stitch of the rows
+ * cannot serve a two-column table: each column's continuation sits in the same
+ * next row. So each fragment is followed DOWN ITS OWN CELL: the cell's left
+ * edge is where its text starts after the previous ≥2-space column gap, and the
+ * continuation is the token starting at exactly that column on the next row.
+ * A fragment qualifies only when it is the last thing in its cell on that row
+ * (row end or a ≥2-space gap follows), and the join is accepted only when the
+ * whole joined string matches the path pattern from its first character, which
+ * is what keeps unrelated cell text from being glued on.
+ *
+ * Pure: reads rows only. Cells are taken one per string character (xterm rows
+ * with wide glyphs would shift columns; such rows simply fail the alignment).
+ *
+ * @param {{getLine: (row: number) => any, length: number}} buffer
+ * @param {number} row 0-based absolute row being examined.
+ * @param {number} [maxRows] Bound on rows one path may span.
+ * @returns {Array<{path: string, segments: Array<{row: number, startCol: number, endCol: number}>}>}
+ *          Paths with a segment on `row`; `endCol` is exclusive, columns 0-based.
+ */
+function terminalCellWrappedPaths(buffer, row, maxRows) {
+  const bound = Math.max(2, maxRows || 4);
+  const rootPattern = /\/(?:home|Users|tmp|var|private|opt|mnt|srv|media|data|workspace)\//g;
+  const isPathChar = (ch) => !!ch && !/[\s"'<>|;&\x00-\x1f]/.test(ch);
+  const rowText = (r) => {
+    const line = buffer.getLine(r);
+    return line ? (line.translateToString(true) || '').replace(/\s+$/, '') : null;
+  };
+  // A fragment is the last text in its cell on this row when the row ends or a
+  // column gap (≥2 spaces) follows it.
+  const endsCell = (text, end) => end >= text.length || /^ {2,}/.test(text.slice(end));
+
+  const fromStart = (startRow) => {
+    const found = [];
+    const text = rowText(startRow);
+    if (!text) return found;
+    rootPattern.lastIndex = 0;
+    let m;
+    while ((m = rootPattern.exec(text)) !== null) {
+      const start = m.index;
+      if (start > 0 && !/[\s(\[{"'`<]/.test(text[start - 1])) continue;
+      let end = start;
+      while (end < text.length && isPathChar(text[end])) end++;
+      rootPattern.lastIndex = Math.max(end, start + 1);
+      if (!endsCell(text, end)) continue;
+      // Already a complete path on its own row: the ordinary detector owns it.
+      const alone = absoluteFilePathPattern().exec(text.slice(start, end));
+      if (alone && alone.index === 0 && alone[0].length === end - start) continue;
+      // The cell's left edge: just past the nearest ≥2-space gap before the path.
+      const before = text.slice(0, start);
+      const gap = before.match(/^(.*\S)? {2,}(?=\S)/);
+      const cellCol = gap ? gap[0].length : before.length - before.replace(/^\s+/, '').length;
+
+      let joined = text.slice(start, end);
+      const segments = [{ row: startRow, startCol: start, endCol: end }];
+      for (let r = startRow + 1; r < startRow + bound; r++) {
+        const line = buffer.getLine(r);
+        if (!line || line.isWrapped) break;
+        const next = rowText(r);
+        if (!next || !isPathChar(next[cellCol]) || (cellCol > 0 && next[cellCol - 1] !== ' ')) break;
+        let tokenEnd = cellCol;
+        while (tokenEnd < next.length && isPathChar(next[tokenEnd])) tokenEnd++;
+        const candidate = joined + next.slice(cellCol, tokenEnd);
+        const match = absoluteFilePathPattern().exec(candidate);
+        if (match && match.index === 0 && match[0].length > joined.length) {
+          segments.push({ row: r, startCol: cellCol, endCol: cellCol + match[0].length - joined.length });
+          found.push({ path: match[0], segments });
+          break;
+        }
+        if (!endsCell(next, tokenEnd)) break;
+        joined = candidate;
+        segments.push({ row: r, startCol: cellCol, endCol: tokenEnd });
+      }
+    }
+    return found;
+  };
+
+  const results = [];
+  for (let s = row; s >= 0 && row - s < bound; s--) {
+    for (const hit of fromStart(s)) {
+      if (hit.segments.some((seg) => seg.row === row)) results.push(hit);
+    }
+  }
+  return results;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2145,6 +2238,22 @@ function reconcilePtyGeometry(local, pty) {
   return { adopt: true, cols: pty.cols };
 }
 
+/**
+ * Which session does a dashboard URL's fragment ask for? Another page that
+ * holds the dashboard's window, such as a task board, points it at
+ * `/#session=<id>`. Only the fragment changes between two such links, so the
+ * browser keeps the page loaded and fires `hashchange`, and the dashboard
+ * switches tabs without reloading. Any other fragment asks for nothing.
+ *
+ * @param {string} hash - `location.hash`, with or without its leading `#`
+ * @returns {string|null} the session id, or null
+ */
+function sessionIdFromFragment(hash) {
+  const params = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+  const id = params.get('session');
+  return id && id.trim() ? id.trim() : null;
+}
+
 if (typeof window !== 'undefined') {
   window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
   /**
@@ -2173,7 +2282,13 @@ if (typeof window !== 'undefined') {
     FILE_PREVIEW_EXTENSIONS,
     relativeResolutionBase,
   };
-  window.CodemanTerminalLines = { terminalLogicalLine, terminalUrlContinuationExtent, findTerminalUrls };
+  window.CodemanTerminalLines = {
+    terminalLogicalLine,
+    terminalUrlContinuationExtent,
+    findTerminalUrls,
+    terminalCellWrappedPaths,
+  };
+  window.CodemanUrlSession = { sessionIdFromFragment };
   window.CodemanSplitPane = {
     clampDividerPercent,
     buildSplitPickerSessions,

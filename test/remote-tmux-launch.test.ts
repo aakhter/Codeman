@@ -259,3 +259,44 @@ describe('COD-104 buildRemoteLaunchCommand — remote tmux attach-or-create', ()
     expect(command).not.toContain('12345.9');
   });
 });
+
+describe('COD-471 remote tmux mouse at CLI startup', () => {
+  // Codex 0.159+ captures the mouse only if tmux's `mouse` option is on when it starts.
+  // Remote sessions sit at `mouse off`, so the codex launch turns it on and schedules the
+  // switch-off as a delayed tmux command (no shell); verified on tmux 3.4 and 3.6a.
+  it('starts a codex remote session with mouse on and switches it off after the startup window', () => {
+    const command = buildRemoteLaunchCommand({ mode: 'codex', sessionId: SESSION_ID, remote: baseRemote });
+    expect(command).toContain(`set -t ${EXPECTED_NAME} mouse on`);
+    expect(command).not.toContain(`set -t ${EXPECTED_NAME} mouse off \;`);
+    // shellescape nests inside the outer ssh quoting, so match the unquoted pieces.
+    expect(command).toContain('run-shell -b -d 8 -C ');
+    expect(command).toContain(`set -t ${EXPECTED_NAME} mouse off`);
+    // Order: mouse on before the scheduled switch-off, and remain-on-exit stays LAST.
+    const on = command.indexOf('mouse on');
+    const sched = command.indexOf('run-shell -b -d 8 -C');
+    const remain = command.indexOf('remain-on-exit failed');
+    expect(on).toBeGreaterThan(-1);
+    expect(sched).toBeGreaterThan(on);
+    expect(remain).toBeGreaterThan(sched);
+    expect(command.trimEnd().endsWith("remain-on-exit failed'")).toBe(true);
+  });
+
+  it('keeps a codex per-host override on the same mouse schedule (it is still codex)', () => {
+    const command = buildRemoteLaunchCommand({
+      mode: 'codex',
+      sessionId: SESSION_ID,
+      remote: { ...baseRemote, commands: { codex: 'exec codx personal' } },
+    });
+    expect(command).toContain(`set -t ${EXPECTED_NAME} mouse on`);
+    expect(command).toContain('run-shell -b -d 8 -C ');
+  });
+
+  it('leaves every CLI without the overlay at plain mouse off', () => {
+    for (const mode of ['shell', 'claude', 'opencode', 'gemini'] as const) {
+      const command = buildRemoteLaunchCommand({ mode, sessionId: SESSION_ID, remote: baseRemote });
+      expect(command, mode).toContain(`set -t ${EXPECTED_NAME} mouse off`);
+      expect(command, mode).not.toContain('mouse on');
+      expect(command, mode).not.toContain('run-shell');
+    }
+  });
+});

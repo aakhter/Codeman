@@ -30,6 +30,20 @@ const FILE_BROWSER_SHOW_HIDDEN_KEY = 'codeman:fileBrowserShowHidden';
 // a huge log is a partial read rather than a download the viewer throws away.
 const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
 const TEXT_PREVIEW_MAX_LINES = 500;
+// A markdown document gets the route's ceiling instead of the 500-line preview
+// cap: a rendered README cut mid-way reads as the whole document.
+const MARKDOWN_PREVIEW_MAX_LINES = 10000;
+const MARKDOWN_EXTS = new Set(['md', 'markdown']);
+// File Viewer text-view prefs: per-device, in their own localStorage keys for
+// the same reason as FILE_BROWSER_SHOW_HIDDEN_KEY (the app-settings object is
+// rebuilt from the settings modal on save, so a key toggled from the viewer
+// would be dropped on the next save).
+const FILE_PREVIEW_PREF_KEYS = {
+  mdRendered: 'codeman:filePreviewMdRendered',
+  lineNumbers: 'codeman:filePreviewLineNumbers',
+  wrap: 'codeman:filePreviewWrap',
+};
+const FILE_PREVIEW_PREF_DEFAULTS = { mdRendered: true, lineNumbers: false, wrap: true };
 const AWAY_DIGEST_SECTIONS = [
   ['needsAttention', 'Needs Attention'],
   ['completed', 'Completed'],
@@ -787,6 +801,67 @@ Object.assign(CodemanApp.prototype, {
     this.renderCommandPalette();
   },
 
+  /**
+   * Save what had focus before a search-first overlay takes it.
+   *
+   * The Command Palette and the Session Manager both call `search.focus()` on
+   * open, and both used to close by removing the `active` class and nothing
+   * else. Hiding the focused input does not hand focus back to anyone — the
+   * browser drops it on `<body>` — so after Escape closed the overlay every
+   * keystroke went nowhere and the user had to click the terminal to type
+   * again (measured: `document.activeElement` is BODY afterwards and the
+   * terminal emits no onData at all). Every close path has the same hole, so
+   * the restore lives in the close functions, not in the global Escape chain.
+   *
+   * ⚠️ Deliberately only the save/restore half of {@link FocusTrap}, not the
+   * whole thing. `FocusTrap.activate()` moves focus to the first focusable
+   * element, which in both of these overlays is not the search box — adopting
+   * it wholesale would fix the focus loss by breaking the thing Cmd+K exists
+   * for, typing a filter the moment it opens.
+   */
+  _rememberOverlayFocus(key) {
+    this[key] = (typeof document !== 'undefined' && document.activeElement) || null;
+  },
+
+  /**
+   * Hand focus back to whatever {@link _rememberOverlayFocus} saved.
+   *
+   * ⚠️ The terminal fallback is gated on there being an active session: an
+   * overlay opened from the welcome screen has no terminal to return to, and
+   * focusing one on a phone summons the on-screen keyboard over a screen that
+   * has no input on it.
+   *
+   * ⚠️ A focus that already left the overlay is kept, not overridden. The
+   * Session Manager's row menu ("Switch to session", "Open folder") calls
+   * selectSession(), which focuses the terminal, BEFORE closeSessionManager();
+   * restoring there would pull focus back to the header button that opened the
+   * modal. Only a focus still inside `modal`, or one dropped on `<body>`, is
+   * the overlay's to hand back.
+   */
+  _restoreOverlayFocus(key, modal) {
+    const prev = this[key];
+    this[key] = null;
+    const body = typeof document !== 'undefined' ? document.body : null;
+    const current = typeof document !== 'undefined' ? document.activeElement : null;
+    if (current && current !== body && modal?.contains?.(current) === false) return;
+    // `isConnected === false` means the element was removed while the overlay
+    // was open (a re-render of the tab strip, say); anything else — including
+    // a stub with no such property — is treated as still focusable.
+    if (prev && prev !== body && prev.isConnected !== false && typeof prev.focus === 'function') {
+      prev.focus();
+      return;
+    }
+    // ⚠️ `activeSessionId` alone only covers the welcome screen. On a touch device
+    // with the keyboard down, focus sits on `<body>`, so focusing the terminal here
+    // would summon the on-screen keyboard — `selectSession()` deliberately skips the
+    // focus for exactly that reason, and this would override it. The app's own
+    // predicate already encodes the rule (true on desktop, on touch only while the
+    // keyboard is open); the optional call keeps the vm test harness working.
+    if (this.activeSessionId && this._shouldFocusTerminalForTabSwitch?.() !== false) {
+      this.terminal?.focus?.();
+    }
+  },
+
   openCommandPalette() {
     const modal = document.getElementById('commandPaletteModal');
     const search = document.getElementById('commandPaletteSearch');
@@ -801,13 +876,25 @@ Object.assign(CodemanApp.prototype, {
     this._wireCommandPalette();
     this.renderCommandPalette();
 
+    // BEFORE the steal, not after: `search.focus()` below is what loses the
+    // caller's focus, so the read has to happen while it is still there.
+    this._rememberOverlayFocus('_commandPalettePrevFocus');
     search.focus();
     search.select?.();
   },
 
   closeCommandPalette() {
     const modal = document.getElementById('commandPaletteModal');
-    if (modal) modal.classList.remove('active');
+    // ⚠️ Bail out when it was not open. The global Escape handler calls this on
+    // EVERY Escape (app.js), in the CAPTURE phase, so an unconditional restore
+    // runs before the focused element's own Escape handler and steals focus into
+    // the terminal: keys typed after Escape in split Pane B land in Pane A, keys
+    // typed in any text field land in the terminal, and the inline tab rename's
+    // Escape fires the input's blur (which commits) before its own handler
+    // (which cancels), turning a cancel into a rename.
+    if (!modal?.classList?.contains('active')) return;
+    modal.classList.remove('active');
+    this._restoreOverlayFocus('_commandPalettePrevFocus', modal);
   },
 
   _wireCommandPalette() {
@@ -1117,6 +1204,7 @@ Object.assign(CodemanApp.prototype, {
         });
       }
       search.value = '';
+      this._rememberOverlayFocus('_sessionManagerPrevFocus');
       search.focus();
     }
     await this._loadSessionManagerList('');
@@ -1124,7 +1212,10 @@ Object.assign(CodemanApp.prototype, {
 
   closeSessionManager() {
     const modal = document.getElementById('sessionManagerModal');
-    if (modal) modal.classList.remove('active');
+    // Same guard as closeCommandPalette — see the note there.
+    if (!modal?.classList?.contains('active')) return;
+    modal.classList.remove('active');
+    this._restoreOverlayFocus('_sessionManagerPrevFocus', modal);
   },
 
   _setSessionManagerMessage(list, message) {
@@ -5083,6 +5174,10 @@ Object.assign(CodemanApp.prototype, {
     // Stop whatever the previous preview was playing. Overwriting innerHTML
     // only DETACHES a <video>/<audio>; a detached media element keeps playing.
     this._stopFilePreviewMedia?.();
+    // The MD/Lines/Wrap toggles act on text this load has not fetched yet,
+    // and an image or PDF has nothing for them to toggle.
+    this.filePreviewText = null;
+    this._updateFilePreviewToolbar?.('none');
 
     // Show overlay with loading state
     overlay.classList.add('visible');
@@ -5453,7 +5548,7 @@ Object.assign(CodemanApp.prototype, {
    * state. Markdown/plain-text re-fetch raw content; image/pdf get an mtime
    * cache-bust so a rewritten file actually reloads.
    */
-  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId }, expectedState = null) {
+  async _renderFilePreviewBody(data, { sessionId, filePath, attachmentId, cachedText }, expectedState = null) {
     const isCurrentPreview = () => !expectedState || this.filePreviewState === expectedState;
     if (!isCurrentPreview()) return false;
     const bodyEl = this.$('filePreviewBody');
@@ -5477,6 +5572,9 @@ Object.assign(CodemanApp.prototype, {
     this.filePreviewEditTarget = null;
     const editBtnEl = this.$('filePreviewEditBtn');
     if (editBtnEl) editBtnEl.hidden = true;
+    // Likewise the MD/Lines/Wrap toggles: only the text branch re-offers them.
+    this.filePreviewText = null;
+    this._updateFilePreviewToolbar?.('none');
 
     if (data.type === 'spreadsheet') {
       const renderer = window.CodemanSpreadsheetPreview;
@@ -5629,13 +5727,20 @@ Object.assign(CodemanApp.prototype, {
       // Fetch the raw text and render it client-side. Markdown goes through the
       // shared sanitized renderer (_renderMarkdown -> _sanitizeHtml); plain text
       // is HTML-escaped into a <pre> so whitespace is preserved without inline HTML.
-      const rawUrl =
-        data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
-      const textRes = await fetch(bust(rawUrl));
-      if (!isCurrentPreview()) return false;
-      if (!textRes.ok) throw new Error('Failed to load file');
-      const text = await textRes.text();
-      if (!isCurrentPreview()) return false;
+      // A view toggle (MD pill) re-renders from the text already fetched for
+      // this exact data (`cachedText`), so flipping views costs no request.
+      let text;
+      if (typeof cachedText === 'string') {
+        text = cachedText;
+      } else {
+        const rawUrl =
+          data.url || data.previewUrl || `/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(filePath)}`;
+        const textRes = await fetch(bust(rawUrl));
+        if (!isCurrentPreview()) return false;
+        if (!textRes.ok) throw new Error('Failed to load file');
+        text = await textRes.text();
+        if (!isCurrentPreview()) return false;
+      }
       this.filePreviewContent = text;
       // Edit affordance (issue #212): the server decides — `editable` is its own
       // dry-run of the edit=1 gate (allowlist + sensitive/blocked + .git + size +
@@ -5651,16 +5756,34 @@ Object.assign(CodemanApp.prototype, {
       // Restore persisted client-only view prefs (COD-62).
       this.readingViewActive = this._readPreviewPref('codeman.preview.readingView');
       const outlineOpenPref = this._readPreviewPref('codeman.preview.outlineOpen');
+      // Upstream #503 text view (MD / Lines / Wrap toggles), folded into the
+      // downstream document viewer: the MD pill flips a markdown file between
+      // the rendered document and its source, and the source / plain-text view
+      // takes the Lines and Wrap toggles. toggleFilePreviewMd re-renders through
+      // this branch (see _rerenderFilePreviewText) so outline, reading view,
+      // comments and Changes survive the flip.
+      const textExt = String(data.extension || filePath.split('.').pop() || '').toLowerCase();
+      this.filePreviewText = { ext: textExt, sessionId, filePath, attachmentId, data, text, state: expectedState || st };
+      const renderMarkdown = data.type === 'markdown' && this._filePreviewPref?.('mdRendered') !== false;
       let outlineBtn = '';
       let prose;
-      if (data.type === 'markdown') {
+      if (renderMarkdown) {
         // Render prose first, then build the outline from the SANITIZED DOM and
         // wrap both in a flex layout so the outline sidebar sits beside the prose.
-        const proseHtml = `<div class="document-preview-markdown rv-text${
+        // Built inside a <template> (upstream #503): a detached div with
+        // innerHTML set starts fetching every <img src> before the rebase pass
+        // rewrites the relative ones. `breaks: false`: a file is not a chat
+        // message, a hard-wrapped paragraph is one paragraph. data-i18n-skip
+        // keeps the translator off the document's own prose.
+        const tmpl = document.createElement('template');
+        tmpl.innerHTML = `<div class="document-preview-markdown rv-text file-preview-md${
           this.readingViewActive ? ' reading-view' : ''
-        }">${this._renderMarkdown(text)}</div>`;
-        bodyEl.innerHTML = proseHtml;
-        prose = bodyEl.querySelector('.document-preview-markdown');
+        }" data-i18n-skip>${this._renderMarkdown(text, { breaks: false })}</div>`;
+        prose = tmpl.content.firstElementChild;
+        this._rebaseFilePreviewMarkdownRefs?.(prose, this.filePreviewText);
+        this._linkifyFilePaths?.(prose);
+        for (const a of prose.querySelectorAll('a.rv-path:not([data-session-id])')) a.dataset.sessionId = sessionId;
+        bodyEl.replaceChildren(prose);
         const nav = this._buildDocumentOutline(prose);
         const layout = document.createElement('div');
         layout.className = 'document-preview-layout';
@@ -5677,11 +5800,23 @@ Object.assign(CodemanApp.prototype, {
           }" onclick="app.toggleDocumentOutline()">Outline</button>`;
         }
       } else {
-        bodyEl.innerHTML = `<pre class="document-preview-text${
-          this.readingViewActive ? ' reading-view' : ''
-        }"><code>${escapeHtml(text)}</code></pre>`;
-        prose = bodyEl.querySelector('.document-preview-text');
+        // Plain text, or a markdown file in source view: one span per line so
+        // the Lines gutter can number them without the numbers being part of the
+        // text (select/copy and the comment anchors see the exact file text).
+        const pre = document.createElement('pre');
+        pre.className = `document-preview-text file-preview-text${this.readingViewActive ? ' reading-view' : ''}`;
+        pre.classList.toggle('wrap', this._filePreviewPref?.('wrap') !== false);
+        pre.classList.toggle('show-lines', this._filePreviewPref?.('lineNumbers') === true);
+        const code = document.createElement('code');
+        code.innerHTML = text
+          .split('\n')
+          .map((line) => `<span class="fp-line">${escapeHtml(line)}</span>`)
+          .join('\n');
+        pre.appendChild(code);
+        bodyEl.replaceChildren(pre);
+        prose = pre;
       }
+      this._updateFilePreviewToolbar?.(renderMarkdown ? 'markdown' : 'text');
       // COD-95: re-apply comment highlights onto the freshly-rendered prose. The
       // preview re-renders on poll, destroying any prior spans, so we rebuild them
       // from the persisted per-comment anchors (quote + occurrence).
@@ -6737,6 +6872,38 @@ Object.assign(CodemanApp.prototype, {
     // audible and keeps streaming from the server. Closing has to stop it.
     this._stopFilePreviewMedia?.();
     this.filePreviewContent = '';
+    this.filePreviewText = null;
+    this._updateFilePreviewToolbar?.('none');
+  },
+
+  _isFilePreviewOpen() {
+    return !!this.$('filePreviewOverlay')?.classList.contains('visible');
+  },
+
+  // Escape-key seam (COD-474), the file-preview twin of the Response Viewer's
+  // COD-229 seam. Returns true when the key belongs to the preview, so the global
+  // handler stops there and ESC never reaches xterm/the CLI. Innermost layer first:
+  // the annotation popover, then anything inside the preview that already took the
+  // key (an open docx comment card), then the preview itself.
+  _maybeCloseFilePreviewOnEscape(e) {
+    if (!this._isFilePreviewOpen()) return false;
+    if (e?.defaultPrevented) return true;
+    e?.preventDefault();
+    e?.stopPropagation();
+    if (document.getElementById('annotationPopover')) {
+      this._closeAnnotationPopover();
+      return true;
+    }
+    this.closeFilePreview();
+    // Cancelling the unsaved-edits prompt keeps the preview open; keep focus there.
+    if (!this._isFilePreviewOpen()) {
+      try {
+        this.terminal?.focus();
+      } catch {
+        /* terminal may be detached mid-teardown */
+      }
+    }
+    return true;
   },
 
   copyFilePreviewContent() {
@@ -7026,6 +7193,215 @@ Object.assign(CodemanApp.prototype, {
   },
 
   // ═══════════════════════════════════════════════════════════════
+  // File Viewer text view: rendered markdown, line numbers, wrap
+  // ═══════════════════════════════════════════════════════════════
+
+  _filePreviewPref(name) {
+    try {
+      const stored = localStorage.getItem(FILE_PREVIEW_PREF_KEYS[name]);
+      if (stored === '1') return true;
+      if (stored === '0') return false;
+    } catch {
+      /* private mode: fall through to the default */
+    }
+    return FILE_PREVIEW_PREF_DEFAULTS[name];
+  },
+
+  _setFilePreviewPref(name, on) {
+    try {
+      localStorage.setItem(FILE_PREVIEW_PREF_KEYS[name], on ? '1' : '0');
+    } catch {
+      /* private mode: the toggle still applies for this page load */
+    }
+  },
+
+  /**
+   * Paint the loaded text (filePreviewContent) into the preview body: a
+   * rendered document for .md/.markdown while the MD toggle is on, otherwise
+   * plain text with one span per line so the Lines toggle can number them.
+   * The MD toggle re-runs this without a refetch.
+   *
+   * Markdown goes through the same pipeline as the Response Viewer
+   * (`_renderMarkdown`: marked + the DOMPurify allowlist), never a second
+   * parser, and is built inside a <template>: a detached div with innerHTML
+   * already set starts fetching every <img src>, so the document's relative
+   * image paths would hit the server as /docs/img.png 404s before
+   * `_rebaseFilePreviewMarkdownRefs` rewrote them. `breaks: false` because a
+   * file is not a chat message: a paragraph hard-wrapped in the source is one
+   * paragraph, as on GitHub.
+   */
+  _renderFilePreviewText() {
+    const info = this.filePreviewText;
+    const bodyEl = this.$('filePreviewBody');
+    if (!info || !bodyEl) return;
+    const isMarkdown = MARKDOWN_EXTS.has(info.ext);
+    const rendered = isMarkdown && this._filePreviewPref('mdRendered');
+    if (rendered) {
+      // data-i18n-skip: the translator's MutationObserver would otherwise
+      // rewrite the document's own headings and paragraphs.
+      const tmpl = document.createElement('template');
+      tmpl.innerHTML = `<div class="rv-text file-preview-md" data-i18n-skip>${this._renderMarkdown(this.filePreviewContent, { breaks: false })}</div>`;
+      const doc = tmpl.content.firstElementChild;
+      this._rebaseFilePreviewMarkdownRefs(doc, info);
+      this._linkifyFilePaths(doc);
+      // The linkifier's absolute paths name no session; give them the
+      // preview's, like the rebased links, or they open in the active tab's.
+      for (const a of doc.querySelectorAll('a.rv-path:not([data-session-id])')) a.dataset.sessionId = info.sessionId;
+      bodyEl.replaceChildren(tmpl.content);
+      // The Response Viewer's click delegate (path links, code-block copy
+      // buttons, loopback links): container-bound and idempotent, so binding it
+      // on the body once serves every preview.
+      this._bindResponseViewerInteractions(bodyEl);
+    } else {
+      const pre = document.createElement('pre');
+      pre.className = 'file-preview-text';
+      pre.classList.toggle('wrap', this._filePreviewPref('wrap'));
+      pre.classList.toggle('show-lines', this._filePreviewPref('lineNumbers'));
+      const code = document.createElement('code');
+      // One span per line joined by real newlines: empty lines survive, select
+      // and copy return the exact text, and the gutter counter hangs off the
+      // spans' ::before so the numbers are never part of the text.
+      code.innerHTML = this.filePreviewContent
+        .split('\n')
+        .map((line) => `<span class="fp-line">${escapeHtml(line)}</span>`)
+        .join('\n');
+      pre.appendChild(code);
+      bodyEl.replaceChildren(pre);
+    }
+    this._updateFilePreviewToolbar(rendered ? 'markdown' : 'text');
+  },
+
+  /**
+   * Point a rendered document's workspace references at the file it came from.
+   *
+   * Images are rebased onto the workspace-confined file-raw route under the
+   * document's directory, root-relative ones (`/docs/x.png`) under the
+   * workspace root as on GitHub (the server refuses escapes, so `..` is safe
+   * to forward). Whatever fails to load degrades to its alt text with one
+   * error handler: a remote image the page CSP blocks, a 404 for a document
+   * outside the workspace, an SVG that file-raw serves as a download. Links
+   * take the `a.rv-path` shape the Response Viewer delegate already opens in
+   * this overlay, minus the target/rel `_renderMarkdown` gave them, which
+   * would otherwise open <origin>/docs/x.md in a new tab, and carry the
+   * preview's own session so a document opened from another session's
+   * attachment card resolves against that workspace, not the active tab's.
+   *
+   * A preview opened by attachment id under a bare file name (attachment
+   * cards and the history drawer: the registry keeps no relative path) has no
+   * directory to resolve against, and the workspace root is the wrong one for
+   * docs/report.md and for a file outside the workspace alike. Its workspace
+   * refs degrade instead: images to their alt text, links to their text,
+   * rather than a missing image or a silently different file.
+   */
+  _rebaseFilePreviewMarkdownRefs(root, { sessionId, filePath, attachmentId }) {
+    const dir = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/') + 1) : '';
+    const unresolvable = !!attachmentId && !filePath.startsWith('/');
+    // Workspace ref = no scheme, not protocol-relative (//host), not a fragment.
+    const isWorkspaceRef = (ref) =>
+      !!ref && !/^[a-z][a-z0-9+.-]*:/i.test(ref) && !ref.startsWith('//') && !ref.startsWith('#');
+    // GitHub-style `img.png#gh-dark-mode-only`, `doc.md#section` and
+    // `img.png?raw=true`: neither fragment nor query is part of the path.
+    // marked percent-encodes destinations (`my image.png` arrives as
+    // `my%20image.png`), so decode before the route encodes again, or file-raw
+    // looks for a file literally named `my%20image.png`; a malformed escape
+    // keeps the ref as written. `.` and `..` segments are collapsed so the
+    // title reads `README.md`, not `docs/../README.md`; a `..` that climbs
+    // past the start is kept and left for the server to refuse.
+    const resolveRef = (ref) => {
+      let rel = ref.split('#')[0].split('?')[0];
+      try {
+        rel = decodeURIComponent(rel);
+      } catch {
+        /* malformed escape: keep the ref as written */
+      }
+      const parts = [];
+      for (const seg of (rel.startsWith('/') ? rel.slice(1) : dir + rel).split('/')) {
+        if (seg === '.' || (seg === '' && parts.length)) continue;
+        if (seg === '..' && parts.length && parts[parts.length - 1] !== '..' && parts[parts.length - 1] !== '') parts.pop();
+        else parts.push(seg);
+      }
+      return parts.join('/');
+    };
+    for (const img of root.querySelectorAll('img[src]')) {
+      const src = img.getAttribute('src') || '';
+      if (unresolvable && isWorkspaceRef(src)) {
+        img.replaceWith(img.getAttribute('alt') || src);
+        continue;
+      }
+      if (isWorkspaceRef(src)) {
+        const path = resolveRef(src);
+        img.setAttribute('src', CodemanBase.url(`/api/sessions/${sessionId}/file-raw?path=${encodeURIComponent(path)}`));
+      }
+      img.addEventListener('error', () => img.replaceWith(img.getAttribute('alt') || src), { once: true });
+    }
+    for (const a of root.querySelectorAll('a[href]')) {
+      const href = a.getAttribute('href') || '';
+      if (!isWorkspaceRef(href)) continue;
+      if (unresolvable) {
+        a.replaceWith(...a.childNodes);
+        continue;
+      }
+      a.className = 'rv-path';
+      a.dataset.path = resolveRef(href);
+      a.dataset.sessionId = sessionId;
+      a.setAttribute('href', '#');
+      a.removeAttribute('target');
+      a.removeAttribute('rel');
+    }
+  },
+
+  /**
+   * Show the toggles that apply to the current view: MD for a markdown file in
+   * either view, Lines/Wrap for the plain-text view only; `'none'` (loading,
+   * image, media, PDF, edit mode) hides all three.
+   */
+  _updateFilePreviewToolbar(view) {
+    const set = (id, shown, pressed) => {
+      const btn = this.$(id);
+      if (!btn) return;
+      btn.hidden = !shown;
+      if (shown) btn.setAttribute('aria-pressed', String(pressed));
+    };
+    const isMarkdown = view !== 'none' && MARKDOWN_EXTS.has(this.filePreviewText?.ext || '');
+    set('filePreviewMdBtn', isMarkdown, view === 'markdown');
+    set('filePreviewLinesBtn', view === 'text', this._filePreviewPref('lineNumbers'));
+    set('filePreviewWrapBtn', view === 'text', this._filePreviewPref('wrap'));
+  },
+
+  toggleFilePreviewMd() {
+    this._setFilePreviewPref('mdRendered', !this._filePreviewPref('mdRendered'));
+    const info = this.filePreviewText;
+    // Downstream document viewer (_renderFilePreviewBody's text branch): re-run
+    // that branch from the text it already holds, so the outline, reading view,
+    // comment highlights and footer actions are rebuilt for the new view.
+    if (info?.data && typeof info.text === 'string') {
+      return this._renderFilePreviewBody(
+        info.data,
+        { sessionId: info.sessionId, filePath: info.filePath, attachmentId: info.attachmentId, cachedText: info.text },
+        info.state || null
+      );
+    }
+    this._renderFilePreviewText();
+  },
+
+  toggleFilePreviewLines() {
+    this._toggleFilePreviewTextClass('lineNumbers', 'show-lines');
+  },
+
+  toggleFilePreviewWrap() {
+    this._toggleFilePreviewTextClass('wrap', 'wrap');
+  },
+
+  /** Lines and Wrap are pure class flips on the <pre>; no re-render needed. */
+  _toggleFilePreviewTextClass(pref, className) {
+    const on = !this._filePreviewPref(pref);
+    this._setFilePreviewPref(pref, on);
+    const pre = this.$('filePreviewBody')?.querySelector(':scope > pre.file-preview-text');
+    if (pre) pre.classList.toggle(className, on);
+    this._updateFilePreviewToolbar('text');
+  },
+
+  // ═══════════════════════════════════════════════════════════════
   // File Viewer edit mode (issue #212 — docs/file-viewer-edit-plan.md)
   // ═══════════════════════════════════════════════════════════════
 
@@ -7092,6 +7468,8 @@ Object.assign(CodemanApp.prototype, {
     textarea.addEventListener('input', () => this._onFilePreviewEditInput());
     bodyEl.innerHTML = '';
     bodyEl.appendChild(textarea);
+    // The MD/Lines/Wrap toggles act on the text view this textarea replaced.
+    this._updateFilePreviewToolbar('none');
     // Deliberately no autofocus: on phones that would pop the OS keyboard
     // before the user has scrolled to the line they want to change.
 
