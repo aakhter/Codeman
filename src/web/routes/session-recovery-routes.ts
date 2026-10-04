@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { stat } from 'node:fs/promises';
 import { z } from 'zod';
+import { readRecoveryPreview } from '../../session-recovery-preview.js';
 import { Session } from '../../session.js';
 import { enrichRecoveryNames, readClaudeRecoveryDetails } from '../../session-recovery-names.js';
 import { probeCodexRecoveryIdentity } from '../../native-session-identity.js';
@@ -60,6 +61,16 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
       (id) => ctx.store.getSession(id)
     ),
   }));
+
+  app.get('/api/session-recoveries/:id/preview', async (req, reply) => {
+    const parsed = RecoveryIdSchema.safeParse((req.params as { id?: unknown }).id);
+    if (!parsed.success)
+      return reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid recovery id'));
+    const record = findRecovery(ctx, parsed.data, req);
+    if (!record) return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Recovery not found'));
+    reply.header('Cache-Control', 'no-store');
+    return readRecoveryPreview(record);
+  });
 
   for (const action of ['refresh', 'reconnect', 'resume', 'dismiss'] as const) {
     app.post(`/api/session-recoveries/:id/${action}`, async (req, reply) => {

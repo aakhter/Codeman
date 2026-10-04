@@ -190,7 +190,7 @@ function contentText(content: unknown): string {
 }
 
 /** One line's user-prompt text, whichever of the three shapes it is. */
-function userPromptFromLine(entry: {
+export function userPromptFromLine(entry: {
   type?: string;
   payload?: {
     type?: string;
@@ -200,6 +200,7 @@ function userPromptFromLine(entry: {
     item?: { type?: string; content?: unknown };
   };
 }): { text: string; injectionProne: boolean } | null {
+  if (!entry || typeof entry !== 'object') return null;
   const p = entry.payload;
   if (!p) return null;
 
@@ -260,6 +261,7 @@ function parseIdentity(head: string): RolloutIdentity {
     } catch {
       continue; // truncated tail of the window, or a malformed line
     }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const p = entry.payload;
     if (entry.type === 'session_meta' && p) {
       out.threadId ??= p.id || p.session_id;
@@ -412,4 +414,23 @@ export function codexThreadBySessionId(rows: CodexHistorySession[]): Map<string,
 /** Test seam: drop the per-path identity cache. */
 export function __clearCodexIdentityCache(): void {
   identityCache.clear();
+}
+
+/** Locate a main conversation by original identity, never by workspace alone. */
+export async function findCodexRecoveryTranscript(record: {
+  nativeResumeId?: string;
+  sourceSessionId: string;
+  workingDir: string;
+}): Promise<string | undefined> {
+  for (const file of await listRollouts(codexSessionsRoot())) {
+    const identity = parseIdentity(await readHead(file.path, HEAD_BYTES));
+    if (!identity.threadId || identity.threadSource === 'subagent' || identity.cwd !== record.workingDir) continue;
+    if (
+      record.nativeResumeId
+        ? identity.threadId === record.nativeResumeId
+        : identity.originator === `codeman_${record.sourceSessionId}`
+    )
+      return file.path;
+  }
+  return undefined;
 }

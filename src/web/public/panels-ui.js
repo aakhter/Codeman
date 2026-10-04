@@ -1209,7 +1209,7 @@ Object.assign(CodemanApp.prototype, {
       nativeIdentity.textContent = `Conversation ID: ${record.mode === 'claude' ? record.claudeResumeId || record.displayConversationId || 'Not saved' : record.nativeResumeId || record.displayConversationId || 'Not saved'}`;
       const activity = document.createElement('span');
       activity.className = 'session-recovery-location';
-      const dateText = (value) => Number.isFinite(value) ? new Date(value).toISOString() : 'Not saved';
+      const dateText = (value) => Number.isFinite(value) ? `${new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' }).format(value)}, ${new Date(value).toISOString()}` : 'Not saved';
       activity.textContent = `Created: ${dateText(record.createdAt)} · Last recorded activity: ${dateText(record.lastActivityAt)}`;
       details.append(title, tabName, location, identity, nativeIdentity, activity, status);
       if (record.providerSelection) {
@@ -1242,13 +1242,61 @@ Object.assign(CodemanApp.prototype, {
         refresh.addEventListener('click', () => this._runSessionRecoveryAction(record, 'refresh'));
         actions.appendChild(refresh);
       }
+      const previewPanel = document.createElement('div');
+      previewPanel.className = 'session-recovery-preview';
+      previewPanel.hidden = true;
+      previewPanel.id = `recovery-preview-${record.id}`;
+
+      const preview = document.createElement('button');
+      preview.type = 'button';
+      preview.className = 'btn-toolbar';
+      preview.textContent = 'Preview';
+      preview.title = 'Show first, middle, and last user prompts from this saved conversation. Does not start an agent.';
+      preview.setAttribute('aria-expanded', 'false');
+      preview.setAttribute('aria-controls', previewPanel.id);
+      preview.addEventListener('click', async () => {
+        const opening = previewPanel.hidden;
+        previewPanel.hidden = !opening;
+        preview.setAttribute('aria-expanded', String(opening));
+        if (!opening || previewPanel.dataset.loaded) return;
+        preview.disabled = true;
+        previewPanel.textContent = 'Loading prompt preview…';
+        try {
+          const res = await fetch(`/api/session-recoveries/${encodeURIComponent(record.id)}/preview`);
+          const body = await res.json();
+          const data = body.data || body;
+          if (!res.ok || body.success === false) throw new Error(body.error?.message || body.error || 'Could not load preview');
+          previewPanel.replaceChildren();
+          const summary = document.createElement('p');
+          summary.textContent = data.available ? `${data.promptCount} readable user prompts. Preview does not confirm resumability.` : data.message || 'Preview unavailable.';
+          previewPanel.appendChild(summary);
+          if (data.available && data.message) {
+            const note = document.createElement('p');
+            note.textContent = data.message;
+            previewPanel.appendChild(note);
+          }
+          for (const prompt of data.prompts || []) {
+            const heading = document.createElement('strong');
+            heading.textContent = `${prompt.position} (${prompt.ordinal} of ${data.promptCount})`;
+            const excerpt = document.createElement('p');
+            excerpt.textContent = prompt.text + (prompt.truncated ? '\n[Excerpt shortened]' : '');
+            previewPanel.append(heading, excerpt);
+          }
+          previewPanel.dataset.loaded = 'true';
+        } catch (err) {
+          previewPanel.textContent = err.message || 'Could not load preview';
+        } finally {
+          preview.disabled = false;
+        }
+      });
+      actions.appendChild(preview);
       const dismiss = document.createElement('button');
       dismiss.type = 'button';
       dismiss.className = 'btn-toolbar session-recovery-dismiss';
       dismiss.textContent = 'Dismiss';
       dismiss.addEventListener('click', () => this._dismissSessionRecovery(record));
       actions.appendChild(dismiss);
-      row.appendChild(actions);
+      row.append(previewPanel, actions);
       list.appendChild(row);
     }
     list.scrollTop = top;

@@ -49,6 +49,17 @@ describe('session recovery routes', () => {
     expect(harness.ctx.mux.createSession).not.toHaveBeenCalled();
   });
 
+  it('enforces ownership for read-only previews and never launches or updates a recovery', async () => {
+    const denied = await harness.app.inject({ method: 'GET', url: '/api/session-recoveries/recovery-bob/preview' });
+    expect(denied.statusCode).toBe(404);
+    const response = await harness.app.inject({ method: 'GET', url: '/api/session-recoveries/recovery-1/preview' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ available: false });
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(harness.ctx.addSession).not.toHaveBeenCalled();
+    expect(harness.ctx.store.upsertSessionRecovery).not.toHaveBeenCalled();
+  });
+
   it('refreshes an unavailable local Codex record from its exact on-disk identity', async () => {
     const root = mkdtempSync(join(tmpdir(), 'codex-recovery-refresh-'));
     const previous = process.env.CODEX_HOME;

@@ -9642,6 +9642,7 @@ kbd {
 
 .session-recovery-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.6rem;
@@ -9653,6 +9654,7 @@ kbd {
 
 .session-recovery-details {
   display: grid;
+  flex: 1 1 18rem;
   min-width: 0;
   gap: 0.12rem;
 }
@@ -9667,7 +9669,7 @@ kbd {
 
 .session-recovery-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.35rem;
@@ -22243,4 +22245,28 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
   padding: 8px 10px;
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.session-recovery-preview {
+  order: 1;
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.session-recovery-preview p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.4rem 0 0.8rem;
+}
+
+@media (max-width: 390px) {
+  .session-recovery-details,
+  .session-recovery-preview {
+    flex: 0 1 auto;
+  }
 }

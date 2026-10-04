@@ -177,10 +177,13 @@ describe('Session Manager Recovery Queue', () => {
         expect(texts).toContain('Codeman tab: w4-work');
         expect(texts).toContain(`${mode} · local · /work/project`);
         expect(texts).toContain('Saved resume ID; availability not checked');
-        expect(texts).toContain('Created: 1970-01-01T00:00:01.000Z · Last recorded activity: 1970-01-01T00:00:02.000Z');
-        expect(elements.sessionRecoveryList.children[0].children[1].children.map((c) => c.textContent)).toEqual([
+        expect(texts).toContain(
+          'Created: Thu, 1970-01-01T00:00:01.000Z · Last recorded activity: Thu, 1970-01-01T00:00:02.000Z'
+        );
+        expect(elements.sessionRecoveryList.children[0].children.at(-1)!.children.map((c) => c.textContent)).toEqual([
           'Resume',
           'Refresh',
+          'Preview',
           'Dismiss',
         ]);
         before.flush();
@@ -214,7 +217,7 @@ describe('Session Manager Recovery Queue', () => {
     await app._loadSessionManagerList('');
     expect(
       elements.sessionRecoveryList.children[0].children.at(-1)?.children.map((child) => child.textContent)
-    ).toEqual(['Start new', 'Refresh', 'Dismiss']);
+    ).toEqual(['Start new', 'Refresh', 'Preview', 'Dismiss']);
   });
 
   it('renders the recovery queue before a slow unified history request finishes', async () => {
@@ -332,7 +335,7 @@ describe('Session Manager Recovery Queue', () => {
     ]);
     expect(
       elements.sessionRecoveryList.children[1].children.at(-1)?.children.map((button) => button.textContent)
-    ).toEqual(['Start new', 'Refresh', 'Dismiss']);
+    ).toEqual(['Start new', 'Refresh', 'Preview', 'Dismiss']);
   });
 
   it('lets a user dismiss a recovered record after its replacement session exists', async () => {
@@ -349,7 +352,9 @@ describe('Session Manager Recovery Queue', () => {
     });
 
     await app._loadSessionManagerList('');
-    const dismiss = elements.sessionRecoveryList.children[0].children.at(-1)!.children[0];
+    const dismiss = elements.sessionRecoveryList.children[0].children
+      .at(-1)!
+      .children.find((button) => button.textContent === 'Dismiss')!;
     expect(dismiss.textContent).toBe('Dismiss');
     await dismiss.click();
 
@@ -362,5 +367,33 @@ describe('Session Manager Recovery Queue', () => {
     expect(elements.sessionRecoveryList.children).toHaveLength(0);
     expect(app.sessions.has('lost-codex')).toBe(false);
     expect(app.selectSession).not.toHaveBeenCalled();
+  });
+  it('loads a read-only preview for just the selected row and toggles it without re-fetching', async () => {
+    const { app, elements, fetch } = loadHarness(async (url) => {
+      if (url.startsWith('/api/sessions/unified')) return ok({ sessions: [] });
+      if (url === '/api/session-recoveries') return ok({ recoveries: [resumableCodex] });
+      if (url.endsWith('/preview'))
+        return ok({
+          available: true,
+          promptCount: 3,
+          prompts: [
+            { position: 'First prompt', ordinal: 1, text: '<script>literal prompt</script>', truncated: false },
+            { position: 'Middle prompt', ordinal: 2, text: 'middle', truncated: false },
+            { position: 'Last prompt', ordinal: 3, text: 'last', truncated: true },
+          ],
+        });
+      throw new Error(`unexpected request ${url}`);
+    });
+    await app._loadSessionManagerList('');
+    const row = elements.sessionRecoveryList.children[0];
+    const button = row.children.at(-1)!.children.find((child) => child.textContent === 'Preview')!;
+    const panel = row.children.find((child) => child.className === 'session-recovery-preview')!;
+    await button.click();
+    expect(fetch).toHaveBeenCalledWith('/api/session-recoveries/lost-codex/preview');
+    expect(panel.children.map((child) => child.textContent)).toContain('<script>literal prompt</script>');
+    expect(panel.children.map((child) => child.textContent)).toContain('last\n[Excerpt shortened]');
+    await button.click();
+    await button.click();
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/preview'))).toHaveLength(1);
   });
 });
