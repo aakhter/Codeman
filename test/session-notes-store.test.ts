@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, writeFile, mkdir, symlink, stat, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -292,6 +294,121 @@ describe('SessionNotesStore real filesystem', () => {
     await fresh.resolveRecovery('alice', 'project2', 'note1', revision, 'external');
     expect(await fresh.list('alice')).toHaveLength(1);
     expect((await fresh.list('alice'))[0].repairable).toBe(true);
+  });
+  it('coordinates stale reclamation so delayed contenders cannot delete a replacement live lock', async () => {
+    await mkdir(join(root, 'alice/.lock'), { recursive: true });
+    await writeFile(join(root, 'alice/.lock/00000000-0000-0000-0000-000000000000.owner'), '99999999');
+    const a = new SessionNotesStore(root);
+    const b = new SessionNotesStore(root);
+    type LockProbe = {
+      bytes(path: string): Promise<Buffer>;
+      locked(owner: string, operation: () => Promise<void>): Promise<void>;
+    };
+    let sawB!: () => void;
+    let enteredA!: () => void;
+    let releaseA!: () => void;
+    let bProgress!: () => void;
+    const bRead = new Promise<void>((resolve) => (sawB = resolve));
+    const aEntered = new Promise<void>((resolve) => (enteredA = resolve));
+    const holdA = new Promise<void>((resolve) => (releaseA = resolve));
+    const bAdvanced = new Promise<void>((resolve) => (bProgress = resolve));
+    for (const [store, first] of [
+      [a, true],
+      [b, false],
+    ] as const) {
+      const probe = store as unknown as LockProbe;
+      const original = probe.bytes.bind(store);
+      probe.bytes = async (path) => {
+        const bytes = await original(path);
+        if (path.includes('/.lock/') && bytes.toString() === '99999999') {
+          if (first) await bRead;
+          else {
+            sawB();
+            await aEntered;
+          }
+        } else if (path.includes('/.lock/') && !first) bProgress();
+        return bytes;
+      };
+    }
+    let active = 0;
+    let maximum = 0;
+    const pa = (a as unknown as LockProbe).locked('alice', async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      enteredA();
+      await holdA;
+      active--;
+    });
+    const pb = (b as unknown as LockProbe).locked('alice', async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      bProgress();
+      active--;
+    });
+    try {
+      await bAdvanced;
+      expect(maximum).toBe(1);
+    } finally {
+      releaseA();
+      await Promise.allSettled([pa, pb]);
+    }
+    await expect(pa).resolves.toBeUndefined();
+    await expect(pb).resolves.toBeUndefined();
+  });
+  it('serializes saves from independent processes and recovers a crashed owner', async () => {
+    const note = await persisted();
+    const run = promisify(execFile);
+    const moduleUrl = new URL('../src/session-notes-store.ts', import.meta.url).href;
+    const script = `import { writeFile } from 'node:fs/promises'; import { SessionNotesStore } from ${JSON.stringify(moduleUrl)};
+      const store = new SessionNotesStore(process.argv[2]);
+      try { await store.save('alice', JSON.parse(process.argv[3]), process.argv[4]); await writeFile(process.argv[2] + '/result-' + process.argv[4], 'saved'); }
+      catch (error) { if (error.constructor.name === 'SessionNotesConflictError') await writeFile(process.argv[2] + '/result-' + process.argv[4], 'conflict'); else throw error; }`;
+    const worker = join(root, 'worker.mjs');
+    await writeFile(worker, script);
+    await Promise.all(
+      ['one', 'two'].map((body) =>
+        run(process.execPath, ['--import', 'tsx', worker, root, JSON.stringify(note), body], {
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE },
+        })
+      )
+    );
+    expect(
+      (await Promise.all(['one', 'two'].map((body) => readFile(join(root, 'result-' + body), 'utf8')))).sort()
+    ).toEqual(['conflict', 'saved']);
+    const crash = `import { SessionNotesStore } from ${JSON.stringify(moduleUrl)};
+      const store = new SessionNotesStore(process.argv[2]);
+      await store.locked('alice', async () => { process.exit(0); });`;
+    const crashWorker = join(root, 'crash.mjs');
+    await writeFile(crashWorker, crash);
+    await run(process.execPath, ['--import', 'tsx', crashWorker, root], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE },
+    });
+    const crashedMarkers = await readdir(join(root, 'alice/.lock'));
+    expect(crashedMarkers).toHaveLength(1);
+    const crashedPid = Number(await readFile(join(root, 'alice/.lock', crashedMarkers[0]), 'utf8'));
+    expect(crashedPid).toBeGreaterThan(0);
+    expect(crashedPid).not.toBe(process.pid);
+    expect(() => process.kill(crashedPid, 0)).toThrow();
+    expect((await new SessionNotesStore(root).read('alice', 'project1', 'note1')).markdown).toMatch(/one|two/);
+    await expect(stat(join(root, 'alice/.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await mkdir(join(root, 'alice/.lock'));
+    expect(await new SessionNotesStore(root).list('alice')).toHaveLength(1);
+  });
+  it('leaves a replacement live owner and malformed legacy locks intact during release and acquisition', async () => {
+    const lock = join(root, 'alice/.lock');
+    await mkdir(lock, { recursive: true });
+    const marker = '11111111-1111-1111-1111-111111111111.owner';
+    await writeFile(join(lock, marker), String(process.pid));
+    const store = new SessionNotesStore(root);
+    await (store as unknown as { releaseLock(path: string, marker: string): Promise<void> }).releaseLock(
+      lock,
+      '00000000-0000-0000-0000-000000000000.owner'
+    );
+    expect(await readFile(join(lock, marker), 'utf8')).toBe(String(process.pid));
+    await rm(lock, { recursive: true });
+    await writeFile(lock, 'legacy file lock');
+    await expect(store.list('alice')).rejects.toThrow('manual repair');
+    expect(await readFile(lock, 'utf8')).toBe('legacy file lock');
   });
   it('retains both versions and surfaces recovery conflict if an external target appears', async () => {
     const note = await persisted();

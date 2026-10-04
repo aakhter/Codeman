@@ -1,6 +1,8 @@
+/** @fileoverview Durable owner-scoped Markdown notebooks with revision conflicts and recoverable filesystem transactions. */
+
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { dataPath } from './config/instance.js';
 import { noteRevision, parseSessionNote, serializeSessionNote } from './session-notes-markdown.js';
@@ -555,27 +557,61 @@ export class SessionNotesStore {
     }
   }
 
+  /** Remove only this observed owner's marker. A replacement live directory is nonempty and survives rmdir. */
+  private async releaseLock(lock: string, marker: string): Promise<void> {
+    await this.guard(lock, true);
+    try {
+      await unlink(join(lock, marker));
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    try {
+      await rmdir(lock);
+    } catch (error) {
+      if (!isMissing(error) && !['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? ''))
+        throw error;
+    }
+  }
+
   private async locked<T>(owner: string, operation: (conflicts: RecoveryConflicts) => Promise<T>): Promise<T> {
     await (this.initialization ??= this.canonicalizeRoot());
     const directory = this.ownerPath(owner);
     await this.directory(directory);
     const lock = join(directory, '.lock');
     const deadline = Date.now() + 5000;
-    const candidate = join(directory, `${randomUUID()}.lock-candidate`);
-    await this.writePrivate(candidate, Buffer.from(String(process.pid)));
+    const token = randomUUID();
+    const marker = `${token}.owner`;
+    const candidate = join(directory, `${token}.lock-candidate`);
+    await this.directory(candidate);
+    await this.writePrivate(join(candidate, marker), Buffer.from(String(process.pid)));
+    await this.syncDirectory(candidate);
     let acquired = false;
     try {
       while (!acquired) {
+        if (Date.now() >= deadline) throw new Error('Session notes store is locked');
         await this.guard(lock, true);
         try {
-          await link(candidate, lock);
+          // Rename publishes a complete nonempty directory and cannot replace another live nonempty directory.
+          await rename(candidate, lock);
           acquired = true;
+          await this.syncDirectory(directory);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-          // A crashed process leaves a lock; only a definitively dead PID can be reclaimed.
+          if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+          let markers: string[];
+          try {
+            await this.guard(lock);
+            if (!(await lstat(lock)).isDirectory()) throw new Error('Malformed notes lock requires manual repair');
+            markers = await readdir(lock);
+          } catch (error) {
+            if (isMissing(error)) continue;
+            throw error;
+          }
+          if (markers.length === 0) continue; // An empty abandoned directory can be replaced atomically.
+          if (markers.length !== 1 || !/^[a-f0-9-]{36}\.owner$/.test(markers[0]))
+            throw new Error('Ambiguous notes lock requires manual repair');
           let pid: number;
           try {
-            pid = Number((await this.bytes(lock)).toString('utf8'));
+            pid = Number((await this.bytes(join(lock, markers[0]))).toString('utf8'));
           } catch (error) {
             if (isMissing(error)) continue;
             throw error;
@@ -585,7 +621,7 @@ export class SessionNotesStore {
               process.kill(pid, 0);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-                await unlink(lock);
+                await this.releaseLock(lock, markers[0]);
                 continue;
               }
             }
@@ -594,14 +630,15 @@ export class SessionNotesStore {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
-      try {
-        const conflicts = await this.recover(owner);
-        return await operation(conflicts);
-      } finally {
-        await unlink(lock);
-      }
+      const conflicts = await this.recover(owner);
+      return await operation(conflicts);
     } finally {
-      await unlink(candidate);
+      if (acquired) {
+        await this.releaseLock(lock, marker);
+        await this.syncDirectory(directory);
+      }
+      // Private candidate directories never become visible until complete. Clean only this attempt's unique marker.
+      await this.releaseLock(candidate, marker);
     }
   }
 }

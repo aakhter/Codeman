@@ -1,3 +1,5 @@
+/** @fileoverview Persistent session notebook metadata, content, and repair entry contracts. */
+
 export interface SessionNoteMetadata {
   version: 1;
   id: string;

@@ -1,3 +1,5 @@
+/** @fileoverview Versioned session-note frontmatter codec and full-file revision hashing. */
+
 import { createHash } from 'node:crypto';
 import type { SessionNote, SessionNoteMetadata } from './types/session-notes.js';
 
