@@ -1,10 +1,14 @@
 /** @fileoverview Durable owner-scoped Markdown notebooks with revision conflicts and recoverable filesystem transactions. */
 
 import { randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises';
+import { chmod, link, readdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { dataPath } from './config/instance.js';
+import {
+  SessionNotesFilesystem,
+  safeNotesId as safeId,
+  isNotesMissing as isMissing,
+} from './session-notes-filesystem.js';
 import { noteRevision, parseSessionNote, serializeSessionNote } from './session-notes-markdown.js';
 import type {
   SessionNote,
@@ -48,23 +52,13 @@ type RecoveryConflicts = Map<string, RecoveryConflict> & { issues: SessionNotesR
 interface StoreOptions {
   checkpoint?: (stage: 'journal-ready' | 'prepared' | 'displaced' | 'installed') => void | Promise<void>;
 }
-function safeId(id: string): string {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id)) throw new Error('Unsafe note path identifier');
-  return id;
-}
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === 'ENOENT';
-}
-
 /** Canonical files are refreshed on every operation. No session lifecycle state is consulted. */
-export class SessionNotesStore {
-  private root: string;
-  private initialization?: Promise<void>;
+export class SessionNotesStore extends SessionNotesFilesystem {
   constructor(
     root = dataPath('notes'),
     private readonly options: StoreOptions = {}
   ) {
-    this.root = resolve(root);
+    super(root);
   }
 
   create(owner: string, input: SessionNoteCreate): SessionNote {
@@ -238,52 +232,11 @@ export class SessionNotesStore {
     safeId(note.metadata.id);
     if (note.metadata.ownerKey !== owner) throw new Error('Note owner mismatch');
   }
-  private ownerPath(owner: string): string {
-    return join(this.root, safeId(owner));
-  }
+
   private notePath(owner: string, project: string, id: string): string {
     return join(this.ownerPath(owner), 'projects', safeId(project), `${safeId(id)}.md`);
   }
 
-  /** Refuse symlinks in every existing component, including the configured root's ancestors. */
-  private async guard(path: string, missing = false): Promise<void> {
-    const absolute = resolve(path);
-    if (absolute !== this.root && !absolute.startsWith(this.root + sep)) throw new Error('Note path escapes root');
-    const parts = absolute.split(sep).filter(Boolean);
-    let current: string = sep;
-    for (const part of parts) {
-      current = join(current, part);
-      try {
-        if ((await lstat(current)).isSymbolicLink()) throw new Error('Symlink note paths are forbidden');
-      } catch (error) {
-        if (missing && isMissing(error)) return;
-        throw error;
-      }
-    }
-    if ((await realpath(absolute)) !== absolute) throw new Error('Noncanonical note path');
-  }
-  private async directory(path: string): Promise<void> {
-    await this.guard(path, true);
-    await mkdir(path, { recursive: true, mode: 0o700 });
-    await this.guard(path);
-    // Only modify directories inside this store, never its configured ancestors.
-    let current = path;
-    while (current === this.root || current.startsWith(this.root + sep)) {
-      await chmod(current, 0o700);
-      if (current === this.root) break;
-      current = dirname(current);
-    }
-  }
-  private async bytes(path: string): Promise<Buffer> {
-    await this.guard(path);
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      if (!(await handle.stat()).isFile()) throw new Error('Note is not a regular file');
-      return await handle.readFile();
-    } finally {
-      await handle.close();
-    }
-  }
   private async readAt(owner: string, path: string): Promise<SessionNote> {
     let bytes: Buffer;
     try {
@@ -314,24 +267,6 @@ export class SessionNotesStore {
   private async checkRevision(owner: string, path: string, expected: string): Promise<void> {
     const current = await this.current(owner, path);
     if ((current?.revision ?? '') !== expected) throw new SessionNotesConflictError('Note changed on disk', current);
-  }
-  private async writePrivate(path: string, bytes: Buffer): Promise<void> {
-    await this.guard(path, true);
-    const file = await open(path, 'wx', 0o600);
-    try {
-      await file.writeFile(bytes);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-  }
-  private async syncDirectory(path: string): Promise<void> {
-    const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY);
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
   }
 
   /** A published .json is always complete; a failed write remains an unpublished repair artifact. */
@@ -531,21 +466,6 @@ export class SessionNotesStore {
     return conflicts;
   }
 
-  private async canonicalizeRoot(): Promise<void> {
-    const suffix: string[] = [];
-    let existing = this.root;
-    for (;;) {
-      try {
-        this.root = join(await realpath(existing), ...suffix);
-        return;
-      } catch (error) {
-        if (!isMissing(error)) throw error;
-        suffix.unshift(basename(existing));
-        existing = dirname(existing);
-      }
-    }
-  }
-
   private async publish(snapshot: string, target: string): Promise<void> {
     const temporary = join(dirname(snapshot), `${randomUUID()}.install`);
     await this.writePrivate(temporary, await this.bytes(snapshot));
@@ -557,88 +477,7 @@ export class SessionNotesStore {
     }
   }
 
-  /** Remove only this observed owner's marker. A replacement live directory is nonempty and survives rmdir. */
-  private async releaseLock(lock: string, marker: string): Promise<void> {
-    await this.guard(lock, true);
-    try {
-      await unlink(join(lock, marker));
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-    try {
-      await rmdir(lock);
-    } catch (error) {
-      if (!isMissing(error) && !['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? ''))
-        throw error;
-    }
-  }
-
   private async locked<T>(owner: string, operation: (conflicts: RecoveryConflicts) => Promise<T>): Promise<T> {
-    await (this.initialization ??= this.canonicalizeRoot());
-    const directory = this.ownerPath(owner);
-    await this.directory(directory);
-    const lock = join(directory, '.lock');
-    const deadline = Date.now() + 5000;
-    const token = randomUUID();
-    const marker = `${token}.owner`;
-    const candidate = join(directory, `${token}.lock-candidate`);
-    await this.directory(candidate);
-    await this.writePrivate(join(candidate, marker), Buffer.from(String(process.pid)));
-    await this.syncDirectory(candidate);
-    let acquired = false;
-    try {
-      while (!acquired) {
-        if (Date.now() >= deadline) throw new Error('Session notes store is locked');
-        await this.guard(lock, true);
-        try {
-          // Rename publishes a complete nonempty directory and cannot replace another live nonempty directory.
-          await rename(candidate, lock);
-          acquired = true;
-          await this.syncDirectory(directory);
-        } catch (error) {
-          if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-          let markers: string[];
-          try {
-            await this.guard(lock);
-            if (!(await lstat(lock)).isDirectory()) throw new Error('Malformed notes lock requires manual repair');
-            markers = await readdir(lock);
-          } catch (error) {
-            if (isMissing(error)) continue;
-            throw error;
-          }
-          if (markers.length === 0) continue; // An empty abandoned directory can be replaced atomically.
-          if (markers.length !== 1 || !/^[a-f0-9-]{36}\.owner$/.test(markers[0]))
-            throw new Error('Ambiguous notes lock requires manual repair');
-          let pid: number;
-          try {
-            pid = Number((await this.bytes(join(lock, markers[0]))).toString('utf8'));
-          } catch (error) {
-            if (isMissing(error)) continue;
-            throw error;
-          }
-          if (Number.isInteger(pid) && pid > 0) {
-            try {
-              process.kill(pid, 0);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-                await this.releaseLock(lock, markers[0]);
-                continue;
-              }
-            }
-          }
-          if (Date.now() >= deadline) throw new Error('Session notes store is locked');
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-      }
-      const conflicts = await this.recover(owner);
-      return await operation(conflicts);
-    } finally {
-      if (acquired) {
-        await this.releaseLock(lock, marker);
-        await this.syncDirectory(directory);
-      }
-      // Private candidate directories never become visible until complete. Clean only this attempt's unique marker.
-      await this.releaseLock(candidate, marker);
-    }
+    return this.withOwnerLock(owner, async () => operation(await this.recover(owner)));
   }
 }
