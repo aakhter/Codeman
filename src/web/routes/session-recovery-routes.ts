@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { stat } from 'node:fs/promises';
 import { z } from 'zod';
 import { readRecoveryPreview } from '../../session-recovery-preview.js';
+import { isMultiUserMode } from '../../config/multiuser.js';
 import { Session } from '../../session.js';
 import { enrichRecoveryNames, readClaudeRecoveryDetails } from '../../session-recovery-names.js';
 import { probeCodexRecoveryIdentity } from '../../native-session-identity.js';
@@ -69,7 +70,10 @@ export function registerSessionRecoveryRoutes(app: FastifyInstance, ctx: Recover
     const record = findRecovery(ctx, parsed.data, req);
     if (!record) return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Recovery not found'));
     reply.header('Cache-Control', 'no-store');
-    return readRecoveryPreview(record);
+    return readRecoveryPreview(record, {
+      // Match the Saved sessions policy: host-wide history is admin-only in multi-user mode.
+      allowWorkspaceCandidates: !isMultiUserMode() || getAuthUser(req).role === 'admin',
+    });
   });
 
   for (const action of ['refresh', 'reconnect', 'resume', 'dismiss'] as const) {

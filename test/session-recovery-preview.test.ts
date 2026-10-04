@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, truncateSync, symlinkSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  appendFileSync,
+  truncateSync,
+  symlinkSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probeCodexRecoveryIdentity } from '../src/native-session-identity.js';
@@ -171,5 +180,48 @@ describe('read-only recovery previews', () => {
     expect(
       await readRecoveryPreview({ ...record, mode: 'claude', claudeResumeId: id, workingDir: alias })
     ).toMatchObject({ available: true, prompts: [{ text: 'Claude symlink prompt' }] });
+  });
+  it('automatically previews workspace candidates without adopting their identity or marking the record resumable', async () => {
+    codex([event('first'), event('middle'), event('last')], { originator: 'another-pane' });
+    const before = structuredClone(record);
+    const preview = await readRecoveryPreview(record, { allowWorkspaceCandidates: true });
+    expect(preview.available).toBe(false);
+    expect(preview.message).toContain('not confirmed matches');
+    expect(preview.candidates).toHaveLength(1);
+    expect(preview.candidates![0]).toMatchObject({
+      conversationId: id,
+      preview: { available: true, promptCount: 3, prompts: [{ text: 'first' }, { text: 'middle' }, { text: 'last' }] },
+    });
+    expect(record).toEqual(before);
+  });
+  it('does not expose candidate content when host-wide history access is disabled', async () => {
+    codex([event('other session private content')], { originator: 'another-pane' });
+    expect(await readRecoveryPreview(record, { allowWorkspaceCandidates: false })).not.toHaveProperty('candidates');
+  });
+  it('excludes other workspaces and subagent threads from candidate previews', async () => {
+    codex([event('other workspace')], { originator: 'another-pane', cwd: '/other' });
+    expect(await readRecoveryPreview(record, { allowWorkspaceCandidates: true })).not.toHaveProperty('candidates');
+    codex([event('child')], { source: { subagent: 'parent' } });
+    expect(await readRecoveryPreview(record, { allowWorkspaceCandidates: true })).not.toHaveProperty('candidates');
+  });
+  it('ranks candidate transcript timestamps numerically by proximity to recorded activity', async () => {
+    codex([event('farther prompt')], { originator: 'another-pane' });
+    const dir = join(process.env.CODEX_HOME!, 'sessions');
+    utimesSync(join(dir, 'rollout-preview.jsonl'), 1, 1);
+    const closerId = '01a0c810-a5c4-7b32-be0b-1599d9d5995e';
+    const closer = join(dir, 'rollout-closer.jsonl');
+    writeFileSync(
+      closer,
+      [
+        { type: 'session_meta', payload: { id: closerId, cwd: '/work', originator: 'third-pane', source: 'cli' } },
+        event('closer prompt'),
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n')
+    );
+    utimesSync(closer, 9, 9);
+    const preview = await readRecoveryPreview({ ...record, lastActivityAt: 10000 }, { allowWorkspaceCandidates: true });
+    expect(preview.candidates?.map((candidate) => candidate.conversationId)).toEqual([closerId, id]);
+    expect(preview.candidates?.map((candidate) => candidate.lastModified)).toEqual([9000, 1000]);
   });
 });

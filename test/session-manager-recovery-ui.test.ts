@@ -396,4 +396,37 @@ describe('Session Manager Recovery Queue', () => {
     await button.click();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/preview'))).toHaveLength(1);
   });
+  it('shows candidate prompts in the same row when the original conversation link is missing', async () => {
+    const { app, elements } = loadHarness(async (url) => {
+      if (url.startsWith('/api/sessions/unified')) return ok({ sessions: [] });
+      if (url === '/api/session-recoveries') return ok({ recoveries: [resumableCodex] });
+      if (url.endsWith('/preview'))
+        return ok({
+          available: false,
+          message: 'Candidates, not confirmed matches.',
+          candidates: [
+            {
+              conversationId: 'candidate-1',
+              lastModified: 1000,
+              preview: {
+                available: true,
+                promptCount: 1,
+                prompts: [{ position: 'Only prompt', ordinal: 1, text: '<b>literal candidate</b>', truncated: false }],
+              },
+            },
+          ],
+        });
+      throw new Error(`unexpected request ${url}`);
+    });
+    await app._loadSessionManagerList('');
+    const row = elements.sessionRecoveryList.children[0];
+    await row.children
+      .at(-1)!
+      .children.find((child) => child.textContent === 'Preview')!
+      .click();
+    const panel = row.children.find((child) => child.className === 'session-recovery-preview')!;
+    expect(panel.children[0].textContent).toBe('Candidates, not confirmed matches.');
+    expect(panel.children[1].children[0].textContent).toContain('Candidate conversation candidate-1');
+    expect(panel.children[1].children.at(-1)!.textContent).toBe('<b>literal candidate</b>');
+  });
 });

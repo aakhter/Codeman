@@ -434,3 +434,21 @@ export async function findCodexRecoveryTranscript(record: {
   }
   return undefined;
 }
+
+/** Workspace matches are preview candidates only, never identity or restore evidence. */
+export async function findCodexPreviewCandidates(record: {
+  workingDir: string;
+  createdAt: number;
+  lastActivityAt?: number;
+}): Promise<CodexHistorySession[]> {
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
+  const activity = record.lastActivityAt ?? record.createdAt;
+  const rows = (await scanCodexSessionIdentities()).filter((row) => matchesWorkspace(row.workingDir));
+  const distance = (row: CodexHistorySession) => Math.abs(Date.parse(row.lastModified) - activity);
+  rows.sort((a, b) => distance(a) - distance(b));
+  const unique = new Map<string, CodexHistorySession>();
+  for (const row of rows) {
+    if (!unique.has(row.sessionId)) unique.set(row.sessionId, row);
+  }
+  return [...unique.values()].slice(0, 3);
+}

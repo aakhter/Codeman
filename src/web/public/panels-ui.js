@@ -1282,6 +1282,21 @@ Object.assign(CodemanApp.prototype, {
             excerpt.textContent = prompt.text + (prompt.truncated ? '\n[Excerpt shortened]' : '');
             previewPanel.append(heading, excerpt);
           }
+          for (const candidate of data.candidates || []) {
+            const section = document.createElement('details');
+            const label = document.createElement('summary');
+            label.textContent = `Candidate conversation ${candidate.conversationId} · Transcript updated: ${new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' }).format(candidate.lastModified)}, ${new Date(candidate.lastModified).toISOString()}`;
+            section.appendChild(label);
+            section.open = true;
+            for (const prompt of candidate.preview.prompts || []) {
+              const heading = document.createElement('strong');
+              heading.textContent = `${prompt.position} (${prompt.ordinal} of ${candidate.preview.promptCount})`;
+              const excerpt = document.createElement('p');
+              excerpt.textContent = prompt.text + (prompt.truncated ? '\n[Excerpt shortened]' : '');
+              section.append(heading, excerpt);
+            }
+            previewPanel.appendChild(section);
+          }
           previewPanel.dataset.loaded = 'true';
         } catch (err) {
           previewPanel.textContent = err.message || 'Could not load preview';

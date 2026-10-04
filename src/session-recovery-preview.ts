@@ -1,7 +1,7 @@
 /** Read-only prompt samples; previewing never changes recovery eligibility. */
 import { open, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { findCodexRecoveryTranscript, userPromptFromLine } from './codex-transcript.js';
+import { findCodexPreviewCandidates, findCodexRecoveryTranscript, userPromptFromLine } from './codex-transcript.js';
 import { localWorkspaceMatcher } from './utils/local-workspace-match.js';
 import { claudeProjectsDir } from './utils/claude-transcript.js';
 import type { SessionRecoveryRecord } from './types/session-recovery.js';
@@ -14,6 +14,7 @@ export type RecoveryPreview = {
   available: boolean;
   message?: string;
   promptCount?: number;
+  candidates?: Array<{ conversationId: string; lastModified: number; preview: RecoveryPreview }>;
   prompts?: Array<{ position: string; ordinal: number; text: string; truncated: boolean }>;
 };
 function textContent(content: unknown): string {
@@ -25,7 +26,10 @@ function textContent(content: unknown): string {
     .trim();
 }
 
-export async function readRecoveryPreview(record: SessionRecoveryRecord): Promise<RecoveryPreview> {
+export async function readRecoveryPreview(
+  record: SessionRecoveryRecord,
+  options: { allowWorkspaceCandidates?: boolean } = {}
+): Promise<RecoveryPreview> {
   const unavailable = (message: string): RecoveryPreview => ({ available: false, message });
   if (record.transport !== 'local' || record.launch.kind !== 'built-in')
     return unavailable('Preview is available for local built-in Claude and Codex conversations only.');
@@ -35,10 +39,28 @@ export async function readRecoveryPreview(record: SessionRecoveryRecord): Promis
   if (record.mode === 'codex') {
     const path = await findCodexRecoveryTranscript(record);
     if (path) paths.push(path);
-    else if (!record.nativeResumeId)
-      return unavailable(
-        'The original Codex conversation ID was not saved, and no local transcript identifies this Codeman session. Search Saved sessions below to find the conversation.'
-      );
+    else {
+      if (options.allowWorkspaceCandidates) {
+        const candidates = [];
+        for (const candidate of await findCodexPreviewCandidates(record)) {
+          const preview = await readRecoveryPreview({ ...record, nativeResumeId: candidate.sessionId });
+          if (preview.available)
+            candidates.push({
+              conversationId: candidate.sessionId,
+              lastModified: Date.parse(candidate.lastModified),
+              preview,
+            });
+        }
+        if (candidates.length)
+          return {
+            available: false,
+            message:
+              'The original conversation link was not retained. Here are saved conversations from the same workspace, ranked by proximity to the recorded activity. These are candidates, not confirmed matches.',
+            candidates,
+          };
+      }
+      return unavailable('Could not identify the original conversation from the saved session data.');
+    }
   } else if (record.mode === 'claude' && UUID.test(claudeId)) {
     for (const dir of await readdir(claudeProjectsDir(), { withFileTypes: true }).catch(() => [])) {
       if (dir.isDirectory()) paths.push(join(claudeProjectsDir(), dir.name, `${claudeId}.jsonl`));
