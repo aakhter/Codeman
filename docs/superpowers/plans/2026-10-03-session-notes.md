@@ -69,12 +69,12 @@ interface SessionNote {
 
 ## Task 3 — COD-480: API, index and checklist projections
 
-- [ ] Add tests using Fastify inject for owner-scoped list/read/save/reassign/export, historical notebooks with no live session, stale-revision conflicts, and forbidden cross-owner operations.
-- [ ] Add Markdown checklist tests excluding fenced code and proving completion changes the source marker under revision checks. Search uses notebook titles and bodies with composable project/session/unfinished filters.
-- [ ] Confirm expected missing-route/feature failures in the two targeted files before implementation.
-- [ ] Register domain routes through the existing route wiring. Supply trusted owner/session/case metadata; browser inputs cannot choose another owner or arbitrary filesystem paths. Match existing API response conventions.
-- [ ] Make the index rebuildable from canonical files and refresh against external changes. Publish owner-scoped change events and preserve repairable files in list responses. Export standalone Markdown.
-- [ ] Run focused tests and required checks, obtain specification and quality reviews, and commit with COD-480.
+- [x] Add tests using Fastify inject for owner-scoped list/read/save/reassign/export, historical notebooks with no live session, stale-revision conflicts, and forbidden cross-owner operations.
+- [x] Add Markdown checklist tests excluding fenced code and proving completion changes the source marker under revision checks. Search uses notebook titles and bodies with composable project/session/unfinished filters.
+- [x] Confirm expected missing-route/feature failures in the two targeted files before implementation.
+- [x] Register domain routes through the existing route wiring. Supply trusted owner/session/case metadata; browser inputs cannot choose another owner or arbitrary filesystem paths. Match existing API response conventions.
+- [x] Make the index rebuildable from canonical files and refresh against external changes. Publish owner-scoped change events and preserve repairable files in list responses. Export standalone Markdown.
+- [x] Run focused tests and required checks, obtain specification and quality reviews, and commit with COD-480.
 
 ## Task 4 — COD-481: session and global UI
 
@@ -105,3 +105,7 @@ Implemented and independently approved for specification and code quality at `3e
 ## COD-479 verification receipt
 
 Implemented at `98d4b130`, independently approved for specification and code quality. Both scoped suites pass 37 tests (17 projects and 20 storage). Root independently reran typecheck, format check and lockfile check successfully. Project registry preserves stable identity across renames/removal and keeps interrupted staged bytes recoverable. API, launch metadata capture, editor and sharing remain pending. COD-480 is now in progress.
+
+## COD-480 verification receipt
+
+Implemented at `06770ec4`, corrected draft concurrency at `eaf923bc` and external provenance adoption at `3e11756e`. Independent specification review passed 147 tests across 10 focused files and direct conflict/provenance reproductions. Independent quality re-review approved the final backend; its focused 41 tests also passed. Root independently reran typecheck, lint, format check, lockfile and diff checks successfully (lint retains one existing warning). Earlier isolated existing remote SSE regression passed 4 tests with installed tmux detection enabled. API contract: `docs/session-notes-api.md`. Backend changes preserve Markdown canonical content, draft versions, retained origin, external edits and exact-owner notifications. COD-481 editor/browser is now starting; sharing and final browser/integration acceptance remain pending. Nothing is deployed or landed.
