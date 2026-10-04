@@ -216,3 +216,52 @@ it('recovery actions use a canonical notebook revision when the list entry has n
     'POST'
   );
 });
+function repairingApp() {
+  (window as any).CodemanApp = function () {};
+  (0, eval)('var CodemanApp = window.CodemanApp;\n' + readFileSync('src/web/public/session-notes-ui.js', 'utf8'));
+  document.body.innerHTML = '<div class="terminal-wrap"><div id="terminalContainer"></div></div>';
+  const app = Object.create((window as any).CodemanApp.prototype);
+  app._notesProjects = [];
+  app._notesController = create();
+  app._notesController.changed = (state: any) => app._renderNotesState(state);
+  app._refreshNotesList = vi.fn();
+  app._createNotesShell('browser');
+  app._mountNotesRepair({ id: 'one', raw: 'broken', revision: 'r1', repairable: true });
+  let resolve: any, reject: any;
+  const deferred = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  app._notesRequest = vi.fn(async (path: string) =>
+    path.endsWith('/repair') ? deferred : note('two', 'r2', 'second notebook')
+  );
+  const button = [...document.querySelectorAll('button')].find((button) => button.textContent === 'Repair notebook')!;
+  button.click();
+  return { app, resolve, reject };
+}
+it('a deferred repair cannot replace a second notebook selected while repair is pending', async () => {
+  const { app, resolve } = repairingApp();
+  await app.openNotesNotebook('two');
+  resolve(note('one', 'repaired', 'repaired first'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(app._notesController.current.id).toBe('two');
+  expect(app._notesEditorElements.markdown.value).toBe('second notebook');
+});
+it('a deferred repair cannot mount into a closed and reopened notes shell', async () => {
+  const { app, resolve } = repairingApp();
+  app.closeSessionNotes();
+  app._createNotesShell('browser');
+  app._mountNotesEditor(note('two', 'r2', 'second notebook'));
+  resolve(note('one', 'repaired', 'repaired first'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(app._notesController.current.id).toBe('two');
+  expect(app._notesEditorElements.markdown.value).toBe('second notebook');
+});
+it('a deferred repair failure cannot render an error on a subsequently selected notebook', async () => {
+  const { app, reject } = repairingApp();
+  await app.openNotesNotebook('two');
+  reject(new Error('failure from old repair'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(app._notesErrorElement.textContent).toBe('');
+  expect(app._notesController.current.id).toBe('two');
+});

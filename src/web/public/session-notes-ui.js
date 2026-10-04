@@ -525,16 +525,26 @@
         host.append(
           markdown,
           button('Repair notebook', async () => {
+            const navigation = this._notesNavigation;
+            const selection = this._notesNotebookSequence;
+            const shell = this._notesShell;
+            const isCurrentRepair = () =>
+              this._notesNavigation === navigation &&
+              this._notesNotebookSequence === selection &&
+              this._notesShell === shell &&
+              this._notesEditorHost === host &&
+              host.contains(markdown);
             try {
               const note = await this._notesRequest(
                 '/' + encodeURIComponent(data.id) + '/repair',
                 { revision: data.revision, markdown: markdown.value },
                 'POST'
               );
+              if (!isCurrentRepair()) return;
               this._mountNotesEditor(note);
               await this._refreshNotesList();
             } catch (error) {
-              this._notesError(error);
+              if (isCurrentRepair()) this._notesError(error);
             }
           })
         );
