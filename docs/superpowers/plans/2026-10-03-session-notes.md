@@ -87,12 +87,14 @@ interface SessionNote {
 
 ## Task 5 — COD-482: explicit sharing and final integration
 
-- [ ] Write tests proving default notes do not reach agent input, explicit send uses the selected content/destination, inactive sources are not resumed, and selected response append respects revisions.
-- [ ] Confirm expected missing-feature failures before wiring the sharing actions.
-- [ ] Add preview and explicit confirmation within Send to session. Append only the selected response with timestamp and source reference in Save response to notes. Reuse existing session-input and response-selection mechanisms where applicable.
-- [ ] Document file layout, retention, assignment, privacy defaults, backup/export, and conflict resolution in docs/wiki/Session-Notes.md.
-- [ ] Exercise design acceptance scenarios across session, project, and global views, including restart, removed project, concurrent edits, owner/instance isolation and index rebuild. Record screenshots for UI review.
-- [ ] Run required checks and focused regressions; obtain final specification and code-quality reviews. Push only the Bitbucket origin working branch and prepare a reviewable PR. Update Jira with branch/PR/commit/verification; completion follows landing, not merely local implementation.
+- [x] Write tests proving default notes do not reach agent input, explicit send uses the selected content/destination, inactive sources are not resumed, and selected response append respects revisions.
+- [x] Confirm expected missing-feature failures before wiring the sharing actions.
+- [x] Add preview and explicit confirmation within Send to session. Append only the selected response with timestamp and source reference in Save response to notes. Reuse existing session-input and response-selection mechanisms where applicable.
+- [x] Document file layout, retention, assignment, privacy defaults, backup/export, and conflict resolution in docs/wiki/Session-Notes.md.
+- [x] Exercise design acceptance scenarios across session, project, and global views, including fresh store/service reconstruction, removed project, concurrent edits, owner/instance isolation and index rebuild. Record screenshots for UI review. Production restart and live agent processing are not claimed.
+- [x] Run required checks and focused regressions; obtain final specification and code-quality reviews.
+- [ ] Push only the Bitbucket origin working branch and prepare a reviewable PR.
+- [ ] Update Jira with branch/PR/commit/verification. Held pending user approval after automatic approval review rejected the detailed payload. Completion follows landing, not merely local implementation.
 
 ## Progress reporting
 
@@ -113,3 +115,7 @@ Implemented at `06770ec4`, corrected draft concurrency at `eaf923bc` and externa
 ## COD-481 verification receipt
 
 Implemented at `be7bfbea`, corrected repair navigation at `ff04c6ba`, and shared-draft/asynchronous callback races at `4dd4fa6b`. Independent specification and quality re-reviews approved the final editor. Final UI regressions pass 28 tests; independent quality checks pass 32 tests including SSE parity. Implementer focused integration checks pass 59 tests. Root verified all six isolated desktop/mobile browser scenarios using actual shipping markup/mixins and temporary Fastify notes storage, and reviewed screenshots in `/tmp/cod477-ui-review`. Root typecheck, lint, formatting, lockfile and diff checks pass; lint retains one existing warning. Production build packages hashed notes assets and matches final source. Existing `sse-events.test.ts` starts an unisolated WebServer and was not escalated after sandbox tmux detection failed; focused notes owner-routing and registry checks passed. COD-482 explicit sharing and final integration remain pending. Nothing is deployed or landed. Jira detail updates are pending user approval after automatic approval review rejected posting implementation and verification details.
+
+## COD-482 and final integration receipt
+
+Implemented at `60ad66c9`, integrated destination recovery/SSE changes at `5bae553b`, fixed shell argument expansion/UTF-8 limits at `9c8ff8df`, and overlapping notes sends at `1c5849e9`. Final specification and code-quality reviews approve `1c5849e9`; each independently passes 31 sharing/input/UI tests. Implementer passes 80 focused tests and build/static checks. Root independently passes 137 tests across 17 focused files, all nine isolated desktop/mobile Chromium scenarios, typecheck, lint, formatting, lockfile and diff checks. The existing lint warning remains. Review screenshots and the nine-criterion acceptance map are committed with [the verification report](../../session-notes-verification.md). Live CLI processing, production restart, deployment and landing are not claimed. Detailed Jira writes remain held pending approval; branch/PR delivery follows this receipt.

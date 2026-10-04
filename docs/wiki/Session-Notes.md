@@ -1,6 +1,6 @@
 # Session Notes
 
-> Reviewable feature branch for COD-477, including COD-482 explicit sharing. This page describes the branch implementation; it is not a deployed release. Final integration review is pending.
+> Reviewed feature branch for COD-477, including COD-482 explicit sharing. This page describes the branch implementation; it is not a deployed release. Verification evidence is in [the acceptance report](../session-notes-verification.md).
 
 Session notes are a private Markdown notebook for your notes, ideas, and next steps. A notebook belongs to its originating session and an assigned project. Session, project, and global views open the same notebook.
 
