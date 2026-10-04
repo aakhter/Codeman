@@ -37,12 +37,12 @@ describe('notebook service canonical files and durable bindings', () => {
     const [a, b] = await Promise.all([first.open('alice', source, cases), service().open('alice', source, cases)]);
     expect(a.metadata.id).toBe(b.metadata.id);
     expect(await store.list('alice')).toEqual([]);
-    await expect(first.save('alice', a.metadata.id, '', 'draft')).rejects.toThrow('disk failure');
+    await expect(first.save('alice', a.metadata.id, a.revision, 'draft')).rejects.toThrow('disk failure');
     const retry = await service().read('alice', a.metadata.id);
     expect(retry.metadata.sessionId).toBe(source.id);
     const saved = await service().save('alice', a.metadata.id, retry.revision, 'remember');
     expect(saved!.markdown).toBe('remember');
-    await expect(service().save('alice', b.metadata.id, '', 'other tab')).rejects.toBeInstanceOf(
+    await expect(service().save('alice', b.metadata.id, b.revision, 'other tab')).rejects.toBeInstanceOf(
       SessionNotesConflictError
     );
     await expect(service().read('bob', a.metadata.id)).rejects.toThrow();
@@ -52,7 +52,7 @@ describe('notebook service canonical files and durable bindings', () => {
     const draft = await s.open('alice', { ...source, notesLaunchCase: cases[0] }, cases);
     const projects = await s.projects.list('alice');
     expect(projects.find((p) => p.id === draft.metadata.projectId)!.name).toBe('Repo');
-    const saved = (await s.save('alice', draft.metadata.id, '', '- [ ] todo'))!;
+    const saved = (await s.save('alice', draft.metadata.id, draft.revision, '- [ ] todo'))!;
     const other = projects.find((p) => p.name === 'Sub')!;
     const moved = await s.reassign('alice', saved.metadata.id, saved.revision, other.id);
     await s.open('alice', { ...source, sessionAliases: ['native1', 'native2'] }, cases);
@@ -65,18 +65,130 @@ describe('notebook service canonical files and durable bindings', () => {
     const draft = await s.open('alice', source, cases);
     const projects = await s.projects.list('alice');
     const other = projects.find((p) => p.id !== draft.metadata.projectId)!;
-    await s.reassign('alice', draft.metadata.id, '', other.id);
-    const renamed = await s.save('alice', draft.metadata.id, '', '', 'Custom');
+    const moved = await s.reassign('alice', draft.metadata.id, draft.revision, other.id);
+    const renamed = await s.save('alice', draft.metadata.id, moved.revision, '', 'Custom');
     expect(renamed!.metadata.title).toBe('Custom');
     const reloaded = await service().read('alice', draft.metadata.id);
     expect(reloaded.metadata.projectId).toBe(other.id);
     expect(reloaded.metadata.title).toBe('Custom');
     expect(await s.store.list('alice')).toEqual([]);
   });
+  it('rejects stale draft metadata revisions across competing service instances', async () => {
+    const first = service();
+    const second = service();
+    const draft = await first.open('alice', source, cases);
+    const renamed = (await first.save('alice', draft.metadata.id, draft.revision, '', 'Title A'))!;
+    await expect(second.save('alice', draft.metadata.id, draft.revision, '', 'Stale Title B')).rejects.toMatchObject({
+      current: { revision: renamed.revision, metadata: { title: 'Title A' } },
+    });
+    expect(renamed.revision).not.toBe(draft.revision);
+    expect((await second.read('alice', draft.metadata.id)).metadata.title).toBe('Title A');
+    const restored = await second.save('alice', draft.metadata.id, renamed.revision, '', draft.metadata.title);
+    expect(restored!.revision).not.toBe(draft.revision);
+    await expect(first.save('alice', draft.metadata.id, draft.revision, 'stale original body')).rejects.toBeInstanceOf(
+      SessionNotesConflictError
+    );
+  });
+  it('holds one filesystem transaction from draft revision check through first save and binding updates', async () => {
+    const first = service();
+    const second = service();
+    const draft = await first.open('alice', source, cases);
+    const other = (await first.projects.list('alice')).find((project) => project.id !== draft.metadata.projectId)!;
+    let reached!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = first.store.save.bind(first.store);
+    vi.spyOn(first.store, 'save').mockImplementation(async (...args) => {
+      reached();
+      await gate;
+      return original(...args);
+    });
+    const saving = first.save('alice', draft.metadata.id, draft.revision, 'first body');
+    await paused;
+    let moveFinished = false;
+    const moving = second.reassign('alice', draft.metadata.id, draft.revision, other.id);
+    void moving.then(
+      () => {
+        moveFinished = true;
+      },
+      () => {
+        moveFinished = true;
+      }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const movedBeforeRelease = moveFinished;
+    release();
+    const [saved, moved] = await Promise.allSettled([saving, moving]);
+    expect(movedBeforeRelease).toBe(false);
+    expect(saved.status).toBe('fulfilled');
+    expect(moved.status).toBe('rejected');
+    const current = await second.read('alice', draft.metadata.id);
+    const retried = await second.reassign('alice', draft.metadata.id, current.revision, other.id);
+    expect(retried.metadata.projectId).toBe(other.id);
+    expect((await first.read('alice', draft.metadata.id)).metadata.projectId).toBe(other.id);
+  });
+  it('rejects a stale first save after an acknowledged draft reassignment', async () => {
+    const first = service();
+    const second = service();
+    const draft = await first.open('alice', source, cases);
+    const target = (await first.projects.list('alice')).find((project) => project.id !== draft.metadata.projectId)!;
+    const moved = await second.reassign('alice', draft.metadata.id, draft.revision, target.id);
+    await expect(first.save('alice', draft.metadata.id, draft.revision, 'stale first body')).rejects.toMatchObject({
+      current: { revision: moved.revision, metadata: { projectId: target.id } },
+    });
+    expect(await first.store.list('alice')).toEqual([]);
+    const saved = await first.save('alice', draft.metadata.id, moved.revision, 'retained body');
+    expect(saved!.metadata.projectId).toBe(target.id);
+    expect(saved!.revision).toMatch(/^[a-f0-9]{64}$/);
+  });
+  it('requires asynchronous descendants to reacquire the filesystem lock after their inherited lease expires', async () => {
+    const first = new SessionNotesStore(root);
+    const second = new SessionNotesStore(root);
+    let entered = false;
+    let child!: Promise<void>;
+    let scheduled!: () => void;
+    const started = new Promise<void>((resolve) => {
+      scheduled = resolve;
+    });
+    await first.transaction('alice', async () => {
+      setTimeout(() => {
+        child = first.transaction('alice', async () => {
+          entered = true;
+        });
+        scheduled();
+      }, 25);
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      held = resolve;
+    });
+    const blocker = second.transaction('alice', async () => {
+      held();
+      await gate;
+    });
+    await acquired;
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const enteredWhileBlocked = entered;
+    release();
+    await blocker;
+    await child;
+    expect(enteredWhileBlocked).toBe(false);
+    expect(entered).toBe(true);
+  });
   it('rebuilds title/body search from disk, combines filters, edits checklists at revision, and lists malformed files', async () => {
     const s = service();
     const draft = await s.open('alice', source, cases);
-    const saved = (await s.save('alice', draft.metadata.id, '', '- [ ] alpha\r\n', 'Roadmap'))!;
+    const saved = (await s.save('alice', draft.metadata.id, draft.revision, '- [ ] alpha\r\n', 'Roadmap'))!;
     expect(
       (
         await service().list('alice', {
@@ -104,7 +216,7 @@ describe('notebook service canonical files and durable bindings', () => {
     const s = new SessionNotesService({ root, pollInterval: 20, onChanged: (owner) => events.push(owner) });
     services.push(s);
     const draft = await s.open('alice', source, cases);
-    const saved = (await s.save('alice', draft.metadata.id, '', 'before'))!;
+    const saved = (await s.save('alice', draft.metadata.id, draft.revision, 'before'))!;
     await s.list('alice');
     events.length = 0;
     const path = join(root, 'alice', 'projects', saved.metadata.projectId, saved.metadata.id + '.md');
@@ -120,9 +232,9 @@ describe('notebook service canonical files and durable bindings', () => {
   it('orders rows by filesystem modification time and filters newly observed aliases', async () => {
     const s = service();
     const a = await s.open('alice', source, cases);
-    await s.save('alice', a.metadata.id, '', 'first');
+    await s.save('alice', a.metadata.id, a.revision, 'first');
     const b = await s.open('alice', { ...source, id: 'session2', sessionAliases: [] }, cases);
-    await s.save('alice', b.metadata.id, '', 'second');
+    await s.save('alice', b.metadata.id, b.revision, 'second');
     await s.open('alice', { ...source, sessionAliases: ['native1', 'later'] }, cases);
     expect(await s.list('alice', { sessionId: 'later' })).toHaveLength(1);
     const path = join(root, 'alice', 'projects', a.metadata.projectId, a.metadata.id + '.md');
@@ -135,7 +247,7 @@ describe('notebook service canonical files and durable bindings', () => {
     const s = new SessionNotesService({ root, pollInterval: 1000, onChanged: () => {} });
     services.push(s);
     const draft = await s.open('alice', source, cases);
-    await s.save('alice', draft.metadata.id, '', 'quiet');
+    await s.save('alice', draft.metadata.id, draft.revision, 'quiet');
     await new Promise((resolve) => setTimeout(resolve, 100));
     const scans = vi.spyOn(s.store, 'list');
     await s.list('alice');

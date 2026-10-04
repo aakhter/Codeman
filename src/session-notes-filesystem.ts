@@ -1,5 +1,6 @@
 /** @fileoverview Shared guarded filesystem operations and owner locks for persistent session notes metadata. */
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -11,6 +12,17 @@ export function safeNotesId(id: string): string {
 }
 export function isNotesMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+interface OwnerLease {
+  root: string;
+  owner: string;
+  active: boolean;
+}
+const ownerLease = new AsyncLocalStorage<OwnerLease>();
+/** Background callbacks must acquire their own lease, even when registered inside a transaction. */
+export function outsideNotesTransaction<T>(operation: () => T): T {
+  return ownerLease.exit(operation);
 }
 
 export class SessionNotesFilesystem {
@@ -115,6 +127,8 @@ export class SessionNotesFilesystem {
   }
   protected async withOwnerLock<T>(owner: string, operation: () => Promise<T>): Promise<T> {
     await (this.initialization ??= this.canonicalizeRoot());
+    const lease = ownerLease.getStore();
+    if (lease?.active && lease.root === this.root && lease.owner === owner) return operation();
     const directory = this.ownerPath(owner);
     await this.directory(directory);
     const lock = join(directory, '.lock');
@@ -126,6 +140,7 @@ export class SessionNotesFilesystem {
     await this.writePrivate(join(candidate, marker), Buffer.from(String(process.pid)));
     await this.syncDirectory(candidate);
     let acquired = false;
+    const held: OwnerLease = { root: this.root, owner, active: false };
     try {
       while (!acquired) {
         if (Date.now() >= deadline) throw new Error('Session notes store is locked');
@@ -170,8 +185,10 @@ export class SessionNotesFilesystem {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
-      return await operation();
+      held.active = true;
+      return await ownerLease.run(held, operation);
     } finally {
+      held.active = false;
       if (acquired) {
         await this.releaseLock(lock, marker);
         await this.syncDirectory(directory);

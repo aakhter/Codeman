@@ -27,6 +27,8 @@ export class SessionNotesBindings extends SessionNotesFilesystem {
       if (!binding) throw new Error('Notes binding not found');
       if (change.title !== undefined) binding.title = change.title;
       if (change.projectId !== undefined) binding.projectId = safeNotesId(change.projectId);
+      // A monotonic persisted stamp prevents an old token becoming valid again after an edit is undone.
+      binding.updatedAt = Math.max(Date.now(), binding.updatedAt + 1);
       await this.persist(owner, bindings);
       return binding;
     });
@@ -45,6 +47,7 @@ export class SessionNotesBindings extends SessionNotesFilesystem {
       if (canonical && matches[0] && matches[0].id !== draft.metadata.id)
         throw new Error('Ambiguous session notebook association');
       const binding = matches[0] ?? { ...draft.metadata };
+      const previous = JSON.stringify(binding);
       if (canonical) {
         binding.title = draft.metadata.title;
         binding.projectId = draft.metadata.projectId;
@@ -53,6 +56,8 @@ export class SessionNotesBindings extends SessionNotesFilesystem {
       binding.sessionAliases = [...new Set([...binding.sessionAliases, ...wanted])].filter(
         (alias) => alias !== binding.sessionId
       );
+      if (matches.length && JSON.stringify(binding) !== previous)
+        binding.updatedAt = Math.max(Date.now(), binding.updatedAt + 1);
       await this.persist(owner, bindings);
       return binding;
     });

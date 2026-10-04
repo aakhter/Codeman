@@ -85,11 +85,15 @@ describe('notebook API real filesystem', () => {
     const saved = await app.inject({
       method: 'PUT',
       url,
-      payload: { revision: '', markdown: '- [ ] task\r\n', title: 'Roadmap' },
+      payload: { revision: draft.revision, markdown: '- [ ] task\r\n', title: 'Roadmap' },
     });
     expect(saved.statusCode).toBe(200);
     const note = saved.json().data;
-    const conflict = await app.inject({ method: 'PUT', url, payload: { revision: '', markdown: 'overwrite' } });
+    const conflict = await app.inject({
+      method: 'PUT',
+      url,
+      payload: { revision: draft.revision, markdown: 'overwrite' },
+    });
     expect(conflict.statusCode).toBe(409);
     expect(conflict.json().data.current).toEqual(note);
     expect((await app.inject(url)).json().data).toEqual(note);
@@ -141,7 +145,7 @@ describe('notebook API real filesystem', () => {
       await app.inject({ method: 'POST', url: '/api/session-notes/open', payload: { sessionId: source.id } })
     ).json().data;
     const url = '/api/session-notes/' + draft.metadata.id;
-    await app.inject({ method: 'PUT', url, payload: { revision: '', markdown: 'first' } });
+    await app.inject({ method: 'PUT', url, payload: { revision: draft.revision, markdown: 'first' } });
     await writeFile(
       join(root, sessionNotesOwnerKey('alice'), 'projects', draft.metadata.projectId, draft.metadata.id + '.md'),
       'broken'
@@ -165,8 +169,9 @@ describe('notebook API real filesystem', () => {
       await app.inject({ method: 'POST', url: '/api/session-notes/open', payload: { sessionId: source.id } })
     ).json().data;
     const url = '/api/session-notes/' + draft.metadata.id;
-    const note = (await app.inject({ method: 'PUT', url, payload: { revision: '', markdown: '- [ ] task' } })).json()
-      .data;
+    const note = (
+      await app.inject({ method: 'PUT', url, payload: { revision: draft.revision, markdown: '- [ ] task' } })
+    ).json().data;
     expect(
       (
         await app.inject({
@@ -189,5 +194,47 @@ describe('notebook API real filesystem', () => {
       (await app.inject({ method: 'PATCH', url: '/api/session-notes/projects/missing', payload: { name: 'Title' } }))
         .statusCode
     ).toBe(404);
+  });
+  it('checks and returns draft revisions for metadata edits, rejecting stale first materialization', async () => {
+    const app = await harness();
+    const opened = await app.inject({
+      method: 'POST',
+      url: '/api/session-notes/open',
+      payload: { sessionId: source.id },
+    });
+    const draft = opened.json().data;
+    expect(draft.revision).toMatch(/^draft-[a-f0-9]{64}$/);
+    const url = '/api/session-notes/' + draft.metadata.id;
+    const renamed = await app.inject({
+      method: 'PUT',
+      url,
+      payload: { revision: draft.revision, markdown: '', title: 'Title A' },
+    });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().data.revision).not.toBe(draft.revision);
+    const stale = await app.inject({
+      method: 'PUT',
+      url,
+      payload: { revision: draft.revision, markdown: 'stale first body' },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().data.current).toEqual(renamed.json().data);
+    const projects = (await app.inject('/api/session-notes/projects')).json().data;
+    const target = projects.find((project: { id: string }) => project.id !== draft.metadata.projectId);
+    const moved = await app.inject({
+      method: 'POST',
+      url: url + '/reassign',
+      payload: { revision: renamed.json().data.revision, projectId: target.id },
+    });
+    expect(moved.statusCode).toBe(200);
+    expect(moved.json().data.revision).not.toBe(renamed.json().data.revision);
+    const saved = await app.inject({
+      method: 'PUT',
+      url,
+      payload: { revision: moved.json().data.revision, markdown: 'first body' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().data.metadata.projectId).toBe(target.id);
+    expect(saved.json().data.revision).toMatch(/^[a-f0-9]{64}$/);
   });
 });

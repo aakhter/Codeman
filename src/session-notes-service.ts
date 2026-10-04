@@ -3,7 +3,8 @@ import { watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { dataPath } from './config/instance.js';
 import { SessionNotesBindings } from './session-notes-bindings.js';
-import { safeNotesId } from './session-notes-filesystem.js';
+import { createHash } from 'node:crypto';
+import { outsideNotesTransaction, safeNotesId } from './session-notes-filesystem.js';
 import {
   checklistItems,
   filterSessionNotes,
@@ -51,7 +52,14 @@ export class SessionNotesService {
   context(owner: string) {
     return this.bindings.context(owner);
   }
-  async open(owner: string, source: SessionNotesSource, cases: CaseInfo[]): Promise<SessionNote> {
+  open(owner: string, source: SessionNotesSource, cases: CaseInfo[]): Promise<SessionNote> {
+    return this.store.transaction(owner, () => this.openWithinTransaction(owner, source, cases));
+  }
+  private async openWithinTransaction(
+    owner: string,
+    source: SessionNotesSource,
+    cases: CaseInfo[]
+  ): Promise<SessionNote> {
     const aliases = [source.id, ...(source.sessionAliases ?? []), source.claudeSessionId, source.resumeId].filter(
       (value): value is string => typeof value === 'string' && !!value
     );
@@ -86,7 +94,10 @@ export class SessionNotesService {
     await this.observe(owner);
     return note;
   }
-  async read(owner: string, id: string): Promise<SessionNote> {
+  read(owner: string, id: string): Promise<SessionNote> {
+    return this.store.transaction(owner, () => this.readWithinTransaction(owner, id));
+  }
+  private async readWithinTransaction(owner: string, id: string): Promise<SessionNote> {
     safeNotesId(id);
     const entries = await this.store.list(owner);
     const matches = entries.filter((entry) => entry.id === id);
@@ -98,9 +109,12 @@ export class SessionNotesService {
     }
     const binding = (await this.bindings.list(owner)).find((candidate) => candidate.id === id);
     if (!binding) throw new SessionNotesNotFoundError('Note not found');
-    return { metadata: binding, markdown: '', revision: '' };
+    return this.draft(binding);
   }
-  async save(
+  save(owner: string, id: string, revision: string, markdown: string, title?: string): Promise<SessionNote | null> {
+    return this.store.transaction(owner, () => this.saveWithinTransaction(owner, id, revision, markdown, title));
+  }
+  private async saveWithinTransaction(
     owner: string,
     id: string,
     revision: string,
@@ -108,14 +122,19 @@ export class SessionNotesService {
     title?: string
   ): Promise<SessionNote | null> {
     const note = await this.atRevision(owner, id, revision);
-    if (!revision && !markdown.trim()) {
+    if (note.revision.startsWith('draft-') && !markdown.trim()) {
       if (title !== undefined) {
         note.metadata = await this.bindings.update(owner, id, { title });
         this.options.onChanged?.(owner);
       }
-      return note;
+      return this.draft(note.metadata);
     }
-    const result = await this.store.save(owner, note, markdown, { title });
+    const result = await this.store.save(
+      owner,
+      note.revision.startsWith('draft-') ? { ...note, revision: '' } : note,
+      markdown,
+      { title }
+    );
     if (result) await this.bindings.observe(owner, result, [], true);
     await this.observe(owner);
     return result;
@@ -135,13 +154,21 @@ export class SessionNotesService {
     }
     return filterSessionNotes(entries, filter).sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0));
   }
-  async reassign(owner: string, id: string, revision: string, projectId: string): Promise<SessionNote> {
+  reassign(owner: string, id: string, revision: string, projectId: string): Promise<SessionNote> {
+    return this.store.transaction(owner, () => this.reassignWithinTransaction(owner, id, revision, projectId));
+  }
+  private async reassignWithinTransaction(
+    owner: string,
+    id: string,
+    revision: string,
+    projectId: string
+  ): Promise<SessionNote> {
     const note = await this.atRevision(owner, id, revision);
     let result: SessionNote;
-    if (!note.revision) {
+    if (note.revision.startsWith('draft-')) {
       if (!(await this.projects.list(owner)).some((project) => project.id === projectId))
         throw new SessionNotesNotFoundError('Notes project not found');
-      result = { ...note, metadata: await this.bindings.update(owner, id, { projectId }) };
+      result = this.draft(await this.bindings.update(owner, id, { projectId }));
     } else {
       if (!(await this.projects.list(owner)).some((project) => project.id === projectId))
         throw new SessionNotesNotFoundError('Notes project not found');
@@ -152,14 +179,28 @@ export class SessionNotesService {
     this.options.onChanged?.(owner);
     return result;
   }
-  async renameProject(owner: string, id: string, name: string) {
+  renameProject(owner: string, id: string, name: string) {
+    return this.store.transaction(owner, () => this.renameProjectWithinTransaction(owner, id, name));
+  }
+  private async renameProjectWithinTransaction(owner: string, id: string, name: string) {
     if (!(await this.projects.list(owner)).some((project) => project.id === id))
       throw new SessionNotesNotFoundError('Notes project not found');
     const result = await this.projects.rename(owner, id, name);
     this.options.onChanged?.(owner);
     return result;
   }
-  async resolveRecovery(
+  resolveRecovery(
+    owner: string,
+    projectId: string,
+    id: string,
+    revision: string,
+    choice: 'external' | 'staged'
+  ): Promise<void> {
+    return this.store.transaction(owner, () =>
+      this.resolveRecoveryWithinTransaction(owner, projectId, id, revision, choice)
+    );
+  }
+  private async resolveRecoveryWithinTransaction(
     owner: string,
     projectId: string,
     id: string,
@@ -170,7 +211,15 @@ export class SessionNotesService {
     await this.observe(owner);
     this.options.onChanged?.(owner);
   }
-  async repair(owner: string, id: string, revision: string, markdown: string): Promise<SessionNote> {
+  repair(owner: string, id: string, revision: string, markdown: string): Promise<SessionNote> {
+    return this.store.transaction(owner, () => this.repairWithinTransaction(owner, id, revision, markdown));
+  }
+  private async repairWithinTransaction(
+    owner: string,
+    id: string,
+    revision: string,
+    markdown: string
+  ): Promise<SessionNote> {
     const entries = (await this.store.list(owner)).filter((candidate) => candidate.id === id);
     if (entries.length > 1) throw new Error('Ambiguous notebook identity');
     const entry = entries[0];
@@ -188,9 +237,25 @@ export class SessionNotesService {
     await this.observe(owner);
     return result;
   }
-  async complete(owner: string, id: string, revision: string, line: number, checked: boolean): Promise<SessionNote> {
+  complete(owner: string, id: string, revision: string, line: number, checked: boolean): Promise<SessionNote> {
+    return this.store.transaction(owner, () => this.completeWithinTransaction(owner, id, revision, line, checked));
+  }
+  private async completeWithinTransaction(
+    owner: string,
+    id: string,
+    revision: string,
+    line: number,
+    checked: boolean
+  ): Promise<SessionNote> {
     const note = await this.atRevision(owner, id, revision);
     return (await this.save(owner, id, revision, setChecklistItem(note.markdown, line, checked)))!;
+  }
+  private draft(metadata: SessionNote['metadata']): SessionNote {
+    return {
+      metadata,
+      markdown: '',
+      revision: 'draft-' + createHash('sha256').update(JSON.stringify(metadata)).digest('hex'),
+    };
   }
   private async atRevision(owner: string, id: string, revision: string): Promise<SessionNote> {
     const note = await this.read(owner, id);
@@ -206,7 +271,9 @@ export class SessionNotesService {
     let observer = this.observers.get(owner);
     if (!observer) {
       const timer = setInterval(() => {
-        void this.rescan(owner);
+        outsideNotesTransaction(() => {
+          void this.rescan(owner);
+        });
       }, this.options.pollInterval ?? 2000);
       timer.unref();
       observer = { signature, timer, watchers: new Map(), scanning: false };
@@ -224,7 +291,9 @@ export class SessionNotesService {
       try {
         const watcher = watch(path, { persistent: false }, (_event, filename) => {
           if (path === join(this.root, owner) && filename?.toString() !== 'projects') return;
-          void this.rescan(owner);
+          outsideNotesTransaction(() => {
+            void this.rescan(owner);
+          });
         });
         watcher.on('error', () => {
           watcher.close();

@@ -13,7 +13,7 @@ import { ownerFor } from '../route-helpers.js';
 import type { SessionNotesPort } from '../ports/session-notes-port.js';
 
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/);
-const revision = z.string().regex(/^(?:[a-f0-9]{64})?$/);
+const revision = z.string().regex(/^(?:[a-f0-9]{64}|draft-[a-f0-9]{64})?$/);
 const content = { revision, markdown: z.string().max(1024 * 1024), title: z.string().max(256).optional() };
 const saveBody = z.object(content).strict();
 const checkedBody = z.object({ revision, line: z.number().int().positive(), checked: z.boolean() }).strict();

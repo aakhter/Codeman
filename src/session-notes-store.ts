@@ -61,6 +61,11 @@ export class SessionNotesStore extends SessionNotesFilesystem {
     super(root);
   }
 
+  /** One shared owner mutation boundary for store, bindings and project operations. */
+  transaction<T>(owner: string, operation: () => Promise<T>): Promise<T> {
+    return this.withOwnerLock(owner, operation);
+  }
+
   create(owner: string, input: SessionNoteCreate): SessionNote {
     safeId(owner);
     safeId(input.projectId);

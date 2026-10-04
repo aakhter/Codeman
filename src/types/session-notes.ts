@@ -18,7 +18,7 @@ export interface SessionNoteMetadata {
 export interface SessionNote {
   metadata: SessionNoteMetadata;
   markdown: string;
-  /** SHA-256 of all persisted bytes; empty for a transient draft. */
+  /** Canonical byte SHA-256, draft-<binding digest> for durable drafts, or empty for a store-only transient. */
   revision: string;
 }
 
