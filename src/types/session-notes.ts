@@ -33,3 +33,11 @@ export interface SessionNoteEntry {
 export type SessionNoteCreate = Omit<SessionNoteMetadata, 'version' | 'ownerKey' | 'createdAt' | 'updatedAt' | 'id'> & {
   id?: string;
 };
+
+/** Preserved recovery artifacts needing manual repair; notebook operations remain available. */
+export interface SessionNotesRecoveryIssue {
+  path: string;
+  raw: string;
+  revision: string;
+  error: string;
+}

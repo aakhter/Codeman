@@ -4,7 +4,12 @@ import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, unlink } fr
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { dataPath } from './config/instance.js';
 import { noteRevision, parseSessionNote, serializeSessionNote } from './session-notes-markdown.js';
-import type { SessionNote, SessionNoteCreate, SessionNoteEntry } from './types/session-notes.js';
+import type {
+  SessionNote,
+  SessionNoteCreate,
+  SessionNoteEntry,
+  SessionNotesRecoveryIssue,
+} from './types/session-notes.js';
 
 export class SessionNotesNotFoundError extends Error {}
 export class SessionNotesMalformedError extends Error {
@@ -37,9 +42,9 @@ interface RecoveryConflict {
   journal: Journal;
   message: string;
 }
-type RecoveryConflicts = Map<string, RecoveryConflict>;
+type RecoveryConflicts = Map<string, RecoveryConflict> & { issues: SessionNotesRecoveryIssue[] };
 interface StoreOptions {
-  checkpoint?: (stage: 'prepared' | 'displaced' | 'installed') => void | Promise<void>;
+  checkpoint?: (stage: 'journal-ready' | 'prepared' | 'displaced' | 'installed') => void | Promise<void>;
 }
 function safeId(id: string): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id)) throw new Error('Unsafe note path identifier');
@@ -173,6 +178,11 @@ export class SessionNotesStore {
     });
   }
 
+  /** Report preserved malformed/unpublished journals separately from canonical notebooks. */
+  async listRecoveryIssues(owner: string): Promise<SessionNotesRecoveryIssue[]> {
+    return this.locked(owner, async (conflicts) => conflicts.issues);
+  }
+
   /** Explicitly choose a retained candidate, with the current full-byte revision checked first. */
   async resolveRecovery(
     owner: string,
@@ -185,6 +195,9 @@ export class SessionNotesStore {
       const path = this.notePath(owner, projectId, id);
       const conflict = conflicts.get(path);
       if (!conflict) throw new Error('No recovery conflict for this note');
+      if (choice === 'external' && !(await this.current(owner, path))) {
+        throw new SessionNotesNotFoundError('External recovery candidate not found');
+      }
       await this.checkRevision(owner, path, revision);
       const { journal } = conflict;
       const kept = choice === 'staged' ? journal.target : path;
@@ -319,6 +332,19 @@ export class SessionNotesStore {
     }
   }
 
+  /** A published .json is always complete; a failed write remains an unpublished repair artifact. */
+  private async writeJournal(path: string, bytes: Buffer): Promise<void> {
+    const temporary = path.replace(/\.json$/, '.journal-tmp');
+    await this.writePrivate(temporary, bytes);
+    await this.syncDirectory(dirname(path));
+    await this.options.checkpoint?.('journal-ready');
+    await this.guard(path, true);
+    await link(temporary, path);
+    await this.syncDirectory(dirname(path));
+    await unlink(temporary);
+    await this.syncDirectory(dirname(path));
+  }
+
   private async replace(
     owner: string,
     source: string,
@@ -340,7 +366,7 @@ export class SessionNotesStore {
     };
     const journalPath = join(history, `${transaction}.json`);
     await this.writePrivate(journal.staged, bytes);
-    await this.writePrivate(journalPath, Buffer.from(JSON.stringify(journal)));
+    await this.writeJournal(journalPath, Buffer.from(JSON.stringify(journal)));
     await this.syncDirectory(history);
     await this.options.checkpoint?.('prepared');
     if (originalRevision) {
@@ -447,7 +473,9 @@ export class SessionNotesStore {
     // Staged bytes are retained alongside history so a later external overwrite remains recoverable.
   }
   private async recover(owner: string): Promise<RecoveryConflicts> {
-    const conflicts: RecoveryConflicts = new Map();
+    const conflicts: RecoveryConflicts = Object.assign(new Map<string, RecoveryConflict>(), {
+      issues: [] as SessionNotesRecoveryIssue[],
+    });
     const history = join(this.ownerPath(owner), '.history');
     await this.guard(history, true);
     let files: string[];
@@ -459,15 +487,44 @@ export class SessionNotesStore {
     }
     for (const file of files.filter((file) => /^[a-f0-9-]+\.json$/.test(file)).sort()) {
       const path = join(history, file);
-      const journal = JSON.parse((await this.bytes(path)).toString('utf8')) as Journal;
+      let journal: Journal | undefined;
       try {
+        journal = JSON.parse((await this.bytes(path)).toString('utf8')) as Journal;
         await this.finish(owner, path, journal);
       } catch (error) {
-        if (!(error instanceof SessionNotesConflictError)) throw error;
-        const conflict = { path, journal, message: error.message };
-        conflicts.set(journal.source, conflict);
-        conflicts.set(journal.target, conflict);
+        if (error instanceof SessionNotesConflictError && journal) {
+          const conflict = { path, journal, message: error.message };
+          conflicts.set(journal.source, conflict);
+          conflicts.set(journal.target, conflict);
+        } else {
+          // Preserve the actual artifact and every staged/displaced file; unknown intent cannot be replayed safely.
+          const quarantined = `${path}.${randomUUID()}.quarantined`;
+          await this.guard(quarantined, true);
+          await rename(path, quarantined);
+          await this.syncDirectory(history);
+          const bytes = await this.bytes(quarantined);
+          conflicts.issues.push({
+            path: quarantined,
+            raw: bytes.toString('utf8'),
+            revision: noteRevision(bytes),
+            error: (error as Error).message,
+          });
+        }
       }
+    }
+    for (const file of files.filter((file) =>
+      /^[a-f0-9-]+(?:\.journal-tmp|\.json\.[a-f0-9-]+\.quarantined)$/.test(file)
+    )) {
+      const path = join(history, file);
+      const bytes = await this.bytes(path);
+      conflicts.issues.push({
+        path,
+        raw: bytes.toString('utf8'),
+        revision: noteRevision(bytes),
+        error: file.endsWith('.journal-tmp')
+          ? 'Unpublished or retained journal artifact requires inspection'
+          : 'Quarantined recovery metadata requires repair',
+      });
     }
     return conflicts;
   }

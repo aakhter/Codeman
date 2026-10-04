@@ -232,6 +232,67 @@ describe('SessionNotesStore real filesystem', () => {
     await fresh.resolveRecovery('alice', 'project1', 'note1', revision, 'staged');
     expect((await fresh.read('alice', 'project1', 'note1')).markdown).toBe('ours');
   });
+  it('preserves and reports malformed recovery journals without blocking unrelated notebooks', async () => {
+    const store = new SessionNotesStore(root);
+    await persisted(store);
+    const other = (await store.save('alice', store.create('alice', { ...input, id: 'note2' }), 'other'))!;
+    const history = join(root, 'alice/.history');
+    const partial = join(history, '00000000-0000-0000-0000-000000000000.json');
+    await writeFile(partial, '{"source":');
+    const fresh = new SessionNotesStore(root);
+    expect(await fresh.read('alice', 'project1', 'note2')).toEqual(other);
+    expect(await fresh.list('alice')).toHaveLength(2);
+    const issues = await fresh.listRecoveryIssues('alice');
+    expect(issues).toHaveLength(1);
+    expect(issues[0].raw).toBe('{"source":');
+    expect(await readFile(issues[0].path, 'utf8')).toBe('{"source":');
+    expect((await fresh.save('alice', other, 'updated'))?.markdown).toBe('updated');
+  });
+  it('publishes journals atomically and preserves unpublished artifacts before any displacement', async () => {
+    const note = await persisted();
+    const original = await readFile(path());
+    const broken = new SessionNotesStore(root, {
+      checkpoint: (stage) => {
+        if (stage === 'journal-ready') throw new Error('crash');
+      },
+    });
+    await expect(broken.save('alice', note, 'ours')).rejects.toThrow('crash');
+    expect(await readFile(path())).toEqual(original);
+    const fresh = new SessionNotesStore(root);
+    expect(await fresh.read('alice', 'project1', 'note1')).toEqual(note);
+    const issues = await fresh.listRecoveryIssues('alice');
+    expect(issues).toHaveLength(1);
+    expect(issues[0].path).toMatch(/journal-tmp$/);
+    expect((await readdir(join(root, 'alice/.history'))).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+  });
+  it('rejects choosing a missing external move candidate before changing canonical notebooks', async () => {
+    const note = await persisted();
+    const target = join(root, 'alice/projects/project2/note1.md');
+    const broken = new SessionNotesStore(root, {
+      checkpoint: async (stage) => {
+        if (stage === 'displaced') {
+          await writeFile(target, 'external candidate');
+          throw new Error('crash');
+        }
+      },
+    });
+    await expect(broken.reassign('alice', note, 'project2')).rejects.toThrow('crash');
+    const fresh = new SessionNotesStore(root);
+    await expect(fresh.resolveRecovery('alice', 'project1', 'note1', '', 'external')).rejects.toBeInstanceOf(
+      SessionNotesNotFoundError
+    );
+    expect(await readFile(target, 'utf8')).toBe('external candidate');
+    expect((await fresh.list('alice')).find((entry) => entry.projectId === 'project2')?.conflict).toBeDefined();
+    let revision = '';
+    try {
+      await fresh.read('alice', 'project2', 'note1');
+    } catch (error) {
+      revision = (error as SessionNotesConflictError).current!.revision;
+    }
+    await fresh.resolveRecovery('alice', 'project2', 'note1', revision, 'external');
+    expect(await fresh.list('alice')).toHaveLength(1);
+    expect((await fresh.list('alice'))[0].repairable).toBe(true);
+  });
   it('retains both versions and surfaces recovery conflict if an external target appears', async () => {
     const note = await persisted();
     const broken = new SessionNotesStore(root, {
