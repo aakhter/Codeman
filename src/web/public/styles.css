@@ -9549,6 +9549,41 @@ kbd {
   flex: 0 0 auto;
 }
 
+.session-manager-filters {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 0.4rem;
+}
+
+.session-manager-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.session-manager-filter-label {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-right: 0.2rem;
+}
+
+.session-manager-filter-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  padding: 0.22rem 0.55rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.session-manager-filter-chip[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .session-manager-list {
   display: flex;
   flex: 0 0 auto;

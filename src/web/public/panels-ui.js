@@ -1162,6 +1162,10 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _renderSessionRecoveryList(list, records) {
+    const signature = JSON.stringify(records);
+    if (signature === this._sessionManagerRecoverySignature) return;
+    this._sessionManagerRecoverySignature = signature;
+    const top = list.scrollTop || 0;
     list.replaceChildren();
     const heading = document.getElementById('sessionRecoveryTitle');
     if (heading) heading.textContent = `Recovery Queue (${records.length})`;
@@ -1247,6 +1251,7 @@ Object.assign(CodemanApp.prototype, {
       row.appendChild(actions);
       list.appendChild(row);
     }
+    list.scrollTop = top;
   },
 
   _confirmSessionRecovery(record, verb) {
@@ -1317,97 +1322,225 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  _sessionManagerProject(record) {
+    const path = String(record.workingDir || '').replace(/\\/g, '/').replace(/\/$/, '');
+    const matches = (this.cases || []).filter(c => c.path &&
+      (path === c.path.replace(/\\/g, '/').replace(/\/$/, '') || path.startsWith(c.path.replace(/\\/g, '/').replace(/\/$/, '') + '/')));
+    matches.sort((a, b) => b.path.length - a.path.length);
+    const name = matches[0]?.name || path.split('/').filter(Boolean).at(-1) || 'Unknown project';
+    return /^\.?codeman(?:[-_].*)?$/i.test(name) ? 'codeman' : name.replace(/^\./, '');
+  },
+
+  _sessionManagerTitleWords(record) {
+    const ignored = new Set('the and for with this that from into your have has was are not saved name session sessions claude codex'.split(' '));
+    const title = [record.name, record.conversationName].filter(Boolean).join(' ')
+      .replace(/\bw\d+-[^:\s]+:?\s*/gi, '')
+      .replace(/(?:https?:\/\/|\/|[A-Za-z]:\\)\S+/g, ' ');
+    return [...new Set((title.toLowerCase().match(/\b[a-z][a-z-]{2,23}\b/g) || [])
+      .filter(word => !ignored.has(word)))];
+  },
+
+  _sessionManagerMatchesFilters(record) {
+    const project = this._sessionManagerProjectFilter;
+    const word = this._sessionManagerWordFilter;
+    return (!project || this._sessionManagerProject(record) === project) &&
+      (!word || this._sessionManagerTitleWords(record).includes(word));
+  },
+
+  _renderSessionManagerFilters() {
+    const container = document.getElementById('sessionManagerFilters');
+    if (!container) return;
+    const records = [...(this._sessionManagerRecoveryRecords || []), ...(this._sessionManagerHistoryRecords || [])];
+    const projects = new Map();
+    const words = new Map();
+    for (const record of records) {
+      const project = this._sessionManagerProject(record);
+      projects.set(project, (projects.get(project) || 0) + 1);
+      for (const word of this._sessionManagerTitleWords(record)) words.set(word, (words.get(word) || 0) + 1);
+    }
+    const projectTags = [...projects].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const wordTags = [...words].filter(([, count]) => count >= 2)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
+    const signature = JSON.stringify([projectTags, wordTags, this._sessionManagerProjectFilter, this._sessionManagerWordFilter]);
+    if (signature === this._sessionManagerFacetSignature) return;
+    this._sessionManagerFacetSignature = signature;
+    container.replaceChildren();
+    const scope = document.createElement('span');
+    scope.className = 'session-manager-filter-label';
+    scope.textContent = 'Filter loaded recovery and saved sessions';
+    container.appendChild(scope);
+    const makeGroup = (label, tags, field) => {
+      const group = document.createElement('div');
+      group.className = 'session-manager-filter-group';
+      const caption = document.createElement('span');
+      caption.className = 'session-manager-filter-label';
+      caption.textContent = label;
+      group.appendChild(caption);
+      for (const [value, count] of [['', records.length], ...tags]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'session-manager-filter-chip';
+        button.textContent = value ? `${value} (${count})` : 'All';
+        button.setAttribute('aria-pressed', String((this[field] || '') === value));
+        button.title = value ? `Filter loaded sessions by ${label.toLowerCase()}: ${value}` : `Show all ${label.toLowerCase()}`;
+        button.addEventListener('click', () => {
+          this[field] = this[field] === value ? '' : value;
+          this._renderSessionManagerFilteredLists();
+          this._renderSessionManagerFilters();
+          const body = document.querySelector('#sessionManagerModal .modal-body');
+          if (body) body.scrollTop = 0;
+        });
+        group.appendChild(button);
+      }
+      container.appendChild(group);
+    };
+    makeGroup('Projects', projectTags, '_sessionManagerProjectFilter');
+    if (wordTags.length || this._sessionManagerWordFilter) {
+      if (this._sessionManagerWordFilter && !wordTags.some(([word]) => word === this._sessionManagerWordFilter))
+        wordTags.push([this._sessionManagerWordFilter, words.get(this._sessionManagerWordFilter) || 0]);
+      makeGroup('Title keywords', wordTags, '_sessionManagerWordFilter');
+    }
+  },
+
+  _renderSessionManagerFilteredLists() {
+    const recoveryList = document.getElementById('sessionRecoveryList');
+    const historyList = document.getElementById('sessionManagerList');
+    const body = typeof document.querySelector === 'function' ? document.querySelector('#sessionManagerModal .modal-body') : null;
+    const top = body?.scrollTop || 0;
+    if (recoveryList && this._sessionManagerRecoveryRecords) {
+      const all = this._sessionManagerRecoveryRecords;
+      const filtered = all.filter(record => this._sessionManagerMatchesFilters(record));
+      this._renderSessionRecoveryList(recoveryList, filtered);
+      const heading = document.getElementById('sessionRecoveryTitle');
+      if (heading) heading.textContent = `Recovery Queue (${filtered.length}${filtered.length === all.length ? '' : ` of ${all.length}`})`;
+    }
+    if (historyList && this._sessionManagerHistoryRecords) {
+      this._renderSessionManagerHistory(historyList,
+        this._sessionManagerHistoryRecords.filter(record => this._sessionManagerMatchesFilters(record)),
+        this._sessionManagerHistoryTotal);
+    }
+    if (body) body.scrollTop = top;
+  },
+
+  _renderSessionManagerHistory(list, sessions, total) {
+    const signature = JSON.stringify([sessions, total, sessions.map(s => this.sessions?.has?.(s.sessionId))]);
+    if (signature === this._sessionManagerHistorySignature) return;
+    this._sessionManagerHistorySignature = signature;
+    const heading = document.getElementById('sessionHistoryTitle');
+    if (heading) heading.textContent = `Saved sessions (${sessions.length} of ${total})`;
+    list.replaceChildren();
+    if (!sessions.length) {
+      this._setSessionManagerMessage(list, 'No saved sessions match these filters');
+      return;
+    }
+    for (const s of sessions) {
+      const record = {
+        sessionId: s.sessionId,
+        workingDir: s.workingDir || '',
+        sizeBytes: s.sizeBytes ?? 0,
+        lastModified: new Date(s.lastActivityAt ?? s.createdAt ?? Date.now()).toISOString(),
+        firstPrompt: s.firstPrompt || s.name || '',
+        // COD-124: status/mode drive the Parked badge, idle-duration flag,
+        // and the Park/Resume menu items in _buildHistoryItem/_openSessionRowMenu.
+        status: s.status,
+        mode: s.mode,
+        name: s.name,
+        claudeSessionId: s.claudeSessionId,
+        pinned: s.pinned,
+        pinnedAt: s.pinnedAt,
+        // Must be carried explicitly: this record is a re-projection, so any
+        // field omitted here silently vanishes from the Cmd+K list (#266).
+        gitBranch: s.gitBranch,
+        worktreeName: s.worktreeName,
+        worktreeRepo: s.worktreeRepo,
+        resumeId: s.resumeId,
+      };
+      const isLive = !!this.sessions?.has?.(s.sessionId);
+      if (isLive) {
+        // Enrich from the richer live-session cache — these fields aren't
+        // part of UnifiedSessionItem (COD-124: resume-fidelity + obligation markers).
+        const live = this.sessions.get(s.sessionId);
+        record.nativeResumeId = live?.nativeResumeId;
+        record.autoResumeAt = live?.autoResumeAt;
+        record.autoResumeEnabled = live?.autoResumeEnabled;
+        record.ralphEnabled = live?.ralphEnabled;
+      }
+      const item = this._buildHistoryItem(record, this.cases, {
+        showViewAll: false,
+        onActivate: () => {
+          this.closeSessionManager();
+          if (isLive) {
+            void this.selectSession(s.sessionId);
+          } else if (record.workingDir) {
+            // History rows are keyed by the Claude conversation UUID; resumed
+            // sessions carry theirs separately as claudeSessionId.
+            void this.resumeHistorySession(
+              s.claudeSessionId || s.sessionId,
+              record.workingDir,
+              undefined,
+              s.mode,
+              s.resumeId
+            );
+          }
+        },
+      });
+      list.appendChild(item);
+    }
+  },
+
   async _loadSessionManagerList(q = '') {
     this._sessionManagerQuery = q;
+    if (this._sessionManagerLoadInFlight) {
+      this._sessionManagerReloadPending = true;
+      return;
+    }
     const list = document.getElementById('sessionManagerList');
     const recoveryList = document.getElementById('sessionRecoveryList');
     if (!list) return;
+    this._sessionManagerLoadInFlight = true;
+    const current = () => this._sessionManagerQuery === q;
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
-      this._setSessionRecoveryMessage(recoveryList, 'Loading recovery queue…');
+      if (!this._sessionManagerRecoveryRecords) this._setSessionRecoveryMessage(recoveryList, 'Loading recovery queue…');
       const sessionRequest = fetch(url);
       const recoveryRequest = fetch('/api/session-recoveries').then(async (recoveryRes) => {
-        if (!recoveryList) return;
         const recoveryData = await recoveryRes.json().catch(() => null);
+        if (!current() || !recoveryList) return;
         if (recoveryRes.ok && recoveryData?.success !== false) {
           const recoveries = recoveryData?.data?.recoveries ?? recoveryData?.recoveries;
-          this._renderSessionRecoveryList(recoveryList, Array.isArray(recoveries) ? recoveries : []);
-        } else {
+          this._sessionManagerRecoveryRecords = Array.isArray(recoveries) ? recoveries : [];
+          this._renderSessionManagerFilteredLists();
+          this._renderSessionManagerFilters();
+        } else if (!this._sessionManagerRecoveryRecords) {
           this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
         }
-      }).catch(() => this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable'));
+      }).catch(() => {
+        if (current() && !this._sessionManagerRecoveryRecords) this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable');
+      });
       const [sessionResult] = await Promise.allSettled([sessionRequest, recoveryRequest]);
+      if (!current()) return;
       if (sessionResult.status === 'rejected') throw sessionResult.reason;
       const res = sessionResult.value;
       const data = await res.json().catch(() => null);
+      if (!current()) return;
       if (!res.ok || !data || data.success === false || !data.data) {
-        this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
+        if (!this._sessionManagerHistoryRecords) this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
         return;
       }
-      const sessions = data.data.sessions || [];
-      const historyHeading = document.getElementById('sessionHistoryTitle');
-      if (historyHeading) historyHeading.textContent = `Saved sessions (${sessions.length} of ${data.data.total ?? sessions.length})`;
-      list.replaceChildren();
-      if (sessions.length === 0) {
-        this._setSessionManagerMessage(list, q ? 'No sessions match your search' : 'No sessions found');
-        return;
-      }
-      for (const s of sessions) {
-        const record = {
-          sessionId: s.sessionId,
-          workingDir: s.workingDir || '',
-          sizeBytes: s.sizeBytes ?? 0,
-          lastModified: new Date(s.lastActivityAt ?? s.createdAt ?? Date.now()).toISOString(),
-          firstPrompt: s.firstPrompt || s.name || '',
-          // COD-124: status/mode drive the Parked badge, idle-duration flag,
-          // and the Park/Resume menu items in _buildHistoryItem/_openSessionRowMenu.
-          status: s.status,
-          mode: s.mode,
-          name: s.name,
-          claudeSessionId: s.claudeSessionId,
-          pinned: s.pinned,
-          pinnedAt: s.pinnedAt,
-          // Must be carried explicitly: this record is a re-projection, so any
-          // field omitted here silently vanishes from the Cmd+K list (#266).
-          gitBranch: s.gitBranch,
-          worktreeName: s.worktreeName,
-          worktreeRepo: s.worktreeRepo,
-          resumeId: s.resumeId,
-        };
-        const isLive = !!this.sessions?.has?.(s.sessionId);
-        if (isLive) {
-          // Enrich from the richer live-session cache — these fields aren't
-          // part of UnifiedSessionItem (COD-124: resume-fidelity + obligation markers).
-          const live = this.sessions.get(s.sessionId);
-          record.nativeResumeId = live?.nativeResumeId;
-          record.autoResumeAt = live?.autoResumeAt;
-          record.autoResumeEnabled = live?.autoResumeEnabled;
-          record.ralphEnabled = live?.ralphEnabled;
-        }
-        const item = this._buildHistoryItem(record, this.cases, {
-          showViewAll: false,
-          onActivate: () => {
-            this.closeSessionManager();
-            if (isLive) {
-              void this.selectSession(s.sessionId);
-            } else if (record.workingDir) {
-              // History rows are keyed by the Claude conversation UUID; resumed
-              // sessions carry theirs separately as claudeSessionId.
-              void this.resumeHistorySession(
-                s.claudeSessionId || s.sessionId,
-                record.workingDir,
-                undefined,
-                s.mode,
-                s.resumeId
-              );
-            }
-          },
-        });
-        list.appendChild(item);
-      }
+      this._sessionManagerHistoryRecords = data.data.sessions || [];
+      this._sessionManagerHistoryTotal = data.data.total ?? this._sessionManagerHistoryRecords.length;
+      this._renderSessionManagerFilteredLists();
+      this._renderSessionManagerFilters();
     } catch (err) {
       console.error('[_loadSessionManagerList]', err);
-      this._setSessionManagerMessage(list, 'Failed to load sessions');
+      if (current() && !this._sessionManagerHistoryRecords) this._setSessionManagerMessage(list, 'Failed to load sessions');
+    } finally {
+      this._sessionManagerLoadInFlight = false;
+      this._sessionManagerLastLoadedAt = Date.now();
+      if (this._sessionManagerReloadPending) {
+        this._sessionManagerReloadPending = false;
+        void this._loadSessionManagerList(this._sessionManagerQuery || '');
+      }
     }
   },
 
@@ -1661,7 +1794,10 @@ Object.assign(CodemanApp.prototype, {
     if (modal && modal.classList.contains('active')) {
       this._debouncedCall(
         'sessionManagerRefresh',
-        () => this._loadSessionManagerList(this._sessionManagerQuery || ''),
+        () => {
+          if (!this._sessionManagerLoadInFlight && Date.now() - (this._sessionManagerLastLoadedAt || 0) >= 10000)
+            void this._loadSessionManagerList(this._sessionManagerQuery || '');
+        },
         400
       );
     }
