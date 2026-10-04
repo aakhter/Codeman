@@ -1,6 +1,6 @@
 # Session Notes
 
-> Feature branch draft for COD-477. The editor and sharing actions are under development; this page does not describe a deployed release yet.
+> Feature branch draft for COD-477. The editor is implemented and reviewed; sharing actions and final integration are under development; this page does not describe a deployed release yet.
 
 Session notes are a private Markdown notebook for your notes, ideas, and next steps. A notebook belongs to its originating session and an assigned project. Session, project, and global views open the same notebook.
 

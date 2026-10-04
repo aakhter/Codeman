@@ -78,12 +78,12 @@ interface SessionNote {
 
 ## Task 4 — COD-481: session and global UI
 
-- [ ] Write editor/controller regressions for debounce, truthful save status, first-save failure/retry, scoped draft restore, revision conflicts, external reload when clean, and retaining both versions when dirty.
-- [ ] Confirm expected missing-feature failures before adding the browser modules.
-- [ ] Add a session Notes action and header Notes action. Desktop editor opens beside the terminal; mobile editor fills the available screen. Global browser uses one project-filtered notebook collection with source metadata and unfinished items.
-- [ ] Implement optional starter headings, edit/sanitized preview, 750 ms autosave, title edits, project reassignment, download/export, conflict comparison, and explicit user resolution. Opening history notes never resumes the agent.
-- [ ] Verify in Playwright with desktop and mobile viewports, keyboard navigation, reload, failed saves, removed sessions, and external changes. Use a separate instance/socket if a server is started; never attach a second server to production sessions.
-- [ ] Run targeted tests and required checks, obtain specification and quality reviews, and commit with COD-481.
+- [x] Write editor/controller regressions for debounce, truthful save status, first-save failure/retry, scoped draft restore, revision conflicts, external reload when clean, and retaining both versions when dirty.
+- [x] Confirm expected missing-feature failures before adding the browser modules.
+- [x] Add a session Notes action and header Notes action. Desktop editor opens beside the terminal; mobile editor fills the available screen. Global browser uses one project-filtered notebook collection with source metadata and unfinished items.
+- [x] Implement optional starter headings, edit/sanitized preview, 750 ms autosave, title edits, project reassignment, download/export, conflict comparison, and explicit user resolution. Opening history notes never resumes the agent.
+- [x] Verify in Playwright with desktop and mobile viewports, keyboard navigation, reload, failed saves, removed sessions, and external changes. Use a separate instance/socket if a server is started; never attach a second server to production sessions.
+- [x] Run targeted tests and required checks, obtain specification and quality reviews, and commit with COD-481.
 
 ## Task 5 — COD-482: explicit sharing and final integration
 
@@ -109,3 +109,7 @@ Implemented at `98d4b130`, independently approved for specification and code qua
 ## COD-480 verification receipt
 
 Implemented at `06770ec4`, corrected draft concurrency at `eaf923bc` and external provenance adoption at `3e11756e`. Independent specification review passed 147 tests across 10 focused files and direct conflict/provenance reproductions. Independent quality re-review approved the final backend; its focused 41 tests also passed. Root independently reran typecheck, lint, format check, lockfile and diff checks successfully (lint retains one existing warning). Earlier isolated existing remote SSE regression passed 4 tests with installed tmux detection enabled. API contract: `docs/session-notes-api.md`. Backend changes preserve Markdown canonical content, draft versions, retained origin, external edits and exact-owner notifications. COD-481 editor/browser is now starting; sharing and final browser/integration acceptance remain pending. Nothing is deployed or landed.
+
+## COD-481 verification receipt
+
+Implemented at `be7bfbea`, corrected repair navigation at `ff04c6ba`, and shared-draft/asynchronous callback races at `4dd4fa6b`. Independent specification and quality re-reviews approved the final editor. Final UI regressions pass 28 tests; independent quality checks pass 32 tests including SSE parity. Implementer focused integration checks pass 59 tests. Root verified all six isolated desktop/mobile browser scenarios using actual shipping markup/mixins and temporary Fastify notes storage, and reviewed screenshots in `/tmp/cod477-ui-review`. Root typecheck, lint, formatting, lockfile and diff checks pass; lint retains one existing warning. Production build packages hashed notes assets and matches final source. Existing `sse-events.test.ts` starts an unisolated WebServer and was not escalated after sandbox tmux detection failed; focused notes owner-routing and registry checks passed. COD-482 explicit sharing and final integration remain pending. Nothing is deployed or landed. Jira detail updates are pending user approval after automatic approval review rejected posting implementation and verification details.
