@@ -1163,8 +1163,14 @@ Object.assign(CodemanApp.prototype, {
 
   _renderSessionRecoveryList(list, records) {
     list.replaceChildren();
+    const heading = document.getElementById('sessionRecoveryTitle');
+    if (heading) heading.textContent = `Recovery Queue (${records.length})`;
     if (!records.length) return;
-    for (const record of records) {
+    const newestFirst = [...records].sort((a, b) =>
+      (b.lastActivityAt ?? b.createdAt ?? 0) - (a.lastActivityAt ?? a.createdAt ?? 0) ||
+      (b.createdAt ?? 0) - (a.createdAt ?? 0)
+    );
+    for (const record of newestFirst) {
       const row = document.createElement('article');
       row.className = 'session-recovery-row';
       row.dataset.recoveryId = record.id;
@@ -1208,14 +1214,6 @@ Object.assign(CodemanApp.prototype, {
         provider.textContent = `Provider: ${record.providerSelection.label || record.providerSelection.endpointId} · ${record.providerSelection.modelId}`;
         details.appendChild(provider);
       }
-      if (record.status === 'unavailable') {
-        const hint = document.createElement('span');
-        hint.className = 'session-recovery-hint';
-        hint.textContent = record.transport === 'local' && ['codex', 'claude'].includes(record.mode) && record.launch?.kind === 'built-in'
-          ? 'Refresh looks for a saved conversation. Start new opens a new one.'
-          : 'No verified resume target is saved for this record.';
-        details.appendChild(hint);
-      }
       row.appendChild(details);
 
       const actions = document.createElement('div');
@@ -1226,6 +1224,8 @@ Object.assign(CodemanApp.prototype, {
         button.type = 'button';
         button.className = 'btn-toolbar';
         button.textContent = primary.label;
+        if (primary.action === 'start') button.title = 'Open a new conversation from this session’s original location.';
+        if (primary.action === 'refresh') button.title = 'Recheck recovery availability for this session. Does not start an agent.';
         button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
         actions.appendChild(button);
       }
@@ -1234,6 +1234,7 @@ Object.assign(CodemanApp.prototype, {
         refresh.type = 'button';
         refresh.className = 'btn-toolbar';
         refresh.textContent = 'Refresh';
+        refresh.title = 'Recheck saved conversation metadata for this session. Does not start an agent.';
         refresh.addEventListener('click', () => this._runSessionRecoveryAction(record, 'refresh'));
         actions.appendChild(refresh);
       }
@@ -1344,6 +1345,8 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
       const sessions = data.data.sessions || [];
+      const historyHeading = document.getElementById('sessionHistoryTitle');
+      if (historyHeading) historyHeading.textContent = `Saved sessions (${sessions.length} of ${data.data.total ?? sessions.length})`;
       list.replaceChildren();
       if (sessions.length === 0) {
         this._setSessionManagerMessage(list, q ? 'No sessions match your search' : 'No sessions found');

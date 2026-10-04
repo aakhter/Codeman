@@ -9540,7 +9540,8 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  overflow: hidden;
+  min-height: 0;
+  overflow-y: auto;
   padding: 1rem;
 }
 
@@ -9550,9 +9551,15 @@ kbd {
 
 .session-manager-list {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 0.35rem;
-  overflow-y: auto;
+}
+
+.session-manager-history-heading {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 0.84rem;
 }
 
 .session-recovery-queue {
@@ -9590,6 +9597,8 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  max-height: 32vh;
+  overflow-y: auto;
 }
 
 .session-recovery-empty {
