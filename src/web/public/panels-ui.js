@@ -1323,12 +1323,17 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _sessionManagerProject(record) {
-    const path = String(record.workingDir || '').replace(/\\/g, '/').replace(/\/$/, '');
-    const matches = (this.cases || []).filter(c => c.path &&
-      (path === c.path.replace(/\\/g, '/').replace(/\/$/, '') || path.startsWith(c.path.replace(/\\/g, '/').replace(/\/$/, '') + '/')));
-    matches.sort((a, b) => b.path.length - a.path.length);
-    const name = matches[0]?.name || path.split('/').filter(Boolean).at(-1) || 'Unknown project';
-    return /^\.?codeman(?:[-_].*)?$/i.test(name) ? 'codeman' : name.replace(/^\./, '');
+    const normalize = value => {
+      const path = String(value || '').split(String.fromCharCode(92)).join('/');
+      return path.length > 1 ? path.replace(/\/+$/, '') : path;
+    };
+    const path = normalize(record.workingDir);
+    const matches = (this.cases || []).filter(c => {
+      const root = normalize(c.path);
+      return root && (path === root || path.startsWith(root.endsWith('/') ? root : root + '/'));
+    });
+    matches.sort((a, b) => normalize(b.path).length - normalize(a.path).length);
+    return matches[0]?.name || 'Unassigned';
   },
 
   _sessionManagerTitleWords(record) {
