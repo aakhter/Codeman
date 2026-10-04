@@ -22,7 +22,7 @@ const repairBody = z.object({ revision, markdown: content.markdown }).strict();
 const recoveryBody = z.object({ revision, projectId: id, choice: z.enum(['external', 'staged']) }).strict();
 const errorCurrent = (current: unknown) =>
   current instanceof SessionNotesMalformedError
-    ? { raw: current.raw, revision: current.revision, repairable: true }
+    ? { raw: current.raw, revision: current.revision, repairable: true, ...current.identity }
     : current;
 async function handled(reply: FastifyReply, operation: () => Promise<unknown>): Promise<unknown> {
   try {

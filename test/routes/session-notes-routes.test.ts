@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotesService } from '../../src/session-notes-service.js';
 import { sessionNotesOwnerKey } from '../../src/session-notes-projects.js';
+import { noteRevision, serializeSessionNote } from '../../src/session-notes-markdown.js';
 import { registerSessionNotesRoutes } from '../../src/web/routes/session-notes-routes.js';
 
 describe('notebook API real filesystem', () => {
@@ -236,5 +237,50 @@ describe('notebook API real filesystem', () => {
     expect(saved.statusCode).toBe(200);
     expect(saved.json().data.metadata.projectId).toBe(target.id);
     expect(saved.json().data.revision).toMatch(/^[a-f0-9]{64}$/);
+  });
+  it('opens a provenance-mismatched notebook as an identified repair entry without duplicating its binding', async () => {
+    const app = await harness();
+    const opened = await app.inject({
+      method: 'POST',
+      url: '/api/session-notes/open',
+      payload: { sessionId: source.id },
+    });
+    const draft = opened.json().data;
+    const url = '/api/session-notes/' + draft.metadata.id;
+    const saved = (
+      await app.inject({ method: 'PUT', url, payload: { revision: draft.revision, markdown: 'original body' } })
+    ).json().data;
+    const forged = serializeSessionNote({ ...saved.metadata, sessionId: 'forged-source' }, saved.markdown);
+    await writeFile(
+      join(root, sessionNotesOwnerKey('alice'), 'projects', saved.metadata.projectId, saved.metadata.id + '.md'),
+      forged
+    );
+    const repair = await app.inject({
+      method: 'POST',
+      url: '/api/session-notes/open',
+      payload: { sessionId: source.id },
+    });
+    expect(repair.statusCode).toBe(422);
+    expect(repair.json().data).toMatchObject({
+      id: saved.metadata.id,
+      projectId: saved.metadata.projectId,
+      raw: forged.toString('utf8'),
+      revision: noteRevision(forged),
+      repairable: true,
+    });
+    expect((await app.inject('/api/session-notes')).json().data).toMatchObject([
+      { id: saved.metadata.id, repairable: true },
+    ]);
+    const repaired = await app.inject({
+      method: 'POST',
+      url: url + '/repair',
+      payload: { revision: repair.json().data.revision, markdown: 'original body' },
+    });
+    expect(repaired.statusCode).toBe(200);
+    expect(repaired.json().data.metadata.sessionId).toBe(source.id);
+    expect(
+      (await app.inject({ method: 'POST', url: '/api/session-notes/open', payload: { sessionId: source.id } })).json()
+        .data.metadata.id
+    ).toBe(saved.metadata.id);
   });
 });

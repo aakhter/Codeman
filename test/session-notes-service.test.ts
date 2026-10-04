@@ -3,8 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotesService } from '../src/session-notes-service.js';
-import { SessionNotesConflictError, SessionNotesStore } from '../src/session-notes-store.js';
-import { noteRevision } from '../src/session-notes-markdown.js';
+import {
+  SessionNotesConflictError,
+  SessionNotesMalformedError,
+  SessionNotesStore,
+} from '../src/session-notes-store.js';
+import { noteRevision, serializeSessionNote } from '../src/session-notes-markdown.js';
 
 describe('notebook service canonical files and durable bindings', () => {
   let root: string;
@@ -279,5 +283,71 @@ describe('notebook service canonical files and durable bindings', () => {
         .map((name) => readFile(join(history, name), 'utf8'))
     );
     expect(backups).toContain('broken');
+  });
+  it.each(['session', 'alias'])(
+    'does not adopt externally forged %s identity or retain false aliases after restoration',
+    async (tamper) => {
+      const s = service();
+      const draft = await s.open('alice', source, cases);
+      const saved = (await s.save('alice', draft.metadata.id, draft.revision, 'A private content'))!;
+      const path = join(root, 'alice', 'projects', saved.metadata.projectId, saved.metadata.id + '.md');
+      const original = await readFile(path);
+      const forged = serializeSessionNote(
+        tamper === 'session'
+          ? { ...saved.metadata, sessionId: 'sessionB', sessionAliases: ['falseAlias'] }
+          : { ...saved.metadata, sessionAliases: [...saved.metadata.sessionAliases, 'sessionB', 'falseAlias'] },
+        saved.markdown
+      );
+      await writeFile(path, forged);
+      const b = await s.open('alice', { ...source, id: 'sessionB', sessionAliases: [] }, cases);
+      expect(b.metadata.id).not.toBe(saved.metadata.id);
+      expect(b.markdown).toBe('');
+      await expect(s.open('alice', source, cases)).rejects.toMatchObject({
+        revision: noteRevision(forged),
+        identity: { id: saved.metadata.id, projectId: saved.metadata.projectId },
+      });
+      expect((await s.list('alice')).find((entry) => entry.id === saved.metadata.id)).toMatchObject({
+        repairable: true,
+        raw: forged.toString('utf8'),
+        revision: noteRevision(forged),
+      });
+      await expect(s.save('alice', saved.metadata.id, noteRevision(forged), 'overwrite')).rejects.toBeInstanceOf(
+        SessionNotesMalformedError
+      );
+      expect(await readFile(path)).toEqual(forged);
+      await writeFile(path, original);
+      const recoveredA = await s.open('alice', source, cases);
+      const recoveredB = await s.open('alice', { ...source, id: 'sessionB', sessionAliases: [] }, cases);
+      expect(recoveredA.metadata.id).toBe(saved.metadata.id);
+      expect(recoveredB.metadata.id).toBe(b.metadata.id);
+      expect(await s.list('alice', { sessionId: 'falseAlias' })).toEqual([]);
+    }
+  );
+  it('preserves external body/title edits and explicitly repairs provenance using the original binding', async () => {
+    const s = service();
+    const draft = await s.open('alice', source, cases);
+    const saved = (await s.save('alice', draft.metadata.id, draft.revision, 'body'))!;
+    let path = join(root, 'alice', 'projects', saved.metadata.projectId, saved.metadata.id + '.md');
+    const edited = serializeSessionNote({ ...saved.metadata, title: 'External title' }, 'External body');
+    await writeFile(path, edited);
+    let valid = await s.read('alice', saved.metadata.id);
+    expect(valid.metadata.title).toBe('External title');
+    expect(valid.markdown).toBe('External body');
+    const target = (await s.projects.list('alice')).find((project) => project.id !== valid.metadata.projectId)!;
+    await s.store.reassign('alice', valid, target.id);
+    valid = await s.read('alice', saved.metadata.id);
+    expect(valid.metadata.projectId).toBe(target.id);
+    path = join(root, 'alice', 'projects', target.id, saved.metadata.id + '.md');
+    const forged = serializeSessionNote(
+      { ...valid.metadata, workingDir: '/forged', sessionTitle: 'Forged origin' },
+      valid.markdown
+    );
+    await writeFile(path, forged);
+    await expect(s.read('alice', saved.metadata.id)).rejects.toBeInstanceOf(SessionNotesMalformedError);
+    const repaired = await s.repair('alice', saved.metadata.id, noteRevision(forged), valid.markdown);
+    expect(repaired.metadata.workingDir).toBe(source.workingDir);
+    expect(repaired.metadata.sessionTitle).toBe(source.name);
+    expect(repaired.metadata.title).toBe('External title');
+    expect(repaired.markdown).toBe('External body');
   });
 });

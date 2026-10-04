@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SessionNotesFilesystem, isNotesMissing, safeNotesId } from './session-notes-filesystem.js';
-import { parseSessionNote, serializeSessionNote } from './session-notes-markdown.js';
+import { parseSessionNote, serializeSessionNote, sessionNoteProvenanceMatches } from './session-notes-markdown.js';
 import type { SessionNote, SessionNoteMetadata } from './types/session-notes.js';
 
 export class SessionNotesBindings extends SessionNotesFilesystem {
@@ -37,7 +37,7 @@ export class SessionNotesBindings extends SessionNotesFilesystem {
   async observe(owner: string, draft: SessionNote, aliases: string[], canonical = false): Promise<SessionNoteMetadata> {
     return this.withOwnerLock(owner, async () => {
       const bindings = await this.load(owner);
-      const wanted = new Set([draft.metadata.sessionId, ...draft.metadata.sessionAliases, ...aliases]);
+      const wanted = new Set(canonical ? aliases : [draft.metadata.sessionId, ...aliases]);
       const matches = bindings.filter(
         (binding) =>
           binding.id === draft.metadata.id ||
@@ -47,13 +47,15 @@ export class SessionNotesBindings extends SessionNotesFilesystem {
       if (canonical && matches[0] && matches[0].id !== draft.metadata.id)
         throw new Error('Ambiguous session notebook association');
       const binding = matches[0] ?? { ...draft.metadata };
+      if (matches[0] && !sessionNoteProvenanceMatches(draft.metadata, binding))
+        throw new Error('Notebook provenance differs from retained binding');
       const previous = JSON.stringify(binding);
       if (canonical) {
         binding.title = draft.metadata.title;
         binding.projectId = draft.metadata.projectId;
       }
       if (!matches.length) bindings.push(binding);
-      binding.sessionAliases = [...new Set([...binding.sessionAliases, ...wanted])].filter(
+      binding.sessionAliases = [...new Set([...binding.sessionAliases, ...aliases])].filter(
         (alias) => alias !== binding.sessionId
       );
       if (matches.length && JSON.stringify(binding) !== previous)

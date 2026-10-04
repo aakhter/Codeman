@@ -12,9 +12,15 @@ import {
   type SessionNotesFilter,
 } from './session-notes-index.js';
 import { SessionNotesProjects, type SessionNotesProjectSession } from './session-notes-projects.js';
-import { SessionNotesConflictError, SessionNotesNotFoundError, SessionNotesStore } from './session-notes-store.js';
+import {
+  SessionNotesConflictError,
+  SessionNotesMalformedError,
+  SessionNotesNotFoundError,
+  SessionNotesStore,
+} from './session-notes-store.js';
+import { sessionNoteProvenanceMatches } from './session-notes-markdown.js';
 import type { CaseInfo } from './types/api.js';
-import type { SessionNote, SessionNoteEntry } from './types/session-notes.js';
+import type { SessionNote, SessionNoteEntry, SessionNoteMetadata } from './types/session-notes.js';
 
 export interface SessionNotesSource extends SessionNotesProjectSession {
   name?: string;
@@ -63,7 +69,13 @@ export class SessionNotesService {
     const aliases = [source.id, ...(source.sessionAliases ?? []), source.claudeSessionId, source.resumeId].filter(
       (value): value is string => typeof value === 'string' && !!value
     );
-    const existing = await this.projects.findNotebook(owner, { ...source, sessionAliases: aliases }, this.store);
+    const entries = await this.validatedEntries(owner);
+    const existing = await this.projects.findNotebook(
+      owner,
+      { ...source, sessionAliases: aliases },
+      this.store,
+      entries
+    );
     const bindings = await this.bindings.list(owner);
     const matches = bindings.filter((binding) =>
       [binding.sessionId, ...binding.sessionAliases].some((alias) => aliases.includes(alias))
@@ -104,6 +116,7 @@ export class SessionNotesService {
     if (matches.length > 1) throw new Error('Ambiguous notebook identity');
     if (matches[0]) {
       const note = await this.store.read(owner, matches[0].projectId, id);
+      await this.validateProvenance(owner, note);
       await this.bindings.observe(owner, note, [], true);
       return note;
     }
@@ -139,8 +152,11 @@ export class SessionNotesService {
     await this.observe(owner);
     return result;
   }
-  async list(owner: string, filter: SessionNotesFilter = {}): Promise<SessionNoteEntry[]> {
-    const entries = await this.store.list(owner);
+  list(owner: string, filter: SessionNotesFilter = {}): Promise<SessionNoteEntry[]> {
+    return this.store.transaction(owner, () => this.listWithinTransaction(owner, filter));
+  }
+  private async listWithinTransaction(owner: string, filter: SessionNotesFilter): Promise<SessionNoteEntry[]> {
+    const entries = await this.validatedEntries(owner);
     await this.observe(owner, entries);
     const bindings = await this.bindings.list(owner);
     for (const entry of entries) {
@@ -257,6 +273,39 @@ export class SessionNotesService {
       revision: 'draft-' + createHash('sha256').update(JSON.stringify(metadata)).digest('hex'),
     };
   }
+  private async validateProvenance(owner: string, note: SessionNote, known?: SessionNoteMetadata[]): Promise<void> {
+    const bindings = known ?? (await this.bindings.list(owner));
+    const retained =
+      bindings.find((binding) => binding.id === note.metadata.id) ??
+      (await this.store.retainedNote(owner, note.metadata.id))?.metadata;
+    if (retained && !sessionNoteProvenanceMatches(note.metadata, retained)) {
+      const bytes = await this.store.raw(owner, note.metadata.projectId, note.metadata.id);
+      throw new SessionNotesMalformedError(
+        'Notebook provenance differs from retained server records',
+        bytes.raw,
+        bytes.revision,
+        { id: note.metadata.id, projectId: note.metadata.projectId }
+      );
+    }
+  }
+  private async validatedEntries(owner: string): Promise<SessionNoteEntry[]> {
+    const entries = await this.store.list(owner);
+    const bindings = await this.bindings.list(owner);
+    for (const entry of entries) {
+      if (!entry.note) continue;
+      try {
+        await this.validateProvenance(owner, entry.note, bindings);
+      } catch (error) {
+        if (!(error instanceof SessionNotesMalformedError)) throw error;
+        delete entry.note;
+        entry.repairable = true;
+        entry.raw = error.raw;
+        entry.revision = error.revision;
+        entry.error = error.message;
+      }
+    }
+    return entries;
+  }
   private async atRevision(owner: string, id: string, revision: string): Promise<SessionNote> {
     const note = await this.read(owner, id);
     if (note.revision !== revision) throw new SessionNotesConflictError('Note changed on disk', note);
@@ -265,7 +314,7 @@ export class SessionNotesService {
   /** Native notifications prompt a canonical scan; periodic scans cover missed notifications and new directories. */
   private async observe(owner: string, entries?: SessionNoteEntry[]): Promise<void> {
     if (this.closed || !this.options.onChanged) return;
-    const current = entries ?? (await this.store.list(owner));
+    const current = entries ?? (await this.store.transaction(owner, () => this.validatedEntries(owner)));
     if (this.closed) return;
     const signature = JSON.stringify(current);
     let observer = this.observers.get(owner);

@@ -6,7 +6,7 @@ import { dataPath } from './config/instance.js';
 import { SessionNotesFilesystem, safeNotesId, isNotesMissing } from './session-notes-filesystem.js';
 import { SessionNotesStore } from './session-notes-store.js';
 import type { CaseInfo } from './types/api.js';
-import type { SessionNote } from './types/session-notes.js';
+import type { SessionNote, SessionNoteEntry } from './types/session-notes.js';
 import type { SessionState } from './types/session.js';
 
 export class SessionNotesProjectRegistryError extends Error {
@@ -218,9 +218,10 @@ export class SessionNotesProjects extends SessionNotesFilesystem {
   async findNotebook(
     owner: string,
     identity: SessionNotesSessionIdentity,
-    store = new SessionNotesStore(this.root)
+    store = new SessionNotesStore(this.root),
+    entries?: SessionNoteEntry[]
   ): Promise<SessionNote | null> {
-    const notes = (await store.list(owner)).flatMap((entry) => (entry.note ? [entry.note] : []));
+    const notes = (entries ?? (await store.list(owner))).flatMap((entry) => (entry.note ? [entry.note] : []));
     const exact = notes.filter((note) => note.metadata.sessionId === identity.id);
     if (exact.length > 1) throw new Error('Ambiguous session notebook association');
     if (exact.length === 1) return exact[0];

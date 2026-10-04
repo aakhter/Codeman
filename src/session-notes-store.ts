@@ -9,7 +9,12 @@ import {
   safeNotesId as safeId,
   isNotesMissing as isMissing,
 } from './session-notes-filesystem.js';
-import { noteRevision, parseSessionNote, serializeSessionNote } from './session-notes-markdown.js';
+import {
+  noteRevision,
+  parseSessionNote,
+  serializeSessionNote,
+  sessionNoteProvenanceMatches,
+} from './session-notes-markdown.js';
 import type {
   SessionNote,
   SessionNoteCreate,
@@ -22,7 +27,8 @@ export class SessionNotesMalformedError extends Error {
   constructor(
     message: string,
     public readonly raw: string,
-    public readonly revision: string
+    public readonly revision: string,
+    public readonly identity?: { id: string; projectId: string }
   ) {
     super(message);
   }
@@ -89,6 +95,12 @@ export class SessionNotesStore extends SessionNotesFilesystem {
   async export(owner: string, projectId: string, id: string): Promise<string> {
     return (await this.read(owner, projectId, id)).markdown;
   }
+  async raw(owner: string, projectId: string, id: string): Promise<{ raw: string; revision: string }> {
+    return this.withOwnerLock(owner, async () => {
+      const bytes = await this.bytes(this.notePath(owner, projectId, id));
+      return { raw: bytes.toString('utf8'), revision: noteRevision(bytes) };
+    });
+  }
 
   async list(owner: string, projectId?: string): Promise<SessionNoteEntry[]> {
     return this.locked(owner, async (conflicts) => {
@@ -130,6 +142,7 @@ export class SessionNotesStore extends SessionNotesFilesystem {
               projectId: project,
               repairable: true,
               raw: error.raw,
+              revision: error.revision,
               error: error.message,
               lastModified: (await stat(this.notePath(owner, project, id))).mtimeMs,
             });
@@ -194,7 +207,11 @@ export class SessionNotesStore extends SessionNotesFilesystem {
       const path = this.notePath(owner, trusted.metadata.projectId, trusted.metadata.id);
       await this.requireResolved(owner, path, conflicts);
       await this.checkRevision(owner, path, revision);
-      if (!((await this.current(owner, path)) instanceof SessionNotesMalformedError))
+      const current = await this.current(owner, path);
+      if (
+        !(current instanceof SessionNotesMalformedError) &&
+        (!current || sessionNoteProvenanceMatches(current.metadata, trusted.metadata))
+      )
         throw new Error('Only malformed notebooks require repair');
       const bytes = serializeSessionNote({ ...trusted.metadata, updatedAt: Date.now() }, markdown);
       const note = parseSessionNote(bytes);
@@ -314,7 +331,10 @@ export class SessionNotesStore extends SessionNotesFilesystem {
         throw new Error('Metadata path mismatch');
       return note;
     } catch (error) {
-      throw new SessionNotesMalformedError((error as Error).message, bytes.toString('utf8'), noteRevision(bytes));
+      throw new SessionNotesMalformedError((error as Error).message, bytes.toString('utf8'), noteRevision(bytes), {
+        id: basename(path, '.md'),
+        projectId: basename(dirname(path)),
+      });
     }
   }
   private async current(owner: string, path: string): Promise<SessionNote | SessionNotesMalformedError | null> {

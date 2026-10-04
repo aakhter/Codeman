@@ -33,6 +33,7 @@ export interface SessionNoteEntry {
   checklist?: Array<{ line: number; checked: boolean; text: string }>;
   sessionAliases?: string[];
   raw?: string;
+  revision?: string;
   error?: string;
   conflict?: string;
 }

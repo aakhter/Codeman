@@ -11,6 +11,24 @@ export function serializeSessionNote(metadata: SessionNoteMetadata, markdown: st
   return Buffer.from(`---\n${JSON.stringify(metadata)}\n---\n${markdown}`, 'utf8');
 }
 
+/** Original provenance and observed aliases are established by retained server records, never an external edit. */
+export function sessionNoteProvenanceMatches(current: SessionNoteMetadata, retained: SessionNoteMetadata): boolean {
+  const immutable = [
+    'id',
+    'ownerKey',
+    'sessionId',
+    'sessionTitle',
+    'workingDir',
+    'executionLocation',
+    'createdAt',
+  ] as const;
+  const trustedAliases = new Set([retained.sessionId, ...retained.sessionAliases]);
+  return (
+    immutable.every((key) => current[key] === retained[key]) &&
+    current.sessionAliases.every((alias) => trustedAliases.has(alias))
+  );
+}
+
 export function parseSessionNote(bytes: Buffer): SessionNote {
   const raw = bytes.toString('utf8');
   const match = /^---\r?\n([^]*?)\r?\n---\r?\n/.exec(raw);
