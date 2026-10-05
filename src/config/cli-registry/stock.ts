@@ -11,6 +11,7 @@
  */
 
 import type { CliEntry } from './types.js';
+import { CODEX_REASONING_EFFORTS } from '../../types/session.js';
 
 const HOME_DIRS = {
   local: '~/.local/bin',
@@ -322,6 +323,12 @@ const CLAUDE: CliEntry = {
       'CLAUDE_CONFIG_DIR',
     ],
     gates: { nameFlag: { minVersion: '2.1.224', failClosed: true } },
+    // claude reads `$CLAUDE_CONFIG_DIR/.claude.json` when that is set (checked in 2.1.289).
+    mcpConfig: {
+      path: '.claude.json',
+      format: 'claude-json',
+      relocation: { envVar: 'CLAUDE_CONFIG_DIR', path: '.claude.json' },
+    },
     // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — verified by hand against a real
     // llama.cpp server. Claude reads these at process start only, so switching requires a
     // respawn, never a live hot-swap.
@@ -514,6 +521,12 @@ const OPENCODE: CliEntry = {
     approvals: true,
     altScreen: 'strip-mux-only',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' }, predictProfile: undefined },
+    // opencode's global config dir is xdg-basedir's `$XDG_CONFIG_HOME/opencode`.
+    mcpConfig: {
+      path: '.config/opencode/opencode.json',
+      format: 'opencode-json',
+      relocation: { envVar: 'XDG_CONFIG_HOME', path: 'opencode/opencode.json' },
+    },
     // Verified by hand against a real llama.cpp server. Reuses the SAME env var opencode's
     // own `env.configContentVar` already declares — the builder in custom-model-injection.ts
     // must merge into whatever opencode config Codeman would otherwise send, not clobber it.
@@ -570,6 +583,7 @@ const CODEX: CliEntry = {
       hookTrust: { type: 'bool' },
       animations: { type: 'bool' },
       model: { type: 'token', pattern: 'model' },
+      reasoningEffort: { type: 'enum', values: [...CODEX_REASONING_EFFORTS] },
       resumeId: { type: 'token', pattern: 'id' },
     },
     variants: [
@@ -582,6 +596,14 @@ const CODEX: CliEntry = {
           { flag: '--config', value: 'tui.animations=true', when: { param: 'animations', is: true } },
           { flag: '--config', value: 'tui.animations=false', when: { param: 'animations', is: false } },
           { flag: '--model', valueFrom: 'model', when: { param: 'model', state: 'set' } },
+          // One literal per level: an argv token cannot splice a value into a literal, and
+          // `model_reasoning_effort=<level>` is a single `--config` value. The enum above is
+          // what admits a level, so an unknown one emits nothing.
+          ...CODEX_REASONING_EFFORTS.map((level) => ({
+            flag: '--config',
+            value: `model_reasoning_effort=${level}`,
+            when: { param: 'reasoningEffort', is: level },
+          })),
           { lit: 'resume', when: { param: 'resumeId', state: 'set' } },
           { valueFrom: 'resumeId', when: { param: 'resumeId', state: 'set' } },
         ],
@@ -689,6 +711,11 @@ const CODEX: CliEntry = {
       // Downstream-only: upstream merge e5164a43 dropped this entry once (COD-453).
       { param: 'hookTrust', clampTo: false },
     ],
+    mcpConfig: {
+      path: '.codex/config.toml',
+      format: 'codex-toml',
+      relocation: { envVar: 'CODEX_HOME', path: 'config.toml' },
+    },
     // Verified by hand against a real llama.cpp server. Written to an isolated CODEX_HOME
     // so the user's real ~/.codex/config.toml is never touched.
     customModelInjection: {
@@ -805,6 +832,12 @@ const GEMINI: CliEntry = {
     // MATERIALIZE a config (not just touch an already-sent one) or a non-granted owner who
     // sends no geminiConfig at all would still get yolo for free.
     privilegedParams: [{ param: 'approvalMode', clampTo: 'auto_edit', materializeWhenAbsent: true }],
+    // gemini-cli's `homedir()` returns `GEMINI_CLI_HOME` when set (packages/core/src/utils/paths.ts).
+    mcpConfig: {
+      path: '.gemini/settings.json',
+      format: 'gemini-json',
+      relocation: { envVar: 'GEMINI_CLI_HOME', path: '.gemini/settings.json' },
+    },
     // Web-researched, unverified — needs a restart to pick up (CLI reads these at process
     // start). Confirm the exact model-override env var name against the installed
     // gemini-cli version before shipping.
@@ -888,6 +921,8 @@ const ANTIGRAVITY: CliEntry = {
     // Like codex: an ABSENT config already defaults safe (no bypass flag), so only a
     // SENT config needs the flag forced off — nothing is materialized.
     privilegedParams: [{ param: 'dangerouslySkipPermissions', clampTo: false }],
+    // No relocation var: `agy` 1.1.12 resolves `~/.gemini/config` from $HOME only.
+    mcpConfig: { path: '.gemini/config/mcp_config.json', format: 'antigravity-json' },
     // No known CLI/env/config mechanism — Antigravity's own docs describe a GUI-only
     // custom-endpoint setting and explicitly say it "cannot currently" become the core
     // reasoning model. Toolbar entry stays disabled for this mode.
