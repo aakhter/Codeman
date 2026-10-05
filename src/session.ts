@@ -3075,7 +3075,9 @@ export class Session extends EventEmitter {
     if (this._closing || this._isStopped || this.paneLifecycleInFlight) return false;
     return this._withPaneLifecycle(async () => {
       if (!this._remote || !this._useMux || !this._mux || !this._muxSession) return false;
-      const options = workerResumeOptions(this._buildRespawnPaneOptions(), this._nativeResumeId);
+      const respawn = this._buildRespawnPaneOptions();
+      respawn.resumeSessionId = this._claudeSessionChain.at(-1) ?? this._claudeSessionId ?? respawn.resumeSessionId;
+      const options = workerResumeOptions(respawn, this._nativeResumeId);
       if (!options || !(await this._mux.muxSessionExists(this._muxSession.muxName))) return false;
       if (this._closing || this._isStopped) return false;
       this._stopWorkingFramePoller();

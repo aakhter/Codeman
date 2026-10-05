@@ -82,6 +82,30 @@ const EXEMPT_FILES = new Set(
  * Keyed `<relative path>::<the matched expression>`.
  */
 const ALLOWED_BRANCHES: Record<string, string> = {
+  // COD-468 landed conversation-recovery integrations alongside COD-486. These
+  // select exact on-disk identity formats or the existing public config fields;
+  // they do not define CLI capabilities (same category as the identity entries below).
+  "reboot-restore.ts::mode === 'codex'":
+    'Codex rollout UUID evidence versus the Claude conversation chain in boot reconciliation',
+  "session-recovery-names.ts::mode === 'codex'":
+    'Codex session_index and rollout identity metadata used for recovery display names',
+  "session-recovery-names.ts::mode === 'claude'":
+    'Claude transcript conversation-name metadata selected by its exact conversation identity',
+  "session-recovery-preview.ts::mode === 'codex'":
+    'Codex rollout-path attribution and its response_item user-prompt transcript format',
+  "session-recovery-preview.ts::mode === 'claude'":
+    'Claude transcript-path attribution and sessionId/cwd/isSidechain identity proof',
+  "session-recovery.ts::mode === 'codex'":
+    'Allowlisted native conversation UUID from the public codexConfig resumeSessionId field',
+  "session-recovery.ts::mode === 'claude'":
+    'Newest adopted Claude conversation-chain identity rather than the original tab UUID',
+  "web/routes/reboot-restore-routes.ts::mode === 'codex'":
+    'Existing public codexConfig versus top-level Claude resumeSessionId launch-field plumbing',
+  "web/routes/session-recovery-routes.ts::mode === 'codex'":
+    'Refresh missing local Codex identity through the verified rollout-file resolver',
+  "web/routes/session-recovery-routes.ts::mode === 'claude'":
+    'Refresh local Claude identity through the adopted conversation chain and transcript evidence',
+
   // ── COD-416 wave 4: the last two, triaged rather than baselined ─────────────────────
   //
   // The DOWNSTREAM PRE-REGISTRY BASELINE block that stood here is GONE, and with it the

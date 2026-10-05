@@ -1,5 +1,13 @@
 # aicodeman
 
+## 1.34.1
+
+### Patch Changes
+
+- COD-486: Resume owned remote conversations in the same tab when a worker reboots while Codeman stays running. Persist worker boot identity and closed-session suppression; require a verified boot change and SSH disconnect; use exact conversation resume with no fresh fallback; confirm remote agent liveness and preserve failed or unsupported resumes in the Recovery Queue. Transport reconnects now attach only, preventing a stale liveness probe from creating a new agent. Serialize mux metadata writes and restore Recovery Queue route registration.
+
+  Integrate origin/local's 1.34.0 release, including per-session Claude model and advisor settings, Codex reasoning effort, grouped tab rail, MCP sync, webhook notifications, newline controls, iOS IME preview, and split-pane improvements. Retain downstream terminal scrolling and remote Codex mouse fixes (COD-464, COD-469, COD-470, COD-471), mobile keyboard recovery (COD-467), conversation recovery names, filters and previews (COD-468), CLI-aware activity labels (COD-473), file-preview Escape handling (COD-474), and pending SSE reconnect retries (COD-483). Preserve newest adopted conversation identities and document existing recovery identity-format exceptions in the CLI registry guard.
+
 ## 1.34.0
 
 ### Minor Changes
@@ -829,7 +837,6 @@
   ### Thanks
   - @opticon454 for #349, and for a write-up that made an infrastructure PR quick to review
 
-
 ## 1.24.2
 
 ### Patch Changes
@@ -889,6 +896,7 @@
   - @timkjr for reporting #352, and for finding it while verifying Docker support for someone else's PR
 
 - Fix terminal file links truncating spaced relative paths to a tail segment. Bullet/marker and labeled (Path:, File:, Saved to:) relative paths with spaces now link the complete path through existing workspace/cwd/external preview routing; unsafe (..) candidates stay unlinked.
+
 ## 1.24.0
 
 ### Minor Changes
@@ -1011,8 +1019,9 @@
 
 ## Unreleased
 
-  ### Thanks
-  - **@aakhter** built both halves of the new tab experience: the owner-scoped, server-authoritative tab-layout foundation with recipient-safe SSE publication and an unusually deep test suite (#335), and the resizable vertical session rail with accessible pointer/keyboard sizing and careful FitAddon handoff (#334). Fifth and sixth merged PRs, and the layout work also fixed real multi-user ordering leaks along the way.
+### Thanks
+
+- **@aakhter** built both halves of the new tab experience: the owner-scoped, server-authoritative tab-layout foundation with recipient-safe SSE publication and an unusually deep test suite (#335), and the resizable vertical session rail with accessible pointer/keyboard sizing and careful FitAddon handoff (#334). Fifth and sixth merged PRs, and the layout work also fixed real multi-user ordering leaks along the way.
 
 ## 1.21.0
 

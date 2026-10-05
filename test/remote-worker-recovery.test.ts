@@ -366,6 +366,20 @@ describe('worker recovery server integration', () => {
     await server.handleRemoteSessionDropped(ID, true);
     expect(session.resumeRemoteAfterWorkerReboot).not.toHaveBeenCalled();
   });
+  it('retains the newest adopted Claude conversation in a worker recovery record', () => {
+    const record = createWorkerRecoveryRecord({
+      id: ID,
+      mode: 'claude',
+      workingDir: '/project',
+      remote,
+      status: 'stopped',
+      currentTaskId: null,
+      pid: null,
+      createdAt: 1,
+      claudeSessionChain: [ID, OLD],
+    });
+    expect(record.claudeResumeId).toBe(OLD);
+  });
   it('provides a manual record when no exact remote native identity is available', () => {
     const record = createWorkerRecoveryRecord({
       id: ID,

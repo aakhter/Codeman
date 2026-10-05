@@ -636,10 +636,12 @@ characters, so an exact compare finds nothing and
 
 ### 5.12 Read My Mind
 
-Each case has an intent profile: user-stated goals plus the user's recent real prompts
-(captured server-side while the opt-in `readMyMindEnabled` setting is on). Read it to
-ground your work in what the user actually wants; write it when the user states an
-intention worth remembering ("the goal is shipping 1.17"):
+Each case has an intent profile: user-stated goals plus durable Claude prompt history
+(captured server-side while the opt-in `readMyMindEnabled` setting is on). Codex recent
+prompts are read only from the strictly owned active rollout on demand for prediction;
+they are never persisted to `intents.json`. Read the profile to ground your work in
+what the user actually wants; write it when the user states an intention worth
+remembering ("the goal is shipping 1.17"):
 
 ```bash
 "${CURL[@]}" "$API/api/v1/sessions/$SELF/intent" | jq '.data.intent'
@@ -652,9 +654,10 @@ Never write goals the user did not state, and never delete the profile
 (`DELETE .../intent`) unless the user asks: it is their memory, not yours. Older
 servers 404 these routes; treat that as "feature absent", not an error.
 
-The same profile feeds a one-shot predictor (claude-mode sessions only; takes 5-90 s
-and costs real tokens, so call it only when asked or when genuinely deciding what the
-user wants next):
+The profile, and for Codex its on-demand strictly owned rollout signals, feed a one-shot
+predictor for Claude and local Codex sessions (5-90 s and real tokens, so call it only
+when asked or when genuinely deciding what the user wants next). The session fixes the
+provider lane: Codex is a separate ephemeral predictor and never falls back to Claude:
 
 ```bash
 "${CURL[@]}" -X POST -H 'Content-Type: application/json' -d '{}' \
@@ -663,9 +666,10 @@ user wants next):
 
 Each suggestion is `{prompt, why, kind}` (`kind`: `continue` / `verify` / `redirect`).
 To re-run after a miss, pass `{"steer":"…","rejected":["…"]}` with the rejected prompt
-texts. A 409 means a prediction is already running for the session; a 400 means
-non-claude mode. ⚠️ Suggestions are **proposals for the user**: never send one into a
-session (yours or another's) unless the user explicitly asked you to act on it.
+texts. A 409 means a prediction is already running for the session; a 400 means an
+unsupported mode (including remote/Docker Codex). ⚠️ The prediction endpoint returns
+suggestion text only. A separate input call can send it into a session (yours or
+another's), so never make that call unless the user explicitly authorized it.
 
 ### 5.13 Messaging claude workers
 
@@ -750,4 +754,3 @@ case, a cloned repo or a worktree never appears there.
 Confirm cleanup with `GET /api/v1/sessions`, never with `/api/v1/sessions/unified`
 (that one folds in transcript history from the whole machine and will keep showing
 your worker forever).
-

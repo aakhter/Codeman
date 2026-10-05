@@ -35,11 +35,16 @@ export function workerResumeOptions(
 
 /** A failed worker resume remains actionable through the existing Recovery Queue. */
 export function createWorkerRecoveryRecord(state: SessionState) {
+  const record = createRecoveryRecord(state);
   const pinned = workerResumeOptions(
-    { ...state, sessionId: state.id, mode: state.mode ?? 'shell' },
+    {
+      ...state,
+      sessionId: state.id,
+      mode: state.mode ?? 'shell',
+      resumeSessionId: record.claudeResumeId ?? state.resumeSessionId,
+    },
     state.nativeResumeId ?? null
   );
-  const record = createRecoveryRecord(state);
   if (!pinned) {
     record.status = 'manual_required';
     record.launch = {
