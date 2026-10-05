@@ -128,6 +128,7 @@ import { AI_CHECK_MODEL } from '../config/ai-defaults.js';
 import { approvalInbox } from './approval-inbox.js';
 import { stopDeepSeekWeb } from '../deepseek-web-server.js';
 import { planAutomaticRecovery, snapshotDeadSessionRecoveries } from '../session-recovery.js';
+import { createWorkerRecoveryRecord } from '../remote-worker-recovery.js';
 import { createNativeResumeIdResolver, resolveNativeResumeIdForRecovery } from '../native-session-identity.js';
 import type { SessionRecoveryRecord } from '../types/session-recovery.js';
 import { executeSessionRecovery, recoveryRemoteIsLive, resolveRecoveryTransport } from './session-recovery-service.js';
@@ -338,6 +339,7 @@ import {
   registerHookEventRoutes,
   registerApprovalRoutes,
   registerRebootRestoreRoutes,
+  registerSessionRecoveryRoutes,
   registerReadMyMindRoutes,
   registerStatusTelemetryRoutes,
   registerSystemRoutes,
@@ -693,9 +695,13 @@ export class WebServer extends EventEmitter {
     // (D1: the watcher does NOT reassemble options itself). On success we reset
     // the watcher's backoff; on failure the backoff schedules the next attempt.
     this.mux.on('remoteSessionDropped', (data) => {
-      const { sessionId, attempt } = data as { sessionId: string; attempt: number };
+      const { sessionId, attempt, workerReboot } = data as {
+        sessionId: string;
+        attempt: number;
+        workerReboot?: boolean;
+      };
       this.broadcast(SseEvent.RemoteSessionDropped, { sessionId, attempt });
-      void this.handleRemoteSessionDropped(sessionId);
+      void this.handleRemoteSessionDropped(sessionId, workerReboot);
     });
     this.mux.on('remoteReconnectExhausted', (data) => {
       const { sessionId } = data as { sessionId: string };
@@ -1886,6 +1892,7 @@ export class WebServer extends EventEmitter {
     registerHookEventRoutes(this.app, ctx);
     registerApprovalRoutes(this.app, ctx);
     registerRebootRestoreRoutes(this.app, ctx);
+    registerSessionRecoveryRoutes(this.app, ctx);
     registerReadMyMindRoutes(this.app, ctx);
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
@@ -4919,7 +4926,7 @@ export class WebServer extends EventEmitter {
    * can reset/advance its backoff. Re-running the idempotent remote command
    * REATTACHES the durable remote tmux session (does NOT recreate it).
    */
-  private async handleRemoteSessionDropped(sessionId: string): Promise<void> {
+  private async handleRemoteSessionDropped(sessionId: string, workerReboot = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     // No live Session object (e.g. detached/restored-but-not-attached) — nothing
     // to drive the reattach; report failure so the watcher backs off and retries.
@@ -4929,10 +4936,34 @@ export class WebServer extends EventEmitter {
     }
     let ok = false;
     try {
-      ok = await session.reattachRemote();
+      if (workerReboot) {
+        const settings = await this.readSettings(true);
+        // Settings or the session may change while an async probe is in flight.
+        if (
+          settings.autoRecoverSessionsAfterReboot !== true ||
+          settings.remoteAutoReconnect === false ||
+          this.sessions.get(sessionId) !== session
+        ) {
+          this.noteRemoteReconnect(sessionId, false);
+          return;
+        }
+        ok = await session.resumeRemoteAfterWorkerReboot();
+      } else {
+        ok = await session.reattachRemote();
+      }
     } catch (err) {
       console.error(`[Server] Remote reattach failed for ${sessionId}:`, err);
       ok = false;
+    }
+    if (workerReboot && this.sessions.get(sessionId) === session) {
+      const previous = this.store.getSessionRecoveries().find((row) => row.sourceSessionId === sessionId);
+      if (!ok) {
+        this.store.upsertSessionRecovery(createWorkerRecoveryRecord(session.toState()));
+        if (!previous)
+          console.warn(`[Recovery] Worker reboot resume failed for ${sessionId}; preserved recovery record`);
+      } else if (previous) {
+        this.store.upsertSessionRecovery({ ...previous, status: 'recovered', recoveredSessionId: sessionId });
+      }
     }
     this.noteRemoteReconnect(sessionId, ok);
     if (ok) {

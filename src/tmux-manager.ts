@@ -96,7 +96,7 @@ import {
   defaultRemoteCommandForMode,
   remoteLoginShellCommand,
   remoteSshTarget,
-  remoteTmuxSessionAlive,
+  probeRemoteWorker,
   withRemotePathBootstrap,
 } from './remote-hosts.js';
 import {
@@ -132,6 +132,7 @@ import {
   resetReconnectState,
   type RemoteReconnectState,
 } from './remote-reconnect.js';
+import { workerResumeOptions } from './remote-worker-recovery.js';
 import { canUsernameRunPrivilegedCommands } from './user-store.js';
 
 // ============================================================================
@@ -224,10 +225,18 @@ const IS_TEST_MODE = !!process.env.VITEST;
 const MUX_SESSIONS_FILE = dataPath('mux-sessions.json');
 
 /**
- * COD-108 kill-switch: `remoteAutoReconnect` app setting (default ON). Read at
- * call time (like headroom routing) so a settings change takes effect without a
- * restart. Absent/non-boolean ⇒ true (feature on).
+ * COD-486: worker reboot recovery uses the existing opt-in reboot setting.
  */
+function isRemoteWorkerRecoveryEnabled(): boolean {
+  try {
+    const settings = JSON.parse(readFileSync(dataPath('settings.json'), 'utf8')) as Record<string, unknown>;
+    return settings.autoRecoverSessionsAfterReboot === true;
+  } catch {
+    return false;
+  }
+}
+
+/** COD-108 transport reconnect defaults on; read each tick for live setting changes. */
 function isRemoteAutoReconnectEnabled(): boolean {
   try {
     const s = JSON.parse(readFileSync(dataPath('settings.json'), 'utf8')) as Record<string, unknown>;
@@ -1446,6 +1455,7 @@ export function buildRemoteLaunchCommand(options: {
   /** OMP only — resume/continue overrides for the remote omp relaunch (dead-pane respawn). */
   ompConfig?: OmpConfig;
   resumeSessionId?: string;
+  remoteResumeOnly?: boolean;
 }): string {
   const {
     mode,
@@ -1478,6 +1488,9 @@ export function buildRemoteLaunchCommand(options: {
         )
       : undefined;
   if (codexRecovery?.kind === 'manual_required') throw new ManualRecoveryRequiredError();
+  if (options.remoteResumeOnly && !workerResumeOptions({ ...options, workingDir: remote.remotePath }, null)) {
+    throw new ManualRecoveryRequiredError();
+  }
   // COD-416 wave 3e: the four per-session builders this replaces (codex / opencode / gemini /
   // antigravity) were each a second copy of a launch spec the registry already declares, and the
   // list of WHICH CLIs get their session config on a remote host is now `overlays.remote
@@ -1528,10 +1541,13 @@ export function buildRemoteLaunchCommand(options: {
       modeCommand = remoteLoginShellCommand(cmd);
     } else {
       const rid = resumeSessionId && RESUME_ID_SAFE.test(resumeSessionId) ? resumeSessionId : undefined;
+      if (options.remoteResumeOnly && !rid) throw new ManualRecoveryRequiredError();
       modeCommand = remoteLoginShellCommand(
-        rid && rid !== sessionId
-          ? `${cmd} --resume ${rid} || ${cmd} --session-id ${sessionId}`
-          : `${cmd} --session-id ${sessionId} || ${cmd} --resume ${sessionId}`
+        options.remoteResumeOnly
+          ? `${cmd} --resume ${rid}`
+          : rid && rid !== sessionId
+            ? `${cmd} --resume ${rid} || ${cmd} --session-id ${sessionId}`
+            : `${cmd} --session-id ${sessionId} || ${cmd} --resume ${sessionId}`
       );
     }
   } else if (mode === 'omp') {
@@ -1718,6 +1734,7 @@ function buildRemoteSessionCommand(
     ompConfig?: OmpConfig;
     /** Pins the remote claude/omp conversation across a respawn or reattach. */
     resumeSessionId?: string;
+    remoteResumeOnly?: boolean;
   } = {}
 ): string {
   if (remote.owned === false || remote.remoteSessionName) {
@@ -1737,6 +1754,7 @@ function buildRemoteSessionCommand(
     historyLimit: options.historyLimit,
     ompConfig: options.ompConfig,
     resumeSessionId: options.resumeSessionId,
+    remoteResumeOnly: options.remoteResumeOnly,
   });
 }
 
@@ -2313,6 +2331,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   // ── COD-108 remote-reconnect watcher state ────────────────────────────────
   /** Periodic watcher that re-establishes dropped remote sessions. */
   private remoteReconnectInterval: NodeJS.Timeout | null = null;
+  private sessionSaveQueue: Promise<void> = Promise.resolve();
+  private remoteProbeAt = new Map<string, number>();
+  private remoteObservedBoot = new Map<string, string>();
   /** Per-session backoff/attempt bookkeeping (sessionId → state). */
   private reconnectState: Map<string, RemoteReconnectState> = new Map();
   /**
@@ -2463,8 +2484,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const json = JSON.stringify(data, null, 2);
 
       const tempPath = MUX_SESSIONS_FILE + '.tmp';
-      writeFile(tempPath, json, 'utf-8')
-        .then(() => rename(tempPath, MUX_SESSIONS_FILE))
+      // Baseline probes can finish together. Serialize writes so the shared
+      // temp file and the final snapshot cannot race each other.
+      this.sessionSaveQueue = this.sessionSaveQueue
+        .then(async () => {
+          await writeFile(tempPath, json, 'utf-8');
+          await rename(tempPath, MUX_SESSIONS_FILE);
+        })
         .catch((err) => {
           console.error('[TmuxManager] Failed to save sessions:', err);
         });
@@ -3149,6 +3175,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
               historyLimit,
               ompConfig,
               resumeSessionId,
+              remoteResumeOnly: options.remoteResumeOnly,
             })
         : undefined,
       docker: docker
@@ -3170,6 +3197,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // dropping the ones the caller retired first (see applyEnvOverrides).
       await this.applyEnvOverrides(muxName, envOverrides, unsetEnvKeys);
 
+      if (
+        options.remoteResumeOnly &&
+        (this.reconnectGuard.has(sessionId) || this.sessions.get(sessionId) !== session)
+      ) {
+        return null;
+      }
       // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       // buildRespawnPaneCommand owns the `cd` for local panes (remote/docker keep theirs).
       await execAsync(
@@ -4154,7 +4187,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.remoteReconnectInterval = setInterval(async () => {
       if (IS_TEST_MODE) return;
       try {
-        await this.runRemoteReconnectTick(Date.now(), isRemoteAutoReconnectEnabled());
+        await this.runRemoteReconnectTick(Date.now(), isRemoteAutoReconnectEnabled(), isRemoteWorkerRecoveryEnabled());
       } catch (err) {
         console.error('[TmuxManager] Remote reconnect watcher error:', err);
       }
@@ -4177,20 +4210,32 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    */
   /**
    * Refresh the cached remote-tmux liveness for a session whose pane is dead.
-   * Fire-and-forget (async, not awaited by the sync tick): the probe is a slow
-   * ssh round-trip, so it must not block the 5s watcher interval. On success it
-   * writes the cached result; the NEXT tick then makes the revive decision with
-   * fresh data. A clean exit makes the remote tmux session vanish, so the probe
-   * resolves false and the watcher stops reviving it (2026-08-29).
+   * Bounded async probes keep the watcher responsive. Observe a running agent
+   * once to persist its boot baseline; dead SSH wrappers get a fresh probe at
+   * most every 30 seconds. Missing sessions on the SAME boot suppress future
+   * reboot recovery, while a changed boot may authorize exact resume.
    */
-  private async refreshRemoteAlive(session: MuxSession): Promise<void> {
-    if (!session.remote) return;
-    if (this.remoteAliveInFlight.has(session.sessionId)) return;
+  private async refreshRemoteAlive(session: MuxSession, baselineOnly = false): Promise<void> {
+    if (!session.remote || this.remoteAliveInFlight.has(session.sessionId)) return;
     this.remoteAliveInFlight.add(session.sessionId);
     const remoteName = session.remote.remoteSessionName || remoteTmuxSessionName(session.sessionId);
     try {
-      const alive = await remoteTmuxSessionAlive(session.remote, remoteName);
-      this.remoteAliveCache.set(session.sessionId, alive);
+      const observation = await probeRemoteWorker(session.remote, remoteName);
+      // A late probe must not undo deletion, teardown, or a manual replacement.
+      if (this.sessions.get(session.sessionId) !== session || this.reconnectGuard.has(session.sessionId)) return;
+      if (!baselineOnly) this.remoteAliveCache.set(session.sessionId, observation?.alive);
+      if (!observation?.bootId) return;
+      this.remoteObservedBoot.set(session.sessionId, observation.bootId);
+      if (observation.alive && observation.agentRunning) {
+        session.remoteBootId = observation.bootId;
+        session.remoteRecoverySuppressed = false;
+        this.saveSessions();
+      } else if (session.remoteBootId === observation.bootId || observation.alive) {
+        // The session disappeared WITHOUT a reboot. A later host reboot must
+        // never resurrect this previously closed conversation.
+        session.remoteRecoverySuppressed = true;
+        this.saveSessions();
+      }
     } catch {
       this.remoteAliveCache.set(session.sessionId, undefined);
     } finally {
@@ -4198,15 +4243,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
-  async runRemoteReconnectTick(now: number, enabled: boolean): Promise<void> {
+  async runRemoteReconnectTick(now: number, enabled: boolean, recoverWorkerReboots = false): Promise<void> {
     for (const session of this.sessions.values()) {
-      if (!session.remote) continue;
+      if (!session.remote || !enabled || this.reconnectGuard.has(session.sessionId)) continue;
       const sessionId = session.sessionId;
       const state = this.reconnectState.get(sessionId);
-      // Only probe when the pane is actually dead — otherwise the ssh round-trip
-      // would run every 5s for every healthy remote session. The cache is
-      // refreshed lazily so a clean exit (remote tmux gone) flips it to false
-      // on the next tick and stops the auto-revive.
+      // Healthy panes discard transport liveness. The one-time baseline probe
+      // below is only needed when worker reboot recovery is enabled.
       const paneDead = await this.isPaneDead(session.muxName);
       if (!paneDead) {
         // A live pane makes whatever the probe last said STALE, so forget it:
@@ -4216,15 +4259,39 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         // to prevent, and a cached `false` from a clean exit would leave a
         // manually restarted session with auto-reconnect permanently off.
         this.remoteAliveCache.delete(sessionId);
-      } else if (this.remoteAliveCache.get(sessionId) === undefined) {
-        void this.refreshRemoteAlive(session);
       }
+      const probeAt = this.remoteProbeAt.get(sessionId);
+      // Establish the baseline once while the remote session exists. Do not
+      // keep polling healthy SSH sessions (sleeping hosts must stay asleep).
+      const needsBaseline =
+        recoverWorkerReboots && !paneDead && (!session.remoteBootId || session.remoteRecoverySuppressed);
+      const needsRefresh =
+        paneDead &&
+        (this.remoteAliveCache.get(sessionId) === undefined || (probeAt !== undefined && now - probeAt >= 30_000));
+      if ((needsBaseline || needsRefresh) && (probeAt === undefined || now - probeAt >= 30_000)) {
+        this.remoteProbeAt.set(sessionId, now);
+        if (paneDead) this.remoteAliveCache.delete(sessionId); // fail closed until the fresh answer
+        void this.refreshRemoteAlive(session, !paneDead);
+      }
+      const bootId = this.remoteObservedBoot.get(sessionId);
+      const workerReboot =
+        recoverWorkerReboots &&
+        session.remote.owned !== false &&
+        !session.remote.remoteSessionName &&
+        !session.discovered &&
+        !session.remoteRecoverySuppressed &&
+        !!session.remoteBootId &&
+        !!bootId &&
+        bootId !== session.remoteBootId &&
+        this.remoteAliveCache.get(sessionId) === false &&
+        this.getPaneExit(session.muxName)?.status === 255;
       const action = decideReconnect({
         session: {
           sessionId,
           isRemote: true,
           paneDead,
           remoteAlive: this.remoteAliveCache.get(sessionId),
+          workerReboot,
         },
         state,
         guarded: this.reconnectGuard.has(sessionId),
@@ -4237,7 +4304,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         // Mark in-flight + advance backoff BEFORE emitting so a re-entrant tick
         // (or a synchronous listener) can never stack a second reconnect.
         this.reconnectState.set(sessionId, { ...advanceBackoff(base, now), inFlight: true });
-        this.emit('remoteSessionDropped', { sessionId, attempt: action.attempt });
+        this.emit('remoteSessionDropped', {
+          sessionId,
+          attempt: action.attempt,
+          ...(workerReboot ? { workerReboot: true } : {}),
+        });
       } else if (action.kind === 'exhaust') {
         const base = state ?? freshReconnectState();
         if (!base.exhaustedEmitted) {
@@ -4258,6 +4329,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   noteRemoteReconnect(sessionId: string, success: boolean): void {
     if (success) {
       this.reconnectState.set(sessionId, resetReconnectState());
+      this.remoteProbeAt.delete(sessionId);
+      const session = this.sessions.get(sessionId);
+      const bootId = this.remoteObservedBoot.get(sessionId);
+      if (session && bootId) {
+        session.remoteBootId = bootId;
+        session.remoteRecoverySuppressed = false;
+        this.saveSessions();
+      }
       return;
     }
     const state = this.reconnectState.get(sessionId);
@@ -4274,6 +4353,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.reconnectState.delete(sessionId);
     this.remoteAliveCache.delete(sessionId);
     this.remoteAliveInFlight.delete(sessionId);
+    this.remoteProbeAt.delete(sessionId);
+    this.remoteObservedBoot.delete(sessionId);
   }
 
   /** Clear all per-session reconnect + guard state (e.g. when a session is removed). */
@@ -4282,6 +4363,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.reconnectGuard.delete(sessionId);
     this.remoteAliveCache.delete(sessionId);
     this.remoteAliveInFlight.delete(sessionId);
+    this.remoteProbeAt.delete(sessionId);
+    this.remoteObservedBoot.delete(sessionId);
   }
 
   destroy(): void {
@@ -4295,6 +4378,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.reconnectGuard.clear();
     this.remoteAliveCache.clear();
     this.remoteAliveInFlight.clear();
+    this.remoteProbeAt.clear();
+    this.remoteObservedBoot.clear();
     this.remoteCaptureBackoff.clear();
     void this.remoteFrameSshPool.close().catch(() => {});
   }

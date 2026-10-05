@@ -50,6 +50,10 @@ export interface MuxSession {
   workingDir: string;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
   remote?: SessionRemote;
+  /** Worker boot observed while the durable remote session existed (COD-486). */
+  remoteBootId?: string;
+  /** An intentional/missing session observed before a reboot must stay closed. */
+  remoteRecoverySuppressed?: boolean;
   /** Docker execution metadata for local tmux sessions wrapping `docker exec` */
   docker?: SessionDocker;
   /** Owning username in multi-user mode (round-tripped through recovery like remote/docker) */
@@ -146,6 +150,8 @@ export interface CreateSessionOptions {
 /** Options for respawning a dead pane. */
 export interface RespawnPaneOptions {
   sessionId: string;
+  /** Verified worker reboot: resume exactly, with no fresh-conversation fallback. */
+  remoteResumeOnly?: boolean;
   workingDir: string;
   mode: SessionMode;
   /** Session display name (tab name). */

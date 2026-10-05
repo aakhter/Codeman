@@ -29,6 +29,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { workerResumeOptions } from './remote-worker-recovery.js';
 import { execSync, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -72,7 +73,7 @@ import { resolveAndClaimOmpSessionId } from './utils/omp-session-resolver.js';
 import { claudeTranscriptExists } from './utils/claude-transcript.js';
 import { matchesPattern } from './config/cli-registry/patterns.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
-import { probeRemoteCliVersion } from './remote-hosts.js';
+import { probeRemoteCliVersion, probeRemoteWorker } from './remote-hosts.js';
 import type { TerminalMultiplexer, MuxSession, CommandDeliveryResult } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
 import { RalphTracker } from './ralph-tracker.js';
@@ -3020,7 +3021,14 @@ export class Session extends EventEmitter {
     // Confirmed the mux session (and thus the pane) exists but this reattach
     // is about to respawn it — safe to resolve/pin now.
     this._pinOmpRespawnId();
-    const newPid = await mux.respawnPane(this._buildRespawnPaneOptions());
+    const options = this._buildRespawnPaneOptions();
+    // A liveness probe can race a worker reboot. Transport recovery must only
+    // attach; it must never create a replacement session on a stale answer.
+    options.remote = {
+      ...this._remote,
+      remoteSessionName: this._remote.remoteSessionName ?? `codeman-ssh-${this.id.slice(0, 8)}`,
+    };
+    const newPid = await mux.respawnPane(options);
     if (!newPid) {
       console.error('[Session] reattachRemote: respawnPane failed for', this._muxSession.muxName);
       return false;
@@ -3031,6 +3039,27 @@ export class Session extends EventEmitter {
     console.log('[Session] reattachRemote: reattached remote session', this._muxSession.muxName, 'pid', newPid);
     if (isExternalCliMode(this.mode)) this._startWorkingFramePoller();
     return true;
+  }
+
+  /** COD-486: restart only a pinned conversation after a proven worker reboot. */
+  async resumeRemoteAfterWorkerReboot(): Promise<boolean> {
+    if (this._closing || this._isStopped || this.paneLifecycleInFlight) return false;
+    return this._withPaneLifecycle(async () => {
+      if (!this._remote || !this._useMux || !this._mux || !this._muxSession) return false;
+      const options = workerResumeOptions(this._buildRespawnPaneOptions(), this._nativeResumeId);
+      if (!options || !(await this._mux.muxSessionExists(this._muxSession.muxName))) return false;
+      if (this._closing || this._isStopped) return false;
+      this._stopWorkingFramePoller();
+      const pid = await this._mux.respawnPane(options);
+      if (!pid || this._closing || this._isStopped) return false;
+      const observed = await probeRemoteWorker(this._remote, `codeman-ssh-${this.id.slice(0, 8)}`);
+      // A living SSH wrapper can be attached to a retained FAILED remote pane.
+      // Require the remote agent itself to be running before reporting recovery.
+      if (!observed?.agentRunning || this._closing || this._isStopped) return false;
+      this.clearPaneExitForNewPane();
+      if (isExternalCliMode(this.mode)) this._startWorkingFramePoller();
+      return true;
+    });
   }
 
   /**

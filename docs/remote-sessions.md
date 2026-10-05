@@ -593,3 +593,23 @@ same SSH connection contract so a growing remote file cannot exhaust local disk.
   Key Pattern.
 - `docs/security-architecture.md` — overall network/auth model.
 - COD-104 (tmux prereq + durable launch), COD-105 (discover + attach, detach-not-kill ownership), COD-107 (shell-safe connection args).
+
+### Worker reboot recovery (COD-486)
+
+With both **Remote Auto-Reconnect** and **Auto-recover sessions after reboot** enabled,
+Codeman also watches for a worker reboot while the Codeman server stays running. It
+records the worker boot identity while the remote agent is running and persists that
+baseline in the managed mux record. When an SSH wrapper exits with status 255 and the
+worker returns with a different boot identity, Codeman can resume an owned conversation
+in the same tab even though the worker's tmux session disappeared.
+
+Transport reconnects use attach-only commands. Reboot recovery uses exact resume commands:
+Claude's pinned conversation UUID, or a saved native conversation ID for Codex/OpenCode.
+It never falls back to a new conversation. Failed or unsupported resumes leave a record
+in the Recovery Queue for explicit handling. Existing retry limits still apply.
+
+An intentional close, a session observed missing before the reboot, a retained exited
+agent, a discovered attachment, an opaque custom launcher, an unknown boot identity, or
+a missing native conversation ID does not trigger automatic resume. Sessions already lost
+before this feature learned their original worker boot identity cannot be recovered
+automatically from that past reboot. No worker is woken or rebooted by this recovery path.

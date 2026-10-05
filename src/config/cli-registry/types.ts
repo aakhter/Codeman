@@ -762,7 +762,15 @@ export interface CliOverlays {
    * shell), the same end state a local session reaches through the mouse sync. The CLI keeps its
    * startup decision; tmux then passes the wheel through because the pane asked for it.
    */
-  remote?: { command?: string; fromLaunchSpec?: true; tmuxMouseAtStartupSeconds?: number } | { disabled: true };
+  remote?:
+    | {
+        command?: string;
+        fromLaunchSpec?: true;
+        tmuxMouseAtStartupSeconds?: number;
+        /** COD-486: exact identity source for automatic worker reboot resume. */
+        workerRebootResume?: 'pinned-session' | 'native-session';
+      }
+    | { disabled: true };
   /**
    * `rootCommand` is the same invocation for a container whose exec user is uid 0. Only
    * declare it when the normal `command` would be REFUSED as root: claude's carries

@@ -362,7 +362,7 @@ const CLAUDE: CliEntry = {
     // Mirrors the local default so the remote/in-container agent runs non-interactively
     // (no trust-folder/permission prompt that nothing on that side can answer). A per-host
     // `commands.claude` override, or the docker multi-user clamp, stays the escape hatch.
-    remote: { command: 'claude --dangerously-skip-permissions' },
+    remote: { command: 'claude --dangerously-skip-permissions', workerRebootResume: 'pinned-session' },
     // ⚠️ As root the flag is not merely unnecessary, it is REFUSED ("cannot be used with
     // root/sudo privileges"), and only inside the container — so an adopted root container
     // would just show a dead pane. Drop it there and let claude ask.
@@ -528,7 +528,7 @@ const OPENCODE: CliEntry = {
     // COD-416 wave 3e: this CLI's remote pane command carries its own per-session config
     // (model / resume / permission flags), rendered from `launch` above. Descriptive of the
     // hand-written builder it replaces, not a new capability.
-    remote: { fromLaunchSpec: true },
+    remote: { fromLaunchSpec: true, workerRebootResume: 'native-session' },
     // OpenCode's resume is a first-class launch param (`--session`), so an in-container
     // resume RE-RENDERS the command rather than bolting a token onto it — and a case that
     // supplies its own opaque `commands.opencode` gets a refusal, because silently starting a
@@ -718,7 +718,7 @@ const CODEX: CliEntry = {
     // mouse and its wheel fell back to page keys. 8 s covers a slow login shell (`$SHELL -i -l`)
     // before codex reads the option; verified on tmux 3.4 and 3.6a that codex keeps tracking
     // after the switch-off.
-    remote: { fromLaunchSpec: true, tmuxMouseAtStartupSeconds: 8 },
+    remote: { fromLaunchSpec: true, tmuxMouseAtStartupSeconds: 8, workerRebootResume: 'native-session' },
     // Codex appends its positional `resume <id>` (launch.resumeAppend) — but never onto a
     // case's own opaque `commands.codex`, where a trailing positional would land in the wrong
     // place. Refuse and let a human recover instead.

@@ -514,6 +514,7 @@ const overlayTargetSchema = z.union([
       command: commandLine.optional(),
       rootCommand: commandLine.optional(),
       fromLaunchSpec: z.literal(true).optional(),
+      workerRebootResume: z.enum(['pinned-session', 'native-session']).optional(),
       // COD-471: remote only (see CliOverlays.remote); bounded so a config typo cannot leave a
       // remote session `mouse on` for minutes.
       tmuxMouseAtStartupSeconds: z.number().int().min(1).max(30).optional(),
