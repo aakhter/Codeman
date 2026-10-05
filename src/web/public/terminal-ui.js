@@ -86,6 +86,9 @@
   // (_installMobileKeyboardDismiss). Two groups: anything that is about to take
   // focus itself, and the accessory bar, which is built to be used while the
   // keyboard is open.
+  // ⚠️ A roving-tabindex widget parks every item but one at tabindex=-1, so the
+  // `[tabindex]` arm cannot see its items: the grouped tab rail's rows and
+  // headers are listed by role instead, or tapping one would drop the keyboard.
   const MOBILE_KEYBOARD_DISMISS_EXEMPT_SELECTOR = [
     'input',
     'textarea',
@@ -95,6 +98,7 @@
     '[contenteditable=""]',
     '[contenteditable="true"]',
     '[tabindex]:not([tabindex="-1"])',
+    '[role="treeitem"]',
     '.keyboard-accessory-bar',
     '.path-picker-overlay',
   ].join(',');
@@ -920,6 +924,11 @@ Object.assign(CodemanApp.prototype, {
       }
       if (ev.isComposing || ev.key === 'Process' || ev.keyCode === 229) return true;
 
+      // COD-474: a preview opened from a terminal link leaves focus in xterm, so
+      // Esc would reach the PTY before the document handler closes the preview.
+      // Returning false only stops xterm; the event still bubbles to that handler.
+      if (ev.type === 'keydown' && ev.key === 'Escape' && this._isFilePreviewOpen?.()) return false;
+
       // ── COD-187 history view keys ──
       // Esc EXITS the frozen history view and must NEVER reach the PTY (a
       // leaked \x1b cancels a running codex turn). Gated strictly on history.
@@ -1068,8 +1077,11 @@ Object.assign(CodemanApp.prototype, {
       // xterm.js sends plain \r for all Enter variants, so Claude Code (Ink) can't
       // distinguish them. We use tmux send-keys -H to send a line feed byte (0x0a)
       // which the inner application recognizes as "insert newline" vs carriage return.
-      if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey) && ev.type === 'keydown') {
-        if (this.activeSessionId) {
+      // This handler also runs for keypress/keyup: xterm drops a keypress carrying Ctrl/Alt
+      // but NOT one carrying only Shift, so unless every event type is swallowed here,
+      // Shift+Enter's keypress sends a bare \r (submit) after the newline. Only keydown sends.
+      if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey)) {
+        if (ev.type === 'keydown' && this.activeSessionId) {
           if (this._localEchoEnabled) {
             const text = this._localEchoOverlay?.pendingText || '';
             this._localEchoOverlay?.clear();
@@ -2105,9 +2117,10 @@ Object.assign(CodemanApp.prototype, {
         // has to re-resolve their gate before the redraw, not just move them.
         this.applyLineageLineSettings?.();
         this.updateConnectionLines();
-        if (this._localEchoOverlay?.hasPending) {
-          this._localEchoOverlay.rerender();
-        }
+        // Unguarded on purpose: hasPending excludes an IME composition, so a
+        // composition-only overlay would stay on the old prompt row. rerender()
+        // is a no-op when the overlay has nothing to draw.
+        this._localEchoOverlay?.rerender();
         // Pane B (split view) has its own container and its own fit()/resize
         // frame — this observer only ever measured Pane A's container, so
         // without this call Pane B never learned about a window resize, an
@@ -2253,6 +2266,8 @@ Object.assign(CodemanApp.prototype, {
         // When enabled, keystrokes are buffered locally in the overlay for
         // instant visual feedback.  Nothing is sent to the PTY until Enter
         // (or a control char) is pressed — avoids out-of-order char delivery.
+        // An IME commit takes the same printable/paste branch as typed text,
+        // and the overlay then shows it in place of the preview.
         if (this._localEchoEnabled && !echoPassthrough) {
           if (isImeCommit) {
             const ownership = this._mobileImeCommitOwnership;
@@ -5203,6 +5218,7 @@ Object.assign(CodemanApp.prototype, {
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
       const effort = this.getEffortSetting(globalSettings);
+      const advisorModel = this.getAdvisorSetting(globalSettings);
       // `resumeSessionId` is a Claude conversation UUID (server reads it from
       // ~/.claude/projects); an external-CLI row has no such thing, so sending
       // it there gets silently ignored while the OMITTED `mode` field defaults
@@ -5253,6 +5269,8 @@ Object.assign(CodemanApp.prototype, {
           ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           ...(effort ? { effort } : {}),
           ...(this.terminal ? { cols: this.terminal.cols, rows: this.terminal.rows } : {}),
+          // The advisor is a claude-only feature; other CLIs would carry it inertly.
+          ...(advisorModel && effectiveMode === 'claude' ? { advisorModel } : {}),
         }),
       });
       const createData = await createRes.json();
@@ -6230,9 +6248,10 @@ Object.assign(CodemanApp.prototype, {
 
     // Re-position local echo overlay after terminal writes — Ink redraws can
     // move the ❯ prompt to a different row, making the overlay invisible.
-    if (this._localEchoOverlay?.hasPending) {
-      this._localEchoOverlay.rerender();
-    }
+    // Unguarded on purpose: hasPending excludes an IME composition, so a
+    // composition-only overlay (the first word of a prompt) would otherwise
+    // stay on the old row. rerender() is a no-op when there is nothing to draw.
+    this._localEchoOverlay?.rerender();
 
     // After Tab completion: detect the completed text in the overlay.
     // Use terminal.write('', callback) to defer detection until xterm.js

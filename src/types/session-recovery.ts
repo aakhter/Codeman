@@ -39,6 +39,14 @@ export interface RecoveryDockerTarget {
 export interface SessionRecoveryRecord {
   id: string;
   sourceSessionId: string;
+  /** Codeman tab name, preserved before the session record is pruned. */
+  name?: string;
+  /** Secret-free original provider selection; custom selections require manual recovery. */
+  providerSelection?: { endpointId: string; modelId: string; label?: string };
+  /** Metadata probe time; a successful probe is not a confirmed CLI restore. */
+  lastCheckedAt?: number;
+  /** What execution actually proved, independent of the terminal queue status. */
+  restoreEvidence?: 'launch_returned' | 'remote_live';
   owner?: string;
   mode: SessionMode;
   workingDir: string;

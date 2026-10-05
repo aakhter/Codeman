@@ -1253,9 +1253,19 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _renderSessionRecoveryList(list, records) {
+    const signature = JSON.stringify(records);
+    if (signature === this._sessionManagerRecoverySignature) return;
+    this._sessionManagerRecoverySignature = signature;
+    const top = list.scrollTop || 0;
     list.replaceChildren();
+    const heading = document.getElementById('sessionRecoveryTitle');
+    if (heading) heading.textContent = `Recovery Queue (${records.length})`;
     if (!records.length) return;
-    for (const record of records) {
+    const newestFirst = [...records].sort((a, b) =>
+      (b.lastActivityAt ?? b.createdAt ?? 0) - (a.lastActivityAt ?? a.createdAt ?? 0) ||
+      (b.createdAt ?? 0) - (a.createdAt ?? 0)
+    );
+    for (const record of newestFirst) {
       const row = document.createElement('article');
       row.className = 'session-recovery-row';
       row.dataset.recoveryId = record.id;
@@ -1263,14 +1273,42 @@ Object.assign(CodemanApp.prototype, {
       const details = document.createElement('div');
       details.className = 'session-recovery-details';
       const title = document.createElement('strong');
-      title.textContent = record.name || record.sourceSessionId || 'Interrupted session';
+      title.textContent = `Session name: ${record.conversationName || 'Name not saved'}`;
+      title.title = record.conversationName || '';
+      const tabName = document.createElement('span');
+      tabName.className = 'session-recovery-tab-name';
+      tabName.textContent = `${record.nameFromLifecycle ? 'Codeman tab (last recorded)' : 'Codeman tab'}: ${record.name || 'Name not saved'}`;
+      tabName.title = record.name || '';
+      const identity = document.createElement('span');
+      identity.className = 'session-recovery-location';
+      identity.textContent = `Codeman ID: ${record.sourceSessionId || record.id}`;
       const location = document.createElement('span');
       location.className = 'session-recovery-location';
-      location.textContent = `${record.transport || 'local'} · ${record.workingDir || 'Unknown location'}`;
+      location.textContent = `${record.mode || 'unknown'} · ${record.transport || 'local'} · ${record.workingDir || 'Unknown location'}`;
       const status = document.createElement('span');
       status.className = 'session-recovery-status';
-      status.textContent = String(record.status || 'pending').replace(/_/g, ' ');
-      details.append(title, location, status);
+      status.textContent = record.status === 'unavailable' ? (record.lastCheckedAt ? 'Saved conversation or workspace unavailable' : 'Needs recovery check') : String(record.status || 'pending').replace(/_/g, ' ');
+      status.title = record.status === 'unavailable' ? 'Conversation metadata or the original workspace could not be verified. Refresh checks again; Start new opens a new conversation.' : '';
+      if (record.status === 'resumable') status.textContent = record.lastCheckedAt
+        ? 'Conversation metadata found; resume not confirmed'
+        : 'Saved resume ID; availability not checked';
+      if (record.status === 'recovered') status.textContent = record.restoreEvidence === 'remote_live'
+        ? 'Reconnected to live remote session'
+        : record.restoreEvidence === 'launch_returned' ? 'Session launch returned; conversation restore not confirmed' : 'Replacement session created; conversation restore not confirmed';
+      const nativeIdentity = document.createElement('span');
+      nativeIdentity.className = 'session-recovery-location';
+      nativeIdentity.textContent = `Conversation ID: ${record.mode === 'claude' ? record.claudeResumeId || record.displayConversationId || 'Not saved' : record.nativeResumeId || record.displayConversationId || 'Not saved'}`;
+      const activity = document.createElement('span');
+      activity.className = 'session-recovery-location';
+      const dateText = (value) => Number.isFinite(value) ? `${new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' }).format(value)}, ${new Date(value).toISOString()}` : 'Not saved';
+      activity.textContent = `Created: ${dateText(record.createdAt)} · Last recorded activity: ${dateText(record.lastActivityAt)}`;
+      details.append(title, tabName, location, identity, nativeIdentity, activity, status);
+      if (record.providerSelection) {
+        const provider = document.createElement('span');
+        provider.className = 'session-recovery-location';
+        provider.textContent = `Provider: ${record.providerSelection.label || record.providerSelection.endpointId} · ${record.providerSelection.modelId}`;
+        details.appendChild(provider);
+      }
       row.appendChild(details);
 
       const actions = document.createElement('div');
@@ -1281,18 +1319,93 @@ Object.assign(CodemanApp.prototype, {
         button.type = 'button';
         button.className = 'btn-toolbar';
         button.textContent = primary.label;
+        if (primary.action === 'start') button.title = 'Open a new conversation from this session’s original location.';
+        if (primary.action === 'refresh') button.title = 'Recheck recovery availability for this session. Does not start an agent.';
         button.addEventListener('click', () => this._runSessionRecoveryAction(record, primary.action));
         actions.appendChild(button);
       }
+      if (['unavailable', 'resumable'].includes(record.status) && record.transport === 'local' && ['codex', 'claude'].includes(record.mode) && record.launch?.kind === 'built-in') {
+        const refresh = document.createElement('button');
+        refresh.type = 'button';
+        refresh.className = 'btn-toolbar';
+        refresh.textContent = 'Refresh';
+        refresh.title = 'Recheck saved conversation metadata for this session. Does not start an agent.';
+        refresh.addEventListener('click', () => this._runSessionRecoveryAction(record, 'refresh'));
+        actions.appendChild(refresh);
+      }
+      const previewPanel = document.createElement('div');
+      previewPanel.className = 'session-recovery-preview';
+      previewPanel.hidden = true;
+      previewPanel.id = `recovery-preview-${record.id}`;
+
+      const preview = document.createElement('button');
+      preview.type = 'button';
+      preview.className = 'btn-toolbar';
+      preview.textContent = 'Preview';
+      preview.title = 'Show first, middle, and last user prompts from this saved conversation. Does not start an agent.';
+      preview.setAttribute('aria-expanded', 'false');
+      preview.setAttribute('aria-controls', previewPanel.id);
+      preview.addEventListener('click', async () => {
+        const opening = previewPanel.hidden;
+        previewPanel.hidden = !opening;
+        preview.setAttribute('aria-expanded', String(opening));
+        if (!opening || previewPanel.dataset.loaded) return;
+        preview.disabled = true;
+        previewPanel.textContent = 'Loading prompt preview…';
+        try {
+          const res = await fetch(`/api/session-recoveries/${encodeURIComponent(record.id)}/preview`);
+          const body = await res.json();
+          const data = body.data || body;
+          if (!res.ok || body.success === false) throw new Error(body.error?.message || body.error || 'Could not load preview');
+          previewPanel.replaceChildren();
+          const summary = document.createElement('p');
+          summary.textContent = data.available ? `${data.promptCount} readable user prompts. Preview does not confirm resumability.` : data.message || 'Preview unavailable.';
+          previewPanel.appendChild(summary);
+          if (data.available && data.message) {
+            const note = document.createElement('p');
+            note.textContent = data.message;
+            previewPanel.appendChild(note);
+          }
+          for (const prompt of data.prompts || []) {
+            const heading = document.createElement('strong');
+            heading.textContent = `${prompt.position} (${prompt.ordinal} of ${data.promptCount})`;
+            const excerpt = document.createElement('p');
+            excerpt.textContent = prompt.text + (prompt.truncated ? '\n[Excerpt shortened]' : '');
+            previewPanel.append(heading, excerpt);
+          }
+          for (const candidate of data.candidates || []) {
+            const section = document.createElement('details');
+            const label = document.createElement('summary');
+            label.textContent = `Candidate conversation ${candidate.conversationId} · Transcript updated: ${new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' }).format(candidate.lastModified)}, ${new Date(candidate.lastModified).toISOString()}`;
+            section.appendChild(label);
+            section.open = true;
+            for (const prompt of candidate.preview.prompts || []) {
+              const heading = document.createElement('strong');
+              heading.textContent = `${prompt.position} (${prompt.ordinal} of ${candidate.preview.promptCount})`;
+              const excerpt = document.createElement('p');
+              excerpt.textContent = prompt.text + (prompt.truncated ? '\n[Excerpt shortened]' : '');
+              section.append(heading, excerpt);
+            }
+            previewPanel.appendChild(section);
+          }
+          previewPanel.dataset.loaded = 'true';
+        } catch (err) {
+          previewPanel.textContent = err.message || 'Could not load preview';
+        } finally {
+          preview.disabled = false;
+        }
+      });
+      actions.appendChild(preview);
       const dismiss = document.createElement('button');
       dismiss.type = 'button';
       dismiss.className = 'btn-toolbar session-recovery-dismiss';
       dismiss.textContent = 'Dismiss';
       dismiss.addEventListener('click', () => this._dismissSessionRecovery(record));
       actions.appendChild(dismiss);
-      row.appendChild(actions);
+      row.append(previewPanel, actions);
       list.appendChild(row);
     }
+    list.scrollTop = top;
   },
 
   _confirmSessionRecovery(record, verb) {
@@ -1363,100 +1476,230 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  _sessionManagerProject(record) {
+    const normalize = value => {
+      const path = String(value || '').split(String.fromCharCode(92)).join('/');
+      return path.length > 1 ? path.replace(/\/+$/, '') : path;
+    };
+    const path = normalize(record.workingDir);
+    const matches = (this.cases || []).filter(c => {
+      const root = normalize(c.path);
+      return root && (path === root || path.startsWith(root.endsWith('/') ? root : root + '/'));
+    });
+    matches.sort((a, b) => normalize(b.path).length - normalize(a.path).length);
+    return matches[0]?.name || 'Unassigned';
+  },
+
+  _sessionManagerTitleWords(record) {
+    const ignored = new Set('the and for with this that from into your have has was are not saved name session sessions claude codex'.split(' '));
+    const title = [record.name, record.conversationName].filter(Boolean).join(' ')
+      .replace(/\bw\d+-[^:\s]+:?\s*/gi, '')
+      .replace(/(?:https?:\/\/|\/|[A-Za-z]:\\)\S+/g, ' ');
+    return [...new Set((title.toLowerCase().match(/\b[a-z][a-z-]{2,23}\b/g) || [])
+      .filter(word => !ignored.has(word)))];
+  },
+
+  _sessionManagerMatchesFilters(record) {
+    const project = this._sessionManagerProjectFilter;
+    const word = this._sessionManagerWordFilter;
+    return (!project || this._sessionManagerProject(record) === project) &&
+      (!word || this._sessionManagerTitleWords(record).includes(word));
+  },
+
+  _renderSessionManagerFilters() {
+    const container = document.getElementById('sessionManagerFilters');
+    if (!container) return;
+    const records = [...(this._sessionManagerRecoveryRecords || []), ...(this._sessionManagerHistoryRecords || [])];
+    const projects = new Map();
+    const words = new Map();
+    for (const record of records) {
+      const project = this._sessionManagerProject(record);
+      projects.set(project, (projects.get(project) || 0) + 1);
+      for (const word of this._sessionManagerTitleWords(record)) words.set(word, (words.get(word) || 0) + 1);
+    }
+    const projectTags = [...projects].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const wordTags = [...words].filter(([, count]) => count >= 2)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
+    const signature = JSON.stringify([projectTags, wordTags, this._sessionManagerProjectFilter, this._sessionManagerWordFilter]);
+    if (signature === this._sessionManagerFacetSignature) return;
+    this._sessionManagerFacetSignature = signature;
+    container.replaceChildren();
+    const scope = document.createElement('span');
+    scope.className = 'session-manager-filter-label';
+    scope.textContent = 'Filter loaded recovery and saved sessions';
+    container.appendChild(scope);
+    const makeGroup = (label, tags, field) => {
+      const group = document.createElement('div');
+      group.className = 'session-manager-filter-group';
+      const caption = document.createElement('span');
+      caption.className = 'session-manager-filter-label';
+      caption.textContent = label;
+      group.appendChild(caption);
+      for (const [value, count] of [['', records.length], ...tags]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'session-manager-filter-chip';
+        button.textContent = value ? `${value} (${count})` : 'All';
+        button.setAttribute('aria-pressed', String((this[field] || '') === value));
+        button.title = value ? `Filter loaded sessions by ${label.toLowerCase()}: ${value}` : `Show all ${label.toLowerCase()}`;
+        button.addEventListener('click', () => {
+          this[field] = this[field] === value ? '' : value;
+          this._renderSessionManagerFilteredLists();
+          this._renderSessionManagerFilters();
+          const body = document.querySelector('#sessionManagerModal .modal-body');
+          if (body) body.scrollTop = 0;
+        });
+        group.appendChild(button);
+      }
+      container.appendChild(group);
+    };
+    makeGroup('Projects', projectTags, '_sessionManagerProjectFilter');
+    if (wordTags.length || this._sessionManagerWordFilter) {
+      if (this._sessionManagerWordFilter && !wordTags.some(([word]) => word === this._sessionManagerWordFilter))
+        wordTags.push([this._sessionManagerWordFilter, words.get(this._sessionManagerWordFilter) || 0]);
+      makeGroup('Title keywords', wordTags, '_sessionManagerWordFilter');
+    }
+  },
+
+  _renderSessionManagerFilteredLists() {
+    const recoveryList = document.getElementById('sessionRecoveryList');
+    const historyList = document.getElementById('sessionManagerList');
+    const body = typeof document.querySelector === 'function' ? document.querySelector('#sessionManagerModal .modal-body') : null;
+    const top = body?.scrollTop || 0;
+    if (recoveryList && this._sessionManagerRecoveryRecords) {
+      const all = this._sessionManagerRecoveryRecords;
+      const filtered = all.filter(record => this._sessionManagerMatchesFilters(record));
+      this._renderSessionRecoveryList(recoveryList, filtered);
+      const heading = document.getElementById('sessionRecoveryTitle');
+      if (heading) heading.textContent = `Recovery Queue (${filtered.length}${filtered.length === all.length ? '' : ` of ${all.length}`})`;
+    }
+    if (historyList && this._sessionManagerHistoryRecords) {
+      this._renderSessionManagerHistory(historyList,
+        this._sessionManagerHistoryRecords.filter(record => this._sessionManagerMatchesFilters(record)),
+        this._sessionManagerHistoryTotal);
+    }
+    if (body) body.scrollTop = top;
+  },
+
+  _renderSessionManagerHistory(list, sessions, total) {
+    const signature = JSON.stringify([sessions, total, sessions.map(s => this.sessions?.has?.(s.sessionId))]);
+    if (signature === this._sessionManagerHistorySignature) return;
+    this._sessionManagerHistorySignature = signature;
+    const heading = document.getElementById('sessionHistoryTitle');
+    if (heading) heading.textContent = `Saved sessions (${sessions.length} of ${total})`;
+    list.replaceChildren();
+    if (!sessions.length) {
+      this._setSessionManagerMessage(list, 'No saved sessions match these filters');
+      return;
+    }
+    for (const s of sessions) {
+      const record = {
+        sessionId: s.sessionId,
+        workingDir: s.workingDir || '',
+        sizeBytes: s.sizeBytes ?? 0,
+        lastModified: new Date(s.lastActivityAt ?? s.createdAt ?? Date.now()).toISOString(),
+        firstPrompt: s.firstPrompt || s.name || '',
+        // COD-124: status/mode drive the Parked badge, idle-duration flag,
+        // and the Park/Resume menu items in _buildHistoryItem/_openSessionRowMenu.
+        status: s.status,
+        mode: s.mode,
+        name: s.name,
+        claudeSessionId: s.claudeSessionId,
+        pinned: s.pinned,
+        pinnedAt: s.pinnedAt,
+        // Must be carried explicitly: this record is a re-projection, so any
+        // field omitted here silently vanishes from the Cmd+K list (#266).
+        gitBranch: s.gitBranch,
+        worktreeName: s.worktreeName,
+        worktreeRepo: s.worktreeRepo,
+        resumeId: s.resumeId,
+      };
+      const isLive = !!this.sessions?.has?.(s.sessionId);
+      if (isLive) {
+        // Enrich from the richer live-session cache — these fields aren't
+        // part of UnifiedSessionItem (COD-124: resume-fidelity + obligation markers).
+        const live = this.sessions.get(s.sessionId);
+        record.nativeResumeId = live?.nativeResumeId;
+        record.autoResumeAt = live?.autoResumeAt;
+        record.autoResumeEnabled = live?.autoResumeEnabled;
+        record.ralphEnabled = live?.ralphEnabled;
+      }
+      const item = this._buildHistoryItem(record, this.cases, {
+        showViewAll: false,
+        onActivate: () => {
+          this.closeSessionManager();
+          if (isLive) {
+            void this.selectSession(s.sessionId);
+          } else if (record.workingDir) {
+            // History rows are keyed by the Claude conversation UUID; resumed
+            // sessions carry theirs separately as claudeSessionId.
+            void this.resumeHistorySession(
+              s.claudeSessionId || s.sessionId,
+              record.workingDir,
+              undefined,
+              s.mode,
+              s.resumeId
+            );
+          }
+        },
+      });
+      list.appendChild(item);
+    }
+  },
+
   async _loadSessionManagerList(q = '') {
     this._sessionManagerQuery = q;
+    if (this._sessionManagerLoadInFlight) {
+      this._sessionManagerReloadPending = true;
+      return;
+    }
     const list = document.getElementById('sessionManagerList');
     const recoveryList = document.getElementById('sessionRecoveryList');
     if (!list) return;
+    this._sessionManagerLoadInFlight = true;
+    const current = () => this._sessionManagerQuery === q;
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
-      const [sessionResult, recoveryResult] = await Promise.allSettled([fetch(url), fetch('/api/session-recoveries')]);
+      if (!this._sessionManagerRecoveryRecords) this._setSessionRecoveryMessage(recoveryList, 'Loading recovery queue…');
+      const sessionRequest = fetch(url);
+      const recoveryRequest = fetch('/api/session-recoveries').then(async (recoveryRes) => {
+        const recoveryData = await recoveryRes.json().catch(() => null);
+        if (!current() || !recoveryList) return;
+        if (recoveryRes.ok && recoveryData?.success !== false) {
+          const recoveries = recoveryData?.data?.recoveries ?? recoveryData?.recoveries;
+          this._sessionManagerRecoveryRecords = Array.isArray(recoveries) ? recoveries : [];
+          this._renderSessionManagerFilteredLists();
+          this._renderSessionManagerFilters();
+        } else if (!this._sessionManagerRecoveryRecords) {
+          this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
+        }
+      }).catch(() => {
+        if (current() && !this._sessionManagerRecoveryRecords) this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable');
+      });
+      const [sessionResult] = await Promise.allSettled([sessionRequest, recoveryRequest]);
+      if (!current()) return;
       if (sessionResult.status === 'rejected') throw sessionResult.reason;
       const res = sessionResult.value;
       const data = await res.json().catch(() => null);
-      if (recoveryList) {
-        if (recoveryResult.status === 'fulfilled') {
-          const recoveryRes = recoveryResult.value;
-          const recoveryData = await recoveryRes.json().catch(() => null);
-          if (recoveryRes.ok && recoveryData?.success !== false) {
-            const recoveries = recoveryData?.data?.recoveries ?? recoveryData?.recoveries;
-            this._renderSessionRecoveryList(
-              recoveryList,
-              Array.isArray(recoveries) ? recoveries : []
-            );
-          } else {
-            this._setSessionRecoveryMessage(recoveryList, recoveryData?.error || 'Recovery Queue is unavailable');
-          }
-        } else {
-          this._setSessionRecoveryMessage(recoveryList, 'Recovery Queue is unavailable');
-        }
-      }
+      if (!current()) return;
       if (!res.ok || !data || data.success === false || !data.data) {
-        this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
+        if (!this._sessionManagerHistoryRecords) this._setSessionManagerMessage(list, data?.error || `Failed to load sessions (HTTP ${res.status})`);
         return;
       }
-      const sessions = data.data.sessions || [];
-      list.replaceChildren();
-      if (sessions.length === 0) {
-        this._setSessionManagerMessage(list, q ? 'No sessions match your search' : 'No sessions found');
-        return;
-      }
-      for (const s of sessions) {
-        const record = {
-          sessionId: s.sessionId,
-          workingDir: s.workingDir || '',
-          sizeBytes: s.sizeBytes ?? 0,
-          lastModified: new Date(s.lastActivityAt ?? s.createdAt ?? Date.now()).toISOString(),
-          firstPrompt: s.firstPrompt || s.name || '',
-          // COD-124: status/mode drive the Parked badge, idle-duration flag,
-          // and the Park/Resume menu items in _buildHistoryItem/_openSessionRowMenu.
-          status: s.status,
-          mode: s.mode,
-          name: s.name,
-          claudeSessionId: s.claudeSessionId,
-          pinned: s.pinned,
-          pinnedAt: s.pinnedAt,
-          // Must be carried explicitly: this record is a re-projection, so any
-          // field omitted here silently vanishes from the Cmd+K list (#266).
-          gitBranch: s.gitBranch,
-          worktreeName: s.worktreeName,
-          worktreeRepo: s.worktreeRepo,
-          resumeId: s.resumeId,
-        };
-        const isLive = !!this.sessions?.has?.(s.sessionId);
-        if (isLive) {
-          // Enrich from the richer live-session cache — these fields aren't
-          // part of UnifiedSessionItem (COD-124: resume-fidelity + obligation markers).
-          const live = this.sessions.get(s.sessionId);
-          record.nativeResumeId = live?.nativeResumeId;
-          record.autoResumeAt = live?.autoResumeAt;
-          record.autoResumeEnabled = live?.autoResumeEnabled;
-          record.ralphEnabled = live?.ralphEnabled;
-        }
-        const item = this._buildHistoryItem(record, this.cases, {
-          showViewAll: false,
-          onActivate: () => {
-            this.closeSessionManager();
-            if (isLive) {
-              void this.selectSession(s.sessionId);
-            } else if (record.workingDir) {
-              // History rows are keyed by the Claude conversation UUID; resumed
-              // sessions carry theirs separately as claudeSessionId.
-              void this.resumeHistorySession(
-                s.claudeSessionId || s.sessionId,
-                record.workingDir,
-                undefined,
-                s.mode,
-                s.resumeId
-              );
-            }
-          },
-        });
-        list.appendChild(item);
-      }
+      this._sessionManagerHistoryRecords = data.data.sessions || [];
+      this._sessionManagerHistoryTotal = data.data.total ?? this._sessionManagerHistoryRecords.length;
+      this._renderSessionManagerFilteredLists();
+      this._renderSessionManagerFilters();
     } catch (err) {
       console.error('[_loadSessionManagerList]', err);
-      this._setSessionManagerMessage(list, 'Failed to load sessions');
+      if (current() && !this._sessionManagerHistoryRecords) this._setSessionManagerMessage(list, 'Failed to load sessions');
+    } finally {
+      this._sessionManagerLoadInFlight = false;
+      this._sessionManagerLastLoadedAt = Date.now();
+      if (this._sessionManagerReloadPending) {
+        this._sessionManagerReloadPending = false;
+        void this._loadSessionManagerList(this._sessionManagerQuery || '');
+      }
     }
   },
 
@@ -1710,7 +1953,10 @@ Object.assign(CodemanApp.prototype, {
     if (modal && modal.classList.contains('active')) {
       this._debouncedCall(
         'sessionManagerRefresh',
-        () => this._loadSessionManagerList(this._sessionManagerQuery || ''),
+        () => {
+          if (!this._sessionManagerLoadInFlight && Date.now() - (this._sessionManagerLastLoadedAt || 0) >= 10000)
+            void this._loadSessionManagerList(this._sessionManagerQuery || '');
+        },
         400
       );
     }
@@ -6628,6 +6874,36 @@ Object.assign(CodemanApp.prototype, {
     this.filePreviewContent = '';
     this.filePreviewText = null;
     this._updateFilePreviewToolbar?.('none');
+  },
+
+  _isFilePreviewOpen() {
+    return !!this.$('filePreviewOverlay')?.classList.contains('visible');
+  },
+
+  // Escape-key seam (COD-474), the file-preview twin of the Response Viewer's
+  // COD-229 seam. Returns true when the key belongs to the preview, so the global
+  // handler stops there and ESC never reaches xterm/the CLI. Innermost layer first:
+  // the annotation popover, then anything inside the preview that already took the
+  // key (an open docx comment card), then the preview itself.
+  _maybeCloseFilePreviewOnEscape(e) {
+    if (!this._isFilePreviewOpen()) return false;
+    if (e?.defaultPrevented) return true;
+    e?.preventDefault();
+    e?.stopPropagation();
+    if (document.getElementById('annotationPopover')) {
+      this._closeAnnotationPopover();
+      return true;
+    }
+    this.closeFilePreview();
+    // Cancelling the unsaved-edits prompt keeps the preview open; keep focus there.
+    if (!this._isFilePreviewOpen()) {
+      try {
+        this.terminal?.focus();
+      } catch {
+        /* terminal may be detached mid-teardown */
+      }
+    }
+    return true;
   },
 
   copyFilePreviewContent() {

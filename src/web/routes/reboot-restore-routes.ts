@@ -112,7 +112,13 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
       const liveSessionIds = () => new Set(ctx.sessions.keys());
       const liveConversationIds = () =>
         new Set(
-          [...ctx.sessions.values()].map((session) => session.claudeSessionId).filter((id): id is string => !!id)
+          [...ctx.sessions.values()]
+            .flatMap((session) => [
+              session.claudeSessionId,
+              session.nativeResumeId,
+              session.codexConfig?.resumeSessionId,
+            ])
+            .filter((id): id is string => !!id)
         );
       const { restore, skipped } = rejectAlreadyLive(taken, liveSessionIds(), liveConversationIds());
       for (const entry of taken) {
@@ -187,7 +193,12 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
             // takes its create branch and makes a fresh one.
             claudeMode: await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, saved.owner),
             allowedTools: claudeModeConfig.allowedTools,
-            resumeSessionId: entry.resumeConversationId,
+            resumeSessionId: saved.mode === 'codex' ? undefined : entry.resumeConversationId,
+            nativeResumeId: saved.mode === 'codex' ? entry.resumeConversationId : undefined,
+            codexConfig:
+              saved.mode === 'codex'
+                ? { ...saved.codexConfig, resumeSessionId: entry.resumeConversationId }
+                : undefined,
             // Re-resolved against the owner's CURRENT grant, never replayed from the
             // record: a grant held when the record was written may be gone now.
             envOverrides: await clampEnvOverridesForOwner(
@@ -195,6 +206,8 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
               (saved as { __envOverrides?: Record<string, string> }).__envOverrides
             ),
             effort: saved.effort,
+            model: saved.model,
+            advisorModel: saved.advisorModel,
             attachmentHistory:
               (saved as { __attachmentHistory?: SessionAttachmentHistoryItem[] }).__attachmentHistory ??
               saved.attachmentHistory,
@@ -255,6 +268,17 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           // Every other open tab and phone needs this; the clicking tab already has
           // the response, and the client's handler is an idempotent upsert.
           ctx.broadcast(SseEvent.SessionCreated, ctx.getSessionStateWithRespawn(session));
+          const recovery = ctx.store
+            .getSessionRecoveries()
+            .find((record) => record.sourceSessionId === entry.sessionId);
+          if (recovery) {
+            ctx.store.upsertSessionRecovery({
+              ...recovery,
+              status: 'recovered',
+              restoreEvidence: 'launch_returned',
+              recoveredSessionId: session.id,
+            });
+          }
           restored.push(toBannerItem(entry));
         } catch (err) {
           // One entry that will not start must not stop the rest of the pass, and

@@ -149,6 +149,20 @@ describe('POST /api/reboot-restore/restore', () => {
     await app.close();
   });
 
+  it('does not duplicate a Codex conversation automatically resumed under a new session ID', async () => {
+    const entry = offerEntry('old-codex');
+    entry.mode = entry.state.mode = 'codex';
+    entry.resumeConversationId = '01a0c810-a5c4-7b32-be0b-1599d9d5995d';
+    rebootRestoreRegistry.set([entry]);
+    const ctx = createMockRouteContext({ sessionId: 'new-codex' });
+    Object.defineProperty(ctx.sessions.get('new-codex')!, 'nativeResumeId', { value: entry.resumeConversationId });
+    const app = await createHarnessWithCtx(ctx);
+    const response = await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
+    expect(response.json().data.skipped).toEqual([{ sessionId: 'old-codex', reason: 'already-live' }]);
+    expect(ctx.addSession).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it('spends only the sessions the click named', async () => {
     rebootRestoreRegistry.set([offerEntry('a'), offerEntry('b')]);
     const app = await createHarness();

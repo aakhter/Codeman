@@ -130,6 +130,8 @@ export interface CreateSessionOptions {
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75). Default off → `unset COLORTERM`. Codex is always truecolor. */
   truecolorEnabled?: boolean;
+  /** Claude advisor model, merged into the same `--settings` JSON (overridable via /advisor in-session) */
+  advisorModel?: string;
   /** tmux history-limit (scrollback lines) allocated when this session is created. */
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
@@ -190,6 +192,8 @@ export interface RespawnPaneOptions {
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75, preserved across respawns). Default off. */
   truecolorEnabled?: boolean;
+  /** Claude advisor model (preserved across respawns, merged into the same `--settings` JSON) */
+  advisorModel?: string;
   /** Original tmux history-limit retained for config parity; respawn cannot resize the existing pane. */
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */

@@ -45,6 +45,7 @@ import {
   NiceConfig,
   DEFAULT_NICE_CONFIG,
   getErrorMessage,
+  isAdvisorModel,
   isEffortLevel,
   type ClaudeMode,
   type SessionMode,
@@ -477,6 +478,21 @@ function detectCheckpointWorkingFrame(grammar: { workingFrameProfile: string }, 
     default:
       return false;
   }
+}
+
+/**
+ * Does this CLI take the top-level session `model` (claude's per-session `--model`)?
+ *
+ * Read off the registry's model-source capability: only a `claude-settings-file` CLI
+ * (claude) launches on that field. Every other CLI takes its model in its own config object
+ * (`codexConfig.model` and so on), so for them the field is inert, and cron hands the
+ * app-wide default (always a Claude id) to any CLI that has a model at all. `toState()`
+ * publishes and persists the field only where this holds, so a codex cron session never
+ * reports a Claude model it did not run on, and `POST /api/sessions` refuses a `model` for
+ * any CLI where it does not.
+ */
+export function cliTakesSessionModel(mode: SessionMode): boolean {
+  return getCli(mode)?.capabilities.model.source === 'claude-settings-file';
 }
 
 /** Display name for a run mode. Falls back to the raw id for an unregistered one. */
@@ -986,6 +1002,10 @@ export class Session extends EventEmitter {
   // at session creation; threaded into the tmux env exports and the direct-PTY env.
   // Default off → COLORTERM is unset (avoids tmux→PTY→xterm.js color glitches).
   private _truecolorEnabled: boolean = false;
+  // Claude advisor model (code.claude.com/docs/en/advisor), merged into the same launch
+  // `--settings` JSON as ultracode, never the `--advisor` flag (which exits on a refused
+  // pairing). A soft default: /advisor still switches or disables it in-session.
+  private _advisorModel: string | undefined;
 
   // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md). `envKeys`,
   // `configDir` and `launchModel` are internal bookkeeping ONLY (never surfaced via
@@ -1117,6 +1137,8 @@ export class Session extends EventEmitter {
       claudeSessionId?: string;
       /** Whether the persisted Claude identity was authoritatively adopted. */
       claudeSessionIdentityAdopted?: boolean;
+      /** Claude advisor model (soft default via --settings, switchable in-session via /advisor) */
+      advisorModel?: string;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Restored per-session reference sources (COD-65). */
@@ -1320,6 +1342,9 @@ export class Session extends EventEmitter {
     }
     if (config.truecolorEnabled !== undefined) {
       this._truecolorEnabled = config.truecolorEnabled;
+    }
+    if (isAdvisorModel(config.advisorModel)) {
+      this._advisorModel = config.advisorModel;
     }
     this._docker = config.docker;
     this._owner = config.owner;
@@ -2689,6 +2714,10 @@ export class Session extends EventEmitter {
       resumeSessionId: this._resumeSessionId,
       nativeResumeId: this._nativeResumeId,
       effort: this._effort,
+      // Claude only: for any other CLI `_model` is inert (its model lives in its own config
+      // object) and may be the app-wide Claude default cron handed it.
+      model: cliTakesSessionModel(this.mode) ? this._model : undefined,
+      advisorModel: this._advisorModel,
       customModel: this.customModel,
       // COD-118: runtime-only — surfaced so the frontend can require explicit user
       // intent before restarting a crash-looped session. Deliberately NOT restored
@@ -3149,6 +3178,7 @@ export class Session extends EventEmitter {
       unsetEnvKeys: this._pendingEnvUnsets.size > 0 ? [...this._pendingEnvUnsets] : undefined,
       effort: this._effort,
       truecolorEnabled: this._truecolorEnabled,
+      advisorModel: this._advisorModel,
       historyLimit: this._tmuxHistoryLimit,
       remote: this._remote,
       docker: this._docker,
@@ -3679,6 +3709,7 @@ export class Session extends EventEmitter {
             envOverrides: this._envOverrides,
             effort: this._effort,
             truecolorEnabled: this._truecolorEnabled,
+            advisorModel: this._advisorModel,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
             initialCols: this._initialDims?.cols,
@@ -3805,7 +3836,8 @@ export class Session extends EventEmitter {
           this._allowedTools,
           this._effort,
           this.cliPinnedName,
-          getClaudeCliVersion()
+          getClaudeCliVersion(),
+          this._advisorModel
         );
         this.ptyProcess = spawnPtyWithHelperRepair(() =>
           pty.spawn(getClaudeBinaryPath(), args, {

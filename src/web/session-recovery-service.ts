@@ -1,5 +1,6 @@
 /** Shared execution path for explicit and automatic reboot recovery actions. */
 
+import { stat } from 'node:fs/promises';
 import { Session } from '../session.js';
 import { readRemoteCases, readRemoteHosts, toAttachedSessionRemote, toSessionRemote } from '../remote-hosts.js';
 import { readDockerCases, readDockerHosts, toSessionDocker } from '../docker-hosts.js';
@@ -114,6 +115,9 @@ export async function executeSessionRecovery(
     throw new SessionRecoveryConflictError(record.launch.hint);
   }
 
+  if (record.transport === 'local' && !(await stat(record.workingDir).catch(() => null))?.isDirectory()) {
+    throw new SessionRecoveryConflictError('Original working directory is unavailable');
+  }
   const resolveTransport = seams.resolveTransport ?? resolveRecoveryTransport;
   const probeRemote = seams.probeRemote ?? recoveryRemoteIsLive;
   const transport = await resolveTransport(record);
@@ -137,6 +141,7 @@ export async function executeSessionRecovery(
   const session = new Session({
     workingDir: record.workingDir,
     mode: record.mode,
+    name: record.name,
     mux: ctx.mux,
     useMux: true,
     ...recoverySessionConfig(record, action, transport),
@@ -155,7 +160,12 @@ export async function executeSessionRecovery(
       await cleanupCancelled(ctx, record, action, session.id);
       throw new SessionRecoveryConflictError('Recovery was cancelled while the action was in progress');
     }
-    const next = { ...record, status: 'recovered' as const, recoveredSessionId: session.id };
+    const next = {
+      ...record,
+      status: 'recovered' as const,
+      restoreEvidence: action === 'reconnect' ? ('remote_live' as const) : ('launch_returned' as const),
+      recoveredSessionId: session.id,
+    };
     ctx.store.upsertSessionRecovery(next);
     return { recovery: next, session: ctx.getSessionStateWithRespawn(session) };
   } catch (error) {

@@ -44,6 +44,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { localWorkspaceMatcher } from './utils/local-workspace-match.js';
 import { LRUMap } from './utils/lru-map.js';
 
 /** Covers `session_meta` (~19 KiB) plus the first user message (~69 KiB behind it). */
@@ -190,7 +191,7 @@ function contentText(content: unknown): string {
 }
 
 /** One line's user-prompt text, whichever of the three shapes it is. */
-function userPromptFromLine(entry: {
+export function userPromptFromLine(entry: {
   type?: string;
   payload?: {
     type?: string;
@@ -200,6 +201,7 @@ function userPromptFromLine(entry: {
     item?: { type?: string; content?: unknown };
   };
 }): { text: string; injectionProne: boolean } | null {
+  if (!entry || typeof entry !== 'object') return null;
   const p = entry.payload;
   if (!p) return null;
 
@@ -246,6 +248,7 @@ function parseIdentity(head: string): RolloutIdentity {
         session_id?: string;
         cwd?: string;
         thread_source?: string;
+        source?: string | { subagent?: unknown };
         originator?: string;
         type?: string;
         role?: string;
@@ -259,11 +262,18 @@ function parseIdentity(head: string): RolloutIdentity {
     } catch {
       continue; // truncated tail of the window, or a malformed line
     }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const p = entry.payload;
     if (entry.type === 'session_meta' && p) {
       out.threadId ??= p.id || p.session_id;
       out.cwd ??= p.cwd;
-      out.threadSource ??= p.thread_source;
+      out.threadSource ??=
+        p.thread_source ??
+        (typeof p.source === 'object' && p.source?.subagent
+          ? 'subagent'
+          : typeof p.source === 'string'
+            ? p.source
+            : undefined);
       out.originator ??= p.originator;
     } else if (entry.type === 'turn_context' && p) {
       out.cwd ??= p.cwd;
@@ -330,14 +340,27 @@ async function listRollouts(root: string): Promise<Array<{ path: string; mtimeMs
  * something a person picks back up, and on a real store they outnumber the
  * threads that are.
  */
-export async function scanCodexSessionsHistory(): Promise<CodexHistorySession[]> {
+export function scanCodexSessionsHistory(): Promise<CodexHistorySession[]> {
+  return scanCodexSessions(MAX_ROLLOUTS, true);
+}
+
+/** Recovery must find exact pane identities even outside the bounded history list. */
+export function scanCodexSessionIdentities(options: { fresh?: boolean } = {}): Promise<CodexHistorySession[]> {
+  return scanCodexSessions(Infinity, false, !options.fresh);
+}
+
+async function scanCodexSessions(
+  maxRows: number,
+  readPrompts: boolean,
+  useCache = true
+): Promise<CodexHistorySession[]> {
   const files = await listRollouts(codexSessionsRoot());
   const out: CodexHistorySession[] = [];
 
   for (const file of files) {
-    if (out.length >= MAX_ROLLOUTS) break;
+    if (out.length >= maxRows) break;
 
-    let identity = identityCache.get(file.path);
+    let identity = useCache ? identityCache.get(file.path) : undefined;
     if (!identity) {
       identity = parseIdentity(await readHead(file.path, HEAD_BYTES));
       if (shouldCacheIdentity(identity, file.size)) identityCache.set(file.path, identity);
@@ -348,7 +371,9 @@ export async function scanCodexSessionsHistory(): Promise<CodexHistorySession[]>
     if (!identity.cwd) continue;
 
     const lastPrompt =
-      out.length < MAX_TAIL_READS ? parseLastPrompt(await readTail(file.path, file.size, TAIL_BYTES)) : undefined;
+      readPrompts && out.length < MAX_TAIL_READS
+        ? parseLastPrompt(await readTail(file.path, file.size, TAIL_BYTES))
+        : undefined;
 
     out.push({
       sessionId: identity.threadId,
@@ -390,4 +415,40 @@ export function codexThreadBySessionId(rows: CodexHistorySession[]): Map<string,
 /** Test seam: drop the per-path identity cache. */
 export function __clearCodexIdentityCache(): void {
   identityCache.clear();
+}
+
+/** Locate a main conversation by original identity, never by workspace alone. */
+export async function findCodexRecoveryTranscript(record: {
+  nativeResumeId?: string;
+  sourceSessionId: string;
+  workingDir: string;
+}): Promise<string | undefined> {
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
+  for (const file of await listRollouts(codexSessionsRoot())) {
+    const identity = parseIdentity(await readHead(file.path, HEAD_BYTES));
+    if (!identity.threadId || identity.threadSource === 'subagent') continue;
+    const matchesIdentity = record.nativeResumeId
+      ? identity.threadId === record.nativeResumeId
+      : identity.originator === `codeman_${record.sourceSessionId}`;
+    if (matchesIdentity && matchesWorkspace(identity.cwd)) return file.path;
+  }
+  return undefined;
+}
+
+/** Workspace matches are preview candidates only, never identity or restore evidence. */
+export async function findCodexPreviewCandidates(record: {
+  workingDir: string;
+  createdAt: number;
+  lastActivityAt?: number;
+}): Promise<CodexHistorySession[]> {
+  const matchesWorkspace = localWorkspaceMatcher(record.workingDir);
+  const activity = record.lastActivityAt ?? record.createdAt;
+  const rows = (await scanCodexSessionIdentities()).filter((row) => matchesWorkspace(row.workingDir));
+  const distance = (row: CodexHistorySession) => Math.abs(Date.parse(row.lastModified) - activity);
+  rows.sort((a, b) => distance(a) - distance(b));
+  const unique = new Map<string, CodexHistorySession>();
+  for (const row of rows) {
+    if (!unique.has(row.sessionId)) unique.set(row.sessionId, row);
+  }
+  return [...unique.values()].slice(0, 3);
 }
