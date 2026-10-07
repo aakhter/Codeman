@@ -217,6 +217,15 @@ export class Connector {
     if (control) {
       const record = this.outbox.get(control[2]);
       if (!this.authorizedRecord(record, destination)) return { handled: true, reply: { text: 'Request not found.' } };
+      if (control[1] === 'cancel' && !record.requestId) {
+        if (this.active.has(record.key))
+          return { handled: true, reply: { text: 'Acceptance is being reconciled. Check Codeman before cancelling.' } };
+        record.delivery = 'stopped';
+        record.status = 'cancelled';
+        delete record.text;
+        this.outbox.put(record);
+        return { handled: true, reply: { text: 'Cancelled before submission to Codeman.' } };
+      }
       if (control[1] === 'cancel' && record.requestId) {
         try {
           await this.api(`/assistant-requests/${record.requestId}/cancel`, 'POST');

@@ -70,7 +70,7 @@ poller for the production bot. Root npm installation does not load this plugin.
 - `/brain <single-line text>` accepts a request into the connector outbox.
 - `/brain status <connector-key>` reports locally observed request/delivery state.
 - `/brain result <connector-key>` retrieves its stored completed result.
-- `/brain cancel <connector-key>` requests queued cancellation from Codeman.
+- `/brain cancel <connector-key>` cancels unsent local work or requests queued cancellation from Codeman. In-flight acceptance must be reconciled first.
 
 The key in the acknowledgement identifies the original account/chat/sender/message
 and assistant. It is not a native Codex thread ID. The connector stores Codeman's

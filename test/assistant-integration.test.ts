@@ -72,6 +72,10 @@ describe('assistant metadata and exact binding', () => {
   it('persists only token hashes, uses private files, and revokes across restart', () => {
     const a = registry.create(undefined, 'Brain', 'brain');
     const issued = store.issueToken(a, 'telegram', ['read', 'submit']);
+    a.name = 'Mutated caller';
+    issued.metadata.scopes.push('cancel');
+    expect(store.get(a.id)?.name).toBe('Brain');
+    expect(store.authenticate(issued.token)?.scopes).toEqual(['read', 'submit']);
     const disk = readFileSync(join(root, 'data', 'assistants.json'), 'utf8');
     expect(disk).not.toContain(issued.token);
     expect(statSync(join(root, 'data', 'assistants.json')).mode & 0o777).toBe(0o600);

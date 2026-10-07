@@ -131,8 +131,8 @@ export class AssistantStore {
   save(assistant: AssistantDefinition): void {
     const next = structuredClone(this.load());
     const index = next.assistants.findIndex((a) => a.id === assistant.id);
-    if (index < 0) next.assistants.push(assistant);
-    else next.assistants[index] = assistant;
+    if (index < 0) next.assistants.push(structuredClone(assistant));
+    else next.assistants[index] = structuredClone(assistant);
     if (next.assistants.some((a) => a.id !== assistant.id && a.owner === assistant.owner && a.slug === assistant.slug))
       throw new Error('Assistant slug is already used');
     if (
@@ -174,7 +174,7 @@ export class AssistantStore {
       throw new Error('Assistant does not exist');
     this.persist(next);
     const { hash: _hash, ...metadata } = record;
-    return { token: raw, metadata };
+    return { token: raw, metadata: structuredClone(metadata) };
   }
   listTokens(assistantId: string): Omit<AssistantToken, 'hash'>[] {
     return this.load()

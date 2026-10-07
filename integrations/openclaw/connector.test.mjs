@@ -219,3 +219,19 @@ test('cross-request API response stops polling before any Telegram delivery', as
   assert.equal(c.outbox.records[0].delivery, 'stopped');
   assert.equal(h.sends.length, 0);
 });
+
+test('cancels pending local work without submission and refuses ambiguous in-flight cancellation', async (t) => {
+  const h = harness(t);
+  const c = h.make();
+  await c.inbound(event, ctx);
+  const key = c.outbox.records[0].key;
+  c.active.add(key);
+  const ambiguous = await c.inbound({ ...event, content: `/brain cancel ${key}` }, { ...ctx, messageId: '777' });
+  assert.match(ambiguous.reply.text, /reconciled/);
+  c.active.delete(key);
+  const cancelled = await c.inbound({ ...event, content: `/brain cancel ${key}` }, { ...ctx, messageId: '778' });
+  assert.match(cancelled.reply.text, /Cancelled before submission/);
+  await c.tick();
+  assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 0);
+  assert.equal(h.make().outbox.records[0].status, 'cancelled');
+});
