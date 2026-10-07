@@ -303,6 +303,11 @@ describe('native projection and API ownership', () => {
     expect(observeAssistantTurn(data.slice(0, -1), conversationId, 'hello').state).toBe('running');
     expect(observeAssistantTurn(data, randomUUID(), 'hello').state).toBe('unknown');
     expect(observeAssistantTurn(data + turn('hello'), conversationId, 'hello').state).toBe('unknown');
+    const records = data.trimEnd().split('\n');
+    expect(
+      observeAssistantTurn([records[1], records[0], ...records.slice(2)].join('\n') + '\n', conversationId, 'hello')
+        .state
+    ).toBe('unknown');
   });
   it('conceals request UUIDs belonging to a different assistant and forbids bearer handoff/reconcile', async () => {
     const a = await ready();

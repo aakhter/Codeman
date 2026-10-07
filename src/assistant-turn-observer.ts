@@ -32,6 +32,7 @@ export function observeAssistantTurn(jsonl: string, conversationId: string, prom
   if (!users.length) return { state: 'waiting' };
   if (
     users.length !== 1 ||
+    events.indexOf(users[0]) < events.indexOf(starts[0]) ||
     item(users[0])?.content?.some((c) => c.type !== 'text' || typeof c.text !== 'string') ||
     item(users[0])
       ?.content?.map((c) => c.text)
