@@ -1,5 +1,11 @@
 # aicodeman
 
+## 1.35.0
+
+### Minor Changes
+
+- b695d6f: Add opt-in named Codex assistants with exact conversation binding, scoped revocable access, durable idempotent requests, native turn attribution and desktop/mobile handoff, takeover and reconciliation controls. Include a separately installed OpenClaw private Telegram connector with a persistent outbox and conservative delivery recovery.
+
 ## 1.34.1
 
 ### Patch Changes
