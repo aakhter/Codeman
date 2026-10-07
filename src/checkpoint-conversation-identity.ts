@@ -302,6 +302,58 @@ export async function findOwnedCodexConversation(
   return resolveCodexConversation({ ...options, codexHome: canonicalizeCodexHome(options.codexHome) }, false);
 }
 
+/** Assistant binding never uses prompt timestamps, newest-file, or cwd-only guesses. */
+export async function findExactCodexConversation(
+  options: CodexConversationIdentityOptions
+): Promise<ActiveCodexConversation | undefined> {
+  const codexHome = canonicalizeCodexHome(options.codexHome);
+  invalidateCodexConversationInventory(codexHome);
+  const files = await listCodexRollouts(codexHome);
+  const explicitIds = [...new Set([options.resumeSessionId, options.nativeResumeId].filter(Boolean))];
+  if (explicitIds.length > 1) return undefined;
+  const candidates = explicitIds.length
+    ? files.filter((file) => file.id === explicitIds[0])
+    : files.filter((file) => file.originator === `codeman_${options.sessionId}`);
+  if (candidates.length !== 1 || !candidates[0].id || !candidates[0].cwd || !options.workingDir) return undefined;
+  // Re-read immutable native session metadata instead of trusting a filename or cached cwd alone.
+  const handle = await open(candidates[0].path, 'r').catch(() => undefined);
+  if (!handle) return undefined;
+  try {
+    const buffer = Buffer.alloc(131072);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
+    lines.pop(); // A partial last row cannot prove identity.
+    const metadata = lines
+      .map((line) => {
+        try {
+          return JSON.parse(line) as { type?: string; payload?: { id?: string; cwd?: string; originator?: string } };
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((row) => row?.type === 'session_meta');
+    if (
+      metadata.length !== 1 ||
+      metadata[0]?.payload?.id !== candidates[0].id ||
+      metadata[0]?.payload?.cwd !== candidates[0].cwd ||
+      (!explicitIds.length && metadata[0]?.payload?.originator !== `codeman_${options.sessionId}`)
+    )
+      return undefined;
+  } finally {
+    await handle.close();
+  }
+  let candidateDir: string;
+  let expectedDir: string;
+  try {
+    candidateDir = realpathSync.native(candidates[0].cwd);
+    expectedDir = realpathSync.native(options.workingDir);
+  } catch {
+    return undefined;
+  }
+  if (candidateDir !== expectedDir) return undefined;
+  return { id: candidates[0].id, path: candidates[0].path };
+}
+
 /**
  * Resolve fresh-thread checkpoint proof only from a new rollout carrying this
  * managed pane's originator marker. Viewer history, resume IDs and cwd matches

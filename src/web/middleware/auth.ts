@@ -9,6 +9,8 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { registerAssistantTokenAuth } from './assistant-auth.js';
+import type { AssistantStore } from '../../assistant-store.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { StaleExpirationMap } from '../../utils/index.js';
 import type { AuthSessionRecord } from '../ports/auth-port.js';
@@ -281,7 +283,13 @@ function matchesRegisteredRoute(req: FastifyRequest, url: string): boolean {
  *
  * @returns AuthState for lifecycle management (dispose on server stop)
  */
-export function registerAuthMiddleware(app: FastifyInstance, https: boolean, basePath = ''): AuthState {
+export function registerAuthMiddleware(
+  app: FastifyInstance,
+  https: boolean,
+  basePath = '',
+  assistantStore?: AssistantStore
+): AuthState {
+  registerAssistantTokenAuth(app, assistantStore);
   const state: AuthState = {
     authSessions: null,
     authFailures: null,
@@ -350,6 +358,10 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean, bas
   const expectedHeader = 'Basic ' + Buffer.from(`${authUsername}:${authPassword}`).toString('base64');
 
   app.addHook('onRequest', (req, reply, done) => {
+    if (req.assistantPrincipal) {
+      done();
+      return;
+    }
     const bypass = checkHookSecretBypass(req, reply, hookSecretFailures);
     if (bypass === 'bypass') {
       done();
@@ -496,6 +508,7 @@ function registerMultiUserAuthHook(
   };
 
   app.addHook('onRequest', async (req, reply) => {
+    if (req.assistantPrincipal) return;
     const bypass = checkHookSecretBypass(req, reply, hookSecretFailures);
     if (bypass === 'bypass' || bypass === 'rejected') return;
 

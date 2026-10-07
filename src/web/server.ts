@@ -27,6 +27,9 @@
  * @module web/server
  */
 
+import { AssistantStore } from '../assistant-store.js';
+import { AssistantRegistry } from '../assistant-registry.js';
+import { registerAssistantRoutes } from './routes/assistant-routes.js';
 import Fastify, { FastifyInstance } from 'fastify';
 import fastifyCompress from '@fastify/compress';
 import fastifyCookie from '@fastify/cookie';
@@ -563,6 +566,7 @@ export class WebServer extends EventEmitter {
     removed: (data: { runId: string }) => void;
   } | null = null;
   private tunnelManager: TunnelManager = new TunnelManager();
+  private readonly assistantStore = new AssistantStore();
   private authSessions: StaleExpirationMap<string, import('./ports/auth-port.js').AuthSessionRecord> | null = null;
   private authFailures: StaleExpirationMap<string, number> | null = null;
   private qrAuthFailures: StaleExpirationMap<string, number> | null = null;
@@ -1607,7 +1611,7 @@ export class WebServer extends EventEmitter {
     registerHostGuard(this.app, () => this.getHostPolicy(), this.basePath);
 
     // Auth middleware (Basic Auth + session cookies + rate limiting)
-    const authState = registerAuthMiddleware(this.app, this.https, this.basePath);
+    const authState = registerAuthMiddleware(this.app, this.https, this.basePath, this.assistantStore);
     if (authState) {
       this.authSessions = authState.authSessions;
       this.authFailures = authState.authFailures;
@@ -1904,6 +1908,7 @@ export class WebServer extends EventEmitter {
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
+    registerAssistantRoutes(this.app, new AssistantRegistry(this.assistantStore), this.sessions);
     registerCodexCommandProfileRoutes(this.app, ctx);
     // The registry's lifetime is the server's: it drops per-session wake state on every
     // cleanup path and resolves in-flight wakes on shutdown.
