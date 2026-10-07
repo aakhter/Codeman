@@ -1,0 +1,324 @@
+#!/usr/bin/env node
+/** Reproducible isolated branch canary: real Codex + HTTP + browser + plugin lifecycle; test Telegram adapter. */
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { spawn, execFileSync } from 'node:child_process';
+import { createServer } from 'node:net';
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright';
+import plugin from '../integrations/openclaw/index.mjs';
+const root = mkdtempSync(join(tmpdir(), 'cod487-assistant-canary-'));
+const home = join(root, 'home');
+const data = join(root, 'data');
+const workspace = join(root, 'workspace');
+for (const dir of [home, data, workspace, join(home, '.codex')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+const auth = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json');
+if (existsSync(auth)) symlinkSync(auth, join(home, '.codex', 'auth.json'));
+writeFileSync(
+  join(home, '.codex', 'config.toml'),
+  `check_for_update_on_startup = false\n[projects.${JSON.stringify(workspace)}]\ntrust_level = "trusted"\n`,
+  { mode: 0o600 }
+);
+writeFileSync(
+  join(workspace, 'AGENTS.md'),
+  'This is an isolated smoke workspace. Reply to exact marker requests without tools.\n'
+);
+const socket = `cod487-canary-${process.pid}`;
+const port = await new Promise((resolvePort) => {
+  const s = createServer();
+  s.listen(0, '127.0.0.1', () => {
+    const p = s.address().port;
+    s.close(() => resolvePort(p));
+  });
+});
+const base = `http://127.0.0.1:${port}`;
+const launcher = join(root, 'server.mjs');
+writeFileSync(
+  launcher,
+  `const { startWebServer } = await import(${JSON.stringify(pathToFileURL(resolve('src/web/server.ts')).href)});\nconst server = await startWebServer(${port},false,true,'127.0.0.1');\nprocess.on('SIGTERM',async()=>{await server.stop();process.exit(0);});\n`,
+  { mode: 0o600 }
+);
+const env = {
+  ...process.env,
+  HOME: home,
+  CODEMAN_INSTANCE: socket,
+  CODEMAN_TMUX_SOCKET: socket,
+  CODEMAN_DATA_DIR: data,
+  CODEX_HOME: join(home, '.codex'),
+  CODEMAN_HOST: '127.0.0.1',
+};
+for (const name of ['CODEMAN_PASSWORD', 'CODEMAN_MULTIUSER', 'CODEMAN_USERNAME', 'CODEMAN_BASE_URL', 'VITEST'])
+  delete env[name];
+const server = spawn(process.execPath, ['--import', 'tsx', launcher], {
+  cwd: process.cwd(),
+  env,
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+let logs = '';
+server.stdout.on('data', (b) => {
+  logs += b;
+});
+server.stderr.on('data', (b) => {
+  logs += b;
+});
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const until = async (fn, timeout = 90000) => {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const result = await fn();
+    if (result) return result;
+    await sleep(500);
+  }
+  throw new Error('Canary condition timed out');
+};
+async function api(path, method = 'GET', body) {
+  const response = await fetch(base + '/api/v1' + path, {
+    method,
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const value = await response.json();
+  if (!response.ok || value.success === false)
+    throw new Error(`${method} ${path}: ${response.status} ${JSON.stringify(value)}`);
+  return value.data ?? value;
+}
+let sessionId;
+let browser;
+let service;
+let assistant;
+const receipts = [];
+const errors = [];
+const checks = [];
+try {
+  await until(async () => {
+    try {
+      return (await fetch(base + '/api/v1/assistants')).ok;
+    } catch {
+      return false;
+    }
+  }, 30000);
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => {
+    if (m.type() === 'error') errors.push(m.text());
+  });
+  await page.goto(base, { waitUntil: 'domcontentloaded' });
+  await sleep(3500);
+  await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Assistants', exact: true }).waitFor();
+  await page.getByLabel('Assistant name', { exact: true }).fill('Canary Brain');
+  await page.getByLabel('Assistant slug', { exact: true }).fill('canary-brain');
+  await page.getByRole('button', { name: 'Create assistant', exact: true }).click();
+  assistant = await until(async () => (await api('/assistants')).assistants.find((a) => a.slug === 'canary-brain'));
+  checks.push('desktop create');
+  await page.screenshot({ path: join(root, 'desktop.png') });
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  const created = await api('/sessions', 'POST', { mode: 'codex', workingDir: workspace, name: 'cod487-canary' });
+  sessionId = created.session.id;
+  await api(`/sessions/${sessionId}/interactive`, 'POST');
+  await sleep(5000);
+  await api(`/sessions/${sessionId}/input`, 'POST', {
+    input: 'Reply with exactly COD487_BOOTSTRAP_OK. Do not use tools.\r',
+    useMux: true,
+  });
+  await until(
+    async () => /^COD487_BOOTSTRAP_OK\.?$/.test((await api(`/sessions/${sessionId}/last-response`)).text?.trim() ?? ''),
+    90000
+  );
+  await until(
+    async () =>
+      (await api(`/sessions/${sessionId}`)).session?.status === 'idle' ||
+      (await api(`/sessions/${sessionId}`)).status === 'idle'
+  );
+  assistant = await api(`/assistants/${assistant.id}/binding`, 'POST', {
+    sessionId,
+    expectedRevision: assistant.revision,
+    expectedGeneration: 0,
+  });
+  assistant = await api(`/assistants/${assistant.id}`, 'PATCH', {
+    expectedRevision: assistant.revision,
+    enabled: true,
+  });
+  for (const setting of ['auto-clear', 'auto-compact', 'checkpoint', 'auto-resume'])
+    await api(`/sessions/${sessionId}/${setting}`, 'POST', { enabled: false });
+  await sleep(1100);
+  assistant = await api(`/assistants/${assistant.id}/handoff`, 'POST', {
+    expectedRevision: assistant.revision,
+    composerEmpty: true,
+  });
+  assert.equal(assistant.capabilities.requestExecution, true);
+  checks.push('exact native binding and handoff');
+  const denied = execFileSync(
+    'curl',
+    [
+      '--silent',
+      '--show-error',
+      '--max-time',
+      '10',
+      '--output',
+      '/dev/null',
+      '--write-out',
+      '%{http_code}',
+      '--header',
+      'Content-Type: application/json',
+      '--data',
+      JSON.stringify({ input: 'MUST_NOT_SEND\r' }),
+      `${base}/api/v1/sessions/${sessionId}/input`,
+    ],
+    { encoding: 'utf8' }
+  );
+  assert.equal(denied, '409');
+  checks.push('curl HTTP input lock');
+  const acknowledgement = await page.evaluate(
+    ({ base, sessionId }) =>
+      new Promise((resolveAck, rejectAck) => {
+        const ws = new WebSocket(
+          base.replace(/^http/, 'ws') + `/ws/sessions/${sessionId}/terminal?cid=cod487-canary-lock`
+        );
+        const timeout = setTimeout(() => {
+          ws.close();
+          rejectAck(new Error('WebSocket lock acknowledgement timed out'));
+        }, 10000);
+        ws.onopen = () => ws.send(JSON.stringify({ t: 'i', d: 'MUST_NOT_SEND', seq: 1 }));
+        ws.onmessage = (event) => {
+          const value = JSON.parse(event.data);
+          if (value.t === 'ia') {
+            clearTimeout(timeout);
+            ws.close();
+            resolveAck(value.err);
+          }
+        };
+        ws.onerror = () => {
+          clearTimeout(timeout);
+          ws.close();
+          rejectAck(new Error('WebSocket lock probe failed'));
+        };
+      }),
+    { base, sessionId }
+  );
+  assert.equal(acknowledgement, 'assistant_locked');
+  checks.push('WebSocket input lock');
+  const issued = await api(`/assistants/${assistant.id}/tokens`, 'POST', {
+    name: 'canary',
+    scopes: ['read', 'submit', 'cancel'],
+  });
+  process.env.COD487_CANARY_TOKEN = issued.token;
+  let ingress;
+  plugin.register({
+    pluginConfig: {
+      baseUrl: base,
+      assistantId: assistant.id,
+      accountId: 'canary',
+      allowFrom: ['123'],
+      tokenEnv: 'COD487_CANARY_TOKEN',
+    },
+    on: (name, handler) => {
+      assert.equal(name, 'inbound_claim');
+      ingress = handler;
+    },
+    registerService: (value) => {
+      service = value;
+    },
+    logger: { error: (message) => errors.push(message) },
+    runtime: {
+      channel: {
+        outbound: {
+          loadAdapter: async () => ({
+            sendText: async (context) => {
+              receipts.push({ accountId: context.accountId, to: context.to, text: context.text });
+              return { messageId: String(receipts.length) };
+            },
+          }),
+        },
+      },
+    },
+  });
+  const serviceContext = { stateDir: join(root, 'gateway'), config: {} };
+  await service.start(serviceContext);
+  const event = {
+    content: '/brain Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
+    channel: 'telegram',
+    isGroup: false,
+    commandAuthorized: true,
+  };
+  const context = {
+    channelId: 'telegram',
+    accountId: 'canary',
+    conversationId: 'telegram:123',
+    senderId: '123',
+    messageId: '456',
+  };
+  await ingress(event, context);
+  await ingress(event, context);
+  await until(async () => (await api(`/assistants/${assistant.id}/requests`)).requests.length === 1);
+  await service.stop();
+  await service.start(serviceContext);
+  checks.push('duplicate update and managed gateway service restart');
+  await until(() => receipts.length > 0, 90000);
+  const requests = (await api(`/assistants/${assistant.id}/requests`)).requests;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].status, 'completed');
+  assert.equal(requests[0].binding.conversationId, assistant.binding.conversationId);
+  assert.match(requests[0].result.text, /^COD487_DELEGATED_OK\.?$/);
+  assert.equal(receipts[0].text, requests[0].result.text);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].to, '123');
+  checks.push('real CLI request completion and matching delivery');
+  await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
+  await sleep(3500);
+  assert.match(await page.locator('#assistantsList').innerText(), /completed/);
+  await page.getByRole('button', { name: 'Take control', exact: true }).click();
+  await until(async () => !(await api(`/assistants/${assistant.id}`)).enabled);
+  checks.push('desktop result and Take control');
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  mobile.on('pageerror', (e) => errors.push(e.message));
+  await mobile.goto(base, { waitUntil: 'domcontentloaded' });
+  await sleep(3500);
+  await mobile.getByRole('button', { name: 'Open assistants', exact: true }).click();
+  await mobile.getByRole('dialog', { name: 'Assistants', exact: true }).waitFor();
+  assert.ok(await mobile.locator('#assistantsDialog').evaluate((el) => el.scrollWidth <= el.clientWidth + 1));
+  await mobile.screenshot({ path: join(root, 'mobile.png') });
+  checks.push('mobile controls');
+  assert.deepEqual(errors, []);
+  writeFileSync(
+    join(root, 'summary.json'),
+    JSON.stringify(
+      {
+        passed: true,
+        checks,
+        sessionId,
+        assistantId: assistant.id,
+        conversationId: assistant.binding.conversationId,
+        requestId: requests[0].id,
+        telegram: 'test SDK adapter; no real bot credentials or poller',
+        artifacts: root,
+      },
+      null,
+      2
+    )
+  );
+  console.log(JSON.stringify({ passed: true, checks, artifacts: root }));
+} catch (error) {
+  writeFileSync(
+    join(root, 'summary.json'),
+    JSON.stringify({ passed: false, error: error.message, errors, checks, artifacts: root }, null, 2)
+  );
+  console.error(JSON.stringify({ passed: false, error: error.message, artifacts: root }));
+  process.exitCode = 1;
+} finally {
+  await service?.stop().catch(() => {});
+  delete process.env.COD487_CANARY_TOKEN;
+  if (assistant) await api(`/assistants/${assistant.id}/take-control`, 'POST', {}).catch(() => {});
+  if (sessionId) await api(`/sessions/${sessionId}`, 'DELETE').catch(() => {});
+  await browser?.close();
+  server.kill('SIGTERM');
+  await new Promise((r) => {
+    server.once('exit', r);
+    setTimeout(r, 10000).unref();
+  });
+  // Diagnostics do not include tokens, native user transcripts, or provider credentials.
+  if (process.exitCode) writeFileSync(join(root, 'server.log'), logs, { mode: 0o600 });
+}

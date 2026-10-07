@@ -2,7 +2,9 @@
 
 Issue: https://aakhter.atlassian.net/browse/COD-487
 
-Status: phases 0, 1, and 3 implementation started on 2026-10-07, authorized by the follow-up request. One branch: `feat/COD-487-openclaw-phases-0-1-3`. Phase 3 is tested against the proposed request contract; phase 2 remains a prerequisite for execution. See `docs/openclaw-integration-evidence.md`. Production deployment and live Brain input remain outside this work.
+Status: full first-release implementation on `feat/COD-487-openclaw-phases-0-1-3`, including durable execution, desktop/mobile controls, connector, regression tests, and an isolated real-Codex canary. The branch name is retained from the initial phase subset. See `docs/openclaw-integration-evidence.md` and `docs/openclaw-release-runbook.md` for delivered behavior and verification. Production deployment and live Brain/Telegram acceptance are separate, pending authorized release steps.
+
+The remaining sections preserve the original design and work-package acceptance criteria. Final choices: session-level input guards rather than a separate coordinator module; fixed 30-minute deadlines; retained request tombstones capped at 1000; metadata refresh through GET polling and request SSE wakeups; desktop handling of approvals; explicit manual rebind after recovery; optional model tools deferred.
 
 ## Outcome
 

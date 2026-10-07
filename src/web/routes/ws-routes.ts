@@ -224,6 +224,11 @@ export function registerWsRoutes(
         try {
           const msg = JSON.parse(String(raw));
           if (msg.t === 'i' && typeof msg.d === 'string') {
+            if (session.assistantInputLocked) {
+              if (socket.readyState === 1)
+                socket.send(JSON.stringify({ t: 'ia', seq: msg.seq, err: 'assistant_locked' }));
+              return;
+            }
             if (msg.d.length > MAX_INPUT_LENGTH) {
               // Refused for good, so say so: a silent return left the frame
               // unACKed and the client redelivered it every few seconds forever

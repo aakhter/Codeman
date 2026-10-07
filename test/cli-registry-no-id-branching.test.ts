@@ -82,6 +82,13 @@ const EXEMPT_FILES = new Set(
  * Keyed `<relative path>::<the matched expression>`.
  */
 const ALLOWED_BRANCHES: Record<string, string> = {
+  // COD-487 deliberately observes Codex's exact rollout identity and native turn
+  // event format. This selects a transcript mechanism, not generic CLI behaviour.
+  "assistant-registry.ts::mode !== 'codex'":
+    'Assistant binding validates Codex session_meta UUID, workspace and originator; no cross-provider fallback',
+  "assistant-request-manager.ts::mode !== 'codex'":
+    'Assistant execution correlates Codex native thread/turn/final/task_complete events in its owned rollout',
+
   // COD-468 landed conversation-recovery integrations alongside COD-486. These
   // select exact on-disk identity formats or the existing public config fields;
   // they do not define CLI capabilities (same category as the identity entries below).

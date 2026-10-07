@@ -233,6 +233,20 @@ export class Connector {
           return { handled: true, reply: { text: 'Cancellation unavailable. Check Codeman before retrying.' } };
         }
       }
+      if (record.requestId && control[1] !== 'cancel') {
+        try {
+          const latest = this.request(await this.api(`/assistant-requests/${record.requestId}`), record);
+          record.status = latest.status;
+          if (latest.status === 'completed' && typeof latest.result?.text === 'string')
+            record.parts = chunks(latest.result.text);
+          this.outbox.put(record);
+        } catch {
+          return {
+            handled: true,
+            reply: { text: 'Codeman status is unavailable. Check the desktop before retrying.' },
+          };
+        }
+      }
       if (control[1] === 'result')
         return { handled: true, reply: { text: record.parts.join('') || 'No completed result is available.' } };
       return {

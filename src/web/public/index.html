@@ -92,6 +92,7 @@
     }
     .app-loaded .loading-skeleton{display:none}
   </style>
+  <link rel="stylesheet" href="assistants.css">
 </head>
 <body>
   <!-- Loading skeleton — visible instantly before CSS/JS loads, hidden by app-loaded class -->
@@ -212,6 +213,7 @@
           <span class="notification-badge" id="notifBadge" style="display:none;">0</span>
         </button>
         <button class="btn-icon-header btn-lifecycle-log" style="display: none" onclick="app.openLifecycleLog()" title="Session Lifecycle Log" aria-label="Open session lifecycle log"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></button>
+        <button class="btn-icon-header assistant-desktop-entry" onclick="app.openAssistants()" title="Assistants" aria-label="Open assistants">AI</button>
         <button class="btn-icon-header btn-settings" onclick="app.openAppSettings()" title="App Settings" aria-label="Open app settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         <div class="header-tokens" id="headerTokens" style="display: none" title="Total tokens across all sessions">0 tokens</div>
       </div>
@@ -4366,7 +4368,20 @@
   <script defer src="home-sessions.js"></script>
   <script defer src="entrance-animations.js"></script>
   <script defer src="ralph-wizard.js"></script>
+  <button type="button" class="btn-toolbar assistant-mobile-entry" onclick="app.openAssistants()" aria-label="Open assistants">Assistants</button>
+  <dialog id="assistantsDialog" class="assistants-dialog" aria-labelledby="assistantsTitle">
+    <header><h2 id="assistantsTitle">Assistants</h2><button class="btn-toolbar" onclick="app.closeAssistants()">Close</button></header>
+    <p>Connect messaging to an existing local Codex conversation. Disable session automation and stop respawn/Ralph before handoff. Handoff locks terminal input until you take control. After a restart or recovery, review and hand off again.</p>
+    <form class="assistant-create" onsubmit="app.createAssistant(event)"><input id="assistantName" aria-label="Assistant name" placeholder="Name (Brain)" required maxlength="60"><input id="assistantSlug" aria-label="Assistant slug" placeholder="Slug (brain)" required pattern="[a-z][a-z0-9\-]{0,59}"><button class="btn-toolbar" type="submit">Create assistant</button></form>
+    <label><input id="assistantComposerEmpty" type="checkbox"> I cleared the terminal composer, no CLI task is running, and nobody is using a direct tmux attachment.</label>
+    <label><input id="assistantReviewConfirmed" type="checkbox"> I stopped or completed the CLI task and reviewed possible side effects before reconciliation.</label>
+    <p id="assistantsError" role="alert"></p>
+    <section id="assistantsTokenPanel" hidden><p>Copy this token to the gateway's credential environment. It is shown only now.</p><textarea id="assistantsToken" readonly aria-label="New connector token"></textarea><button class="btn-toolbar" onclick="app.$('assistantsToken').value='';app.$('assistantsTokenPanel').hidden=true">Hide token</button></section>
+    <div id="assistantsList"></div>
+  </dialog>
+  <div id="assistantInputBanner" hidden role="status"><span></span> <button class="btn-toolbar" onclick="app.openAssistants()">Assistants / Take control</button></div>
   <script defer src="api-client.js"></script>
+  <script defer src="assistants-ui.js"></script>
   <script defer src="subagent-windows.js"></script>
   <script defer src="ultracode-windows.js"></script>
   <script defer src="session-lineage.js"></script>

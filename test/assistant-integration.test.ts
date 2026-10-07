@@ -196,7 +196,7 @@ describe('assistant routes through the common auth middleware', () => {
           method: 'POST',
           url: `/api/assistants/${a.id}/requests`,
           headers,
-          payload: { text: 'hello' },
+          payload: { text: 'hello', idempotencyKey: 'valid-key-123456789' },
         })
       ).statusCode
     ).toBe(503);

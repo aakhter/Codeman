@@ -2569,6 +2569,7 @@ Object.assign(CodemanApp.prototype, {
       this._keyCode229Recovery = null;
     }
     this.terminal.onData((data) => {
+      if (this._assistantLocks?.has(this.activeSessionId)) { this.renderAssistantLock?.(); return; }
       // Canonical xterm data. Telling the controller is what lets it know a
       // keystroke was already delivered and needs no recovery.
       //

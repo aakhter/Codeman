@@ -1,139 +1,134 @@
 # OpenClaw → Codeman assistant connector
 
-Part of [COD-487](https://aakhter.atlassian.net/browse/COD-487), phases 0/1/3 on one branch.
-This package is opt-in and does not install itself into a gateway. The tested host is
-OpenClaw **2026.9.8 (fc23bc8)** with Node 22+. Recheck the SDK before upgrading.
+[COD-487](https://aakhter.atlassian.net/browse/COD-487) implements named assistants,
+durable requests and an opt-in OpenClaw connector. The tested versions are
+OpenClaw **2026.9.8 (fc23bc8)**, Codex **0.160.1**, and Node 22+.
+Optional model-driven tools are deferred; explicit `/brain` bypasses OpenClaw's model.
 
-The current Codeman assistant API stores identities, exact local Codex bindings,
-and scoped credentials. **Execution remains unavailable until COD-490 adds the
-durable request engine and desktop handoff.** The connector reports this explicitly.
-Phase 3 is implemented and tested against a contract fixture; this is not a live
-Telegram/Brain acceptance test. Optional model-driven tools are deferred.
+## Setup
 
-## Assistant management
-
-Use the existing desktop administrator authentication for these `/api/v1` routes.
-Responses use Codeman's `{success, data}` envelope. All assistant responses are `no-store`.
-
-| Method | Route | Body / behavior |
-| --- | --- | --- |
-| POST | `/assistants` | `{name, slug}`; creates a disabled local Codex identity |
-| GET | `/assistants` or `/assistants/:id` | Owner-visible metadata and capabilities |
-| PATCH | `/assistants/:id` | `{expectedRevision, name?, enabled?}` |
-| POST | `/assistants/:id/binding` | `{sessionId, expectedRevision, expectedGeneration}`; starts generation at 0 |
-| DELETE | `/assistants/:id` | `{expectedRevision}`; requires disabled and reconciled requests; revokes tokens |
-| POST | `/assistants/:id/tokens` | `{name, scopes:["read","submit","cancel"]}`; reveals token once |
-| GET | `/assistants/:id/tokens` | Metadata only |
-| DELETE | `/assistants/:id/tokens/:tokenId` | Revocation |
-
-Bind only an idle, running, local Codex session with available credentials. The
-native rollout must have matching metadata ID and workspace, plus a unique
-Codeman originator or an explicit matching native resume ID. Conflicting resume
-IDs, multiple owned rollouts, remote/docker sessions, and cross-owner bindings
-are rejected. A shared workspace or the newest transcript is insufficient.
-Rebinding requires current revision and generation. The phase 2 implementation
-must inject its outstanding-request guard before enabling dispatch.
-
-Tokens are 256-bit random credentials, stored only as SHA-256 hashes in the
-instance-specific private `assistants.json`. A bearer token is limited to one
-assistant and its granted scopes; it cannot manage assistants/tokens or use
-session input, settings, SSE, uploads, or the terminal WebSocket. Disabled,
-missing, or password-reset owners invalidate bearer access in multi-user mode.
-Switching to single-user mode does not promote an owned token to administrator.
-
-## Installation after the execution engine ships
-
-Install/link this directory through OpenClaw's normal plugin workflow. Configure
-`plugins.entries.codeman-assistant` with `enabled: true` and this `config`:
+1. Open **Assistants** in Codeman, create an assistant, and bind an idle local
+   Codex session. Binding validates the exact native conversation and canonical
+   workspace/data-home; it never selects the newest conversation in a workspace.
+2. Disable conflicting session automation, clear any unsubmitted composer text,
+   stop direct tmux input, enable the assistant, and explicitly hand control over.
+   Normal HTTP/WebSocket/session input is then locked. Output remains visible.
+3. Issue an assistant token with `read`, `submit`, and `cancel` scopes. Copy the
+   one-time value into the gateway's credential environment. Tokens are hashed
+   at rest and can be revoked in Codeman. Never put them in configuration or logs.
+4. Install/link this directory through OpenClaw's normal plugin workflow. Root
+   npm installation does not install it into a gateway. Configure
+   `plugins.entries.codeman-assistant` with `enabled: true` and this `config`:
 
 ```json
 {
   "baseUrl": "http://127.0.0.1:3002",
-  "assistantId": "<assistant UUID from Codeman>",
+  "assistantId": "<assistant UUID>",
   "accountId": "<configured Telegram account ID>",
   "allowFrom": ["<numeric Telegram sender ID>"],
   "tokenEnv": "CODEMAN_BRAIN_TOKEN"
 }
 ```
 
-Set that environment variable in the gateway's credential environment, using a
-scoped Codeman token. Never put the token in this config, logs, or source control.
-The base URL must be an HTTPS origin or loopback HTTP; credentials, redirects,
-query strings, subpaths, and arbitrary model-supplied destinations are rejected.
-Subpath hosting is not supported by this initial connector.
+Set `CODEMAN_BRAIN_TOKEN` in the gateway service's environment. Use a separate
+profile and bot for testing; never start a second poller for the production bot.
+Only HTTPS origins or loopback HTTP are accepted. Redirects, credentials, query
+strings, subpaths and model-selected destinations are rejected. Recheck the SDK
+and native events before upgrading either application.
 
-Use a separate test profile and bot for gateway testing. Do not create another
-poller for the production bot. Root npm installation does not load this plugin.
+## Commands
 
-## Commands and delivery
+- `/brain <single-line text>` queues a request and acknowledges its connector key.
+- `/brain status <connector-key>` fetches current request/delivery state.
+- `/brain result <connector-key>` retrieves the matching stored final answer.
+- `/brain cancel <connector-key>` cancels unsent local work or queued Codeman work.
 
-- `/brain <single-line text>` accepts a request into the connector outbox.
-- `/brain status <connector-key>` reports locally observed request/delivery state.
-- `/brain result <connector-key>` retrieves its stored completed result.
-- `/brain cancel <connector-key>` cancels unsent local work or requests queued cancellation from Codeman. In-flight acceptance must be reconciled first.
+Private numeric chats only: account, sender, chat, stable provider message ID and
+command authorization must match. Groups, threads, missing IDs and foreign
+routing metadata are refused. The connector key identifies the original
+account/chat/sender/message and assistant; it is different from Codeman's request
+UUID and native conversation ID. Canonical `content` supplies the command text.
 
-The key in the acknowledgement identifies the original account/chat/sender/message
-and assistant. It is not a native Codex thread ID. The connector stores Codeman's
-request UUID after durable API acceptance. Private-chat sender IDs are explicitly
-allowlisted and must match the chat; groups, threads, missing IDs, unauthorized
-commands, and mismatched routing metadata are refused. OpenClaw's model is not
-called for these requests. Command text comes from the canonical `content` field,
-not the decorated body. `telegram:<chat-id>` and numeric canonical chat forms
-are supported.
+`registerCommand` does not supply the stable provider message ID in the tested
+SDK, so the plugin uses `inbound_claim`. Its managed service submits/polls outside
+ingress and sends through `runtime.channel.outbound.loadAdapter('telegram').sendText`.
+Unicode-safe chunks stay within 3500 UTF-16 units. Adapter formatting can affect
+rendered Markdown. Prompts/results are not sent through another model.
 
-The installed `registerCommand` handler lacks the provider message ID, so this
-plugin uses the supported `inbound_claim` hook. Its managed service submits and
-polls outside the ingress handler and sends completed results through
-`runtime.channel.outbound.loadAdapter('telegram').sendText`. Unicode-safe chunks
-stay within 3500 UTF-16 units; text is passed to the Telegram adapter without an
-extra model invocation. Adapter formatting can affect rendered Markdown.
+## Guarantees and attention states
 
-The private outbox under the service's `stateDir` survives gateway restart. A
-lost API acceptance response retries the **same** idempotency key and payload.
-That is safe only with phase 2's durable idempotency contract. Delivery failures
-never submit a completed request again. A crash/timeout during a Telegram send
-becomes `delivery_unknown` and automatic delivery stops. Retrieve the stored
-result with `/brain result` and review the uncertain notification before any
-manual delivery retry. Delivery is conservative, not an exactly-once guarantee.
-No raw prompt/token/error is logged. Corrupt state is preserved; capacity is 1000
-records and requires operator archival of reconciled records. Approvals,
-interruptions, and unknown execution outcomes require desktop attention.
+Codeman persists acceptance and the payload hash before returning a request.
+The same key/payload returns the same UUID, including after restart; changed
+payload returns 409. One turn runs per bound assistant/conversation. Dispatch
+intent is persisted before the mux write. Native user acceptance, exact turn ID,
+final-answer phase and matching task completion provide result attribution;
+terminal output, commentary and idle timers cannot complete a request.
 
-## Phase 2 HTTP contract required by the connector
+The ledger and PTY write cannot be atomic. An uncertain write, foreign turn,
+identity change, transcript rotation/truncation or observation timeout pauses
+execution as `outcome_unknown`. Possible tool side effects must be reviewed.
+Restart reconciles possible writes without resubmitting them; queued work needs
+a new explicit desktop handoff. Recovery requires taking control, reconciliation
+and explicit rebind to a proven native conversation.
 
-These routes currently return 503 and `capabilities.requestExecution` is false.
-Phase 2 must implement them before changing that capability:
+**Take control** disables the assistant, cancels queued work, waits for pending
+submission, and marks active work interrupted. It releases Codeman's input lock;
+it does not stop Codex or undo tool activity. Handle approvals or stop the task
+in the desktop terminal, then acknowledge reconciliation before enabling again.
+Direct tmux writes bypass the lock and must stop during handoff. Unexpected
+native turns are detected conservatively.
 
-```text
-POST /api/v1/assistants/:id/requests
-  { text, idempotencyKey }
-GET /api/v1/assistant-requests/:requestId
-POST /api/v1/assistant-requests/:requestId/cancel
-```
+The private outbox survives gateway restart. Lost acceptance responses retry the
+same key/payload. Delivery failures never rerun completed work. A crash/timeout
+while sending becomes `delivery_unknown`; automatic delivery stops. Retrieve
+`/brain result` and review before manually sending a notification again.
+Delivery is conservative, without an exactly-once notification guarantee.
 
-Request responses must include `{id, assistantId, idempotencyKey, status}`;
-completed requests additionally include `result: {text}`. Supported statuses are
-`queued`, `dispatching`, `running`, `awaiting_approval`, `completed`, `failed`,
-`cancelled`, `interrupted`, and `outcome_unknown`. The same key with the same
-payload must return the same durable request UUID; a different payload must
-conflict. Request routes must verify request ownership and assistant scope at
-lookup, including GET/cancel by request UUID. The bearer middleware's path/scope
-check alone cannot provide request-level ownership. Cancellation is queued-only.
+Requests expire before dispatch after 30 minutes. An active observation deadline
+blocks dispatch but does not interrupt the agent. Each assistant has 20 queued/
+active slots; both durable ledgers retain at most 1000 records. Preserve backups
+and idempotency tombstones when archiving; do not delete keys and replay old input.
+No raw prompt, token or error is logged by the connector. Corrupt state is
+preserved and execution fails closed.
+
+## HTTP API
+
+Routes below use `/api/v1` and Codeman's `{success, data}` envelope; responses are
+`no-store`. Management uses existing desktop user/admin authentication. A bearer
+credential can only read/submit/cancel its own assistant's requests and cannot
+access settings, management, terminal input, uploads, SSE or WebSockets.
+Disabled/missing/password-reset owners invalidate bearer access.
+
+| Method | Route | Body / behavior |
+| --- | --- | --- |
+| POST / GET | `/assistants` | Create `{name, slug}` / list visible identities |
+| GET / PATCH | `/assistants/:id` | Inspect / `{expectedRevision, name?, enabled?}` |
+| POST | `/assistants/:id/binding` | `{sessionId, expectedRevision, expectedGeneration}` |
+| DELETE | `/assistants/:id` | `{expectedRevision}`; disabled, no outstanding work |
+| POST / GET | `/assistants/:id/tokens` | Issue `{name, scopes}` / metadata only |
+| DELETE | `/assistants/:id/tokens/:tokenId` | Revoke |
+| POST | `/assistants/:id/handoff` | `{expectedRevision, composerEmpty:true}` |
+| POST | `/assistants/:id/take-control` | Pause and release input ownership |
+| POST / GET | `/assistants/:id/requests` | Submit `{text, idempotencyKey}` / list |
+| GET | `/assistant-requests/:requestId` | Current status and completed `result.text` |
+| POST | `/assistant-requests/:requestId/cancel` | Queued cancellation only |
+| POST | `/assistant-requests/:requestId/reconcile` | Desktop-only `{acknowledgeSideEffects:true}` |
+
+Single-line text only, maximum 20,000 characters; terminal controls and CLI slash
+commands are rejected. Request UUID lookups enforce both ownership and token
+assistant scope. Revision/generation checks protect binding changes; duplicate
+native-conversation bindings and remote/Docker sessions are rejected. Request
+SSE wakeups contain IDs/status/revision only; GET remains authoritative.
 
 ## Checks
 
 ```sh
-npm test -- test/assistant-integration.test.ts test/openclaw-connector.test.ts
+npm test -- test/assistant-integration.test.ts test/assistant-requests.test.ts test/openclaw-connector.test.ts
 npm --prefix integrations/openclaw test
+node scripts/smoke-openclaw-assistant.mjs
 ```
 
-The root CI test invokes the package's regression suites. The native contract
-probe is deliberately read-only and is not a production turn observer:
-
-```sh
-node integrations/openclaw/codex-contract-spike.mjs \
-  <rollout-path> <native-conversation-id> <originator> '<known-test-prompt>'
-```
-
-See [phase evidence](../../docs/openclaw-integration-evidence.md) for the exact
-verified versions, supported signals, and remaining release gates.
+The canary uses isolated instance/data/socket/home, a throwaway real Codex session
+and a test Telegram adapter. It does not use a production bot or Brain session.
+See [implementation evidence](../../docs/openclaw-integration-evidence.md) and
+[release runbook](../../docs/openclaw-release-runbook.md).

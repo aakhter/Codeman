@@ -2144,6 +2144,10 @@ export function registerSessionRoutes(
     const { id } = req.params as { id: string };
     const { input, useMux, seq, clientId, wait, waitTimeout } = parseBody(SessionInputWithLimitSchema, req.body);
     const session = findSessionOrFail(ctx, id, req);
+    if (session.assistantInputLocked)
+      return reply
+        .code(409)
+        .send(createErrorResponse(ApiErrorCode.CONFLICT, 'Assistant owns session input; take control in Assistants'));
 
     const inputStr = String(input);
     if (inputStr.length > MAX_INPUT_LENGTH) {
@@ -2554,6 +2558,8 @@ export function registerSessionRoutes(
     }
 
     const session = findSessionOrFail(ctx, id, req);
+    if (session.assistantInputLocked)
+      throw { statusCode: 409, body: createErrorResponse(ApiErrorCode.CONFLICT, 'Assistant owns session input') };
     session.cancelCheckpoint('manual-takeover');
     const muxName = session.muxName;
     if (!muxName) {
@@ -2575,17 +2581,20 @@ export function registerSessionRoutes(
     try {
       // Route through the dedicated Codeman socket — bare `tmux` would target the
       // user's default server and never find this session (same #80 regression class).
-      await new Promise<void>((resolve, reject) => {
-        execFile(
-          'tmux',
-          ['-L', ctx.mux.muxSocket, 'send-keys', '-H', '-t', muxName, ...hex],
-          { timeout: 5000 },
-          (err) => {
-            if (err) reject(err);
-            else resolve();
-          }
-        );
-      });
+      await session.performAuxiliaryInput(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            execFile(
+              'tmux',
+              ['-L', ctx.mux.muxSocket, 'send-keys', '-H', '-t', muxName, ...hex],
+              { timeout: 5000 },
+              (err) => {
+                if (err) reject(err);
+                else resolve();
+              }
+            );
+          })
+      );
     } catch (err) {
       console.error('[Server] send-key failed:', err);
       return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, 'tmux send-keys failed');

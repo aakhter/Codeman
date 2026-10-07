@@ -27,6 +27,9 @@
  * @module web/server
  */
 
+import { findUser } from '../user-store.js';
+import { AssistantRequestManager } from '../assistant-request-manager.js';
+import { AssistantRequestStore } from '../assistant-request-store.js';
 import { AssistantStore } from '../assistant-store.js';
 import { AssistantRegistry } from '../assistant-registry.js';
 import { registerAssistantRoutes } from './routes/assistant-routes.js';
@@ -567,6 +570,7 @@ export class WebServer extends EventEmitter {
   } | null = null;
   private tunnelManager: TunnelManager = new TunnelManager();
   private readonly assistantStore = new AssistantStore();
+  private assistantRequests: AssistantRequestManager | undefined;
   private authSessions: StaleExpirationMap<string, import('./ports/auth-port.js').AuthSessionRecord> | null = null;
   private authFailures: StaleExpirationMap<string, number> | null = null;
   private qrAuthFailures: StaleExpirationMap<string, number> | null = null;
@@ -1421,6 +1425,7 @@ export class WebServer extends EventEmitter {
 
   /** Register a live session only inside its owner layout queue, rolling activity state back on failure. */
   private async registerSessionWithLayout(session: Session, options: SessionCreationOptions = {}) {
+    this.assistantRequests?.attach(session);
     this.attachAgentActivity(session);
     let activityAttached = true;
     try {
@@ -1908,7 +1913,44 @@ export class WebServer extends EventEmitter {
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
-    registerAssistantRoutes(this.app, new AssistantRegistry(this.assistantStore), this.sessions);
+    this.assistantRequests = new AssistantRequestManager(
+      this.assistantStore,
+      new AssistantRequestStore(),
+      (id) => this.sessions.get(id),
+      (id) =>
+        Boolean(
+          this.respawnControllers.get(id)?.isRunning ||
+          this.sessions.get(id)?.ralphTracker.enabled ||
+          this.sessions.get(id)?.autoClearEnabled ||
+          this.sessions.get(id)?.autoCompactEnabled ||
+          this.sessions.get(id)?.checkpointEnabled
+        ),
+      async (r) => {
+        if (
+          r.tokenId &&
+          !this.assistantStore
+            .listTokens(r.assistantId)
+            .some((t) => t.id === r.tokenId && t.owner === r.owner && t.scopes.includes('submit'))
+        )
+          return false;
+        if (!isMultiUserMode()) return r.owner === undefined;
+        const user = r.owner ? await findUser(r.owner) : undefined;
+        return Boolean(user && !user.disabled && !user.mustChangePassword);
+      },
+      (r) =>
+        this.sse.broadcast(
+          'assistant-request:updated',
+          { id: r.id, assistantId: r.assistantId, status: r.status, revision: r.revision },
+          isMultiUserMode() ? { owner: r.owner, adminOnly: r.owner === undefined } : undefined
+        )
+    );
+    registerAssistantRoutes(
+      this.app,
+      new AssistantRegistry(this.assistantStore, (id) => this.assistantRequests!.outstanding(id)),
+      this.sessions,
+      this.assistantRequests
+    );
+    this.assistantRequests.start();
     registerCodexCommandProfileRoutes(this.app, ctx);
     // The registry's lifetime is the server's: it drops per-session wake state on every
     // cleanup path and resolves in-flight wakes on shutdown.
@@ -2687,6 +2729,7 @@ export class WebServer extends EventEmitter {
   }
 
   private async setupSessionListeners(session: Session): Promise<void> {
+    this.assistantRequests?.attach(session);
     // PTY exit detaches the coordinator together with the old listener set. A
     // later interactive restart reuses this Session object, so restore its
     // exact-identity gate before the replacement PTY becomes observable.
@@ -5085,6 +5128,7 @@ export class WebServer extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    await this.assistantRequests?.stop();
     getLifecycleLog().log({ event: 'server_stopped', sessionId: '*' });
     // Set stopping flag to prevent new timer creation during shutdown
     this.sse.setStopping();

@@ -1,9 +1,10 @@
-/** Assistant registry routes. Request execution is deliberately gated until COD-490. */
+/** Owner-scoped assistant management, handoff and durable request routes. */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { AssistantRegistry, AssistantConflict, type AssistantSession } from '../../assistant-registry.js';
 import { ApiErrorCode, createErrorResponse } from '../../types.js';
 import { getAuthUser, ownerFor, canAccessOwned, parseBody } from '../route-helpers.js';
+import type { AssistantRequestManager } from '../../assistant-request-manager.js';
 import type { AssistantDefinition } from '../../types/assistant.js';
 
 const Params = z.object({ id: z.uuid() });
@@ -34,16 +35,12 @@ const Token = z
       .max(3),
   })
   .strict();
-const unavailable = () =>
-  createErrorResponse(
-    ApiErrorCode.OPERATION_FAILED,
-    'Assistant request execution is unavailable until COD-490 is installed'
-  );
 
 export function registerAssistantRoutes(
   app: FastifyInstance,
   registry: AssistantRegistry,
-  sessions: ReadonlyMap<string, AssistantSession>
+  sessions: ReadonlyMap<string, AssistantSession>,
+  requests?: AssistantRequestManager
 ): void {
   const visible = (req: FastifyRequest, a: AssistantDefinition): boolean =>
     req.assistantPrincipal
@@ -57,7 +54,12 @@ export function registerAssistantRoutes(
   };
   const expose = (a: AssistantDefinition) => ({
     ...a,
-    capabilities: { localCodex: true, requestExecution: false, requiresDesktopHandoff: true },
+    capabilities: {
+      localCodex: true,
+      requestExecution: false,
+      requiresDesktopHandoff: true,
+      ...requests?.availability(a),
+    },
   });
   const mutate = async <T>(operation: () => T | Promise<T>): Promise<T> => {
     try {
@@ -128,16 +130,68 @@ export function registerAssistantRoutes(
       return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND));
     return { success: true, data: { revoked: true } };
   });
-  // Explicit capability gate. Do not synthesize a result from last-response or
-  // silently submit through the legacy terminal API when the engine is absent.
-  app.post('/api/assistants/:id/requests', async (req, reply) => {
-    get(req);
-    return reply.code(503).send(unavailable());
+  const engine = (): AssistantRequestManager => {
+    if (!requests)
+      throw {
+        statusCode: 503,
+        body: createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Assistant execution engine is unavailable'),
+      };
+    return requests;
+  };
+  const request = (req: FastifyRequest) => {
+    const { id } = parseBody(Params, req.params);
+    const r = engine().store.get(id);
+    const a = r && registry.store.get(r.assistantId);
+    if (!r || !a || !visible(req, a) || r.owner !== a.owner)
+      throw { statusCode: 404, body: createErrorResponse(ApiErrorCode.NOT_FOUND) };
+    return r;
+  };
+  app.post('/api/assistants/:id/handoff', async (req) => {
+    const a = get(req);
+    const input = parseBody(
+      z.object({ expectedRevision: z.number().int().positive(), composerEmpty: z.literal(true) }).strict(),
+      req.body
+    );
+    await mutate(() => engine().handoff(a, input.expectedRevision, input.composerEmpty));
+    return { success: true, data: expose(registry.store.get(a.id)!) };
   });
-  app.get('/api/assistants/:id/requests', async (req, reply) => {
-    get(req);
-    return reply.code(503).send(unavailable());
+  app.post('/api/assistants/:id/take-control', async (req) => {
+    const a = get(req);
+    await mutate(() => engine().takeControl(a));
+    return { success: true, data: expose(registry.store.get(a.id)!) };
   });
-  app.get('/api/assistant-requests/:id', async (_req, reply) => reply.code(503).send(unavailable()));
-  app.post('/api/assistant-requests/:id/cancel', async (_req, reply) => reply.code(503).send(unavailable()));
+  app.post('/api/assistants/:id/requests', async (req) => {
+    const a = get(req);
+    const input = parseBody(
+      z
+        .object({ text: z.string().min(1).max(20000), idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/) })
+        .strict(),
+      req.body
+    );
+    return {
+      success: true,
+      data: await mutate(() => engine().submit(a, input.text, input.idempotencyKey, req.assistantPrincipal?.tokenId)),
+    };
+  });
+  app.get('/api/assistants/:id/requests', async (req) => ({
+    success: true,
+    data: {
+      requests: engine()
+        .store.list()
+        .filter((r) => r.assistantId === get(req).id),
+    },
+  }));
+  app.get('/api/assistant-requests/:id', async (req) => ({ success: true, data: request(req) }));
+  app.post('/api/assistant-requests/:id/cancel', async (req) => ({
+    success: true,
+    data: await mutate(() => engine().cancel(request(req))),
+  }));
+  app.post('/api/assistant-requests/:id/reconcile', async (req) => {
+    const r = request(req);
+    const { acknowledgeSideEffects } = parseBody(
+      z.object({ acknowledgeSideEffects: z.literal(true) }).strict(),
+      req.body
+    );
+    return { success: true, data: await mutate(() => engine().reconcile(r, acknowledgeSideEffects)) };
+  });
 }

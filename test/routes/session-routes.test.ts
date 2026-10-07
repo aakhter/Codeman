@@ -1038,6 +1038,24 @@ describe('session-routes', () => {
   // ========== POST /api/sessions/:id/send-key ==========
 
   describe('POST /api/sessions/:id/send-key', () => {
+    it('rejects both input routes before sending keys while assistant handoff owns the session', async () => {
+      harness.ctx._session.assistantInputLocked = true;
+      execFile.mockClear();
+      const key = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/send-key',
+        payload: { key: 'S-Enter' },
+      });
+      const input = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/input',
+        payload: { input: 'must not send\r' },
+      });
+      expect(key.statusCode).toBe(409);
+      expect(input.statusCode).toBe(409);
+      expect(execFile).not.toHaveBeenCalled();
+      expect(harness.ctx._session.writeBuffer).toEqual([]);
+    });
     it('routes tmux send-keys through the dedicated Codeman socket (-L)', async () => {
       // Regression guard: bare `tmux` would hit the user's default server and never
       // find a session that lives only on the Codeman socket (#80 regression class).

@@ -1,4 +1,4 @@
-/** Named assistant metadata and exact local Codex binding. Execution is supplied by COD-490. */
+/** Named assistant metadata and exact local Codex binding. */
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { AssistantStore } from './assistant-store.js';
@@ -48,7 +48,7 @@ export async function resolveAssistantBinding(
 }
 
 export class AssistantRegistry {
-  // COD-490 will inject a durable request guard here before enabling execution.
+  // The request engine supplies the durable outstanding-work and handoff guard.
   constructor(
     readonly store: AssistantStore,
     private readonly hasOutstandingRequests: (id: string) => boolean = () => false

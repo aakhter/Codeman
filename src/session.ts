@@ -4641,6 +4641,7 @@ export class Session extends EventEmitter {
     prompt: string,
     options?: { model?: string; onProgress?: (info: { tokens?: number; status?: string }) => void }
   ): Promise<{ result: string; cost: number }> {
+    if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
     return new Promise((resolve, reject) => {
       if (this.ptyProcess) {
         reject(new Error('Session already has a running process'));
@@ -5366,7 +5367,40 @@ export class Session extends EventEmitter {
    * discards the data, but it used to do so with no signal at all — which is how
    * input could disappear while the caller believed it had been delivered.
    */
+  private _assistantInputGuard: ((permit?: string) => boolean) | undefined;
+  private _assistantPendingWrites = 0;
+  private _assistantLastInputAt = 0;
+  setAssistantInputGuard(guard: (permit?: string) => boolean): void {
+    this._assistantInputGuard = guard;
+  }
+  get assistantPendingWrites(): number {
+    return this._assistantPendingWrites;
+  }
+  get assistantLastInputAt(): number {
+    return this._assistantLastInputAt;
+  }
+  get assistantInputLocked(): boolean {
+    return !this.assistantInputAllowed();
+  }
+  assistantInputAllowed(permit?: string): boolean {
+    return this._assistantInputGuard?.(permit) ?? true;
+  }
+  async performAuxiliaryInput(operation: () => Promise<void>): Promise<void> {
+    if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
+    this._assistantLastInputAt = Date.now();
+    this._assistantPendingWrites++;
+    try {
+      await operation();
+    } finally {
+      this._assistantPendingWrites--;
+    }
+  }
+  cancelAssistantSubmitVerification(): void {
+    this._submitVerifier?.cancel();
+  }
   write(data: string, options: SessionWriteOptions = {}): boolean {
+    if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._assistantLastInputAt = Date.now();
     const submittedPrompt = this._trackSubmit(data, options);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
@@ -5519,22 +5553,29 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string, options: SessionWriteOptions = {}): Promise<boolean> {
-    const submittedPrompt = this._trackSubmit(data, options);
-    if (this._mux && this._muxSession) {
-      const sent = await this._mux.sendInput(this.id, data);
-      if (sent) {
-        this._emitSubmittedPrompt(submittedPrompt);
-        this._verifySubmitted(data);
+    if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._assistantLastInputAt = Date.now();
+    this._assistantPendingWrites++;
+    try {
+      const submittedPrompt = this._trackSubmit(data, options);
+      if (this._mux && this._muxSession) {
+        const sent = await this._mux.sendInput(this.id, data);
+        if (sent) {
+          this._emitSubmittedPrompt(submittedPrompt);
+          // Delegated delivery is observed through native acceptance, without autonomous Enter retries.
+          if (!options.assistantPermit) this._verifySubmitted(data);
+        }
+        return sent;
       }
-      return sent;
+      if (this.ptyProcess) {
+        this.ptyProcess.write(data);
+        this._emitSubmittedPrompt(submittedPrompt);
+        return true;
+      }
+      return false;
+    } finally {
+      this._assistantPendingWrites--;
     }
-    // Fallback to PTY write
-    if (this.ptyProcess) {
-      this.ptyProcess.write(data);
-      this._emitSubmittedPrompt(submittedPrompt);
-      return true;
-    }
-    return false;
   }
 
   /**
@@ -5542,6 +5583,8 @@ export class Session extends EventEmitter {
    * unchanged; checkpoint orchestration receives the exact failed stage.
    */
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
+    if (!this.assistantInputAllowed())
+      return { ok: false, stage: 'text', error: 'Assistant owns session input', attempt: 1 };
     const checkpointRunId = this._autoOps.activeCheckpointRunId;
     const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
     const isClear = checkpointCommand === '/clear';
@@ -5636,7 +5679,7 @@ export class Session extends EventEmitter {
         this._isStopped || !this._mux || !this._muxSession
           ? null
           : this._mux.capturePaneText?.(this._muxSession.muxName),
-      sendEnter: () => this._mux?.sendInput(this.id, '\r'),
+      sendEnter: () => (this.assistantInputAllowed() ? this._mux?.sendInput(this.id, '\r') : undefined),
       // ⚠ NO fallback glyph here, unlike the screen-reading probe elsewhere in this file.
       // Only claude and codex declare a promptGlyph; the other eight modes would fall back
       // to claude's `❯`, which is ALSO starship's default shell prompt (and pure's, and
@@ -5895,6 +5938,7 @@ export class Session extends EventEmitter {
 
   // Legacy method for sending input - wraps runPrompt
   async sendInput(input: string): Promise<void> {
+    if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
     this._status = 'busy';
     this._markActivity(true);
     this.runPrompt(input).catch((err) => {
