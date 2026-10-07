@@ -49,11 +49,12 @@ the real PTY canary below.
 
 ## Verification
 
-- Typecheck, lint (zero errors; one existing server `any` warning), format,
+- Build, typecheck, lint (zero errors; one existing server `any` warning), format,
   lockfile, frontend syntax and public asset checks pass.
 - Focused assistant/store/auth/identity/native projection/connector/wait/submit
   verification passes (102 tests), alongside native identity/rollout regressions
-  (15 tests) and session routes/input-lock regressions (220 tests). Tests cover duplicate/concurrent requests, changed
+  (15 tests), session routes/input-lock regressions (220 tests), CLI format guard
+  (11 tests) and mobile header policy (5 tests): **353 focused tests pass**. Tests cover duplicate/concurrent requests, changed
   payloads, durable intent before write, lost write/restart without resend,
   late completion, deadline, inode replacement, incomplete native task despite
   idle status, desktop interference, queued expiry/cancel, grant revocation,
@@ -77,8 +78,12 @@ the real PTY canary below.
   recorded separately from passing feature tests. The broad run also exposed
   missing Session mock support for the new auxiliary-input guard and an omitted
   CLI static-guard explanation for the deliberately Codex-specific native format;
-  both feature-related test integrations were corrected and rerun. No unrelated
-  source is changed.
+  those integrations and the mobile header policy were corrected and rerun.
+  The full sweep completed: 629 files, 11,767 passing tests, 108 failing tests.
+  Nine feature-related failures across three files were fixed; the other failures
+  are in 28 baseline suites (the remote-file baseline used a representative test).
+  Comparison artifact: `/tmp/cod487-baseline-comparison.json`; full output:
+  `/tmp/cod487-full-suite.log`. No unrelated source is changed.
 
 ## First-release limits and remaining release gates
 
