@@ -7370,6 +7370,17 @@ class CodemanApp {
     return root.getAttribute('data-tab-orientation') === 'vertical' && root.dataset.tabRailSort === 'activity';
   }
 
+  _isNamedGroupTabRef(ref) {
+    return (this.tabLayout?.groups || []).some((group) =>
+      group.refs.some((member) => member.kind === ref.kind && member.id === ref.id)
+    );
+  }
+
+  _tabRailVisualOrder(ref, railSortOrder) {
+    if (this._isNamedGroupTabRef(ref)) return undefined;
+    return ref.kind === 'webview' ? 9999 : railSortOrder.get(ref.id);
+  }
+
   /**
    * Visual position per session id for the sorted rail, or null when the rail is
    * not sorting.
@@ -7398,6 +7409,9 @@ class CodemanApp {
     if (!window.CodemanSessionOrder || typeof this._mobileOverviewState !== 'function') return null;
     const rows = [];
     for (let i = 0; i < ids.length; i++) {
+      // Named groups keep their saved ref order across selections and activity
+      // updates. Only Ungrouped (or a flat rail) uses activity sorting.
+      if (this._isNamedGroupTabRef({ kind: 'session', id: ids[i] })) continue;
       const session = this.sessions.get(ids[i]);
       if (!session) continue;
       rows.push({
@@ -8717,7 +8731,7 @@ class CodemanApp {
           window.CodemanTabLayout.altNumberForRef(altRefs, ref)
         ),
       railSortOrder
-        ? (ref) => (ref.kind === 'webview' ? 9999 : railSortOrder.get(ref.id))
+        ? (ref) => this._tabRailVisualOrder(ref, railSortOrder)
         : null
     );
     container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');

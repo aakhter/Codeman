@@ -21985,6 +21985,11 @@ html[data-tab-orientation='vertical'][data-tab-rail-sort='activity'] .tab-rail .
   order: 9999;
 }
 
+/* Named groups retain saved ref order, including web tabs between sessions. */
+html[data-tab-orientation='vertical'][data-tab-rail-sort='activity'] .tab-rail .tab-layout-group:not([data-tab-group-id='']) .session-tab[data-webview-id] {
+  order: 0;
+}
+
 /* --- Collapsed rail ---------------------------------------------------- */
 /* Collapsed is a 44px icon rail, not "hidden": the ambient signal (status dot,
    task/subagent/ultracode badges) is the whole point of mission control and

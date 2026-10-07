@@ -109,6 +109,10 @@ type Row = {
 type RailApp = {
   isTabRailSorted: () => boolean;
   _tabRailSortOrder: (ids: string[]) => Map<string, number> | null;
+  _tabRailVisualOrder: (ref: { kind: string; id: string }, order: Map<string, number>) => number | undefined;
+  tabLayout?: { groups: { id: string; refs: { kind: string; id: string }[] }[] };
+  activeSessionId?: string;
+  sessions: Map<string, Row>;
 };
 
 /**
@@ -135,6 +139,39 @@ const NOW = 1_700_000_000_000;
 const minsAgo = (m: number) => NOW - m * 60_000;
 
 describe('vertical tab rail row order', () => {
+  it('keeps named groups in saved order across selection and activity updates while sorting Ungrouped', () => {
+    const app = makeApp([
+      { id: 'a', status: 'idle', lastActivityAt: minsAgo(1) },
+      { id: 'c', status: 'idle', lastActivityAt: minsAgo(3) },
+      { id: 'quiet', status: 'idle', lastActivityAt: minsAgo(2) },
+      { id: 'blocked', status: 'idle', lastActivityAt: minsAgo(9), hooks: ['permission_prompt'] },
+    ]);
+    app.tabLayout = {
+      groups: [
+        {
+          id: 'g',
+          refs: [
+            { kind: 'session', id: 'a' },
+            { kind: 'webview', id: 'dashboard' },
+            { kind: 'session', id: 'c' },
+          ],
+        },
+      ],
+    };
+    const saved = JSON.stringify(app.tabLayout);
+    const ids = ['a', 'c', 'quiet', 'blocked'];
+    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
+    app.activeSessionId = 'c';
+    app.sessions.get('c')!.lastActivityAt = NOW;
+    app.sessions.get('c')!.status = 'busy';
+    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
+    const order = app._tabRailSortOrder(ids)!;
+    expect(app._tabRailVisualOrder({ kind: 'session', id: 'c' }, order)).toBeUndefined();
+    expect(app._tabRailVisualOrder({ kind: 'webview', id: 'dashboard' }, order)).toBeUndefined();
+    expect(app._tabRailVisualOrder({ kind: 'webview', id: 'ungrouped-web' }, order)).toBe(9999);
+    expect(JSON.stringify(app.tabLayout)).toBe(saved);
+  });
+
   it('puts a blocked session first, longest-blocked ahead of the newest block', () => {
     const ids = ['fresh-block', 'old-block', 'quiet'];
     const app = makeApp([
