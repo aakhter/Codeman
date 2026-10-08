@@ -99,3 +99,29 @@ Bitbucket CI and one explicitly authorized real Brain/Telegram canary remain
 separate gates under COD-493. Source does not prove production acceptance.
 See [connector setup](../integrations/openclaw/README.md) and
 [release/rollback runbook](openclaw-release-runbook.md).
+
+## 2026-10-08 production ingress correction
+
+The first real private-chat acceptance exposed a gap in the original canary:
+`inbound_claim` is targeted only at a plugin-owned OpenClaw conversation binding.
+A registered hook and loaded plugin did not establish ordinary bot-chat routing.
+The gateway received `/brain`, but Codeman's Brain request ledger remained empty.
+
+The connector now also claims ordinary messages through `reply_dispatch`, before
+model execution, using the finalized trusted channel context. This retains
+`CommandAuthorized`, exact Telegram account/sender/private chat, stable provider
+message ID and thread rejection; `before_dispatch` omits authorization and thread
+facts and was rejected as the correction surface. Plugin-owned bindings retain
+`inbound_claim`. Ordinary messages and unrelated channels fall through normally.
+
+All 13 connector/native tests pass, including the ordinary-chat hook and denied
+account/sender/group/thread/missing identity/internal-turn/delivery-policy cases.
+The installed OpenClaw hook runner invokes the new hook and returns handled.
+The updated real Codex/browser canary passes ordinary-chat takeover, duplicate
+message identity, one execution and matching final delivery through a test SDK
+adapter: `/tmp/cod487-assistant-canary-kFcPk5/summary.json`. The root connector
+wrapper test and formatting/syntax checks pass. Production gateway was restarted
+with the linked connector; runtime loader reports two hooks and no diagnostics.
+The existing Brain session/conversation and explicit handoff were preserved.
+A new real Telegram message is required to establish production delivery; previous
+messages are not automatically replayed.

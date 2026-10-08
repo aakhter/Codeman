@@ -216,8 +216,8 @@ try {
       tokenEnv: 'COD487_CANARY_TOKEN',
     },
     on: (name, handler) => {
-      assert.equal(name, 'inbound_claim');
-      ingress = handler;
+      assert.ok(['inbound_claim', 'reply_dispatch'].includes(name));
+      if (name === 'reply_dispatch') ingress = handler;
     },
     registerService: (value) => {
       service = value;
@@ -239,20 +239,34 @@ try {
   const serviceContext = { stateDir: join(root, 'gateway'), config: {} };
   await service.start(serviceContext);
   const event = {
-    content: '/brain Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
-    channel: 'telegram',
-    isGroup: false,
-    commandAuthorized: true,
+    sendPolicy: 'allow',
+    ctx: {
+      BodyForCommands: '/brain Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
+      OriginatingChannel: 'telegram',
+      ChatType: 'direct',
+      CommandAuthorized: true,
+      AccountId: 'canary',
+      OriginatingTo: 'telegram:123',
+      SenderId: '123',
+      MessageSid: '456',
+    },
   };
+  const acknowledgements = [];
   const context = {
-    channelId: 'telegram',
-    accountId: 'canary',
-    conversationId: 'telegram:123',
-    senderId: '123',
-    messageId: '456',
+    dispatcher: {
+      sendFinalReply: (payload) => {
+        acknowledgements.push(payload);
+        return true;
+      },
+    },
+    recordProcessed: () => {},
+    markIdle: () => {},
   };
-  await ingress(event, context);
-  await ingress(event, context);
+  assert.equal((await ingress(event, context)).handled, true);
+  assert.equal((await ingress(event, context)).handled, true);
+  assert.match(acknowledgements[0].text, /Accepted by connector/);
+  assert.match(acknowledgements[1].text, /Existing request/);
+  checks.push('ordinary Telegram reply_dispatch takeover with stable message identity');
   await until(async () => (await api(`/assistants/${assistant.id}/requests`)).requests.length === 1);
   await service.stop();
   await service.start(serviceContext);

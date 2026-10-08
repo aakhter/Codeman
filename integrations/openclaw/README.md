@@ -50,7 +50,10 @@ account/chat/sender/message and assistant; it is different from Codeman's reques
 UUID and native conversation ID. Canonical `content` supplies the command text.
 
 `registerCommand` does not supply the stable provider message ID in the tested
-SDK, so the plugin uses `inbound_claim`. Its managed service submits/polls outside
+SDK. Ordinary bot chats use `reply_dispatch`, which preserves trusted
+`CommandAuthorized`, sender/account/chat, stable provider message ID and thread
+metadata before model dispatch. `inbound_claim` remains available for explicitly
+plugin-owned conversation bindings; it is not a global ingress hook. Its managed service submits/polls outside
 ingress and sends through `runtime.channel.outbound.loadAdapter('telegram').sendText`.
 Unicode-safe chunks stay within 3500 UTF-16 units. Adapter formatting can affect
 rendered Markdown. Prompts/results are not sent through another model.

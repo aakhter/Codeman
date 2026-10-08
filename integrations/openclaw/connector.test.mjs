@@ -235,3 +235,99 @@ test('cancels pending local work without submission and refuses ambiguous in-fli
   assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 0);
   assert.equal(h.make().outbox.records[0].status, 'cancelled');
 });
+
+test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuits the model', async (t) => {
+  const h = harness(t);
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env[config.tokenEnv];
+  globalThis.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: config.assistantId,
+        enabled: true,
+        capabilities: { requestExecution: true },
+      },
+    });
+  process.env[config.tokenEnv] = `cma_${'a'.repeat(43)}`;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env[config.tokenEnv];
+    else process.env[config.tokenEnv] = originalToken;
+  });
+  const hooks = new Map();
+  let service;
+  plugin.register({
+    pluginConfig: config,
+    on: (name, handler) => hooks.set(name, handler),
+    registerService: (value) => {
+      service = value;
+    },
+    runtime: { channel: { outbound: { loadAdapter: async () => ({ sendText: async () => ({ messageId: '1' }) }) } } },
+    logger: { error: () => {} },
+  });
+  await service.start({ stateDir: h.path.slice(0, h.path.lastIndexOf('/')), config: {} });
+  t.after(() => service.stop());
+  const handler = hooks.get('reply_dispatch');
+  const source = {
+    BodyForCommands: '/brain test',
+    RawBody: 'not canonical',
+    Body: 'wrapped text',
+    OriginatingChannel: 'telegram',
+    AccountId: config.accountId,
+    OriginatingTo: 'telegram:123',
+    SenderId: '123',
+    MessageSid: '456',
+    ChatType: 'direct',
+    CommandAuthorized: true,
+  };
+  const replies = [];
+  const dispatch = {
+    dispatcher: {
+      sendFinalReply: (payload) => {
+        replies.push(payload);
+        return true;
+      },
+    },
+    recordProcessed: () => {},
+    markIdle: () => {},
+  };
+  for (const patch of [
+    { CommandAuthorized: false },
+    { CommandAuthorized: undefined },
+    { SenderId: '999' },
+    { OriginatingTo: 'telegram:-123' },
+    { AccountId: 'other' },
+    { MessageSid: undefined },
+    { ChatType: 'group' },
+    { ChatType: undefined },
+    { MessageThreadId: 123 },
+    { InternalTurnSource: 'cron' },
+  ]) {
+    const result = await handler({ ctx: { ...source, ...patch }, sendPolicy: 'allow' }, dispatch);
+    assert.equal(result.handled, true);
+    assert.equal(result.queuedFinal, false);
+  }
+  assert.equal(replies.length, 0);
+  for (const patch of [{ sendPolicy: 'deny' }, { suppressUserDelivery: true }, { isTailDispatch: true }]) {
+    assert.equal((await handler({ ctx: source, sendPolicy: 'allow', ...patch }, dispatch)).queuedFinal, false);
+  }
+  assert.equal(
+    (await handler({ ctx: { ...source, BodyForCommands: 'hello' }, sendPolicy: 'allow' }, dispatch)).handled,
+    false
+  );
+  assert.equal(
+    (await handler({ ctx: { ...source, OriginatingChannel: 'discord' }, sendPolicy: 'allow' }, dispatch)).handled,
+    false
+  );
+  const result = await handler({ ctx: source, sendPolicy: 'allow' }, dispatch);
+  assert.equal(result.handled, true);
+  assert.equal(result.queuedFinal, true);
+  assert.equal(result.counts.final, 1);
+  assert.match(replies[0].text, /Accepted by connector/);
+  assert.equal(
+    JSON.parse(readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8'))
+      .records[0].text,
+    'test'
+  );
+});
