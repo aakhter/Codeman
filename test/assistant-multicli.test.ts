@@ -312,6 +312,17 @@ describe('OpenCode durable native updates', () => {
     await manager.tick();
     expect(ledger.get(request.id)?.status).toBe('completed');
   });
+  it('does not treat a cached OpenCode identity as an explicit continuation', async () => {
+    await ready('opencode');
+    db!.prepare('INSERT INTO session VALUES(?,?)').run('ses_other', root);
+    const candidate = live('opencode', 'cached-pane');
+    candidate.openCodeConfig = {};
+    const registry = new AssistantRegistry(store);
+    const other = registry.create(undefined, 'Cached', 'cached');
+    await expect(registry.bind(other, 1, 0, candidate)).rejects.toThrow(/ambiguous/);
+    candidate.openCodeConfig = { continueSession: 'ses_other' };
+    await expect(registry.bind(other, 1, 0, candidate)).rejects.toThrow(/ambiguous/);
+  });
   it('does not bind an unpinned pane when multiple conversations share its workspace', async () => {
     await ready('opencode');
     db!.prepare('INSERT INTO session VALUES(?,?)').run('ses_other', root);

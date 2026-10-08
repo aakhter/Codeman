@@ -242,7 +242,7 @@ Final isolated real-CLI canaries passed text/image tool use, input ownership,
 connector duplicate/restart delivery, desktop/mobile UI and deletion recovery:
 
 - Claude Code: `/tmp/cod487-assistant-canary-1qPoWQ/summary.json`.
-- OpenCode: `/tmp/cod487-assistant-canary-nxbKGa/summary.json`.
+- OpenCode: `/tmp/cod487-assistant-canary-k43lNT/summary.json`.
 - Codex regression: `/tmp/cod487-assistant-canary-sKpMvU/summary.json`.
 
 Each recovery retained the native conversation, root and workspace, incremented
@@ -254,7 +254,7 @@ for history, replay and tab switching, with no page or serious console errors:
 `/tmp/codeman-dev-smoke-artifacts-2026-10-08T17-54-19-059Z-p1542321-r0870a7f0237b4a7e9c88bcb2fe97edd6/summary.json`.
 Remote coverage was skipped because no target was configured.
 
-Validation: 49 assistant/native/recovery/connector wrapper tests and 23 plugin
+Validation: 50 assistant/native/recovery/connector wrapper tests and 23 plugin
 tests; typecheck, lint (one existing warning), format, lockfile, frontend syntax
 and public asset checks. Native schemas were checked against installed CLIs,
 the [Claude hook contract](https://code.claude.com/docs/en/hooks) and the
@@ -264,3 +264,6 @@ The first Claude fixture copied a refreshable OAuth credential, leaving the
 original token stale after refresh. The refreshed credential was restored after
 matching account identity. Subsequent canaries share the credential file while
 isolating native conversations, data and tmux sockets.
+
+A cached OpenCode identity does not count as an explicit continuation: initial
+binding still checks workspace uniqueness and rejects conflicting native IDs.

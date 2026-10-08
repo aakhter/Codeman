@@ -107,16 +107,19 @@ export async function findAssistantConversation(
   const path = join(binding.codexHome, 'opencode', 'opencode.db');
   const id = live?.nativeResumeId || live?.openCodeConfig?.continueSession || binding.conversationId;
   if (id && !/^ses_[A-Za-z0-9_-]{1,120}$/.test(id)) return undefined;
+  if (live?.openCodeConfig?.continueSession && live.openCodeConfig.continueSession !== id) return undefined;
+  const pinned = Boolean(live?.openCodeConfig?.continueSession || binding.conversationId);
   return database(path, (db) => {
     const rows = db
       .prepare(
-        id
+        pinned && id
           ? 'SELECT id,directory FROM session WHERE id = ?'
           : 'SELECT id,directory FROM session WHERE directory = ? LIMIT 2'
       )
-      .all(id || binding.workingDir) as Array<{ id: string; directory: string }>;
+      .all(pinned && id ? id : binding.workingDir) as Array<{ id: string; directory: string }>;
     return rows.length === 1 &&
       rows[0].directory === binding.workingDir &&
+      (!id || rows[0].id === id) &&
       (!binding.conversationId || rows[0].id === binding.conversationId)
       ? { id: rows[0].id, path }
       : undefined;
