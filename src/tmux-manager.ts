@@ -4475,7 +4475,10 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(textPart)}`, {
           timeout: EXEC_TIMEOUT_MS,
         });
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        // Long literal input is recognized as a paste by Codex. Give its paste
+        // buffer time to settle before the single Enter; 50ms can leave an
+        // attachment prompt unsubmitted. This is a delay, never a retry.
+        await new Promise((resolve) => setTimeout(resolve, textPart.length > 100 ? 500 : 50));
         await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" Enter`, {
           timeout: EXEC_TIMEOUT_MS,
         });

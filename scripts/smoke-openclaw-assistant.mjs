@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import plugin from '../integrations/openclaw/index.mjs';
@@ -116,7 +117,12 @@ try {
   checks.push('desktop create');
   await page.screenshot({ path: join(root, 'desktop.png') });
   await page.getByRole('button', { name: 'Close', exact: true }).click();
-  const created = await api('/sessions', 'POST', { mode: 'codex', workingDir: workspace, name: 'cod487-canary' });
+  const created = await api('/sessions', 'POST', {
+    mode: 'codex',
+    workingDir: workspace,
+    name: 'cod487-canary',
+    codexConfig: { dangerouslyBypassApprovals: true },
+  });
   sessionId = created.session.id;
   await api(`/sessions/${sessionId}/interactive`, 'POST');
   await sleep(5000);
@@ -206,6 +212,18 @@ try {
     scopes: ['read', 'submit', 'cancel'],
   });
   process.env.COD487_CANARY_TOKEN = issued.token;
+  const mediaRoot = join(root, 'telegram-inbound');
+  mkdirSync(mediaRoot, { mode: 0o700 });
+  const hiddenCode = randomBytes(6).toString('hex');
+  const documentPath = join(mediaRoot, 'note.txt');
+  const imagePath = join(mediaRoot, 'shape.png');
+  writeFileSync(documentPath, `The secret code is ${hiddenCode}.`, { mode: 0o600 });
+  const fixturePage = await browser.newPage({ viewport: { width: 240, height: 240 } });
+  await fixturePage.setContent(
+    '<html><body style="margin:0;background:white"><svg width="240" height="240"><polygon points="120,20 220,220 20,220" fill="blue"/></svg></body></html>'
+  );
+  await fixturePage.screenshot({ path: imagePath });
+  await fixturePage.close();
   const acknowledgements = [];
   let ingress;
   plugin.register({
@@ -215,6 +233,7 @@ try {
       accountId: 'canary',
       allowFrom: ['123'],
       tokenEnv: 'COD487_CANARY_TOKEN',
+      mediaRoot,
     },
     on: (name, handler) => {
       assert.ok(['inbound_claim', 'reply_dispatch'].includes(name));
@@ -248,7 +267,12 @@ try {
     suppressUserDelivery: true,
     sourceReplyDeliveryMode: 'message_tool_only',
     ctx: {
-      BodyForCommands: 'Brain, Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
+      BodyForCommands:
+        'Brain, Read the attached text file and inspect the attached image. Reply only with the secret code in the text file, then the shape and color in the image in lowercase, separated by spaces. Use tools.',
+      media: [
+        { path: documentPath, contentType: 'text/plain', fileName: 'note.txt' },
+        { path: imagePath, contentType: 'image/png', fileName: 'shape.png' },
+      ],
       OriginatingChannel: 'telegram',
       ChatType: 'direct',
       CommandAuthorized: true,
@@ -268,6 +292,10 @@ try {
     markIdle: () => {},
   };
   assert.equal((await ingress(event, context)).handled, true);
+  // Temporary Telegram downloads can expire after durable acceptance.
+  const { unlinkSync } = await import('node:fs');
+  unlinkSync(documentPath);
+  unlinkSync(imagePath);
   assert.equal((await ingress(event, context)).handled, true);
   assert.match(acknowledgements[0].text, /On it/);
   assert.match(acknowledgements[1].text, /already have/);
@@ -278,12 +306,14 @@ try {
   await service.stop();
   await service.start(serviceContext);
   checks.push('duplicate update and managed gateway service restart');
-  await until(() => receipts.length > 0, 90000);
+  await until(() => receipts.length > 0, 120000);
   const requests = (await api(`/assistants/${assistant.id}/requests`)).requests;
   assert.equal(requests.length, 1);
   assert.equal(requests[0].status, 'completed');
   assert.equal(requests[0].binding.conversationId, assistant.binding.conversationId);
-  assert.match(requests[0].result.text, /^COD487_DELEGATED_OK\.?$/);
+  assert.equal(requests[0].result.text.trim(), `${hiddenCode} triangle blue`);
+  assert.match(requests[0].text, /\.codeman-telegram/);
+  checks.push('real Codex reads durable text attachment and visually identifies image after temporary sources expire');
   assert.equal(receipts[0].text, requests[0].result.text);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].to, '123');
@@ -323,6 +353,17 @@ try {
   );
   console.log(JSON.stringify({ passed: true, checks, artifacts: root }));
 } catch (error) {
+  if (sessionId) {
+    try {
+      writeFileSync(
+        join(root, 'terminal-failure.txt'),
+        execFileSync('tmux', ['-L', socket, 'capture-pane', '-p', '-t', `codeman-${sessionId.slice(0, 8)}`], {
+          encoding: 'utf8',
+        }),
+        { mode: 0o600 }
+      );
+    } catch {}
+  }
   writeFileSync(
     join(root, 'summary.json'),
     JSON.stringify({ passed: false, error: error.message, errors, checks, artifacts: root }, null, 2)

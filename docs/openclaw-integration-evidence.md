@@ -189,3 +189,35 @@ All 17 connector/native tests and the root wrapper pass. The isolated real
 Codex/browser canary now submits `Brain, Reply ...` and verifies explicit simple
 acknowledgements, duplicate identity, one completion and matching final delivery:
 `/tmp/cod487-assistant-canary-3T8RNy/summary.json`. Formatting/diff checks pass.
+
+
+## COD-496 incoming Telegram media
+
+Implemented private, bounded copying of current SDK media facts and legacy
+aliases into the exact bound local workspace. Captions continue through the
+existing assistant request API and native turn observer; no bearer scopes,
+conversation selection, platform destinations or CLI launch paths changed.
+Files are retained after OpenClaw's transient downloads expire. Failed media
+staging never submits a caption alone. Telegram replies remain text.
+
+The first real canary exposed long literal input remaining in Codex's composer
+with the prior 50 ms text/Enter separation. Input over 100 characters now waits
+500 ms before its single Enter; uncertain delivery still has no automatic
+retry. A later isolated canary reached the image tool but its default sandbox
+could not initialize (`bwrap` loopback permission failure). Only the throwaway
+canary now explicitly uses its existing bypass-approvals session option; the
+production Brain permission configuration is preserved.
+
+Successful real Codex/browser evidence:
+`/tmp/cod487-assistant-canary-vyj2qV/summary.json`. The agent read a random hidden
+code from the staged text file and used its image tool to identify a blue
+triangle. The prompt did not reveal either answer. Temporary source files were
+deleted after acceptance; duplicate ingress and managed plugin service restart
+still produced one completed request and one matching test Telegram receipt.
+Desktop/mobile and input ownership checks passed. This is an isolated SDK
+adapter test, not proof of a new real Telegram photo/PDF delivery.
+
+Validation: 23 connector/native tests; root connector wrapper; 217 targeted
+assistant/integration/tmux tests; typecheck, lint (one existing server warning),
+format and lockfile checks. Source is tracked under COD-496; deployment and
+actual Telegram acceptance are recorded separately.

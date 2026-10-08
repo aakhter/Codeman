@@ -27,6 +27,10 @@
       "tokenEnv": {
         "type": "string",
         "pattern": "^[A-Z][A-Z0-9_]*$"
+      },
+      "mediaRoot": {
+        "type": "string",
+        "description": "Absolute Telegram inbound download directory; attachment forwarding requires a same-host Codeman connection."
       }
     }
   },

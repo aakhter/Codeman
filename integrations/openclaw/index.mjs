@@ -37,6 +37,7 @@ export default {
         return { handled: true, queuedFinal: false, counts };
       const message = {
         content,
+        mediaSource: source,
         channel,
         isGroup: source.ChatType === 'direct' ? false : true,
         commandAuthorized: source.CommandAuthorized,

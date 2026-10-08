@@ -11,7 +11,8 @@ import {
   renameSync,
   unlinkSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
+import { inboundMedia, mediaIdentity, stageMedia, MediaError } from './media.mjs';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -49,6 +50,8 @@ export function validateConfig(input) {
     input.allowFrom.some((id) => !/^[1-9][0-9]*$/.test(id))
   )
     throw new Error('Invalid connector configuration');
+  if (input.mediaRoot !== undefined && (typeof input.mediaRoot !== 'string' || !isAbsolute(input.mediaRoot)))
+    throw new Error('mediaRoot must be an absolute local Telegram download directory');
   return { ...input, baseUrl: url.origin, allowFrom: [...input.allowFrom] };
 }
 export function brainRequestText(content) {
@@ -138,6 +141,7 @@ export class Outbox {
             (r.requestId !== undefined && !uuid.test(r.requestId)) ||
             (r.status !== undefined && !states.has(r.status)) ||
             !/^[a-f0-9]{64}$/.test(r.payloadHash ?? '') ||
+            (r.inputHash !== undefined && !/^[a-f0-9]{64}$/.test(r.inputHash)) ||
             (r.delivery === 'pending' && (typeof r.text !== 'string' || r.payloadHash !== hash(r.text))) ||
             !['pending', 'polling', 'sending', 'delivered', 'delivery_unknown', 'stopped'].includes(r.delivery)
         ) ||
@@ -232,11 +236,23 @@ export class Connector {
   }
   async inbound(event, ctx) {
     const body = event.content ?? '';
-    const text = brainRequestText(body);
+    let text = brainRequestText(body);
     if (text === undefined) return { handled: false };
     const destination = trustedDestination(event, ctx, this.config);
     if (!destination) return { handled: true }; // Never send unauthorized text to the model or reply destination.
-    const control = /^(status|result|cancel)(?: +([a-f0-9]{64}))?$/i.exec(text);
+    let media;
+    try {
+      media = inboundMedia(event.mediaSource ?? event);
+    } catch (error) {
+      return {
+        handled: true,
+        reply: {
+          text: error instanceof MediaError ? error.message : 'The attachment could not be read. Please send it again.',
+        },
+      };
+    }
+    const inputHash = mediaIdentity(text, media);
+    const control = !media.length && /^(status|result|cancel)(?: +([a-f0-9]{64}))?$/i.exec(text);
     if (control) {
       control[1] = control[1].toLowerCase();
       control[2] ??= [...this.outbox.records].reverse().find((r) => this.authorizedRecord(r, destination))?.key;
@@ -287,12 +303,17 @@ export class Connector {
         },
       };
     }
-    if (/^(status|result|cancel)(?:\s|$)/.test(text))
+    if (!media.length && /^(status|result|cancel)(?:\s|$)/.test(text))
       return {
         handled: true,
         reply: { text: 'Use brain status, brain result, or brain cancel for your latest request.' },
       };
-    if (!text || text.length > 20000 || /[\x00-\x1f\x7f]/.test(body) || text.trimStart().startsWith('/'))
+    if (
+      (!text && !media.length) ||
+      text.length > 20000 ||
+      /[\x00-\x1f\x7f]/.test(body) ||
+      text.trimStart().startsWith('/')
+    )
       return {
         handled: true,
         reply: { text: 'Tell Brain what you need in one line, for example: brain summarize my notes.' },
@@ -309,13 +330,14 @@ export class Connector {
     );
     const old = this.outbox.get(key);
     if (old) {
-      if (old.payloadHash !== hash(text))
+      if ((old.inputHash ?? old.payloadHash) !== inputHash)
         return { handled: true, reply: { text: 'Message identity conflict. Check Codeman.' } };
       return { handled: true, reply: { text: 'I already have that request.' } };
     }
+    let assistant;
     // Phase 2 absence must produce an explicit unavailable reply, never terminal input.
     try {
-      const assistant = await this.api(`/assistants/${this.config.assistantId}`);
+      assistant = await this.api(`/assistants/${this.config.assistantId}`);
       if (
         assistant.id !== this.config.assistantId ||
         !assistant.enabled ||
@@ -332,20 +354,40 @@ export class Connector {
     }
     // Recheck after await: concurrent duplicate ingress must not replace a committed record.
     const concurrent = this.outbox.get(key);
-    if (concurrent && concurrent.payloadHash !== hash(text))
+    if (concurrent && (concurrent.inputHash ?? concurrent.payloadHash) !== inputHash)
       return { handled: true, reply: { text: 'Message identity conflict. Check Codeman.' } };
     if (this.stopped) return { handled: true, reply: { text: 'Connector is stopping. No request was accepted.' } };
-    if (!concurrent)
+    if (!concurrent) {
+      try {
+        text = stageMedia({
+          text,
+          media,
+          mediaRoot: this.config.mediaRoot,
+          workingDir: assistant.binding?.workingDir,
+          key,
+          baseUrl: this.config.baseUrl,
+        });
+      } catch (error) {
+        return {
+          handled: true,
+          reply: {
+            text:
+              error instanceof MediaError ? error.message : 'The attachment could not be saved. No request was sent.',
+          },
+        };
+      }
       this.outbox.put({
         key,
         assistantId: this.config.assistantId,
         destination,
         text,
         payloadHash: hash(text),
+        inputHash,
         delivery: 'pending',
         parts: [],
         receipts: [],
       });
+    }
     return { handled: true, reply: { text: 'On it — sending this to Brain.' } };
   }
   async tick() {

@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  unlinkSync,
+  statSync,
+  symlinkSync,
+  truncateSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +24,7 @@ import {
   validateConfig,
 } from './connector.mjs';
 import plugin from './index.mjs';
+import { inboundMedia, stageMedia, MEDIA_LIMITS } from './media.mjs';
 const config = {
   baseUrl: 'http://127.0.0.1:3000',
   assistantId: randomUUID(),
@@ -435,4 +446,149 @@ test('plain Brain requests acknowledge simply and latest controls remain scoped 
     /No matching Brain request/
   );
   assert.equal(c.outbox.records.length, 1);
+});
+
+function mediaFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'brain-media-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const mediaRoot = join(root, 'inbound');
+  const workingDir = join(root, 'workspace');
+  mkdirSync(mediaRoot, { mode: 0o700 });
+  mkdirSync(workingDir, { mode: 0o700 });
+  const path = join(mediaRoot, 'photo.png');
+  writeFileSync(path, 'trusted bytes');
+  return {
+    root,
+    mediaRoot,
+    workingDir,
+    path,
+    text: 'explain this',
+    media: [{ path, type: 'image/png', name: 'photo.png' }],
+    key: 'a'.repeat(64),
+    baseUrl: config.baseUrl,
+  };
+}
+test('current and legacy SDK media facts preserve ordering and reject unavailable downloads', () => {
+  assert.deepEqual(
+    inboundMedia({
+      media: [
+        { path: '/one', contentType: 'image/png', fileName: 'a.png' },
+        { path: '/two', kind: 'document' },
+      ],
+    }),
+    [
+      { path: '/one', type: 'image/png', name: 'a.png' },
+      { path: '/two', type: 'document', name: undefined },
+    ]
+  );
+  assert.deepEqual(inboundMedia({ MediaPaths: ['/one', '/two'], MediaTypes: ['image/png', 'application/pdf'] }), [
+    { path: '/one', type: 'image/png' },
+    { path: '/two', type: 'application/pdf' },
+  ]);
+  assert.deepEqual(inboundMedia({ metadata: { mediaPath: '/one', mediaType: 'image/png' } }), [
+    { path: '/one', type: 'image/png' },
+  ]);
+  assert.throws(() => inboundMedia({ MediaUrl: 'https://example.com/file' }), /download/);
+  assert.throws(() => inboundMedia({ mediaStagingPending: true }), /downloading/);
+});
+test('staging creates private durable files, survives source expiry, and recovers a pre-acceptance copy', (t) => {
+  const f = mediaFixture(t);
+  const prompt = stageMedia(f);
+  const saved = /at "([^"]+)"/.exec(prompt)[1];
+  assert.equal(readFileSync(saved, 'utf8'), 'trusted bytes');
+  assert.equal(statSync(saved).mode & 0o777, 0o600);
+  assert.equal(statSync(join(f.workingDir, '.codeman-telegram')).mode & 0o777, 0o700);
+  assert.equal(stageMedia(f), prompt);
+  unlinkSync(f.path);
+  assert.equal(readFileSync(saved, 'utf8'), 'trusted bytes');
+  assert.match(prompt, /file and image tools/);
+});
+test('staging rejects unsafe sources, destination symlinks, missing files and bounded file sizes', (t) => {
+  const f = mediaFixture(t);
+  const outside = join(f.root, 'secret');
+  writeFileSync(outside, 'must not forward');
+  const link = join(f.mediaRoot, 'link.png');
+  symlinkSync(outside, link);
+  for (const path of [outside, link, join(f.mediaRoot, 'missing'), 'https://example.com/photo', '../secret'])
+    assert.throws(() => stageMedia({ ...f, media: [{ path }] }));
+  assert.throws(() => stageMedia({ ...f, mediaRoot: undefined }), /local/);
+  assert.throws(() => stageMedia({ ...f, baseUrl: 'https://codeman.example.com' }), /local/);
+  assert.throws(() => stageMedia({ ...f, media: Array(11).fill(f.media[0]) }), /10 files/);
+  truncateSync(f.path, MEDIA_LIMITS.fileBytes + 1);
+  assert.throws(() => stageMedia(f), /20 MB/);
+  writeFileSync(f.path, 'bytes');
+  symlinkSync(f.mediaRoot, join(f.workingDir, '.codeman-telegram'));
+  assert.throws(() => stageMedia(f), /folder needs attention/);
+});
+test('authorized media submission is durable and duplicate retries never need temporary downloads', async (t) => {
+  const f = mediaFixture(t);
+  const h = harness(t, {
+    config: { ...config, mediaRoot: f.mediaRoot },
+    fetchImpl: async (url, options) => {
+      h.calls.push({ url, options });
+      if (options.method === 'GET')
+        return Response.json({
+          success: true,
+          data: {
+            id: config.assistantId,
+            enabled: true,
+            capabilities: { requestExecution: true },
+            binding: { workingDir: f.workingDir },
+          },
+        });
+      return Response.json({
+        success: true,
+        data: {
+          id: randomUUID(),
+          assistantId: config.assistantId,
+          idempotencyKey: JSON.parse(options.body).idempotencyKey,
+          status: 'queued',
+        },
+      });
+    },
+  });
+  let c = h.make();
+  const message = { ...event, content: 'Brain, explain this', media: [{ path: f.path, contentType: 'image/png' }] };
+  const ack = await c.inbound(message, ctx);
+  assert.match(ack.reply.text, /On it/);
+  assert.equal(c.outbox.records.length, 1);
+  assert.match(c.outbox.records[0].text, /file and image tools/);
+  unlinkSync(f.path);
+  c = h.make();
+  assert.match((await c.inbound(message, ctx)).reply.text, /already have/);
+  await c.tick();
+  assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 1);
+  assert.match(JSON.parse(h.calls.find((v) => v.options.method === 'POST').options.body).text, /\.codeman-telegram/);
+  assert.match(
+    (await c.inbound({ ...message, media: [{ path: join(f.mediaRoot, 'different') }] }, ctx)).reply.text,
+    /conflict/
+  );
+});
+test('attachments require trusted identity and failed staging never submits a caption alone', async (t) => {
+  const f = mediaFixture(t);
+  const h = harness(t, { config: { ...config, mediaRoot: f.mediaRoot } });
+  const c = h.make();
+  const message = { ...event, media: [{ path: f.path }] };
+  assert.equal((await c.inbound(message, { ...ctx, senderId: '999' })).reply, undefined);
+  assert.equal(h.calls.length, 0);
+  assert.match((await c.inbound(message, ctx)).reply.text, /local Brain connection/);
+  assert.equal(c.outbox.records.length, 0);
+  await c.tick();
+  assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 0);
+});
+
+test('attachment aggregate and retained-storage budgets fail before acceptance', (t) => {
+  const f = mediaFixture(t);
+  truncateSync(f.path, MEDIA_LIMITS.fileBytes);
+  assert.throws(() => stageMedia({ ...f, media: Array(3).fill(f.media[0]) }), /40 MB/);
+  writeFileSync(f.path, 'bytes');
+  const storage = join(f.workingDir, '.codeman-telegram');
+  mkdirSync(storage, { mode: 0o700 });
+  const prior = join(storage, 'prior-completed-request');
+  mkdirSync(prior, { mode: 0o700 });
+  const retained = join(prior, 'old-file');
+  writeFileSync(retained, 'x', { mode: 0o600 });
+  truncateSync(retained, MEDIA_LIMITS.retainedBytes);
+  assert.throws(() => stageMedia(f), /storage is full/);
+  assert.equal(statSync(retained).size, MEDIA_LIMITS.retainedBytes);
 });

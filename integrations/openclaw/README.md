@@ -27,7 +27,8 @@ to bypass OpenClaw's model. Optional model-driven tools are deferred.
   "assistantId": "<assistant UUID>",
   "accountId": "<configured Telegram account ID>",
   "allowFrom": ["<numeric Telegram sender ID>"],
-  "tokenEnv": "CODEMAN_BRAIN_TOKEN"
+  "tokenEnv": "CODEMAN_BRAIN_TOKEN",
+  "mediaRoot": "/home/ubuntu/.openclaw/media/inbound"
 }
 ```
 
@@ -72,6 +73,39 @@ rendered Markdown. In the Codex harness's `message_tool_only` reply mode, acknow
 explicitly through that trusted Telegram adapter too; automatic dispatcher
 replies remain suppressed. Delivery-denied, internal, group/thread and unauthorized
 turns remain blocked. Prompts/results are not sent through another model.
+
+## Incoming photos and files
+
+Attach a photo or document and put the request in its Telegram caption:
+`Brain, explain this photo` or `Brain, summarize this PDF`. A caption of just
+`brain` asks it to review the attached files. Albums preserve attachment order
+when OpenClaw exposes the album as one inbound message. Sending an unaddressed
+attachment alone continues through OpenClaw's ordinary handling.
+
+Set optional `mediaRoot` to the gateway's actual inbound download directory.
+Media forwarding requires OpenClaw and Codeman on the same host with a loopback
+Codeman origin and a local bound workspace. Existing remote text-only setups
+remain supported; remote file transfer is deferred. Current SDK `media` facts
+and legacy `MediaPaths`/`MediaPath` aliases are supported. Supplemental quoted
+attachments and arbitrary URLs are never fetched.
+
+After identity checks and binding readiness, the connector copies downloaded
+files into the bound workspace's private `.codeman-telegram/<request-key>/`
+folder (directories 0700, files 0600). Saved filenames use content hashes and
+safe extensions. Brain receives the caption plus instructions to inspect the
+local files with its file/image tools, through the same durable single-line
+request API and exact native conversation. No upload or terminal-input token
+scope is added. Original downloads can then expire without breaking accepted
+work. Missing, unsafe, oversized, or unsaved attachments reject the entire
+request; the caption is never silently submitted alone.
+
+Limits: 10 files, 20 MiB per file, 40 MiB per request, 256 MiB retained per
+workspace. OpenClaw/Telegram download limits may be lower. Files remain for
+conversation references and review; no automatic deletion occurs. Archive only
+completed/reconciled request directories when capacity is reached, preserving
+outbox/ledger identity records and files needed by active requests. Photo,
+text-file, and PDF analysis depends on the bound agent's file/image tools;
+this does not add audio/video transcription or outbound file delivery.
 
 ## Guarantees and attention states
 
