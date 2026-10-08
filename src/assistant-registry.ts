@@ -13,6 +13,7 @@ export interface AssistantSession {
   workingDir: string;
   status: string;
   pid: number | null;
+  paneExit?: { at: number };
   remote?: unknown;
   docker?: unknown;
   nativeResumeId?: string | null;
@@ -30,6 +31,7 @@ export async function resolveAssistantBinding(
     session.remote ||
     session.docker ||
     !session.pid ||
+    session.paneExit ||
     session.status !== 'idle' ||
     session.hasLostCodexProviderCredentials()
   )
@@ -118,6 +120,7 @@ export class AssistantRegistry {
       session.owner !== latest.owner ||
       session.status !== 'idle' ||
       !session.pid ||
+      session.paneExit ||
       session.mode !== 'codex' ||
       session.remote ||
       session.docker ||

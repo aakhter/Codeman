@@ -6,7 +6,8 @@ import { AssistantRequestStore, type AssistantRequest } from './assistant-reques
 import { AssistantStore } from './assistant-store.js';
 import { findExactCodexConversation, resolveEffectiveCodexHome } from './checkpoint-conversation-identity.js';
 import { observeAssistantTurn } from './assistant-turn-observer.js';
-import type { AssistantDefinition } from './types/assistant.js';
+import type { AssistantDefinition, AssistantBinding } from './types/assistant.js';
+import type { AssistantRecovery } from './assistant-recovery.js';
 
 export interface AssistantExecutionSession extends AssistantSession {
   assistantPendingWrites: number;
@@ -29,6 +30,31 @@ export class AssistantRequestManager {
   private timer: ReturnType<typeof setInterval> | undefined;
   private pumping: Promise<void> | undefined;
   private stopped = false;
+  private recovery: AssistantRecovery | undefined;
+  private recoverySessions = new Set<string>();
+  setRecovery(recovery: AssistantRecovery): void {
+    this.recovery = recovery;
+  }
+  holdRecoverySession(id: string): void {
+    this.recoverySessions.add(id);
+  }
+  releaseRecoverySession(id: string): void {
+    this.recoverySessions.delete(id);
+  }
+  clearRecoveryHandoff(id: string): void {
+    this.handoffs.delete(id);
+  }
+  hasUnresolved(id: string): boolean {
+    return this.store.list().some((r) => r.assistantId === id && unresolved(r));
+  }
+  rebindQueuedRecovery(id: string, previous: AssistantBinding, binding: AssistantBinding): void {
+    for (const r of this.store.list())
+      if (r.assistantId === id && r.status === 'queued' && JSON.stringify(r.binding) === JSON.stringify(previous))
+        this.change(r, { binding: structuredClone(binding) });
+  }
+  conversationReady(path: string): Promise<boolean> {
+    return this.nativeReady(path);
+  }
   private handoffPending = new Set<string>();
   private takingControl = new Set<string>();
   private lockedSessions = new Set<string>();
@@ -57,6 +83,8 @@ export class AssistantRequestManager {
       const length = Math.min(info.size, 1024 * 1024);
       const bytes = Buffer.alloc(length);
       await file.read(bytes, 0, length, info.size - length);
+      if (!length || bytes[length - 1] !== 10) return false;
+      let malformed = false;
       const lines = bytes.toString('utf8').split('\n');
       lines.pop();
       if (info.size > length) lines.shift();
@@ -65,6 +93,7 @@ export class AssistantRequestManager {
           try {
             return JSON.parse(line) as { type?: string; payload?: { type?: string } };
           } catch {
+            malformed = true;
             return undefined;
           }
         })
@@ -75,7 +104,7 @@ export class AssistantRequestManager {
               r.payload?.type ?? ''
             )
         );
-      return !events.length || events.at(-1)?.payload?.type === 'task_complete';
+      return !malformed && (!events.length || events.at(-1)?.payload?.type === 'task_complete');
     } finally {
       await file.close();
     }
@@ -87,6 +116,7 @@ export class AssistantRequestManager {
     );
   }
   inputAllowed(sessionId: string, permit?: string): boolean {
+    if (this.recoverySessions.has(sessionId)) return false;
     const held = [...this.handoffs.values()].find((h) => h.sessionId === sessionId);
     if (held) return permit !== undefined && permit === held.permit;
     if ([...this.handoffPending].some((id) => this.assistants.get(id)?.binding?.sessionId === sessionId)) return false;
@@ -100,6 +130,7 @@ export class AssistantRequestManager {
     handedOff: boolean;
     needsAttention: boolean;
     inputLocked: boolean;
+    recovery?: { state: string; reason?: string; attempts: number };
   } {
     const live = a.binding && this.session(a.binding.sessionId);
     const h = this.handoffs.get(a.id);
@@ -111,6 +142,7 @@ export class AssistantRequestManager {
         !this.stopped &&
         a.enabled &&
         live?.pid &&
+        !live.paneExit &&
         h &&
         h.generation === a.binding?.generation &&
         h.session === live &&
@@ -119,6 +151,7 @@ export class AssistantRequestManager {
         !this.automationBusy(live.id) &&
         !this.takingControl.has(a.id)
       ),
+      recovery: this.recovery?.status(a.id),
       handedOff: Boolean(h),
       needsAttention,
       inputLocked: Boolean(a.binding && !this.inputAllowed(a.binding.sessionId)),
@@ -238,6 +271,7 @@ export class AssistantRequestManager {
         live.status !== 'idle'
       )
         throw new AssistantConflict('Binding or live session changed during handoff');
+      this.recovery?.arm(a, live);
       this.handoffs.set(a.id, {
         sessionId: live.id,
         generation: binding.generation,
@@ -250,6 +284,7 @@ export class AssistantRequestManager {
     }
   }
   async takeControl(a: AssistantDefinition): Promise<void> {
+    this.recovery?.disarm(a.id);
     this.takingControl.add(a.id);
     try {
       await this.dispatches.get(a.id); // The mux submission must settle before input ownership changes.
@@ -454,6 +489,7 @@ export class AssistantRequestManager {
     if (this.stopped) return;
     for (const r of this.store.list())
       if (active(r) || (r.status === 'outcome_unknown' && !r.reconciled)) await this.observe(r);
+    await this.recovery?.tick();
     for (const r of this.store.list().filter((r) => r.status === 'queued')) {
       if (this.stopped) return;
       if (Date.now() >= r.deadline) {

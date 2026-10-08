@@ -444,7 +444,7 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Plain text from the active pane's visible screen, captured asynchronously
    * for activity detection.
    */
-  capturePaneTextAsync?(muxName: string, opts?: { signal?: AbortSignal }): Promise<string | null>;
+  capturePaneTextAsync?(muxName: string, opts?: { signal?: AbortSignal; ansi?: boolean }): Promise<string | null>;
 
   /**
    * COD-180 — capture a REMOTE session's pane buffer on the remote tmux server

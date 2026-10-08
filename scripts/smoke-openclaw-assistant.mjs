@@ -353,6 +353,31 @@ try {
   checks.push(
     'desktop overview, selected assistant navigation, advanced disclosure, hidden identifiers and focus-safe polling'
   );
+  if (process.argv.includes('--recovery')) {
+    const originalBinding = assistant.binding;
+    await api(`/sessions/${sessionId}`, 'DELETE');
+    const recovered = await until(async () => {
+      const current = await api(`/assistants/${assistant.id}`);
+      return current.binding.sessionId !== sessionId && current.capabilities.requestExecution ? current : undefined;
+    }, 150000);
+    sessionId = recovered.binding.sessionId;
+    assert.equal(recovered.binding.conversationId, originalBinding.conversationId);
+    assert.equal(recovered.binding.codexHome, originalBinding.codexHome);
+    assert.equal(recovered.binding.workingDir, originalBinding.workingDir);
+    assert.equal(recovered.binding.generation, originalBinding.generation + 1);
+    assert.equal(recovered.capabilities.inputLocked, true);
+    const next = await api(`/assistants/${assistant.id}/requests`, 'POST', {
+      text: 'Reply with exactly RECOVERY_OK. Do not use tools.', idempotencyKey: 'canary-recovery-proof'
+    });
+    const completed = await until(async () => {
+      const r = await api(`/assistant-requests/${next.id}`);
+      return r.status === 'completed' ? r : undefined;
+    }, 120000);
+    assert.equal(completed.result.text.trim(), 'RECOVERY_OK');
+    checks.push('deleted idle session automatically resumes exact native conversation, restores input lock and completes follow-up');
+    await page.evaluate(() => app.refreshAssistants());
+    await page.screenshot({path:join(root,'recovered-assistant.png')});
+  }
   await page.getByRole('button', { name: 'Take control', exact: true }).click();
   await until(async () => !(await api(`/assistants/${assistant.id}`)).enabled);
   checks.push('desktop result and Take control');
@@ -405,7 +430,11 @@ try {
 } finally {
   await service?.stop().catch(() => {});
   delete process.env.COD487_CANARY_TOKEN;
+  const recoveryCandidates = existsSync(join(data, 'assistant-recovery.json'))
+    ? JSON.parse(readFileSync(join(data, 'assistant-recovery.json'), 'utf8')).records.map(r => r.candidateId).filter(Boolean)
+    : [];
   if (assistant) await api(`/assistants/${assistant.id}/take-control`, 'POST', {}).catch(() => {});
+  for (const id of recoveryCandidates) if (id !== sessionId) await api(`/sessions/${id}`, 'DELETE').catch(() => {});
   if (sessionId) await api(`/sessions/${sessionId}`, 'DELETE').catch(() => {});
   await browser?.close();
   server.kill('SIGTERM');

@@ -84,6 +84,9 @@ Object.assign(CodemanApp.prototype, {
   },
   assistantState(a) {
     if (a.capabilities.needsAttention) return { label: 'Needs review', tone: 'attention' };
+    if (a.capabilities.recovery?.state === 'recovering') return { label: 'Recovering', tone: 'muted' };
+    if (!a.capabilities.requestExecution && a.capabilities.recovery?.state === 'blocked')
+      return { label: 'Recovery needed', tone: 'attention' };
     if (a.capabilities.requestExecution) return { label: 'Ready', tone: 'ready' };
     if (!a.binding) return { label: 'Setup needed', tone: 'muted' };
     return { label: a.enabled ? 'Handoff needed' : 'Paused', tone: 'muted' };
@@ -224,6 +227,20 @@ Object.assign(CodemanApp.prototype, {
     );
     head.append(avatar, heading);
     card.append(head);
+    if (a.capabilities.recovery) {
+      const recovery = a.capabilities.recovery;
+      card.append(
+        element(
+          'p',
+          recovery.state === 'armed'
+            ? 'Automatic recovery will resume this conversation if its session stops.'
+            : recovery.state === 'recovering'
+              ? 'Reconnecting to the original conversation. Messaging will resume after verification.'
+              : recovery.reason || 'Automatic recovery needs desktop review.',
+          'assistant-secondary'
+        )
+      );
+    }
     const tiles = element('div', undefined, 'assistant-tiles');
     const connection = element('section', undefined, 'assistant-tile');
     const plane = element('span', undefined, 'assistant-channel-icon');

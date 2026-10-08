@@ -29,6 +29,10 @@
 
 import { findUser } from '../user-store.js';
 import { AssistantRequestManager } from '../assistant-request-manager.js';
+import { AssistantRecovery, assistantComposerEmpty } from '../assistant-recovery.js';
+import { findExactCodexConversation, resolveEffectiveCodexHome } from '../checkpoint-conversation-identity.js';
+import { _clampExternalCliBypassForOwner } from './routes/session-routes.js';
+import { clampEnvOverridesForOwner } from '../session-env-clamp.js';
 import { AssistantRequestStore } from '../assistant-request-store.js';
 import { AssistantStore } from '../assistant-store.js';
 import { AssistantRegistry } from '../assistant-registry.js';
@@ -1949,6 +1953,82 @@ export class WebServer extends EventEmitter {
       new AssistantRegistry(this.assistantStore, (id) => this.assistantRequests!.outstanding(id)),
       this.sessions,
       this.assistantRequests
+    );
+    this.assistantRequests.setRecovery(
+      new AssistantRecovery(this.assistantStore, this.assistantRequests, (id) => this.sessions.get(id), {
+        snapshot: (live) => {
+          const session = this.sessions.get(live.id);
+          if (!session || session.getCodexProviderIdentityForPersist()?.credentialSource === 'session-key')
+            throw new Error('Session-scoped credentials require manual recovery');
+          const { resumeSessionId: _resume, ...codexConfig } = session.codexConfig ?? {};
+          return { name: session.name, codexConfig };
+        },
+        ownerAllowed: async (a) => {
+          if (!isMultiUserMode()) return a.owner === undefined;
+          const user = a.owner ? await findUser(a.owner) : undefined;
+          return Boolean(user && !user.disabled && !user.mustChangePassword);
+        },
+        composerEmpty: async (live) => {
+          const session = this.sessions.get(live.id);
+          return Boolean(
+            session?.muxName &&
+            assistantComposerEmpty((await this.mux.capturePaneTextAsync?.(session.muxName, { ansi: true })) ?? null)
+          );
+        },
+        create: async (id, assistant, profile) => {
+          const binding = assistant.binding!;
+          if (this.sessions.has(id)) throw new Error('Recovery session already exists');
+          for (const live of this.sessions.values()) {
+            if (
+              live.mode !== 'codex' ||
+              !live.pid ||
+              live.paneExit ||
+              live.remote ||
+              live.docker ||
+              resolveEffectiveCodexHome(live.getCodexHomeOverride(), live.workingDir) !== binding.codexHome
+            )
+              continue;
+            const native = await findExactCodexConversation({
+              codexHome: binding.codexHome,
+              workingDir: binding.workingDir,
+              sessionId: live.id,
+              nativeResumeId: live.nativeResumeId ?? undefined,
+              resumeSessionId: live.codexConfig?.resumeSessionId,
+            });
+            if (native?.id === binding.conversationId)
+              throw new Error('Original conversation already has another live session');
+          }
+
+          const gated = await _clampExternalCliBypassForOwner(assistant.owner, profile.codexConfig);
+          const envOverrides = await clampEnvOverridesForOwner(assistant.owner, { CODEX_HOME: binding.codexHome });
+          if (
+            envOverrides?.CODEX_HOME !== binding.codexHome ||
+            JSON.stringify(gated.codexConfig) !== JSON.stringify(profile.codexConfig)
+          )
+            throw new Error('Recovery permissions changed');
+          const session = new Session({
+            id,
+            workingDir: binding.workingDir,
+            name: profile.name,
+            mode: 'codex',
+            owner: assistant.owner,
+            mux: this.mux,
+            useMux: true,
+            codexConfig: { ...gated.codexConfig, resumeSessionId: binding.conversationId },
+            envOverrides,
+            checkpointEnabled: false,
+            truecolorEnabled: await this.getTruecolorEnabled(),
+          });
+          await this.registerSessionWithLayout(session);
+          this.store.incrementSessionsCreated();
+          this.persistSessionState(session);
+          await this.setupSessionListeners(session);
+          await session.startInteractive();
+          this.persistSessionState(session);
+          this.broadcast(SseEvent.SessionCreated, this.getSessionStateWithRespawn(session));
+          return session;
+        },
+      })
     );
     this.assistantRequests.start();
     registerCodexCommandProfileRoutes(this.app, ctx);

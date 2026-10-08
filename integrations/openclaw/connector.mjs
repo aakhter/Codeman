@@ -346,7 +346,11 @@ export class Connector {
         return {
           handled: true,
           reply: {
-            text: 'Brain is paused. Open Assistants in Codeman and hand Brain over to messaging.',
+            text: assistant.capabilities?.recovery?.state === 'recovering'
+              ? 'Brain is reconnecting to its conversation. Please try again shortly.'
+              : assistant.capabilities?.recovery?.state === 'blocked'
+                ? 'Brain needs recovery review. Open Assistants in Codeman.'
+                : 'Brain is paused. Open Assistants in Codeman and hand Brain over to messaging.',
           },
         };
     } catch {

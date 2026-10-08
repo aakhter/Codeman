@@ -4807,7 +4807,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * blocking the event loop. Passing argv directly to execFile avoids a shell
    * and targeting the session lets tmux resolve its active pane in one command.
    */
-  async capturePaneTextAsync(muxName: string, opts?: { signal?: AbortSignal }): Promise<string | null> {
+  async capturePaneTextAsync(muxName: string, opts?: { signal?: AbortSignal; ansi?: boolean }): Promise<string | null> {
     if (!SAFE_TMUX_SOCKET_PATTERN.test(this.tmuxSocket) || !isValidMuxName(muxName)) return null;
 
     const execOptions: TmuxPaneTextExecOptions = {
@@ -4820,7 +4820,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     try {
       const { stdout } = await this.paneTextExecutor(
         'tmux',
-        ['-L', this.tmuxSocket, 'capture-pane', '-p', '-t', muxName],
+        ['-L', this.tmuxSocket, 'capture-pane', '-p', ...(opts?.ansi ? ['-e'] : []), '-t', muxName],
         execOptions
       );
       if (Buffer.byteLength(stdout, 'utf8') > ASYNC_TEXT_CAPTURE_MAX_BUFFER) return null;

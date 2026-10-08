@@ -143,6 +143,41 @@ and idempotency tombstones when archiving; do not delete keys and replay old inp
 No raw prompt, token or error is logged by the connector. Corrupt state is
 preserved and execution fails closed.
 
+## Automatic session recovery (COD-498)
+
+An explicit desktop handoff arms bounded recovery for that assistant. If its
+idle local Codex session disappears or its agent exits, Codeman creates a
+replacement with the saved session name/configuration and resumes the **exact**
+native conversation, workspace and Codex home. It verifies native readiness,
+current owner permissions and an empty composer before updating the binding and
+restoring messaging ownership. Tokens and assistant identity are unchanged.
+Only unsent queued requests migrate to the verified replacement binding;
+submitted/uncertain work is never replayed.
+
+Recovery waits 60 seconds after server startup for ordinary session restoration.
+Each startup attempt has a 60-second readiness window; failed launches wait
+30 seconds between retries, with at most three attempts persisted across restarts.
+A live candidate with uncertain readiness stops for desktop review rather than
+spawning another process. A missing/unfinished conversation, changed identity,
+revoked owner or un-restorable session-only provider credentials also stops for
+review. There is no fresh-conversation fallback. Active or uncertain requests
+must be reviewed before recovery can proceed. **Take control** disarms recovery;
+a new explicit handoff re-arms it and resets the attempt budget.
+
+Private recovery profiles and attempt/launch intent are stored in instance-scoped
+`assistant-recovery.json` (0600). Profiles can include private owner-authored
+launch commands; never expose or commit this file. The API exposes only recovery
+state, a safe reason and attempt count. The UI shows **Recovering** or **Recovery
+needed**, and Telegram reports reconnecting/review instead of claiming readiness.
+A normal Codeman restart that retains the same live session still needs an
+explicit handoff; recovery does not take control of a healthy desktop session.
+
+Run the isolated native recovery canary with:
+
+```sh
+node scripts/smoke-openclaw-assistant.mjs --pdf --recovery
+```
+
 ## HTTP API
 
 Routes below use `/api/v1` and Codeman's `{success, data}` envelope; responses are
