@@ -4370,14 +4370,12 @@
   <script defer src="ralph-wizard.js"></script>
   <button type="button" class="btn-toolbar assistant-mobile-entry" onclick="app.openAssistants()" aria-label="Open assistants">Assistants</button>
   <dialog id="assistantsDialog" class="assistants-dialog" aria-labelledby="assistantsTitle">
-    <header><h2 id="assistantsTitle">Assistants</h2><button class="btn-toolbar" onclick="app.closeAssistants()">Close</button></header>
-    <p>Connect messaging to an existing local Codex conversation. Disable session automation and stop respawn/Ralph before handoff. Handoff locks terminal input until you take control. After a restart or recovery, review and hand off again.</p>
-    <form class="assistant-create" onsubmit="app.createAssistant(event)"><input id="assistantName" aria-label="Assistant name" placeholder="Name (Brain)" required maxlength="60"><input id="assistantSlug" aria-label="Assistant slug" placeholder="Slug (brain)" required pattern="[a-z][a-z0-9\-]{0,59}"><button class="btn-toolbar" type="submit">Create assistant</button></form>
-    <label><input id="assistantComposerEmpty" type="checkbox"> I cleared the terminal composer, no CLI task is running, and nobody is using a direct tmux attachment.</label>
-    <label><input id="assistantReviewConfirmed" type="checkbox"> I stopped or completed the CLI task and reviewed possible side effects before reconciliation.</label>
-    <p id="assistantsError" role="alert"></p>
-    <section id="assistantsTokenPanel" hidden><p>Copy this token to the gateway's credential environment. It is shown only now.</p><textarea id="assistantsToken" readonly aria-label="New connector token"></textarea><button class="btn-toolbar" onclick="app.$('assistantsToken').value='';app.$('assistantsTokenPanel').hidden=true">Hide token</button></section>
+    <header class="assistants-header"><div><span class="assistants-eyebrow">Codeman</span><h2 id="assistantsTitle">Assistants</h2></div><div class="assistant-header-actions"><button class="assistant-button assistant-primary" onclick="app.toggleAssistantCreate()" aria-expanded="false" aria-controls="assistantCreatePanel" id="assistantAddButton">+ Add assistant</button><button class="assistant-button assistant-close" onclick="app.closeAssistants()" aria-label="Close">×</button></div></header>
+    <section id="assistantCreatePanel" class="assistant-create-panel" hidden aria-label="Create an assistant"><h3>New assistant</h3><form class="assistant-create" onsubmit="app.createAssistant(event)"><label>Name<input id="assistantName" aria-label="Assistant name" placeholder="Brain" required maxlength="60"></label><label>Messaging name<input id="assistantSlug" aria-label="Assistant slug" placeholder="brain" required pattern="[a-z][a-z0-9\-]{0,59}"></label><button class="assistant-button assistant-primary" type="submit">Create assistant</button></form></section>
+    <p id="assistantsError" role="alert" aria-live="polite"></p>
+    <section id="assistantsTokenPanel" class="assistant-token-panel" hidden><h3>New connector token</h3><p>Copy this token to the gateway's credential environment. It is shown only now.</p><textarea id="assistantsToken" readonly aria-label="New connector token"></textarea><button class="assistant-button" onclick="app.$('assistantsToken').value='';app.$('assistantsTokenPanel').hidden=true">Hide token</button></section>
     <div id="assistantsList"></div>
+    <nav class="assistant-bottom-nav" aria-label="Assistant navigation"><button type="button" onclick="app.closeAssistants()">▣<span>Sessions</span></button><button type="button" aria-current="page">✦<span>Assistants</span></button><button type="button" onclick="app.closeAssistants();app.openAppSettings()">⚙<span>Settings</span></button></nav>
   </dialog>
   <div id="assistantInputBanner" hidden role="status"><span></span> <button class="btn-toolbar" onclick="app.openAssistants()">Assistants / Take control</button></div>
   <script defer src="api-client.js"></script>

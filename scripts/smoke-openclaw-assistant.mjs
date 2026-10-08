@@ -332,7 +332,27 @@ try {
   checks.push('real CLI request completion and matching delivery');
   await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
   await sleep(3500);
-  assert.match(await page.locator('#assistantsList').innerText(), /completed/);
+  assert.match(await page.locator('#assistantsList').innerText(), /completed/i);
+  assert.equal(await page.locator('.assistant-nav-item[aria-pressed="true"]').count(), 1);
+  assert.equal(await page.locator('.assistant-tiles').count(), 1);
+  assert.ok(!(await page.locator('.assistant-card').innerText()).includes(assistant.binding.conversationId));
+  await page.screenshot({ path: join(root, 'desktop-assistants.png') });
+  const helper = await api('/assistants', 'POST', { name: 'Canary helper', slug: 'canary-helper' });
+  await page.evaluate(() => app.refreshAssistants());
+  await page.getByRole('button', { name: /Canary helper/ }).click();
+  await page.locator(`.assistant-card[data-assistant-id="${helper.id}"]`).waitFor();
+  assert.equal(await page.locator('.assistant-card .assistant-advanced-body').isVisible(), true);
+  await page.getByRole('button', { name: /Canary Brain/ }).click();
+  await page.locator(`.assistant-card[data-assistant-id="${assistant.id}"]`).waitFor();
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await page.getByLabel('Rename Canary Brain').fill('Unsaved draft');
+  await sleep(4000);
+  assert.equal(await page.getByLabel('Rename Canary Brain').inputValue(), 'Unsaved draft');
+  await page.getByLabel('Rename Canary Brain').blur();
+  await page.getByText('Advanced settings', { exact: true }).click();
+  checks.push(
+    'desktop overview, selected assistant navigation, advanced disclosure, hidden identifiers and focus-safe polling'
+  );
   await page.getByRole('button', { name: 'Take control', exact: true }).click();
   await until(async () => !(await api(`/assistants/${assistant.id}`)).enabled);
   checks.push('desktop result and Take control');
