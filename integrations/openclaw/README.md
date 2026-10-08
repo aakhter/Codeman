@@ -30,6 +30,11 @@ Optional model-driven tools are deferred; explicit `/brain` bypasses OpenClaw's 
 }
 ```
 
+The manifest declares `activation.onStartup: true` so the gateway imports the
+connector and starts its managed outbox service. Runtime inspection alone does
+not prove startup activation. Verify the gateway log contains
+`Codeman assistant connector service started`.
+
 Set `CODEMAN_BRAIN_TOKEN` in the gateway service's environment. Use a separate
 profile and bot for testing; never start a second poller for the production bot.
 Only HTTPS origins or loopback HTTP are accepted. Redirects, credentials, query

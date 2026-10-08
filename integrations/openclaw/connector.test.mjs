@@ -331,3 +331,8 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
     'test'
   );
 });
+
+test('manifest explicitly activates the managed connector during gateway startup', () => {
+  const manifest = JSON.parse(readFileSync(new URL('./openclaw.plugin.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.activation.onStartup, true);
+});

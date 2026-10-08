@@ -89,6 +89,7 @@ export default {
               running = undefined;
             });
         };
+        api.logger?.info?.('Codeman assistant connector service started');
         pump();
         timer = setInterval(pump, 2000);
         timer.unref();

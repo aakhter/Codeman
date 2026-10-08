@@ -29,5 +29,8 @@
         "pattern": "^[A-Z][A-Z0-9_]*$"
       }
     }
+  },
+  "activation": {
+    "onStartup": true
   }
 }

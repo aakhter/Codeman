@@ -125,3 +125,20 @@ with the linked connector; runtime loader reports two hooks and no diagnostics.
 The existing Brain session/conversation and explicit handoff were preserved.
 A new real Telegram message is required to establish production delivery; previous
 messages are not automatically replayed.
+
+## 2026-10-08 gateway startup correction
+
+The next real Telegram attempt still reached the ordinary OpenClaw model. The
+manifest lacked `activation.onStartup: true`; the installed SDK startup planner
+explicitly excludes hook/service-only plugins without a startup trigger. CLI
+runtime inspection imported the plugin independently and was insufficient proof.
+
+Added explicit startup activation and a credential-free managed-service startup
+log. The installed SDK's real `loadGatewayStartupPluginPlan` now includes
+`codeman-assistant`. All 14 connector/native tests and the root wrapper pass;
+formatting checks pass. Production `openclaw-gateway` was restarted and its user
+journal records `Codeman assistant connector service started` at
+2026-10-08T08:54:48.099Z. This establishes live service activation, separately from
+CLI inspection and the earlier isolated real Codex canary. Existing Brain binding
+and handoff are preserved. A fresh Telegram test is requested; failed earlier
+messages are not replayed.
