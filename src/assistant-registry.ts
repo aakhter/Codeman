@@ -1,8 +1,7 @@
-/** Named assistant metadata and exact local Codex binding. */
+/** Named assistant metadata and exact local provider binding. */
 import { randomUUID } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
 import { AssistantStore } from './assistant-store.js';
-import { findExactCodexConversation, resolveEffectiveCodexHome } from './checkpoint-conversation-identity.js';
+import { ASSISTANT_MODES, assistantSessionHome, resolveSessionAssistantConversation } from './assistant-native.js';
 import type { AssistantDefinition, AssistantBinding } from './types/assistant.js';
 
 export class AssistantConflict extends Error {}
@@ -17,6 +16,9 @@ export interface AssistantSession {
   remote?: unknown;
   docker?: unknown;
   nativeResumeId?: string | null;
+  claudeSessionId?: string | null;
+  openCodeConfig?: { continueSession?: string };
+  getClaudeConfigDirOverride?(): string | undefined;
   codexConfig?: { resumeSessionId?: string };
   getCodexHomeOverride(): string | undefined;
   hasLostCodexProviderCredentials(): boolean;
@@ -27,7 +29,7 @@ export async function resolveAssistantBinding(
   generation: number
 ): Promise<AssistantBinding> {
   if (
-    session.mode !== 'codex' ||
+    !ASSISTANT_MODES.some((mode) => mode === session.mode) ||
     session.remote ||
     session.docker ||
     !session.pid ||
@@ -35,18 +37,18 @@ export async function resolveAssistantBinding(
     session.status !== 'idle' ||
     session.hasLostCodexProviderCredentials()
   )
-    throw new AssistantConflict('Binding requires an idle, running local Codex session with available credentials');
-  const codexHome = resolveEffectiveCodexHome(session.getCodexHomeOverride(), session.workingDir);
-  const workingDir = await realpath(session.workingDir);
-  const conversation = await findExactCodexConversation({
-    codexHome,
+    throw new AssistantConflict(
+      'Binding requires an idle, running local Codex, Claude or OpenCode session with available credentials'
+    );
+  const { conversation, home: codexHome, workingDir } = await resolveSessionAssistantConversation(session);
+  return {
     sessionId: session.id,
+    conversationId: conversation.id,
+    codexHome,
     workingDir,
-    nativeResumeId: session.nativeResumeId ?? undefined,
-    resumeSessionId: session.codexConfig?.resumeSessionId,
-  });
-  if (!conversation) throw new AssistantConflict('Exact conversation identity is unavailable or ambiguous');
-  return { sessionId: session.id, conversationId: conversation.id, codexHome, workingDir, generation };
+    generation,
+    ...(session.mode !== 'codex' ? { mode: session.mode as 'claude' | 'opencode' } : {}),
+  };
 }
 
 export class AssistantRegistry {
@@ -103,6 +105,9 @@ export class AssistantRegistry {
     if (session.owner !== current.owner) throw new AssistantConflict('Assistant and session ownership must match');
     if (this.hasOutstandingRequests(current.id))
       throw new AssistantConflict('Reconcile outstanding requests before changing the binding');
+    const initialMode = session.mode;
+    const initialClaudeId = session.claudeSessionId;
+    const initialOpenCodeId = session.openCodeConfig?.continueSession;
     const initialWorkingDir = session.workingDir;
     const initialNativeId = session.nativeResumeId;
     const initialResumeId = session.codexConfig?.resumeSessionId;
@@ -121,11 +126,14 @@ export class AssistantRegistry {
       session.status !== 'idle' ||
       !session.pid ||
       session.paneExit ||
-      session.mode !== 'codex' ||
+      !ASSISTANT_MODES.some((mode) => mode === session.mode) ||
       session.remote ||
       session.docker ||
       session.hasLostCodexProviderCredentials() ||
-      resolveEffectiveCodexHome(session.getCodexHomeOverride(), session.workingDir) !== binding.codexHome ||
+      assistantSessionHome(session) !== binding.codexHome ||
+      session.mode !== initialMode ||
+      session.claudeSessionId !== initialClaudeId ||
+      session.openCodeConfig?.continueSession !== initialOpenCodeId ||
       session.workingDir !== initialWorkingDir ||
       session.nativeResumeId !== initialNativeId ||
       session.codexConfig?.resumeSessionId !== initialResumeId
@@ -142,7 +150,13 @@ export class AssistantRegistry {
         )
     )
       throw new AssistantConflict('Conversation is already bound');
-    const next = { ...latest, binding, revision: latest.revision + 1, updatedAt: Date.now() };
+    const next = {
+      ...latest,
+      mode: session.mode as 'codex' | 'claude' | 'opencode',
+      binding,
+      revision: latest.revision + 1,
+      updatedAt: Date.now(),
+    };
     this.store.save(next);
     return next;
   }

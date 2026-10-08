@@ -14,16 +14,33 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { dataPath } from './config/instance.js';
-import { CODEX_REASONING_EFFORTS } from './types.js';
+import { CODEX_REASONING_EFFORTS, EFFORT_LEVELS } from './types.js';
 import type { AssistantDefinition } from './types/assistant.js';
 import type { AssistantExecutionSession, AssistantRequestManager } from './assistant-request-manager.js';
 import { AssistantStore } from './assistant-store.js';
 import { resolveAssistantBinding } from './assistant-registry.js';
-import { findExactCodexConversation } from './checkpoint-conversation-identity.js';
+import { findAssistantConversation, assistantBindingMode } from './assistant-native.js';
 
 const Profile = z
   .object({
     name: z.string().max(200),
+    mode: z.enum(['codex', 'claude', 'opencode']).optional(),
+    envOverrides: z.record(z.string(), z.string()).optional(),
+    claudeConfig: z
+      .object({
+        claudeMode: z.enum(['normal', 'auto', 'allowedTools', 'dangerously-skip-permissions']),
+        allowedTools: z.string().optional(),
+        model: z.string().optional(),
+        effort: z.enum(EFFORT_LEVELS).optional(),
+        advisorModel: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    openCodeConfig: z
+      .object({ model: z.string().optional(), autoAllowTools: z.boolean().optional() })
+      .strict()
+      .optional(),
+    openCodeConfigHome: z.string().optional(),
     codexConfig: z
       .object({
         model: z.string().optional(),
@@ -41,7 +58,8 @@ export type AssistantRecoveryProfile = z.infer<typeof Profile>;
 const Binding = z
   .object({
     sessionId: z.string(),
-    conversationId: z.uuid(),
+    conversationId: z.string().regex(/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|ses_[A-Za-z0-9_-]{1,120})$/i),
+    mode: z.enum(['codex', 'claude', 'opencode']).optional(),
     codexHome: z.string(),
     workingDir: z.string(),
     generation: z.number().int().positive(),
@@ -165,14 +183,9 @@ export class AssistantRecovery {
       return this.blocked(r, 'Assistant owner is unavailable or no longer authorized');
     try {
       if ((await realpath(r.binding.workingDir)) !== r.binding.workingDir) throw new Error('Workspace changed');
-      const native = await findExactCodexConversation({
-        codexHome: r.binding.codexHome,
-        workingDir: r.binding.workingDir,
-        sessionId: r.binding.sessionId,
-        nativeResumeId: r.binding.conversationId,
-      });
+      const native = await findAssistantConversation(r.binding);
       if (!native) return this.blocked(r, 'Original conversation is unavailable; choose recovery in the desktop');
-      if (!(await this.requests.conversationReady(native.path)))
+      if (!(await this.requests.conversationReady(native.path, r.binding)))
         return this.blocked(r, 'Original conversation has an unfinished turn; review it in the desktop');
       let candidate: AssistantExecutionSession | undefined;
       if (r.state === 'armed') {
@@ -196,6 +209,7 @@ export class AssistantRecovery {
       const binding = await resolveAssistantBinding(candidate, r.binding.generation + 1);
       if (
         candidate.owner !== a.owner ||
+        assistantBindingMode(binding) !== a.mode ||
         binding.conversationId !== r.binding.conversationId ||
         binding.codexHome !== r.binding.codexHome ||
         binding.workingDir !== r.binding.workingDir
@@ -247,13 +261,35 @@ export class AssistantRecovery {
 
 /* eslint-disable no-control-regex -- tmux SGR sequences carry composer placeholder styling. */
 /** Accept only an empty Codex composer; dim placeholder text is not submitted input. */
-export function assistantComposerEmpty(screen: string | null): boolean {
+export function assistantComposerEmpty(
+  screen: string | null,
+  mode: 'codex' | 'claude' | 'opencode' = 'codex'
+): boolean {
   if (!screen) return false;
+  if (mode === 'opencode') {
+    const plain = screen.replace(/\x1b\[[0-9;]*m/g, '');
+    // Inspect the last OpenTUI input box, never a placeholder in conversation
+    // history. Resumed sessions draw blank input rows instead of a placeholder.
+    const lines = plain.split('\n');
+    let border = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/^\s*╹▀{5,}\s*$/.test(lines[i])) {
+        border = i;
+        break;
+      }
+    }
+    if (border < 0 || !lines.slice(border + 1).some((line) => /ctrl\+p.*commands/.test(line))) return false;
+    const box: string[] = [];
+    for (let i = border - 1; i >= 0 && /^\s*┃/.test(lines[i]); i--) box.unshift(lines[i].replace(/^\s*┃/, '').trim());
+    if (box.length < 3 || !/^.+ · .+/.test(box.at(-1) ?? '')) return false;
+    const input = box.slice(0, -1).filter(Boolean);
+    return input.length === 0 || (input.length === 1 && /^Ask anything(?:…|\.\.\.)(?: "[^"\n]*")?$/.test(input[0]));
+  }
   const lines = screen.split('\n').filter((line) =>
     line
       .replace(/\x1b\[[0-9;]*m/g, '')
       .trimStart()
-      .startsWith('›')
+      .startsWith(mode === 'claude' ? '❯' : '›')
   );
   const line = lines.at(-1);
   if (!line) return false;
@@ -271,8 +307,11 @@ export function assistantComposerEmpty(screen: string | null): boolean {
     } else {
       let text = token;
       if (!after) {
-        if (!text.includes('›')) continue;
-        text = text.split('›').slice(1).join('›');
+        if (!text.includes(mode === 'claude' ? '❯' : '›')) continue;
+        text = text
+          .split(mode === 'claude' ? '❯' : '›')
+          .slice(1)
+          .join(mode === 'claude' ? '❯' : '›');
         after = true;
       }
       if (!dim) visible += text;

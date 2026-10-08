@@ -161,7 +161,7 @@ Object.assign(CodemanApp.prototype, {
       empty.append(
         icon('brain'),
         element('h3', 'Your sessions, within reach'),
-        element('p', 'Create an assistant and connect it to an existing Codex session.')
+        element('p', 'Create an assistant and connect it to an existing Codex, Claude or OpenCode session.')
       );
       list.replaceChildren(empty);
       this.$('assistantCreatePanel').hidden = false;
@@ -181,7 +181,9 @@ Object.assign(CodemanApp.prototype, {
     )
       return;
     const allSessions = Array.isArray(sessionData) ? sessionData : (sessionData.sessions ?? []);
-    const sessions = allSessions.filter((s) => s.mode === 'codex' && !s.remote && !s.docker && s.pid);
+    const sessions = allSessions.filter(
+      (s) => ['codex', 'claude', 'opencode'].includes(s.mode) && !s.remote && !s.docker && s.pid
+    );
     const bound = allSessions.find((s) => s.id === a.binding?.sessionId);
     const state = this.assistantState(a);
     const layout = element('div', undefined, 'assistant-layout');
@@ -221,7 +223,7 @@ Object.assign(CodemanApp.prototype, {
       title,
       element(
         'p',
-        `${bound?.name || (a.binding ? 'Bound session unavailable' : 'Choose a session')} · Codex`,
+        `${bound?.name || (a.binding ? 'Bound session unavailable' : 'Choose a session')} · ${{ codex: 'Codex', claude: 'Claude', opencode: 'OpenCode' }[a.mode] || a.mode}`,
         'assistant-secondary'
       )
     );
@@ -262,7 +264,11 @@ Object.assign(CodemanApp.prototype, {
     sessionText.append(
       element('h4', 'Session'),
       element('p', bound?.name || (a.binding ? 'Unavailable' : 'Not connected')),
-      element('small', 'Local Codex', 'assistant-secondary')
+      element(
+        'small',
+        `Local ${{ codex: 'Codex', claude: 'Claude', opencode: 'OpenCode' }[a.mode] || a.mode}`,
+        'assistant-secondary'
+      )
     );
     if (bound)
       sessionText.append(
@@ -466,8 +472,8 @@ Object.assign(CodemanApp.prototype, {
     );
     const select = element('select');
     select.setAttribute('aria-label', `Session for ${a.name}`);
-    select.append(new Option('Choose a local Codex session', ''));
-    for (const s of sessions) select.append(new Option(s.name || s.id, s.id));
+    select.append(new Option('Choose a local Codex, Claude or OpenCode session', ''));
+    for (const s of sessions) select.append(new Option(`${s.name || s.id} · ${s.mode}`, s.id));
     select.value = a.binding?.sessionId ?? '';
     const controls = element('div', undefined, 'assistant-controls');
     controls.append(

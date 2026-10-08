@@ -30,7 +30,13 @@
 import { findUser } from '../user-store.js';
 import { AssistantRequestManager } from '../assistant-request-manager.js';
 import { AssistantRecovery, assistantComposerEmpty } from '../assistant-recovery.js';
-import { findExactCodexConversation, resolveEffectiveCodexHome } from '../checkpoint-conversation-identity.js';
+import {
+  assistantBindingMode,
+  assistantSessionHome,
+  findAssistantConversation,
+  openCodeAssistantHome,
+} from '../assistant-native.js';
+import { canonicalizeCodexHome } from '../checkpoint-conversation-identity.js';
 import { _clampExternalCliBypassForOwner } from './routes/session-routes.js';
 import { clampEnvOverridesForOwner } from '../session-env-clamp.js';
 import { AssistantRequestStore } from '../assistant-request-store.js';
@@ -50,7 +56,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execFile, execSync } from 'node:child_process';
-import { hostname as getHostname, uptime as osUptime } from 'node:os';
+import { hostname as getHostname, uptime as osUptime, homedir } from 'node:os';
 import { normalizeSettingsObject } from '../config/settings.js';
 import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
 import { rebootRestoreRegistry } from './reboot-restore-registry.js';
@@ -1958,8 +1964,49 @@ export class WebServer extends EventEmitter {
       new AssistantRecovery(this.assistantStore, this.assistantRequests, (id) => this.sessions.get(id), {
         snapshot: (live) => {
           const session = this.sessions.get(live.id);
-          if (!session || session.getCodexProviderIdentityForPersist()?.credentialSource === 'session-key')
+          if (
+            !session ||
+            session.customModel ||
+            session.getCodexProviderIdentityForPersist()?.credentialSource === 'session-key'
+          )
             throw new Error('Session-scoped credentials require manual recovery');
+          if (session.mode === 'claude') {
+            const envOverrides = session.getEnvOverridesForPersist();
+            if (Object.keys(envOverrides ?? {}).some((k) => /TOKEN|KEY|AUTH|ENDPOINT|BASE_URL/i.test(k)))
+              throw new Error('Private provider configuration requires manual recovery');
+            const state = session.toState();
+            return {
+              name: session.name,
+              mode: 'claude' as const,
+              codexConfig: {},
+              envOverrides,
+              claudeConfig: {
+                claudeMode: session.claudeMode,
+                allowedTools: session.allowedTools,
+                model: state.model,
+                effort: state.effort,
+                advisorModel: state.advisorModel,
+              },
+            };
+          }
+          if (session.mode === 'opencode') {
+            if (
+              session.openCodeConfig?.configContent ||
+              Object.keys(session.getEnvOverridesForPersist() ?? {}).length ||
+              ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT'].some((key) => process.env[key])
+            )
+              throw new Error('Custom provider configuration requires manual recovery');
+            return {
+              name: session.name,
+              mode: 'opencode' as const,
+              codexConfig: {},
+              openCodeConfig: {
+                model: session.openCodeConfig?.model,
+                autoAllowTools: session.openCodeConfig?.autoAllowTools,
+              },
+              openCodeConfigHome: canonicalizeCodexHome(process.env.XDG_CONFIG_HOME || join(homedir(), '.config')),
+            };
+          }
           const { resumeSessionId: _resume, ...codexConfig } = session.codexConfig ?? {};
           return { name: session.name, codexConfig };
         },
@@ -1972,49 +2019,77 @@ export class WebServer extends EventEmitter {
           const session = this.sessions.get(live.id);
           return Boolean(
             session?.muxName &&
-            assistantComposerEmpty((await this.mux.capturePaneTextAsync?.(session.muxName, { ansi: true })) ?? null)
+            assistantComposerEmpty(
+              (await this.mux.capturePaneTextAsync?.(session.muxName, { ansi: true })) ?? null,
+              session.mode as 'codex' | 'claude' | 'opencode'
+            )
           );
         },
         create: async (id, assistant, profile) => {
           const binding = assistant.binding!;
           if (this.sessions.has(id)) throw new Error('Recovery session already exists');
+          const mode = assistantBindingMode(binding);
           for (const live of this.sessions.values()) {
             if (
-              live.mode !== 'codex' ||
+              live.mode !== mode ||
               !live.pid ||
               live.paneExit ||
               live.remote ||
               live.docker ||
-              resolveEffectiveCodexHome(live.getCodexHomeOverride(), live.workingDir) !== binding.codexHome
+              assistantSessionHome(live) !== binding.codexHome
             )
               continue;
-            const native = await findExactCodexConversation({
-              codexHome: binding.codexHome,
-              workingDir: binding.workingDir,
-              sessionId: live.id,
-              nativeResumeId: live.nativeResumeId ?? undefined,
-              resumeSessionId: live.codexConfig?.resumeSessionId,
-            });
+            const native = await findAssistantConversation(binding, live);
             if (native?.id === binding.conversationId)
               throw new Error('Original conversation already has another live session');
           }
-
-          const gated = await _clampExternalCliBypassForOwner(assistant.owner, profile.codexConfig);
-          const envOverrides = await clampEnvOverridesForOwner(assistant.owner, { CODEX_HOME: binding.codexHome });
-          if (
-            envOverrides?.CODEX_HOME !== binding.codexHome ||
-            JSON.stringify(gated.codexConfig) !== JSON.stringify(profile.codexConfig)
+          let envOverrides: Record<string, string> | undefined;
+          let codexConfig = profile.codexConfig;
+          const claudeConfig = profile.claudeConfig;
+          if (mode === 'codex') {
+            const gated = await _clampExternalCliBypassForOwner(assistant.owner, profile.codexConfig);
+            envOverrides = await clampEnvOverridesForOwner(assistant.owner, { CODEX_HOME: binding.codexHome });
+            if (
+              envOverrides?.CODEX_HOME !== binding.codexHome ||
+              JSON.stringify(gated.codexConfig) !== JSON.stringify(profile.codexConfig)
+            )
+              throw new Error('Recovery permissions changed');
+            codexConfig = gated.codexConfig!;
+          } else if (mode === 'claude') {
+            if (
+              !claudeConfig ||
+              (await resolveClaudeModeForUsername(claudeConfig.claudeMode, assistant.owner)) !== claudeConfig.claudeMode
+            )
+              throw new Error('Recovery permissions changed');
+            const rawEnv = { ...profile.envOverrides };
+            envOverrides = await clampEnvOverridesForOwner(assistant.owner, rawEnv);
+            const defaultHome = canonicalizeCodexHome(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'));
+            if (
+              Object.entries(rawEnv).some(([key, value]) => envOverrides?.[key] !== value) ||
+              canonicalizeCodexHome(envOverrides?.CLAUDE_CONFIG_DIR || defaultHome, binding.workingDir) !==
+                binding.codexHome
+            )
+              throw new Error('Recovery account changed');
+          } else if (
+            openCodeAssistantHome() !== binding.codexHome ||
+            profile.openCodeConfigHome !==
+              canonicalizeCodexHome(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'))
           )
-            throw new Error('Recovery permissions changed');
+            throw new Error('Recovery account changed');
           const session = new Session({
             id,
             workingDir: binding.workingDir,
             name: profile.name,
-            mode: 'codex',
+            mode,
             owner: assistant.owner,
             mux: this.mux,
             useMux: true,
-            codexConfig: { ...gated.codexConfig, resumeSessionId: binding.conversationId },
+            codexConfig: mode === 'codex' ? { ...codexConfig, resumeSessionId: binding.conversationId } : undefined,
+            openCodeConfig:
+              mode === 'opencode'
+                ? { ...profile.openCodeConfig, continueSession: binding.conversationId, forkSession: false }
+                : undefined,
+            ...(mode === 'claude' ? { ...claudeConfig, resumeSessionId: binding.conversationId } : {}),
             envOverrides,
             checkpointEnabled: false,
             truecolorEnabled: await this.getTruecolorEnabled(),

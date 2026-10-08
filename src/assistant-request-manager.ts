@@ -4,8 +4,16 @@ import { open, stat, realpath } from 'node:fs/promises';
 import { AssistantConflict, resolveAssistantBinding, type AssistantSession } from './assistant-registry.js';
 import { AssistantRequestStore, type AssistantRequest } from './assistant-request-store.js';
 import { AssistantStore } from './assistant-store.js';
-import { findExactCodexConversation, resolveEffectiveCodexHome } from './checkpoint-conversation-identity.js';
-import { observeAssistantTurn } from './assistant-turn-observer.js';
+import {
+  assistantBindingMode,
+  assistantSessionHome,
+  findAssistantConversation,
+  otherNativeReady,
+  snapshotOpenCode,
+  observeOpenCode,
+  type NativeCursor,
+} from './assistant-native.js';
+import { observeClaudeAssistantTurn, observeAssistantTurn } from './assistant-turn-observer.js';
 import type { AssistantDefinition, AssistantBinding } from './types/assistant.js';
 import type { AssistantRecovery } from './assistant-recovery.js';
 
@@ -52,8 +60,10 @@ export class AssistantRequestManager {
       if (r.assistantId === id && r.status === 'queued' && JSON.stringify(r.binding) === JSON.stringify(previous))
         this.change(r, { binding: structuredClone(binding) });
   }
-  conversationReady(path: string): Promise<boolean> {
-    return this.nativeReady(path);
+  conversationReady(path: string, binding?: AssistantBinding): Promise<boolean> {
+    return binding && assistantBindingMode(binding) !== 'codex'
+      ? otherNativeReady(binding, path)
+      : this.nativeReady(path);
   }
   private handoffPending = new Set<string>();
   private takingControl = new Set<string>();
@@ -250,19 +260,14 @@ export class AssistantRequestManager {
       this.attach(live);
       live.cancelAssistantSubmitVerification();
       const binding = await resolveAssistantBinding(live, a.binding.generation);
-      const native = await findExactCodexConversation({
-        codexHome: binding.codexHome,
-        workingDir: binding.workingDir,
-        sessionId: live.id,
-        nativeResumeId: live.nativeResumeId ?? undefined,
-        resumeSessionId: live.codexConfig?.resumeSessionId,
-      });
-      if (!native || !(await this.nativeReady(native.path)))
+      const native = await findAssistantConversation(binding, live);
+      if (!native || !(await this.conversationReady(native.path, binding)))
         throw new AssistantConflict('Native conversation still has an unfinished turn');
       const latest = this.assistants.get(a.id);
       if (
         !latest?.enabled ||
         latest.revision !== expectedRevision ||
+        assistantBindingMode(binding) !== a.mode ||
         binding.conversationId !== a.binding.conversationId ||
         binding.codexHome !== a.binding.codexHome ||
         binding.workingDir !== a.binding.workingDir ||
@@ -335,7 +340,7 @@ export class AssistantRequestManager {
     const live = this.session(r.binding.sessionId);
     if (
       !live ||
-      live.mode !== 'codex' ||
+      live.mode !== assistantBindingMode(r.binding) ||
       live.owner !== r.owner ||
       live.remote ||
       live.docker ||
@@ -344,16 +349,10 @@ export class AssistantRequestManager {
       return undefined;
     if (
       (await realpath(live.workingDir)) !== r.binding.workingDir ||
-      resolveEffectiveCodexHome(live.getCodexHomeOverride(), live.workingDir) !== r.binding.codexHome
+      assistantSessionHome(live) !== r.binding.codexHome
     )
       return undefined;
-    const conversation = await findExactCodexConversation({
-      codexHome: r.binding.codexHome,
-      workingDir: r.binding.workingDir,
-      sessionId: live.id,
-      nativeResumeId: live.nativeResumeId ?? undefined,
-      resumeSessionId: live.codexConfig?.resumeSessionId,
-    });
+    const conversation = await findAssistantConversation(r.binding, live);
     return conversation?.id === r.binding.conversationId ? conversation.path : undefined;
   }
   private async observe(r: AssistantRequest): Promise<void> {
@@ -364,24 +363,32 @@ export class AssistantRequestManager {
     try {
       const path = await this.transcriptIdentity(r);
       if (path !== r.transcript.path) throw new Error('Exact conversation binding changed or session is unavailable');
-      const file = await open(path, 'r');
-      let delta: string;
-      try {
-        const info = await file.stat();
-        if (
-          String(info.ino) !== r.transcript.inode ||
-          String(info.dev) !== r.transcript.device ||
-          info.size < r.transcript.offset ||
-          info.size - r.transcript.offset > 16 * 1024 * 1024
-        )
-          throw new Error('Transcript rotated, truncated, or exceeded observation capacity');
-        const bytes = Buffer.alloc(info.size - r.transcript.offset);
-        const { bytesRead } = await file.read(bytes, 0, bytes.length, r.transcript.offset);
-        delta = bytes.subarray(0, bytesRead).toString('utf8');
-      } finally {
-        await file.close();
+      let result;
+      if (assistantBindingMode(r.binding) === 'opencode')
+        result = await observeOpenCode(r.binding, r.transcript, r.text);
+      else {
+        const file = await open(path, 'r');
+        let delta: string;
+        try {
+          const info = await file.stat();
+          if (
+            String(info.ino) !== r.transcript.inode ||
+            String(info.dev) !== r.transcript.device ||
+            info.size < r.transcript.offset ||
+            info.size - r.transcript.offset > 16 * 1024 * 1024
+          )
+            throw new Error('Transcript rotated, truncated, or exceeded observation capacity');
+          const bytes = Buffer.alloc(info.size - r.transcript.offset);
+          const { bytesRead } = await file.read(bytes, 0, bytes.length, r.transcript.offset);
+          delta = bytes.subarray(0, bytesRead).toString('utf8');
+        } finally {
+          await file.close();
+        }
+        result =
+          assistantBindingMode(r.binding) === 'claude'
+            ? observeClaudeAssistantTurn(delta, r.binding.conversationId, r.text)
+            : observeAssistantTurn(delta, r.binding.conversationId, r.text);
       }
-      const result = observeAssistantTurn(delta, r.binding.conversationId, r.text);
       const latest = this.store.get(r.id)!;
       if (!active(latest) && latest.status !== 'outcome_unknown') return;
       if (result.state === 'completed')
@@ -435,17 +442,22 @@ export class AssistantRequestManager {
       this.handoffs.delete(a.id);
       return;
     }
-    if (!(await this.nativeReady(path))) return;
-    const info = await stat(path);
-    const file = await open(path, 'r');
-    try {
-      if (info.size) {
-        const last = Buffer.alloc(1);
-        await file.read(last, 0, 1, info.size - 1);
-        if (last[0] !== 10) return;
+    if (!(await this.conversationReady(path, r.binding))) return;
+    let transcript: NativeCursor;
+    if (assistantBindingMode(r.binding) === 'opencode') transcript = await snapshotOpenCode(r.binding, path);
+    else {
+      const info = await stat(path);
+      const file = await open(path, 'r');
+      try {
+        if (info.size) {
+          const last = Buffer.alloc(1);
+          await file.read(last, 0, 1, info.size - 1);
+          if (last[0] !== 10) return;
+        }
+      } finally {
+        await file.close();
       }
-    } finally {
-      await file.close();
+      transcript = { path, offset: info.size, inode: String(info.ino), device: String(info.dev) };
     }
     if (!(await this.grantValid(r))) {
       this.change(this.store.get(r.id)!, {
@@ -470,7 +482,7 @@ export class AssistantRequestManager {
       return;
     const intent = this.change(current, {
       status: 'dispatching',
-      transcript: { path, offset: info.size, inode: String(info.ino), device: String(info.dev) },
+      transcript,
     });
     try {
       // Never fall back or resend if this write fails: it may already have typed part of the prompt.

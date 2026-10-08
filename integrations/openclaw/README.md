@@ -2,14 +2,15 @@
 
 [COD-487](https://aakhter.atlassian.net/browse/COD-487) implements named assistants,
 durable requests and an opt-in OpenClaw connector. The tested versions are
-OpenClaw **2026.9.8 (fc23bc8)**, Codex **0.160.1**, and Node 22+.
+OpenClaw **2026.9.8 (fc23bc8)** and Node 22+. Named assistants support local
+Codex, Claude Code and OpenCode sessions (COD-499).
 Address Brain with `brain <request>`, `Brain, <request>`, or `/brain <request>`
 to bypass OpenClaw's model. Optional model-driven tools are deferred.
 
 ## Setup
 
 1. Open **Assistants** in Codeman, create an assistant, and bind an idle local
-   Codex session. Binding validates the exact native conversation and canonical
+   Codex, Claude Code or OpenCode session. Binding validates the exact native conversation and canonical
    workspace/data-home; it never selects the newest conversation in a workspace.
 2. Disable conflicting session automation, clear any unsubmitted composer text,
    stop direct tmux input, enable the assistant, and explicitly hand control over.
@@ -125,7 +126,7 @@ and explicit rebind to a proven native conversation.
 
 **Take control** disables the assistant, cancels queued work, waits for pending
 submission, and marks active work interrupted. It releases Codeman's input lock;
-it does not stop Codex or undo tool activity. Handle approvals or stop the task
+it does not stop the agent or undo tool activity. Handle approvals or stop the task
 in the desktop terminal, then acknowledge reconciliation before enabling again.
 Direct tmux writes bypass the lock and must stop during handoff. Unexpected
 native turns are detected conservatively.
@@ -146,9 +147,9 @@ preserved and execution fails closed.
 ## Automatic session recovery (COD-498)
 
 An explicit desktop handoff arms bounded recovery for that assistant. If its
-idle local Codex session disappears or its agent exits, Codeman creates a
+idle local supported session disappears or its agent exits, Codeman creates a
 replacement with the saved session name/configuration and resumes the **exact**
-native conversation, workspace and Codex home. It verifies native readiness,
+native conversation, workspace and provider data/config home. It verifies native readiness,
 current owner permissions and an empty composer before updating the binding and
 restoring messaging ownership. Tokens and assistant identity are unchanged.
 Only unsent queued requests migrate to the verified replacement binding;
@@ -175,7 +176,9 @@ explicit handoff; recovery does not take control of a healthy desktop session.
 Run the isolated native recovery canary with:
 
 ```sh
-node scripts/smoke-openclaw-assistant.mjs --pdf --recovery
+node scripts/smoke-openclaw-assistant.mjs --pdf
+node scripts/smoke-openclaw-assistant.mjs --mode=claude --recovery
+node scripts/smoke-openclaw-assistant.mjs --mode=opencode --recovery --recovery
 ```
 
 ## HTTP API
@@ -207,6 +210,34 @@ assistant scope. Revision/generation checks protect binding changes; duplicate
 native-conversation bindings and remote/Docker sessions are rejected. Request
 SSE wakeups contain IDs/status/revision only; GET remains authoritative.
 
+## Provider identities and recovery (COD-499)
+
+The linked session chooses the assistant's CLI. Complete one initial request in
+that terminal before binding, then hand control over in **Assistants**. Messaging,
+attachments, scoped tokens and bounded recovery use the same connector for all
+three CLIs. Remote and Docker sessions remain unsupported.
+
+- **Codex:** exact rollout UUID, configured Codex home and native turn completion.
+- **Claude Code:** exact session UUID and config directory, parent-linked JSONL
+  messages and native turn-duration completion. Recovery passes `--resume` with
+  that UUID and preserves model, effort, tools and permission mode.
+- **OpenCode:** exact `ses_…` identity and native SQLite messages/parts. Completion
+  requires a finished assistant response linked to the submitted user message.
+  Recovery resumes that ID without forking, preserving model/tool settings and
+  checking both data and configuration roots. If workspace discovery finds
+  multiple candidates, explicitly choose a native continuation before binding.
+
+Existing Codex bindings and tokens remain compatible. The persisted/API binding
+field `codexHome` retains its legacy name; for Claude it holds the config root,
+for OpenCode the XDG data root. `binding.mode` distinguishes new provider bindings;
+an omitted mode means Codex. Private recovery profiles never appear in the API.
+
+Automatic recovery refuses custom endpoint profiles, session-only credentials,
+Claude credential/endpoint overrides and custom OpenCode environment/inline configuration that
+cannot safely be restored. Normal messaging can still be handed over, but those
+sessions need manual recovery. Approval prompts still use the terminal and the
+selected CLI's permission policy.
+
 ## Checks
 
 ```sh
@@ -215,9 +246,11 @@ npm --prefix integrations/openclaw test
 node scripts/smoke-openclaw-assistant.mjs
 # Optional PDF extraction canary (Python reportlab fixture generator required):
 node scripts/smoke-openclaw-assistant.mjs --pdf
+node scripts/smoke-openclaw-assistant.mjs --mode=claude --recovery
+node scripts/smoke-openclaw-assistant.mjs --mode=opencode --recovery
 ```
 
-The canary uses isolated instance/data/socket/home, a throwaway real Codex session
+The canary uses isolated instance/data/socket/home, a throwaway real session of the selected CLI
 and a test Telegram adapter. It does not use a production bot or Brain session.
 See [implementation evidence](../../docs/openclaw-integration-evidence.md) and
 [release runbook](../../docs/openclaw-release-runbook.md).

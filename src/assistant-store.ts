@@ -19,7 +19,8 @@ import type { AssistantDefinition, AssistantPrincipal, AssistantScope, Assistant
 const BindingSchema = z
   .object({
     sessionId: z.string().min(1),
-    conversationId: z.uuid(),
+    conversationId: z.string().regex(/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|ses_[A-Za-z0-9_-]{1,120})$/i),
+    mode: z.enum(['codex', 'claude', 'opencode']).optional(),
     codexHome: z.string().min(1),
     workingDir: z.string().min(1),
     generation: z.number().int().positive(),
@@ -31,7 +32,7 @@ const DefinitionSchema = z
     owner: z.string().optional(),
     name: z.string().min(1).max(60),
     slug: z.string().regex(/^[a-z][a-z0-9-]{0,59}$/),
-    mode: z.literal('codex'),
+    mode: z.enum(['codex', 'claude', 'opencode']),
     enabled: z.boolean(),
     binding: BindingSchema.optional(),
     revision: z.number().int().positive(),

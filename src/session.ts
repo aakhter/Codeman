@@ -3288,6 +3288,10 @@ export class Session extends EventEmitter {
   }
 
   /** The session's Claude config dir when it has been relocated (#255), else undefined. */
+  getClaudeConfigDirOverride(): string | undefined {
+    return this._claudeConfigDir();
+  }
+
   private _claudeConfigDir(): string | undefined {
     // Trimmed like `claudeProjectsDir()` trims the process-wide override: the
     // envOverrides schema validates keys only, and a whitespace-only value would

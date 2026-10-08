@@ -55,7 +55,8 @@ export function registerAssistantRoutes(
   const expose = (a: AssistantDefinition) => ({
     ...a,
     capabilities: {
-      localCodex: true,
+      localCodex: a.mode === 'codex',
+      supportedModes: ['codex', 'claude', 'opencode'],
       requestExecution: false,
       requiresDesktopHandoff: true,
       ...requests?.availability(a),

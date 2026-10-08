@@ -235,5 +235,13 @@ describe('empty composer proof', () => {
     expect(assistantComposerEmpty('› \x1b[2mAsk Codex anything\x1b[0m')).toBe(true);
     expect(assistantComposerEmpty('› run this')).toBe(false);
     expect(assistantComposerEmpty('loading')).toBe(false);
+    expect(assistantComposerEmpty('❯ ', 'claude')).toBe(true);
+    expect(assistantComposerEmpty('❯ typed input', 'claude')).toBe(false);
+    const box = (input: string) =>
+      `history Ask anything…\n  ┃\n  ┃ ${input}\n  ┃\n  ┃ Plan · GPT-5.6 Sol OpenAI\n  ╹▀▀▀▀▀▀▀▀▀▀\n ctrl+p commands`;
+    expect(assistantComposerEmpty(box(''), 'opencode')).toBe(true);
+    expect(assistantComposerEmpty(box('Ask anything… "Try a question"'), 'opencode')).toBe(true);
+    expect(assistantComposerEmpty(box('typed input'), 'opencode')).toBe(false);
+    expect(assistantComposerEmpty('history Ask anything…', 'opencode')).toBe(false);
   });
 });

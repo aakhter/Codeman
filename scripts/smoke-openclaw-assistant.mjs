@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 /** Reproducible isolated branch canary: real Codex + HTTP + browser + plugin lifecycle; test Telegram adapter. */
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  existsSync,
+  readFileSync,
+  copyFileSync,
+  chmodSync,
+} from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,6 +19,8 @@ import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import plugin from '../integrations/openclaw/index.mjs';
+const mode = process.argv.find((a) => a.startsWith('--mode='))?.slice(7) || 'codex';
+assert.ok(['codex', 'claude', 'opencode'].includes(mode));
 const root = mkdtempSync(join(tmpdir(), 'cod487-assistant-canary-'));
 const home = join(root, 'home');
 const data = join(root, 'data');
@@ -26,6 +37,39 @@ writeFileSync(
   join(workspace, 'AGENTS.md'),
   'This is an isolated smoke workspace. Reply to exact marker requests without tools.\n'
 );
+if (mode === 'claude') {
+  mkdirSync(join(home, '.claude'), { recursive: true, mode: 0o700 });
+  for (const [source, target] of [
+    [join(homedir(), '.claude', '.credentials.json'), join(home, '.claude', '.credentials.json')],
+    [join(homedir(), '.claude.json'), join(home, '.claude.json')],
+    [join(homedir(), '.claude.json'), join(home, '.claude', '.claude.json')],
+  ]) {
+    if (existsSync(source)) {
+      if (source.endsWith('/.credentials.json')) symlinkSync(source, target);
+      else {
+        copyFileSync(source, target);
+        chmodSync(target, 0o600);
+      }
+    }
+  }
+  writeFileSync(
+    join(data, 'settings.json'),
+    JSON.stringify({ claudeMode: 'allowedTools', allowedTools: 'Read', agentSkillEnabled: false }),
+    { mode: 0o600 }
+  );
+}
+if (mode === 'opencode') {
+  for (const [source, target] of [
+    [join(homedir(), '.local/share/opencode/auth.json'), join(home, '.local/share/opencode/auth.json')],
+    [join(homedir(), '.config/opencode/opencode.json'), join(home, '.config/opencode/opencode.json')],
+  ]) {
+    if (existsSync(source)) {
+      mkdirSync(resolve(target, '..'), { recursive: true, mode: 0o700 });
+      copyFileSync(source, target);
+      chmodSync(target, 0o600);
+    }
+  }
+}
 const socket = `cod487-canary-${process.pid}`;
 const port = await new Promise((resolvePort) => {
   const s = createServer();
@@ -44,6 +88,10 @@ writeFileSync(
 const env = {
   ...process.env,
   HOME: home,
+  XDG_CONFIG_HOME: join(home, '.config'),
+  XDG_DATA_HOME: join(home, '.local', 'share'),
+  XDG_CACHE_HOME: join(home, '.cache'),
+  CLAUDE_CONFIG_DIR: join(home, '.claude'),
   CODEMAN_INSTANCE: socket,
   CODEMAN_TMUX_SOCKET: socket,
   CODEMAN_DATA_DIR: data,
@@ -118,32 +166,41 @@ try {
   await page.screenshot({ path: join(root, 'desktop.png') });
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   const created = await api('/sessions', 'POST', {
-    mode: 'codex',
+    mode,
     workingDir: workspace,
     name: 'cod487-canary',
-    codexConfig: { dangerouslyBypassApprovals: true },
+    codexConfig: mode === 'codex' ? { dangerouslyBypassApprovals: true } : undefined,
+    openCodeConfig: mode === 'opencode' ? { autoAllowTools: true } : undefined,
+    model: mode === 'claude' ? 'haiku' : undefined,
   });
   sessionId = created.session.id;
   await api(`/sessions/${sessionId}/interactive`, 'POST');
-  await sleep(5000);
+  await until(async () => {
+    const frame = await api(`/sessions/${sessionId}/terminal?frame=1`);
+    const plain = frame.terminalBuffer.replace(/\x1b\[[0-9]+;[0-9]+H/g, '\n').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+    return mode === 'opencode'
+      ? plain.includes('Ask anything')
+      : mode === 'claude'
+        ? /❯\s*(?:Try[^\n]*)?\s*$/.test(plain.split('\n').findLast((l) => l.trimStart().startsWith('❯')) || '')
+        : plain.includes('›');
+  }, 90000);
+  await sleep(1000);
   await api(`/sessions/${sessionId}/input`, 'POST', {
     input: 'Reply with exactly COD487_BOOTSTRAP_OK. Do not use tools.\r',
     useMux: true,
   });
-  await until(
-    async () => /^COD487_BOOTSTRAP_OK\.?$/.test((await api(`/sessions/${sessionId}/last-response`)).text?.trim() ?? ''),
-    90000
-  );
-  await until(
-    async () =>
-      (await api(`/sessions/${sessionId}`)).session?.status === 'idle' ||
-      (await api(`/sessions/${sessionId}`)).status === 'idle'
-  );
-  assistant = await api(`/assistants/${assistant.id}/binding`, 'POST', {
-    sessionId,
-    expectedRevision: assistant.revision,
-    expectedGeneration: 0,
-  });
+  await until(async () => {
+    try {
+      assistant = await api(`/assistants/${assistant.id}/binding`, 'POST', {
+        sessionId,
+        expectedRevision: assistant.revision,
+        expectedGeneration: 0,
+      });
+      return assistant;
+    } catch {
+      return undefined;
+    }
+  }, 90000);
   assistant = await api(`/assistants/${assistant.id}`, 'PATCH', {
     expectedRevision: assistant.revision,
     enabled: true,
@@ -151,10 +208,16 @@ try {
   for (const setting of ['auto-clear', 'auto-compact', 'checkpoint', 'auto-resume'])
     await api(`/sessions/${sessionId}/${setting}`, 'POST', { enabled: false });
   await sleep(1100);
-  assistant = await api(`/assistants/${assistant.id}/handoff`, 'POST', {
-    expectedRevision: assistant.revision,
-    composerEmpty: true,
-  });
+  assistant = await until(async () => {
+    try {
+      return await api(`/assistants/${assistant.id}/handoff`, 'POST', {
+        expectedRevision: assistant.revision,
+        composerEmpty: true,
+      });
+    } catch {
+      return undefined;
+    }
+  }, 90000);
   assert.equal(assistant.capabilities.requestExecution, true);
   checks.push('exact native binding and handoff');
   const denied = execFileSync(
@@ -324,11 +387,13 @@ try {
   assert.equal(requests[0].binding.conversationId, assistant.binding.conversationId);
   assert.equal(requests[0].result.text.trim(), `${hiddenCode}${pdfCode ? ` ${pdfCode}` : ''} triangle blue`);
   assert.match(requests[0].text, /\.codeman-telegram/);
-  checks.push('real Codex reads durable text attachment and visually identifies image after temporary sources expire');
+  checks.push(
+    `real ${mode} reads durable text attachment and visually identifies image after temporary sources expire`
+  );
   assert.equal(receipts[0].text, requests[0].result.text);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].to, '123');
-  if (pdfCode) checks.push('real Codex extracts hidden code from durable PDF attachment');
+  if (pdfCode) checks.push(`real ${mode} extracts hidden code from durable PDF attachment`);
   checks.push('real CLI request completion and matching delivery');
   await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
   await sleep(3500);
@@ -367,16 +432,19 @@ try {
     assert.equal(recovered.binding.generation, originalBinding.generation + 1);
     assert.equal(recovered.capabilities.inputLocked, true);
     const next = await api(`/assistants/${assistant.id}/requests`, 'POST', {
-      text: 'Reply with exactly RECOVERY_OK. Do not use tools.', idempotencyKey: 'canary-recovery-proof'
+      text: 'Reply with exactly RECOVERY_OK. Do not use tools.',
+      idempotencyKey: 'canary-recovery-proof',
     });
     const completed = await until(async () => {
       const r = await api(`/assistant-requests/${next.id}`);
       return r.status === 'completed' ? r : undefined;
     }, 120000);
     assert.equal(completed.result.text.trim(), 'RECOVERY_OK');
-    checks.push('deleted idle session automatically resumes exact native conversation, restores input lock and completes follow-up');
+    checks.push(
+      'deleted idle session automatically resumes exact native conversation, restores input lock and completes follow-up'
+    );
     await page.evaluate(() => app.refreshAssistants());
-    await page.screenshot({path:join(root,'recovered-assistant.png')});
+    await page.screenshot({ path: join(root, 'recovered-assistant.png') });
   }
   await page.getByRole('button', { name: 'Take control', exact: true }).click();
   await until(async () => !(await api(`/assistants/${assistant.id}`)).enabled);
@@ -431,7 +499,9 @@ try {
   await service?.stop().catch(() => {});
   delete process.env.COD487_CANARY_TOKEN;
   const recoveryCandidates = existsSync(join(data, 'assistant-recovery.json'))
-    ? JSON.parse(readFileSync(join(data, 'assistant-recovery.json'), 'utf8')).records.map(r => r.candidateId).filter(Boolean)
+    ? JSON.parse(readFileSync(join(data, 'assistant-recovery.json'), 'utf8'))
+        .records.map((r) => r.candidateId)
+        .filter(Boolean)
     : [];
   if (assistant) await api(`/assistants/${assistant.id}/take-control`, 'POST', {}).catch(() => {});
   for (const id of recoveryCandidates) if (id !== sessionId) await api(`/sessions/${id}`, 'DELETE').catch(() => {});

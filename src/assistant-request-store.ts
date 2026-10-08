@@ -40,14 +40,21 @@ const Schema = z
     binding: z
       .object({
         sessionId: z.string(),
-        conversationId: z.uuid(),
+        conversationId: z.string().regex(/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|ses_[A-Za-z0-9_-]{1,120})$/i),
+        mode: z.enum(['codex', 'claude', 'opencode']).optional(),
         codexHome: z.string(),
         workingDir: z.string(),
         generation: z.number().int().positive(),
       })
       .strict(),
     transcript: z
-      .object({ path: z.string(), offset: z.number().int().nonnegative(), inode: z.string(), device: z.string() })
+      .object({
+        path: z.string(),
+        anchor: z.string().optional(),
+        offset: z.number().int().nonnegative(),
+        inode: z.string(),
+        device: z.string(),
+      })
       .strict()
       .optional(),
     turnId: z.string().optional(),
