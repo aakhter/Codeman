@@ -4472,13 +4472,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         // Ink (Claude CLI's terminal framework) needs them split — sending both in a
         // single tmux invocation (via \;) causes Ink to interpret Enter as a newline
         // character in the input buffer rather than as form submission.
-        await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(textPart)}`, {
+        // Codex's heuristic paste buffer can retain a >1KiB literal burst even
+        // after a long delay. Explicit bracketed-paste boundaries deliver one
+        // complete paste event, so the separate Enter submits the whole prompt.
+        // Only Codex long prompts use this terminal protocol; no Enter retries.
+        const codexPaste = session.mode === 'codex' && textPart.length > 100;
+        const deliveredText = codexPaste ? `\x1b[200~${textPart}\x1b[201~` : textPart;
+        await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(deliveredText)}`, {
           timeout: EXEC_TIMEOUT_MS,
         });
-        // Long literal input is recognized as a paste by Codex. Give its paste
-        // buffer time to settle before the single Enter; 50ms can leave an
-        // attachment prompt unsubmitted. This is a delay, never a retry.
-        await new Promise((resolve) => setTimeout(resolve, textPart.length > 100 ? 500 : 50));
+        await new Promise((resolve) => setTimeout(resolve, codexPaste ? 250 : 50));
         await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" Enter`, {
           timeout: EXEC_TIMEOUT_MS,
         });

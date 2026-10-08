@@ -215,6 +215,16 @@ try {
   const mediaRoot = join(root, 'telegram-inbound');
   mkdirSync(mediaRoot, { mode: 0o700 });
   const hiddenCode = randomBytes(6).toString('hex');
+  const pdfCode = process.argv.includes('--pdf') ? randomBytes(6).toString('hex') : undefined;
+  const pdfPath = join(mediaRoot, 'note.pdf');
+  if (pdfCode) {
+    execFileSync('python3', [
+      '-c',
+      'from reportlab.pdfgen import canvas; import sys; c=canvas.Canvas(sys.argv[1]); c.drawString(72,720,"The secret code is "+sys.argv[2]); c.save()',
+      pdfPath,
+      pdfCode,
+    ]);
+  }
   const documentPath = join(mediaRoot, 'note.txt');
   const imagePath = join(mediaRoot, 'shape.png');
   writeFileSync(documentPath, `The secret code is ${hiddenCode}.`, { mode: 0o600 });
@@ -267,11 +277,11 @@ try {
     suppressUserDelivery: true,
     sourceReplyDeliveryMode: 'message_tool_only',
     ctx: {
-      BodyForCommands:
-        'Brain, Read the attached text file and inspect the attached image. Reply only with the secret code in the text file, then the shape and color in the image in lowercase, separated by spaces. Use tools.',
+      BodyForCommands: `Brain, Read the attached text file${pdfCode ? ' and PDF' : ''} and inspect the attached image. Reply only with the secret code in the text file, ${pdfCode ? 'the secret code in the PDF, ' : ''}then the shape and color in the image in lowercase, separated by spaces. Use tools.`,
       media: [
         { path: documentPath, contentType: 'text/plain', fileName: 'note.txt' },
         { path: imagePath, contentType: 'image/png', fileName: 'shape.png' },
+        ...(pdfCode ? [{ path: pdfPath, contentType: 'application/pdf', fileName: 'note.pdf' }] : []),
       ],
       OriginatingChannel: 'telegram',
       ChatType: 'direct',
@@ -296,6 +306,7 @@ try {
   const { unlinkSync } = await import('node:fs');
   unlinkSync(documentPath);
   unlinkSync(imagePath);
+  if (pdfCode) unlinkSync(pdfPath);
   assert.equal((await ingress(event, context)).handled, true);
   assert.match(acknowledgements[0].text, /On it/);
   assert.match(acknowledgements[1].text, /already have/);
@@ -311,12 +322,13 @@ try {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].status, 'completed');
   assert.equal(requests[0].binding.conversationId, assistant.binding.conversationId);
-  assert.equal(requests[0].result.text.trim(), `${hiddenCode} triangle blue`);
+  assert.equal(requests[0].result.text.trim(), `${hiddenCode}${pdfCode ? ` ${pdfCode}` : ''} triangle blue`);
   assert.match(requests[0].text, /\.codeman-telegram/);
   checks.push('real Codex reads durable text attachment and visually identifies image after temporary sources expire');
   assert.equal(receipts[0].text, requests[0].result.text);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].to, '123');
+  if (pdfCode) checks.push('real Codex extracts hidden code from durable PDF attachment');
   checks.push('real CLI request completion and matching delivery');
   await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
   await sleep(3500);

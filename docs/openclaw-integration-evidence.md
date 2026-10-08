@@ -201,23 +201,29 @@ Files are retained after OpenClaw's transient downloads expire. Failed media
 staging never submits a caption alone. Telegram replies remain text.
 
 The first real canary exposed long literal input remaining in Codex's composer
-with the prior 50 ms text/Enter separation. Input over 100 characters now waits
-500 ms before its single Enter; uncertain delivery still has no automatic
-retry. A later isolated canary reached the image tool but its default sandbox
+with the prior 50 ms text/Enter separation. Increasing the delay alone did not
+resolve Codex’s heuristic paste buffering above 1 KiB. Long Codex prompts now
+use explicit bracketed-paste boundaries and one separate Enter; uncertain
+delivery still has no automatic retry. Other CLI transport remains unchanged. A later isolated canary reached the image tool but its default sandbox
 could not initialize (`bwrap` loopback permission failure). Only the throwaway
 canary now explicitly uses its existing bypass-approvals session option; the
 production Brain permission configuration is preserved.
 
 Successful real Codex/browser evidence:
-`/tmp/cod487-assistant-canary-vyj2qV/summary.json`. The agent read a random hidden
+`/tmp/cod487-assistant-canary-vyj2qV/summary.json` (text and image) and
+`/tmp/cod487-assistant-canary-33E07K/summary.json` (text, image and PDF, with the
+final paste protocol). The agent read a random hidden
 code from the staged text file and used its image tool to identify a blue
 triangle. The prompt did not reveal either answer. Temporary source files were
 deleted after acceptance; duplicate ingress and managed plugin service restart
 still produced one completed request and one matching test Telegram receipt.
 Desktop/mobile and input ownership checks passed. This is an isolated SDK
-adapter test, not proof of a new real Telegram photo/PDF delivery.
+adapter test, not proof of a new real Telegram photo/PDF delivery. The PDF
+canary additionally extracted a second hidden code from an attached PDF; it
+ran against Codex 0.161.0 using the same native request observer.
 
 Validation: 23 connector/native tests; root connector wrapper; 217 targeted
 assistant/integration/tmux tests; typecheck, lint (one existing server warning),
-format and lockfile checks. Source is tracked under COD-496; deployment and
+format and lockfile checks. Final transport regressions plus the connector
+wrapper passed 218 tests. Source is tracked under COD-496; deployment and
 actual Telegram acceptance are recorded separately.

@@ -178,6 +178,8 @@ SSE wakeups contain IDs/status/revision only; GET remains authoritative.
 npm test -- test/assistant-integration.test.ts test/assistant-requests.test.ts test/openclaw-connector.test.ts
 npm --prefix integrations/openclaw test
 node scripts/smoke-openclaw-assistant.mjs
+# Optional PDF extraction canary (Python reportlab fixture generator required):
+node scripts/smoke-openclaw-assistant.mjs --pdf
 ```
 
 The canary uses isolated instance/data/socket/home, a throwaway real Codex session
