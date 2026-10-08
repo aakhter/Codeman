@@ -267,3 +267,32 @@ isolating native conversations, data and tmux sockets.
 
 A cached OpenCode identity does not count as an explicit continuation: initial
 binding still checks workspace uniqueness and rejects conflicting native IDs.
+
+## COD-500: Telegram reply-to-assistant routing
+
+Reported Telegram reply 928 omitted the Brain prefix and followed ordinary
+OpenClaw routing. The connector only tested the prefix at `reply_dispatch` and
+ingress, despite already retaining the referenced result's delivery receipt 927.
+It now checks the SDK's trusted reply-to ID against same-assistant/account/chat/
+sender receipts and a bounded private ledger of immediate connector replies.
+Quoted body text does not select an assistant or become the follow-up prompt.
+Existing result receipts remain compatible; each result chunk is replyable.
+
+Immediate replies use the receipt-bearing Telegram adapter for both normal and
+`message_tool_only` policy. A failed acknowledgement remains claimed and never
+falls through to OpenClaw's model or replays accepted work. All authorization,
+thread/group, internal/tail-dispatch and send-policy guards remain enforced.
+
+28 plugin tests cover authorized follow-ups, result chunks, legacy receipts,
+restart persistence, acknowledgements, unknown/forged/cross-scope replies,
+bounded private storage, corruption and acknowledgement delivery failure. The
+root wrapper and 50 targeted assistant/native tests passed. Static type, lint
+(existing warning), format, lockfile and frontend syntax checks passed.
+
+Isolated real Codex/plugin/browser canary:
+`/tmp/cod487-assistant-canary-WpijnP/summary.json` (`--reply`). The agent read text
+and image attachments; a prefix-free reply to its result recalled the hidden
+code from the same native conversation after service restart. A reply to the
+acknowledgement also completed; duplicate ingress executed once and an unknown
+reply remained ordinary chat. Desktop/mobile controls passed. Telegram delivery
+used a test SDK adapter; the reported booking request was not replayed.

@@ -361,11 +361,11 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
   );
   assert.equal(manual.handled, true);
   assert.equal(manual.queuedFinal, true);
-  assert.equal(replies.length, 1);
-  assert.equal(deliveries.length, 1);
+  assert.equal(replies.length, 0);
+  assert.equal(deliveries.length, 2);
   assert.equal(deliveries[0].accountId, config.accountId);
   assert.equal(deliveries[0].to, '123');
-  assert.match(deliveries[0].text, /already have/);
+  assert.match(deliveries[1].text, /already have/);
   for (const patch of [
     { sendPolicy: 'deny' },
     { ctx: { ...source, SenderId: '999' } },
@@ -383,19 +383,241 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
       dispatch
     );
   }
-  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries.length, 2);
 
-  assert.match(replies[0].text, /On it/);
+  assert.match(deliveries[0].text, /On it/);
   assert.equal(
     JSON.parse(readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8'))
       .records[0].text,
     'test'
+  );
+  await service.stop();
+  await service.start({ stateDir: h.path.slice(0, h.path.lastIndexOf('/')), config: {} });
+  const followup = await handler(
+    {
+      ctx: {
+        ...source,
+        BodyForCommands: 'continue with that option',
+        MessageSid: '460',
+        ReplyToId: '1',
+        ReplyToBody: 'ignored quoted text',
+      },
+      sendPolicy: 'allow',
+    },
+    dispatch
+  );
+  assert.equal(followup.handled, true);
+  assert.equal(followup.queuedFinal, true);
+  assert.equal(deliveries.length, 3);
+  const saved = JSON.parse(
+    readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8')
+  );
+  assert.equal(saved.records[1].text, 'continue with that option');
+  assert.equal(saved.replyTargets[0].messageId, '1');
+  for (const patch of [{ sendPolicy: 'deny' }, { isTailDispatch: true }, { suppressUserDelivery: true }])
+    assert.equal(
+      (
+        await handler(
+          {
+            ctx: { ...source, BodyForCommands: 'followup', MessageSid: '461', ReplyToIdFull: '1' },
+            sendPolicy: 'allow',
+            ...patch,
+          },
+          dispatch
+        )
+      ).queuedFinal,
+      false
+    );
+  assert.equal(deliveries.length, 3);
+  assert.equal(
+    (
+      await handler(
+        {
+          ctx: { ...source, BodyForCommands: 'another question', ReplyToId: '999', ReplyToBody: 'Brain result' },
+          sendPolicy: 'allow',
+        },
+        dispatch
+      )
+    ).handled,
+    false
   );
 });
 
 test('manifest explicitly activates the managed connector during gateway startup', () => {
   const manifest = JSON.parse(readFileSync(new URL('./openclaw.plugin.json', import.meta.url), 'utf8'));
   assert.equal(manifest.activation.onStartup, true);
+});
+
+test('replies to each delivered result chunk route without a prefix after restart; quote text does not route', async (t) => {
+  let n = 900;
+  const h = harness(t, { deliver: async () => ({ messageId: String(++n) }) });
+  let c = h.make();
+  await c.inbound(event, ctx);
+  h.finish();
+  await c.tick();
+  assert.deepEqual(c.outbox.records[0].receipts, ['901', '902']);
+  // Legacy result receipts are sufficient; no new reply-target ledger required.
+  c = h.make();
+  for (const replyToMessageId of ['901', '902']) {
+    const id = replyToMessageId === '901' ? '457' : '458';
+    const reply = { ...event, content: 'continue with that option' };
+    assert.match((await c.inbound(reply, { ...ctx, messageId: id, replyToMessageId })).reply.text, /On it/);
+  }
+  assert.equal(c.outbox.records.length, 3);
+  assert.equal(c.outbox.records[1].text, 'continue with that option');
+  assert.equal(
+    (
+      await c.inbound(
+        { ...event, content: 'ordinary question', ReplyToBody: 'Brain result' },
+        { ...ctx, messageId: '459', replyToMessageId: '999' }
+      )
+    ).handled,
+    false
+  );
+  assert.equal(
+    (await c.inbound({ ...event, content: 'ordinary question' }, { ...ctx, messageId: '459' })).handled,
+    false
+  );
+});
+
+test('reply ownership rejects unauthorized identities, different chats/accounts, malformed and unknown IDs', async (t) => {
+  const h = harness(t),
+    c = h.make();
+  c.rememberReplyTarget({ accountId: config.accountId, chatId: '123', senderId: '123' }, '901');
+  const reply = { ...event, content: 'continue' };
+  const identity = { ...ctx, messageId: '457', replyToMessageId: '901' };
+  for (const patch of [
+    { senderId: '999' },
+    { conversationId: '999', senderId: '999' },
+    { accountId: 'other' },
+    { channelId: 'discord' },
+    { messageId: undefined },
+    { replyToMessageId: 901 },
+    { replyToMessageId: '999' },
+    { replyToMessageId: '901:123' },
+  ])
+    assert.equal((await c.inbound(reply, { ...identity, ...patch })).handled, false);
+  for (const patch of [{ commandAuthorized: false }, { isGroup: true }, { threadId: 1 }])
+    assert.equal((await c.inbound({ ...reply, ...patch }, identity)).handled, false);
+  c.config = { ...c.config, assistantId: randomUUID() };
+  assert.equal((await c.inbound(reply, identity)).handled, false);
+  assert.equal(h.calls.length, 0);
+});
+
+test('acknowledgement reply ownership persists privately, deduplicates and stays bounded', async (t) => {
+  const h = harness(t),
+    c = h.make();
+  const dest = { accountId: config.accountId, chatId: '123', senderId: '123' };
+  c.rememberReplyTarget(dest, '901');
+  c.rememberReplyTarget(dest, '901');
+  assert.equal(c.outbox.replyTargets.length, 1);
+  const restarted = h.make();
+  assert.match(
+    (await restarted.inbound({ ...event, content: 'follow up' }, { ...ctx, messageId: '457', replyToMessageId: '901' }))
+      .reply.text,
+    /On it/
+  );
+  assert.equal(statSync(h.path).mode & 0o777, 0o600);
+  const retained = Array.from({ length: 2000 }, (_, i) => ({
+    assistantId: config.assistantId,
+    destination: dest,
+    messageId: String(i + 1000),
+  }));
+  restarted.outbox.persist(restarted.outbox.records, retained);
+  restarted.rememberReplyTarget(dest, '9999');
+  assert.equal(restarted.outbox.replyTargets.length, 2000);
+  assert.equal(restarted.outbox.replyTargets[0].messageId, '1001');
+  assert.equal(h.make().outbox.replyTargets.at(-1).messageId, '9999');
+});
+
+test('corrupt reply ownership is rejected instead of guessing routing', (t) => {
+  const h = harness(t);
+  for (const replyTargets of [
+    [null],
+    [
+      {
+        assistantId: config.assistantId,
+        messageId: '901',
+        destination: { accountId: config.accountId, chatId: '123', senderId: '999' },
+      },
+    ],
+    Array(2).fill({
+      assistantId: config.assistantId,
+      messageId: '901',
+      destination: { accountId: config.accountId, chatId: '123', senderId: '123' },
+    }),
+  ]) {
+    writeFileSync(h.path, JSON.stringify({ version: 1, records: [], replyTargets }));
+    assert.throws(() => h.make(), /corrupt/);
+  }
+});
+
+test('acknowledgement failure keeps the request claimed and never falls back to the model', async (t) => {
+  const h = harness(t),
+    hooks = new Map();
+  let service;
+  const originalFetch = globalThis.fetch,
+    originalToken = process.env[config.tokenEnv];
+  globalThis.fetch = async () =>
+    Response.json({
+      success: true,
+      data: { id: config.assistantId, enabled: true, capabilities: { requestExecution: true } },
+    });
+  process.env[config.tokenEnv] = `cma_${'a'.repeat(43)}`;
+  t.after(async () => {
+    await service?.stop();
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env[config.tokenEnv];
+    else process.env[config.tokenEnv] = originalToken;
+  });
+  const errors = [];
+  plugin.register({
+    pluginConfig: config,
+    on: (n, handler) => hooks.set(n, handler),
+    registerService: (s) => {
+      service = s;
+    },
+    logger: { error: (e) => errors.push(e) },
+    runtime: {
+      channel: {
+        outbound: {
+          loadAdapter: async () => ({
+            sendText: async () => {
+              throw Error('network failure');
+            },
+          }),
+        },
+      },
+    },
+  });
+  const stateDir = h.path.slice(0, h.path.lastIndexOf('/'));
+  await service.start({ stateDir, config: {} });
+  const source = {
+    BodyForCommands: 'brain do this',
+    OriginatingChannel: 'telegram',
+    AccountId: config.accountId,
+    OriginatingTo: 'telegram:123',
+    SenderId: '123',
+    MessageSid: '456',
+    ChatType: 'direct',
+    CommandAuthorized: true,
+  };
+  const result = await hooks.get('reply_dispatch')(
+    { ctx: source, sendPolicy: 'allow' },
+    {
+      dispatcher: {
+        sendFinalReply: () => {
+          throw Error('must not invoke dispatcher');
+        },
+      },
+      recordProcessed: () => {},
+      markIdle: () => {},
+    }
+  );
+  assert.equal(result.handled, true);
+  assert.equal(result.queuedFinal, false);
+  assert.equal(errors.length, 1);
+  assert.equal(new Outbox(join(stateDir, 'codeman-assistant-outbox.json')).records.length, 1);
 });
 
 test('natural Brain addressing stays explicit and preserves the request text', () => {

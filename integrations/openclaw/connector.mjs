@@ -118,12 +118,28 @@ export class Outbox {
   constructor(path) {
     this.path = path;
     this.records = [];
+    this.replyTargets = [];
     if (existsSync(path)) {
       const file = JSON.parse(readFileSync(path, 'utf8'));
       if (
         file.version !== 1 ||
         !Array.isArray(file.records) ||
         file.records.length > 1000 ||
+        (file.replyTargets !== undefined &&
+          (!Array.isArray(file.replyTargets) ||
+            file.replyTargets.length > 2000 ||
+            file.replyTargets.some(
+              (r) =>
+                !r ||
+                !uuid.test(r.assistantId) ||
+                !/^[1-9][0-9]*$/.test(r.messageId ?? '') ||
+                !/^[A-Za-z0-9_-]{1,100}$/.test(r.destination?.accountId ?? '') ||
+                !/^[1-9][0-9]*$/.test(r.destination?.chatId ?? '') ||
+                r.destination.chatId !== r.destination.senderId
+            ) ||
+            new Set(
+              file.replyTargets.map((r) => JSON.stringify([r.destination.accountId, r.destination.chatId, r.messageId]))
+            ).size !== file.replyTargets.length)) ||
         file.records.some(
           (r) =>
             !/^[a-f0-9]{64}$/.test(r.key) ||
@@ -149,6 +165,7 @@ export class Outbox {
       )
         throw new Error('Connector outbox is corrupt; preserve it for reconciliation');
       this.records = file.records;
+      this.replyTargets = file.replyTargets ?? [];
       // A crash during a platform send has an unknown recipient-visible outcome.
       for (const r of this.records) if (r.delivery === 'sending') r.delivery = 'delivery_unknown';
     }
@@ -160,12 +177,31 @@ export class Outbox {
       if (next.length >= 1000) throw new Error('Outbox is full; archive reconciled records before continuing');
       next.push(record);
     } else next[index] = record;
+    this.persist(next, this.replyTargets);
+  }
+  rememberReplyTarget(target) {
+    const next = structuredClone(this.replyTargets);
+    const old = next.find(
+      (r) =>
+        r.messageId === target.messageId &&
+        r.destination.accountId === target.destination.accountId &&
+        r.destination.chatId === target.destination.chatId
+    );
+    if (old) {
+      if (old.assistantId !== target.assistantId || old.destination.senderId !== target.destination.senderId)
+        throw new Error('Outbound reply ownership conflict');
+      return;
+    }
+    next.push(structuredClone(target));
+    this.persist(this.records, next.slice(-2000));
+  }
+  persist(records, replyTargets) {
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.${randomUUID()}.tmp`;
     let fd;
     try {
       fd = openSync(tmp, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ version: 1, records: next }));
+      writeFileSync(fd, JSON.stringify({ version: 1, records, replyTargets }));
       fsyncSync(fd);
       closeSync(fd);
       fd = undefined;
@@ -176,7 +212,8 @@ export class Outbox {
       } finally {
         closeSync(dir);
       }
-      this.records = next;
+      this.records = records;
+      this.replyTargets = replyTargets;
     } finally {
       if (fd !== undefined) closeSync(fd);
       if (existsSync(tmp)) unlinkSync(tmp);
@@ -234,9 +271,29 @@ export class Connector {
       record.destination.senderId === destination.senderId
     );
   }
+  rememberReplyTarget(destination, messageId) {
+    if (!/^[1-9][0-9]*$/.test(messageId ?? '')) return;
+    const { accountId, chatId, senderId } = destination;
+    this.outbox.rememberReplyTarget({
+      assistantId: this.config.assistantId,
+      destination: { accountId, chatId, senderId },
+      messageId,
+    });
+  }
+  addressedText(event, ctx) {
+    const explicit = brainRequestText(event.content);
+    if (explicit !== undefined) return explicit;
+    const destination = trustedDestination(event, ctx, this.config);
+    const replyId = ctx.replyToMessageId;
+    if (!destination || typeof replyId !== 'string' || !/^[1-9][0-9]*$/.test(replyId)) return undefined;
+    const owned =
+      this.outbox.records.some((r) => this.authorizedRecord(r, destination) && r.receipts.includes(replyId)) ||
+      this.outbox.replyTargets.some((r) => this.authorizedRecord(r, destination) && r.messageId === replyId);
+    return owned && typeof event.content === 'string' ? event.content : undefined;
+  }
   async inbound(event, ctx) {
     const body = event.content ?? '';
-    let text = brainRequestText(body);
+    let text = this.addressedText(event, ctx);
     if (text === undefined) return { handled: false };
     const destination = trustedDestination(event, ctx, this.config);
     if (!destination) return { handled: true }; // Never send unauthorized text to the model or reply destination.
@@ -346,11 +403,12 @@ export class Connector {
         return {
           handled: true,
           reply: {
-            text: assistant.capabilities?.recovery?.state === 'recovering'
-              ? 'Brain is reconnecting to its conversation. Please try again shortly.'
-              : assistant.capabilities?.recovery?.state === 'blocked'
-                ? 'Brain needs recovery review. Open Assistants in Codeman.'
-                : 'Brain is paused. Open Assistants in Codeman and hand Brain over to messaging.',
+            text:
+              assistant.capabilities?.recovery?.state === 'recovering'
+                ? 'Brain is reconnecting to its conversation. Please try again shortly.'
+                : assistant.capabilities?.recovery?.state === 'blocked'
+                  ? 'Brain needs recovery review. Open Assistants in Codeman.'
+                  : 'Brain is paused. Open Assistants in Codeman and hand Brain over to messaging.',
           },
         };
     } catch {

@@ -5,7 +5,11 @@ durable requests and an opt-in OpenClaw connector. The tested versions are
 OpenClaw **2026.9.8 (fc23bc8)** and Node 22+. Named assistants support local
 Codex, Claude Code and OpenCode sessions (COD-499).
 Address Brain with `brain <request>`, `Brain, <request>`, or `/brain <request>`
-to bypass OpenClaw's model. Optional model-driven tools are deferred.
+to bypass OpenClaw's model. You can also reply directly to a connector-delivered
+Brain answer or acknowledgement without repeating `brain`. Replies follow the
+recorded Telegram message ID for the same authorized account/chat/sender; quoted
+text, unrelated bot messages and ordinary unaddressed messages do not select
+Brain. Optional model-driven tools are deferred.
 
 ## Setup
 
@@ -254,3 +258,20 @@ The canary uses isolated instance/data/socket/home, a throwaway real session of 
 and a test Telegram adapter. It does not use a production bot or Brain session.
 See [implementation evidence](../../docs/openclaw-integration-evidence.md) and
 [release runbook](../../docs/openclaw-release-runbook.md).
+
+## Reply conversation routing (COD-500)
+
+The `reply_dispatch` adapter reads the SDK's `ReplyToIdFull`/`ReplyToId`, not the
+quoted body. Ownership comes from durable delivery receipts or the bounded
+`replyTargets` ledger (latest 2000 immediate connector replies) in the private
+outbox. Existing result receipts remain usable after upgrade and restart. Every
+result chunk can be replied to. Acknowledgements and status/result replies use
+the same trusted receipt-bearing adapter in normal and `message_tool_only`
+delivery modes. An acknowledgement failure still claims accepted work and
+cannot fall through to OpenClaw's model or replay it.
+
+Follow-ups retain their own incoming message ID/idempotency key and use the same
+assistant/native conversation. They do not prepend quoted text, change global
+routing, or replay the request being replied to. Chat authorization, groups,
+threads, send policy and tail/internal dispatch restrictions remain enforced.
+Test with `node scripts/smoke-openclaw-assistant.mjs --reply`.

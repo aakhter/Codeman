@@ -323,7 +323,7 @@ try {
             sendText: async (context) => {
               if (/^(On it|I already have)/.test(context.text)) {
                 acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
-                return { messageId: `ack-${acknowledgements.length}` };
+                return { messageId: String(10000 + acknowledgements.length) };
               }
               receipts.push({ accountId: context.accountId, to: context.to, text: context.text });
               return { messageId: String(receipts.length) };
@@ -395,6 +395,52 @@ try {
   assert.equal(receipts[0].to, '123');
   if (pdfCode) checks.push(`real ${mode} extracts hidden code from durable PDF attachment`);
   checks.push('real CLI request completion and matching delivery');
+  if (process.argv.includes('--reply')) {
+    await service.stop();
+    await service.start(serviceContext);
+    const replyEvent = {
+      ...event,
+      suppressUserDelivery: false,
+      sourceReplyDeliveryMode: 'direct',
+      ctx: {
+        ...event.ctx,
+        media: [],
+        MessageSid: '457',
+        ReplyToId: '1',
+        ReplyToBody: 'quoted context must not become the prompt',
+        BodyForCommands:
+          'Reply with the secret code from the attached text file you just read, followed by FOLLOWUP_OK, and nothing else. Do not use tools.',
+      },
+    };
+    assert.equal((await ingress(replyEvent, context)).handled, true);
+    assert.equal((await ingress(replyEvent, context)).handled, true);
+    await until(() => receipts.length === 2, 120000);
+    assert.equal(receipts[1].text.trim(), `${hiddenCode} FOLLOWUP_OK`);
+    const replyRequests = (await api(`/assistants/${assistant.id}/requests`)).requests;
+    assert.equal(replyRequests.length, 2);
+    assert.equal(replyRequests.find((r) => r.text === replyEvent.ctx.BodyForCommands)?.status, 'completed');
+    const ackReply = {
+      ...replyEvent,
+      ctx: {
+        ...replyEvent.ctx,
+        MessageSid: '458',
+        ReplyToId: '10001',
+        BodyForCommands: 'Reply with exactly ACK_FOLLOWUP_OK. Do not use tools.',
+      },
+    };
+    assert.equal((await ingress(ackReply, context)).handled, true);
+    await until(() => receipts.length === 3, 120000);
+    assert.equal(receipts[2].text.trim(), 'ACK_FOLLOWUP_OK');
+    assert.equal(
+      (await ingress({ ...replyEvent, ctx: { ...replyEvent.ctx, MessageSid: '459', ReplyToId: '999999' } }, context))
+        .handled,
+      false
+    );
+    checks.push(
+      'prefix-free replies to persisted result and acknowledgement route to same native conversation; duplicate accepted once; unknown replies fall through'
+    );
+  }
+
   await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
   await sleep(3500);
   assert.match(await page.locator('#assistantsList').innerText(), /completed/i);
