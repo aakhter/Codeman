@@ -61,7 +61,10 @@ metadata before model dispatch. `inbound_claim` remains available for explicitly
 plugin-owned conversation bindings; it is not a global ingress hook. Its managed service submits/polls outside
 ingress and sends through `runtime.channel.outbound.loadAdapter('telegram').sendText`.
 Unicode-safe chunks stay within 3500 UTF-16 units. Adapter formatting can affect
-rendered Markdown. Prompts/results are not sent through another model.
+rendered Markdown. In the Codex harness's `message_tool_only` reply mode, acknowledgements are sent
+explicitly through that trusted Telegram adapter too; automatic dispatcher
+replies remain suppressed. Delivery-denied, internal, group/thread and unauthorized
+turns remain blocked. Prompts/results are not sent through another model.
 
 ## Guarantees and attention states
 

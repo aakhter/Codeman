@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Connector, Outbox, validateConfig } from './connector.mjs';
+import { Connector, Outbox, trustedDestination, validateConfig } from './connector.mjs';
 
 export default {
   id: 'codeman-assistant',
@@ -9,6 +9,7 @@ export default {
     let connector;
     let timer;
     let running;
+    let deliver;
     const inbound = async (event, ctx) => {
       if (!connector) {
         return /^\/brain(?:\s|$)/.test(event.content ?? '')
@@ -32,29 +33,36 @@ export default {
         event.isTailDispatch ||
         source.InternalTurnSource != null ||
         event.sendPolicy !== 'allow' ||
-        event.suppressUserDelivery
+        (event.suppressUserDelivery && event.sourceReplyDeliveryMode !== 'message_tool_only')
       )
         return { handled: true, queuedFinal: false, counts };
-      const result = await inbound(
-        {
-          content,
-          channel,
-          isGroup: source.ChatType === 'direct' ? false : true,
-          commandAuthorized: source.CommandAuthorized,
-          threadId: source.MessageThreadId,
-        },
-        {
-          channelId: channel,
-          accountId: source.AccountId,
-          conversationId: source.OriginatingTo ?? source.To,
-          senderId: source.SenderId,
-          messageId: source.MessageSidFull ?? source.MessageSid,
-        }
-      );
+      const message = {
+        content,
+        channel,
+        isGroup: source.ChatType === 'direct' ? false : true,
+        commandAuthorized: source.CommandAuthorized,
+        threadId: source.MessageThreadId,
+      };
+      const identity = {
+        channelId: channel,
+        accountId: source.AccountId,
+        conversationId: source.OriginatingTo ?? source.To,
+        senderId: source.SenderId,
+        messageId: source.MessageSidFull ?? source.MessageSid,
+      };
+      const destination = trustedDestination(message, identity, config);
+      if (!destination) return { handled: true, queuedFinal: false, counts };
+      const result = await inbound(message, identity);
       if (!result.handled) return { handled: false };
       let queuedFinal = false;
       if (result.reply) {
-        queuedFinal = ctx.dispatcher.sendFinalReply(result.reply);
+        // Codex's message_tool_only mode suppresses automatic dispatcher output,
+        // not explicitly addressed plugin replies. Use the same trusted adapter
+        // as durable final delivery; never change the user's global reply policy.
+        if (event.sourceReplyDeliveryMode === 'message_tool_only') {
+          await deliver(destination, result.reply.text);
+          queuedFinal = true;
+        } else queuedFinal = ctx.dispatcher.sendFinalReply(result.reply);
         if (queuedFinal) counts.final = 1;
       }
       ctx.recordProcessed('completed', { reason: 'codeman-assistant' });
@@ -64,21 +72,22 @@ export default {
     api.registerService({
       id: 'codeman-assistant-outbox',
       async start(ctx) {
+        deliver = async (destination, text) => {
+          const adapter = await api.runtime.channel.outbound.loadAdapter('telegram');
+          if (!adapter?.sendText) throw new Error('Telegram delivery adapter unavailable');
+          return adapter.sendText({
+            cfg: ctx.config,
+            accountId: destination.accountId,
+            to: destination.chatId,
+            text,
+            signal: AbortSignal.timeout(10000),
+          });
+        };
         connector = new Connector({
           config,
           outbox: new Outbox(join(ctx.stateDir, 'codeman-assistant-outbox.json')),
           token: () => process.env[config.tokenEnv],
-          deliver: async (destination, text) => {
-            const adapter = await api.runtime.channel.outbound.loadAdapter('telegram');
-            if (!adapter?.sendText) throw new Error('Telegram delivery adapter unavailable');
-            return adapter.sendText({
-              cfg: ctx.config,
-              accountId: destination.accountId,
-              to: destination.chatId,
-              text,
-              signal: AbortSignal.timeout(10000),
-            });
-          },
+          deliver,
         });
         const pump = () => {
           if (running) return;
@@ -99,6 +108,7 @@ export default {
         if (connector) connector.stopped = true;
         await running;
         connector = undefined;
+        deliver = undefined;
       },
     });
   },

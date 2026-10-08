@@ -206,6 +206,7 @@ try {
     scopes: ['read', 'submit', 'cancel'],
   });
   process.env.COD487_CANARY_TOKEN = issued.token;
+  const acknowledgements = [];
   let ingress;
   plugin.register({
     pluginConfig: {
@@ -228,6 +229,10 @@ try {
         outbound: {
           loadAdapter: async () => ({
             sendText: async (context) => {
+              if (/^(Accepted by connector|Existing request)/.test(context.text)) {
+                acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
+                return { messageId: `ack-${acknowledgements.length}` };
+              }
               receipts.push({ accountId: context.accountId, to: context.to, text: context.text });
               return { messageId: String(receipts.length) };
             },
@@ -240,6 +245,8 @@ try {
   await service.start(serviceContext);
   const event = {
     sendPolicy: 'allow',
+    suppressUserDelivery: true,
+    sourceReplyDeliveryMode: 'message_tool_only',
     ctx: {
       BodyForCommands: '/brain Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
       OriginatingChannel: 'telegram',
@@ -251,12 +258,10 @@ try {
       MessageSid: '456',
     },
   };
-  const acknowledgements = [];
   const context = {
     dispatcher: {
-      sendFinalReply: (payload) => {
-        acknowledgements.push(payload);
-        return true;
+      sendFinalReply: () => {
+        throw new Error('Automatic delivery must stay suppressed');
       },
     },
     recordProcessed: () => {},
@@ -266,7 +271,9 @@ try {
   assert.equal((await ingress(event, context)).handled, true);
   assert.match(acknowledgements[0].text, /Accepted by connector/);
   assert.match(acknowledgements[1].text, /Existing request/);
-  checks.push('ordinary Telegram reply_dispatch takeover with stable message identity');
+  assert.equal(acknowledgements[0].to, '123');
+  assert.equal(acknowledgements[0].accountId, 'canary');
+  checks.push('ordinary Telegram message_tool_only takeover and explicit acknowledgements');
   await until(async () => (await api(`/assistants/${assistant.id}/requests`)).requests.length === 1);
   await service.stop();
   await service.start(serviceContext);

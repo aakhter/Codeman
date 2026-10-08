@@ -255,6 +255,7 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
     if (originalToken === undefined) delete process.env[config.tokenEnv];
     else process.env[config.tokenEnv] = originalToken;
   });
+  const deliveries = [];
   const hooks = new Map();
   let service;
   plugin.register({
@@ -263,7 +264,18 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
     registerService: (value) => {
       service = value;
     },
-    runtime: { channel: { outbound: { loadAdapter: async () => ({ sendText: async () => ({ messageId: '1' }) }) } } },
+    runtime: {
+      channel: {
+        outbound: {
+          loadAdapter: async () => ({
+            sendText: async (payload) => {
+              deliveries.push(payload);
+              return { messageId: '1' };
+            },
+          }),
+        },
+      },
+    },
     logger: { error: () => {} },
   });
   await service.start({ stateDir: h.path.slice(0, h.path.lastIndexOf('/')), config: {} });
@@ -324,6 +336,36 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
   assert.equal(result.handled, true);
   assert.equal(result.queuedFinal, true);
   assert.equal(result.counts.final, 1);
+  const manual = await handler(
+    { ctx: source, sendPolicy: 'allow', suppressUserDelivery: true, sourceReplyDeliveryMode: 'message_tool_only' },
+    dispatch
+  );
+  assert.equal(manual.handled, true);
+  assert.equal(manual.queuedFinal, true);
+  assert.equal(replies.length, 1);
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].accountId, config.accountId);
+  assert.equal(deliveries[0].to, '123');
+  assert.match(deliveries[0].text, /Existing request/);
+  for (const patch of [
+    { sendPolicy: 'deny' },
+    { ctx: { ...source, SenderId: '999' } },
+    { ctx: { ...source, MessageThreadId: 123 } },
+    { isTailDispatch: true },
+  ]) {
+    await handler(
+      {
+        ctx: source,
+        sendPolicy: 'allow',
+        suppressUserDelivery: true,
+        sourceReplyDeliveryMode: 'message_tool_only',
+        ...patch,
+      },
+      dispatch
+    );
+  }
+  assert.equal(deliveries.length, 1);
+
   assert.match(replies[0].text, /Accepted by connector/);
   assert.equal(
     JSON.parse(readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8'))

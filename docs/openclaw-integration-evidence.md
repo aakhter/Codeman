@@ -142,3 +142,29 @@ journal records `Codeman assistant connector service started` at
 CLI inspection and the earlier isolated real Codex canary. Existing Brain binding
 and handoff are preserved. A fresh Telegram test is requested; failed earlier
 messages are not replayed.
+
+## 2026-10-08 explicit-delivery correction
+
+User message 916 reached Telegram ingress at 08:59:05Z and completed without
+queued replies at 08:59:06Z; neither connector outbox nor Brain requests existed.
+The persisted Telegram session uses the Codex harness. Its installed
+`deliveryDefaults.visibleReplies` is `message_tool`; the installed SDK's real
+source-reply visibility policy reproduces `message_tool_only` and
+`suppressHookUserDelivery=true` for this explicit `/brain` text. The connector
+mistakenly treated automatic-reply suppression as an ingress denial.
+
+For an authorized private `/brain` command in message-tool-only mode, the
+connector now sends its acknowledgement explicitly using the same trusted
+Telegram adapter as final-result delivery. It preserves the gateway's global
+reply policy and still rejects send-policy denial, internal/tail turns, foreign
+accounts/senders/chats, missing identity, groups and threads. Other suppression
+modes are still denied. Routing diagnostics logged only boolean checks and were
+removed after reproducing the source-policy condition.
+
+All 14 connector/native tests and the root wrapper pass. The updated isolated
+real Codex/browser canary verifies message-tool-only takeover, explicit matching
+acknowledgements, duplicate identity, one native completion and final delivery:
+`/tmp/cod487-assistant-canary-AmTwl6/summary.json`. Formatting/diff checks pass.
+Production hot replacement is recorded at 2026-10-08T09:10:57Z, preceded by the
+connector service-start log. Brain remains ready on the same native binding.
+A new real Telegram receipt remains separate from the test-adapter canary.
