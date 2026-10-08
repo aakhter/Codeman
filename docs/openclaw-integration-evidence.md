@@ -227,3 +227,40 @@ assistant/integration/tmux tests; typecheck, lint (one existing server warning),
 format and lockfile checks. Final transport regressions plus the connector
 wrapper passed 218 tests. Source is tracked under COD-496; deployment and
 actual Telegram acceptance are recorded separately.
+
+## COD-499: Claude Code and OpenCode assistant support
+
+Named assistants now bind local Codex, Claude Code and OpenCode sessions. Native
+adapters validate identity and prompt acceptance, observe completed responses,
+and resume the same conversation after idle-session loss. Existing Codex bindings
+and tokens retain their original representation. Claude observation follows
+attachment/hook parent links and matches complete paired native paste envelopes.
+OpenCode reads readonly SQLite snapshots of linked messages and parts. Unknown
+attribution stops dispatch without replay.
+
+Final isolated real-CLI canaries passed text/image tool use, input ownership,
+connector duplicate/restart delivery, desktop/mobile UI and deletion recovery:
+
+- Claude Code: `/tmp/cod487-assistant-canary-1qPoWQ/summary.json`.
+- OpenCode: `/tmp/cod487-assistant-canary-nxbKGa/summary.json`.
+- Codex regression: `/tmp/cod487-assistant-canary-sKpMvU/summary.json`.
+
+Each recovery retained the native conversation, root and workspace, incremented
+the binding generation and completed a follow-up. These use a test Telegram SDK
+adapter, not the production bot. Brain was not prompted or deleted.
+
+The realistic browser smoke passed all applicable Claude, Codex and shell checks
+for history, replay and tab switching, with no page or serious console errors:
+`/tmp/codeman-dev-smoke-artifacts-2026-10-08T17-54-19-059Z-p1542321-r0870a7f0237b4a7e9c88bcb2fe97edd6/summary.json`.
+Remote coverage was skipped because no target was configured.
+
+Validation: 49 assistant/native/recovery/connector wrapper tests and 23 plugin
+tests; typecheck, lint (one existing warning), format, lockfile, frontend syntax
+and public asset checks. Native schemas were checked against installed CLIs,
+the [Claude hook contract](https://code.claude.com/docs/en/hooks) and the
+[OpenCode message implementation](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/message-v2.ts).
+
+The first Claude fixture copied a refreshable OAuth credential, leaving the
+original token stale after refresh. The refreshed credential was restored after
+matching account identity. Subsequent canaries share the credential file while
+isolating native conversations, data and tmux sockets.
