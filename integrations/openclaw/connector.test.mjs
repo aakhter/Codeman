@@ -4,7 +4,15 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Connector, Outbox, chunks, trustedDestination, validateConfig } from './connector.mjs';
+import {
+  Connector,
+  Outbox,
+  brainRequestText,
+  telegramAnswer,
+  chunks,
+  trustedDestination,
+  validateConfig,
+} from './connector.mjs';
 import plugin from './index.mjs';
 const config = {
   baseUrl: 'http://127.0.0.1:3000',
@@ -157,9 +165,9 @@ test('cross-request result, malformed input, phase 2 absence and unauthorized re
       }),
   });
   const c = h.make();
-  assert.match((await c.inbound(event, ctx)).reply.text, /unavailable/);
+  assert.match((await c.inbound(event, ctx)).reply.text, /paused/);
   assert.equal(c.outbox.records.length, 0);
-  assert.match((await c.inbound({ ...event, content: '/brain hello\nother' }, ctx)).reply.text, /single-line/);
+  assert.match((await c.inbound({ ...event, content: '/brain hello\nother' }, ctx)).reply.text, /one line/);
   assert.deepEqual(await c.inbound(event, { ...ctx, senderId: '999' }), { handled: true });
   assert.throws(
     () =>
@@ -197,7 +205,7 @@ test('concurrent edited message conflicts without replacing the first persisted 
   assert.match(results[1].reply.text, /conflict/);
   assert.match(
     (await c.inbound({ ...event, content: '/brain\nother' }, { ...ctx, messageId: '777' })).reply.text,
-    /single-line/
+    /one line/
   );
 });
 test('cross-request API response stops polling before any Telegram delivery', async (t) => {
@@ -282,7 +290,7 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
   t.after(() => service.stop());
   const handler = hooks.get('reply_dispatch');
   const source = {
-    BodyForCommands: '/brain test',
+    BodyForCommands: 'Brain, test',
     RawBody: 'not canonical',
     Body: 'wrapped text',
     OriginatingChannel: 'telegram',
@@ -346,7 +354,7 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
   assert.equal(deliveries.length, 1);
   assert.equal(deliveries[0].accountId, config.accountId);
   assert.equal(deliveries[0].to, '123');
-  assert.match(deliveries[0].text, /Existing request/);
+  assert.match(deliveries[0].text, /already have/);
   for (const patch of [
     { sendPolicy: 'deny' },
     { ctx: { ...source, SenderId: '999' } },
@@ -366,7 +374,7 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
   }
   assert.equal(deliveries.length, 1);
 
-  assert.match(replies[0].text, /Accepted by connector/);
+  assert.match(replies[0].text, /On it/);
   assert.equal(
     JSON.parse(readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8'))
       .records[0].text,
@@ -377,4 +385,54 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
 test('manifest explicitly activates the managed connector during gateway startup', () => {
   const manifest = JSON.parse(readFileSync(new URL('./openclaw.plugin.json', import.meta.url), 'utf8'));
   assert.equal(manifest.activation.onStartup, true);
+});
+
+test('natural Brain addressing stays explicit and preserves the request text', () => {
+  for (const prefix of ['brain ', 'Brain, ', 'BRAIN: ', '/brain '])
+    assert.equal(brainRequestText(prefix + 'summarize my notes'), 'summarize my notes');
+  for (const text of ['brainstorm ideas', 'my brain notes', 'brainwork task', 'brainless', '/brainstorm test'])
+    assert.equal(brainRequestText(text), undefined);
+  assert.equal(brainRequestText('brain'), '');
+});
+
+test('Telegram presentation hides only the known leading memory status banner', () => {
+  const banner =
+    'Mem0 Active | user=test (override; default: ubuntu) | project=brain | branch=unknown | memories=594\n';
+  assert.equal(telegramAnswer(banner + 'BRAIN_CONNECTED_OK'), 'BRAIN_CONNECTED_OK');
+  assert.equal(telegramAnswer('My answer\n' + banner), 'My answer\n' + banner);
+  assert.equal(telegramAnswer('Mem0 Active is useful\nDetails'), 'Mem0 Active is useful\nDetails');
+  assert.equal(telegramAnswer(banner), banner);
+});
+
+test('plain Brain requests acknowledge simply and latest controls remain scoped to their chat', async (t) => {
+  const h = harness(t);
+  const c = h.make();
+  const accepted = await c.inbound({ ...event, content: 'Brain, summarize my notes' }, ctx);
+  assert.equal(accepted.reply.text, 'On it — sending this to Brain.');
+  assert.equal(c.outbox.records[0].text, 'summarize my notes');
+  assert.doesNotMatch(accepted.reply.text, /[a-f0-9]{64}/);
+  assert.equal(
+    (await c.inbound({ ...event, content: 'brain status' }, { ...ctx, messageId: '457' })).reply.text,
+    'Your latest request is waiting for Brain.'
+  );
+  assert.match(
+    (await c.inbound({ ...event, content: 'brain result' }, { ...ctx, messageId: '458' })).reply.text,
+    /No completed result/
+  );
+  assert.equal(
+    (await c.inbound({ ...event, content: 'brain cancel' }, { ...ctx, messageId: '459' })).reply.text,
+    'Cancelled before submission to Codeman.'
+  );
+  assert.equal(c.outbox.records[0].status, 'cancelled');
+  assert.equal(
+    (await c.inbound({ ...event, content: 'brain summarize notes' }, { ...ctx, senderId: '999' })).reply,
+    undefined
+  );
+  c.config.allowFrom.push('999');
+  assert.match(
+    (await c.inbound({ ...event, content: 'brain status' }, { ...ctx, senderId: '999', conversationId: '999' })).reply
+      .text,
+    /No matching Brain request/
+  );
+  assert.equal(c.outbox.records.length, 1);
 });

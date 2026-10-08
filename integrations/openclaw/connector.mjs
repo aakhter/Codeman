@@ -51,6 +51,29 @@ export function validateConfig(input) {
     throw new Error('Invalid connector configuration');
   return { ...input, baseUrl: url.origin, allowFrom: [...input.allowFrom] };
 }
+export function brainRequestText(content) {
+  if (typeof content !== 'string' || !/^\/?brain(?=[\s,:]|$)/i.test(content)) return undefined;
+  return content.replace(/^\/?brain[,:]? */i, '');
+}
+export function telegramAnswer(text) {
+  const banner = /^Mem0 Active \| user=[^\r\n]+ \| project=[^\r\n]+ \| branch=[^\r\n]+ \| memories=\d+\r?\n/.exec(text);
+  const answer = banner ? text.slice(banner[0].length) : text;
+  return answer.trim() ? answer : text;
+}
+function requestStatus(record) {
+  const statuses = {
+    queued: 'Your latest request is queued.',
+    running: 'Brain is working on your latest request.',
+    completed: 'Your latest request is complete.',
+    cancelled: 'Your latest request was cancelled.',
+    failed: 'Brain could not finish your latest request. Check Codeman before trying again.',
+    interrupted: 'Your latest request was interrupted. Check Codeman before trying again.',
+    outcome_unknown: 'Your latest request needs attention in Codeman. Check it before trying again.',
+  };
+  if (record.delivery === 'delivery_unknown')
+    return 'Your answer may not have reached Telegram. Use brain result to retrieve it.';
+  return statuses[record.status] ?? 'Your latest request is waiting for Brain.';
+}
 export function trustedDestination(event, ctx, config) {
   const sender = ctx.senderId;
   const chat = typeof ctx.conversationId === 'string' ? ctx.conversationId.replace(/^telegram:/, '') : undefined;
@@ -209,14 +232,22 @@ export class Connector {
   }
   async inbound(event, ctx) {
     const body = event.content ?? '';
-    if (typeof body !== 'string' || !/^\/brain(?:\s|$)/.test(body)) return { handled: false };
+    const text = brainRequestText(body);
+    if (text === undefined) return { handled: false };
     const destination = trustedDestination(event, ctx, this.config);
     if (!destination) return { handled: true }; // Never send unauthorized text to the model or reply destination.
-    const text = body.replace(/^\/brain */, '');
-    const control = /^(status|result|cancel)\s+([a-f0-9]{64})$/.exec(text);
+    const control = /^(status|result|cancel)(?: +([a-f0-9]{64}))?$/i.exec(text);
     if (control) {
-      const record = this.outbox.get(control[2]);
-      if (!this.authorizedRecord(record, destination)) return { handled: true, reply: { text: 'Request not found.' } };
+      control[1] = control[1].toLowerCase();
+      control[2] ??= [...this.outbox.records].reverse().find((r) => this.authorizedRecord(r, destination))?.key;
+    }
+    if (control) {
+      const record = control[2] && this.outbox.get(control[2]);
+      if (!this.authorizedRecord(record, destination))
+        return {
+          handled: true,
+          reply: { text: 'No matching Brain request yet. Send brain followed by what you need.' },
+        };
       if (control[1] === 'cancel' && !record.requestId) {
         if (this.active.has(record.key))
           return { handled: true, reply: { text: 'Acceptance is being reconciled. Check Codeman before cancelling.' } };
@@ -238,7 +269,7 @@ export class Connector {
           const latest = this.request(await this.api(`/assistant-requests/${record.requestId}`), record);
           record.status = latest.status;
           if (latest.status === 'completed' && typeof latest.result?.text === 'string')
-            record.parts = chunks(latest.result.text);
+            record.parts = chunks(telegramAnswer(latest.result.text));
           this.outbox.put(record);
         } catch {
           return {
@@ -252,19 +283,19 @@ export class Connector {
       return {
         handled: true,
         reply: {
-          text: `${record.status ?? record.delivery}; delivery: ${record.delivery}. Approvals and interruptions require Codeman.`,
+          text: requestStatus(record),
         },
       };
     }
     if (/^(status|result|cancel)(?:\s|$)/.test(text))
       return {
         handled: true,
-        reply: { text: 'Use /brain status|result|cancel followed by the connector request key.' },
+        reply: { text: 'Use brain status, brain result, or brain cancel for your latest request.' },
       };
     if (!text || text.length > 20000 || /[\x00-\x1f\x7f]/.test(body) || text.trimStart().startsWith('/'))
       return {
         handled: true,
-        reply: { text: 'Use /brain followed by a single-line request without terminal controls or CLI commands.' },
+        reply: { text: 'Tell Brain what you need in one line, for example: brain summarize my notes.' },
       };
     const key = hash(
       JSON.stringify([
@@ -280,7 +311,7 @@ export class Connector {
     if (old) {
       if (old.payloadHash !== hash(text))
         return { handled: true, reply: { text: 'Message identity conflict. Check Codeman.' } };
-      return { handled: true, reply: { text: `Existing request ${key}; ${old.status ?? old.delivery}.` } };
+      return { handled: true, reply: { text: 'I already have that request.' } };
     }
     // Phase 2 absence must produce an explicit unavailable reply, never terminal input.
     try {
@@ -293,7 +324,7 @@ export class Connector {
         return {
           handled: true,
           reply: {
-            text: 'Brain execution is unavailable. Codeman needs the durable request engine and desktop handoff.',
+            text: 'Brain is paused. Open Assistants in Codeman and hand Brain over to messaging.',
           },
         };
     } catch {
@@ -315,7 +346,7 @@ export class Connector {
         parts: [],
         receipts: [],
       });
-    return { handled: true, reply: { text: `Accepted by connector: ${key}. Use /brain status ${key}.` } };
+    return { handled: true, reply: { text: 'On it — sending this to Brain.' } };
   }
   async tick() {
     if (this.stopped) return;
@@ -347,9 +378,9 @@ export class Connector {
         if (result.status === 'completed') {
           if (typeof result.result?.text !== 'string' || !result.result.text || result.result.text.length > 1000000)
             throw new ContractViolation('Unsupported completed result');
-          r.parts = chunks(result.result.text);
+          r.parts = chunks(telegramAnswer(result.result.text));
         } else if (['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(result.status)) {
-          r.parts = [`Brain request ${r.key}: ${result.status}. Check Codeman before sending another request.`];
+          r.parts = [requestStatus(r)];
         }
         this.outbox.put(r);
         if (!r.parts.length || this.stopped) continue;

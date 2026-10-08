@@ -168,3 +168,24 @@ acknowledgements, duplicate identity, one native completion and final delivery:
 Production hot replacement is recorded at 2026-10-08T09:10:57Z, preceded by the
 connector service-start log. Brain remains ready on the same native binding.
 A new real Telegram receipt remains separate from the test-adapter canary.
+
+## COD-495 conversational Telegram presentation
+
+Real production acceptance is now proven for the existing Brain conversation:
+request `feab4ac6-2955-4d9a-8cd3-b8a81ad4e825` completed with the expected marker,
+the connector outbox records `delivered` with one Telegram receipt, and the user
+confirmed the acknowledgement and answer in their private chat. The leading
+Mem0 banner was part of the stored native final answer.
+
+COD-495 adds case-insensitive `brain ...`, `Brain, ...`, and `brain: ...` routing
+alongside `/brain`, a short acknowledgement without exposing request keys, and
+status/result/cancel for the latest request scoped to the same assistant,
+account, sender and private chat. Explicit keys remain available. Telegram
+presentation removes only the known leading Mem0 status banner when followed by
+an answer; Codeman's stored native answer remains untouched. The same routing,
+authorization, idempotency and queued-only cancellation constraints apply.
+
+All 17 connector/native tests and the root wrapper pass. The isolated real
+Codex/browser canary now submits `Brain, Reply ...` and verifies explicit simple
+acknowledgements, duplicate identity, one completion and matching final delivery:
+`/tmp/cod487-assistant-canary-3T8RNy/summary.json`. Formatting/diff checks pass.

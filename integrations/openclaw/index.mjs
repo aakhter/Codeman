@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Connector, Outbox, trustedDestination, validateConfig } from './connector.mjs';
+import { Connector, Outbox, brainRequestText, trustedDestination, validateConfig } from './connector.mjs';
 
 export default {
   id: 'codeman-assistant',
@@ -12,7 +12,7 @@ export default {
     let deliver;
     const inbound = async (event, ctx) => {
       if (!connector) {
-        return /^\/brain(?:\s|$)/.test(event.content ?? '')
+        return brainRequestText(event.content) !== undefined
           ? { handled: true, reply: { text: 'Codeman connector is starting or unavailable.' } }
           : { handled: false };
       }
@@ -26,8 +26,7 @@ export default {
       const source = event.ctx ?? {};
       const content = source.BodyForCommands ?? source.RawBody ?? '';
       const channel = source.OriginatingChannel ?? source.Surface ?? source.Provider;
-      if (channel !== 'telegram' || typeof content !== 'string' || !/^\/brain(?:\s|$)/.test(content))
-        return { handled: false };
+      if (channel !== 'telegram' || brainRequestText(content) === undefined) return { handled: false };
       const counts = { tool: 0, block: 0, final: 0 };
       if (
         event.isTailDispatch ||

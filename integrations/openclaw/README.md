@@ -3,7 +3,8 @@
 [COD-487](https://aakhter.atlassian.net/browse/COD-487) implements named assistants,
 durable requests and an opt-in OpenClaw connector. The tested versions are
 OpenClaw **2026.9.8 (fc23bc8)**, Codex **0.160.1**, and Node 22+.
-Optional model-driven tools are deferred; explicit `/brain` bypasses OpenClaw's model.
+Address Brain with `brain <request>`, `Brain, <request>`, or `/brain <request>`
+to bypass OpenClaw's model. Optional model-driven tools are deferred.
 
 ## Setup
 
@@ -43,10 +44,16 @@ and native events before upgrading either application.
 
 ## Commands
 
-- `/brain <single-line text>` queues a request and acknowledges its connector key.
-- `/brain status <connector-key>` fetches current request/delivery state.
-- `/brain result <connector-key>` retrieves the matching stored final answer.
-- `/brain cancel <connector-key>` cancels unsent local work or queued Codeman work.
+- `brain <single-line text>` sends a request; Brain acknowledges briefly and replies when finished.
+- `brain status` checks your latest request.
+- `brain result` retrieves your latest completed answer.
+- `brain cancel` cancels your latest unsent or queued request.
+
+`Brain, ...`, `brain: ...`, and `/brain ...` also work. Status/result/cancel can
+still take an explicit connector key for troubleshooting. Latest-request lookup
+is limited to the same assistant, Telegram account, private chat and sender.
+A known leading `Mem0 Active | ...` runtime banner is omitted from Telegram
+presentation; the native answer stored in Codeman is preserved.
 
 Private numeric chats only: account, sender, chat, stable provider message ID and
 command authorization must match. Groups, threads, missing IDs and foreign

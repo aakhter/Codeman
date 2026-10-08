@@ -229,7 +229,7 @@ try {
         outbound: {
           loadAdapter: async () => ({
             sendText: async (context) => {
-              if (/^(Accepted by connector|Existing request)/.test(context.text)) {
+              if (/^(On it|I already have)/.test(context.text)) {
                 acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
                 return { messageId: `ack-${acknowledgements.length}` };
               }
@@ -248,7 +248,7 @@ try {
     suppressUserDelivery: true,
     sourceReplyDeliveryMode: 'message_tool_only',
     ctx: {
-      BodyForCommands: '/brain Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
+      BodyForCommands: 'Brain, Reply with exactly COD487_DELEGATED_OK. Do not use tools.',
       OriginatingChannel: 'telegram',
       ChatType: 'direct',
       CommandAuthorized: true,
@@ -269,8 +269,8 @@ try {
   };
   assert.equal((await ingress(event, context)).handled, true);
   assert.equal((await ingress(event, context)).handled, true);
-  assert.match(acknowledgements[0].text, /Accepted by connector/);
-  assert.match(acknowledgements[1].text, /Existing request/);
+  assert.match(acknowledgements[0].text, /On it/);
+  assert.match(acknowledgements[1].text, /already have/);
   assert.equal(acknowledgements[0].to, '123');
   assert.equal(acknowledgements[0].accountId, 'canary');
   checks.push('ordinary Telegram message_tool_only takeover and explicit acknowledgements');
