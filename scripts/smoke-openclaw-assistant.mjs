@@ -138,6 +138,7 @@ let browser;
 let service;
 let assistant;
 const receipts = [];
+let resultDeliveryAttempts = 0;
 const errors = [];
 const checks = [];
 try {
@@ -360,6 +361,8 @@ try {
                 acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
                 return { messageId: String(10000 + acknowledgements.length) };
               }
+              if (++resultDeliveryAttempts === 1 && process.argv.includes('--delivery-retry'))
+                throw new Error("Network request for 'sendMessage' failed!");
               receipts.push({ accountId: context.accountId, to: context.to, text: context.text });
               return { messageId: String(receipts.length) };
             },
@@ -430,6 +433,13 @@ try {
   assert.equal(receipts[0].to, '123');
   if (pdfCode) checks.push(`real ${mode} extracts hidden code from durable PDF attachment`);
   checks.push('real CLI request completion and matching delivery');
+  if (process.argv.includes('--delivery-retry')) {
+    assert.equal(resultDeliveryAttempts, 2);
+    checks.push(
+      'transient Telegram send failure automatically retries the saved answer without rerunning native request'
+    );
+  }
+
   if (process.argv.includes('--reply')) {
     await service.stop();
     await service.start(serviceContext);

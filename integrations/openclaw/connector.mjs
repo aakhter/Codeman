@@ -27,6 +27,24 @@ const states = new Set([
   'interrupted',
   'outcome_unknown',
 ]);
+const DELIVERY_RETRY_DELAYS = [5000, 15000, 30000, 60000, 120000];
+export function telegramDeliveryRetryDelay(error, failures) {
+  if (!Number.isInteger(failures) || failures < 1 || failures > DELIVERY_RETRY_DELAYS.length) return undefined;
+  const code = Number(
+    error?.error_code ?? error?.response?.error_code ?? error?.error?.status ?? error?.status ?? error?.statusCode
+  );
+  const network =
+    /Network request for ['"]sendMessage['"] failed|fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/i.test(
+      String(error?.message ?? '')
+    );
+  if (code >= 400 && code < 500 && code !== 429) return undefined;
+  if (code !== 429 && !(code >= 500 && code <= 599) && !network) return undefined;
+  const retryAfter = Number(error?.parameters?.retry_after ?? error?.response?.parameters?.retry_after);
+  return Math.max(
+    DELIVERY_RETRY_DELAYS[failures - 1],
+    Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 86400) * 1000 : 0
+  );
+}
 export function validateConfig(input) {
   const url = new URL(input.baseUrl);
   if (
@@ -73,6 +91,7 @@ function requestStatus(record) {
     interrupted: 'Your latest request was interrupted. Check Codeman before trying again.',
     outcome_unknown: 'Your latest request needs attention in Codeman. Check it before trying again.',
   };
+  if (record.delivery === 'retrying') return 'Telegram reply delivery is being retried automatically.';
   if (record.delivery === 'delivery_unknown')
     return 'Your answer may not have reached Telegram. Use brain result to retrieve it.';
   return statuses[record.status] ?? 'Your latest request is waiting for Brain.';
@@ -159,7 +178,18 @@ export class Outbox {
             !/^[a-f0-9]{64}$/.test(r.payloadHash ?? '') ||
             (r.inputHash !== undefined && !/^[a-f0-9]{64}$/.test(r.inputHash)) ||
             (r.delivery === 'pending' && (typeof r.text !== 'string' || r.payloadHash !== hash(r.text))) ||
-            !['pending', 'polling', 'sending', 'delivered', 'delivery_unknown', 'stopped'].includes(r.delivery)
+            (r.deliveryFailures !== undefined &&
+              (!Number.isInteger(r.deliveryFailures) || r.deliveryFailures < 0 || r.deliveryFailures > 6)) ||
+            (r.retryAt !== undefined && (!Number.isSafeInteger(r.retryAt) || r.retryAt < 0)) ||
+            (r.delivery === 'retrying' &&
+              (!r.requestId ||
+                !r.deliveryFailures ||
+                r.deliveryFailures > 5 ||
+                r.retryAt === undefined ||
+                r.parts.length <= r.receipts.length)) ||
+            !['pending', 'polling', 'sending', 'delivered', 'delivery_unknown', 'stopped', 'retrying'].includes(
+              r.delivery
+            )
         ) ||
         new Set(file.records.map((r) => r.key)).size !== file.records.length
       )
@@ -227,12 +257,13 @@ export class Outbox {
 class ContractViolation extends Error {}
 
 export class Connector {
-  constructor({ config, outbox, token, fetchImpl = fetch, deliver }) {
+  constructor({ config, outbox, token, fetchImpl = fetch, deliver, now = Date.now }) {
     this.config = validateConfig(config);
     this.outbox = outbox;
     this.token = token;
     this.fetch = fetchImpl;
     this.deliver = deliver;
+    this.now = now;
     this.active = new Set();
     this.stopped = false;
   }
@@ -456,7 +487,12 @@ export class Connector {
     if (this.stopped) return;
     for (const snapshot of [...this.outbox.records]) {
       if (this.stopped) break;
-      if (this.active.has(snapshot.key) || !['pending', 'polling'].includes(snapshot.delivery)) continue;
+      if (
+        this.active.has(snapshot.key) ||
+        !['pending', 'polling', 'retrying'].includes(snapshot.delivery) ||
+        (snapshot.retryAt ?? 0) > this.now()
+      )
+        continue;
       const r = this.outbox.get(snapshot.key);
       if (
         r.assistantId !== this.config.assistantId ||
@@ -484,22 +520,27 @@ export class Connector {
             throw new ContractViolation('Unsupported completed result');
           r.parts = chunks(telegramAnswer(result.result.text));
         } else if (['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(result.status)) {
-          r.parts = [requestStatus(r)];
+          r.parts = [requestStatus({ ...r, delivery: 'polling' })];
         }
         this.outbox.put(r);
         if (!r.parts.length || this.stopped) continue;
         for (let index = r.receipts.length; index < r.parts.length; index++) {
           if (this.stopped) break;
           r.delivery = 'sending';
+          delete r.retryAt;
           this.outbox.put(r);
           try {
             const receipt = await this.deliver(r.destination, r.parts[index]);
             if (!receipt?.messageId) throw new Error('Missing delivery receipt');
             r.receipts.push(String(receipt.messageId));
             r.delivery = 'polling';
+            delete r.deliveryFailures;
             this.outbox.put(r);
-          } catch {
-            r.delivery = 'delivery_unknown';
+          } catch (error) {
+            r.deliveryFailures = Math.min((r.deliveryFailures ?? 0) + 1, 6);
+            const delay = telegramDeliveryRetryDelay(error, r.deliveryFailures);
+            r.delivery = delay === undefined ? 'delivery_unknown' : 'retrying';
+            if (delay !== undefined) r.retryAt = this.now() + delay;
             this.outbox.put(r);
             break;
           }

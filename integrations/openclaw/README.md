@@ -300,3 +300,20 @@ node scripts/smoke-openclaw-assistant.mjs --recovery --recovery-failure
 
 It deliberately exits the first custom-launcher resume attempt, then verifies
 that the next attempt resumes the same conversation in the original group.
+
+### Telegram reply delivery retries (COD-503)
+
+Recognized Telegram network failures, HTTP 429 and server errors retry the saved
+reply with delays of 5, 15, 30, 60 and 120 seconds. A Telegram `retry_after`
+response may lengthen that delay. The per-chunk failure count and next retry time
+are persisted, so a gateway restart continues the schedule. Receipt-bearing
+chunks are skipped; Codeman requests are never resubmitted by a delivery retry.
+
+Permanent errors, missing receipts, a crash during a send, or exhausted retries
+retain an uncertain delivery state. `brain result` can retrieve the saved answer.
+Telegram sends have no idempotency key, so a network failure after Telegram
+accepted a reply can produce a duplicate reply on retry; it never repeats the
+task's actions.
+
+The native canary supports `--delivery-retry` to inject one failed result send
+and verify automatic recovery through the plugin service.

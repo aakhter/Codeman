@@ -814,3 +814,139 @@ test('attachment aggregate and retained-storage budgets fail before acceptance',
   assert.throws(() => stageMedia(f), /storage is full/);
   assert.equal(statSync(retained).size, MEDIA_LIMITS.retainedBytes);
 });
+
+test('transient Telegram failure retries after persisted backoff without replaying Codeman or acknowledged chunks', async (t) => {
+  let clock = 10000;
+  let attempts = 0;
+  const delivered = [];
+  const h = harness(t, {
+    now: () => clock,
+    deliver: async (_, text) => {
+      attempts++;
+      if (attempts === 2) throw new Error("Network request for 'sendMessage' failed!");
+      delivered.push(text);
+      return { messageId: String(attempts) };
+    },
+  });
+  let c = h.make();
+  await c.inbound(event, ctx);
+  h.finish();
+  await c.tick();
+  assert.equal(c.outbox.records[0].delivery, 'retrying');
+  assert.equal(c.outbox.records[0].receipts.length, 1);
+  assert.equal(c.outbox.records[0].retryAt, 15000);
+  const posts = h.calls.filter((x) => x.options.method === 'POST').length;
+  c = h.make();
+  await c.tick();
+  assert.equal(attempts, 2);
+  clock = 15000;
+  await c.tick();
+  assert.equal(c.outbox.records[0].delivery, 'delivered');
+  assert.equal(c.outbox.records[0].receipts.length, 2);
+  assert.equal(delivered.length, 2);
+  assert.equal(h.calls.filter((x) => x.options.method === 'POST').length, posts);
+});
+test('repeated network failures exhaust five delayed retries across restarts', async (t) => {
+  let clock = 10000,
+    attempts = 0;
+  const h = harness(t, {
+    now: () => clock,
+    deliver: async () => {
+      attempts++;
+      throw new Error('fetch failed');
+    },
+  });
+  let c = h.make();
+  await c.inbound(event, ctx);
+  h.finish();
+  for (let i = 0; i < 6; i++) {
+    await c.tick();
+    const r = c.outbox.records[0];
+    if (i < 5) {
+      assert.equal(r.delivery, 'retrying');
+      clock = r.retryAt;
+      c = h.make();
+    }
+  }
+  assert.equal(attempts, 6);
+  assert.equal(c.outbox.records[0].delivery, 'delivery_unknown');
+  c = h.make();
+  clock += 1000000;
+  await c.tick();
+  assert.equal(attempts, 6);
+  assert.equal(h.calls.filter((x) => x.options.method === 'POST').length, 1);
+});
+test('rate limits honor retry_after and permanent errors do not retry', async (t) => {
+  for (const code of [429, 403]) {
+    const h = harness(t, {
+      now: () => 10000,
+      deliver: async () => {
+        throw Object.assign(new Error('Telegram refused'), { error_code: code, parameters: { retry_after: 30 } });
+      },
+    });
+    const c = h.make();
+    await c.inbound(event, ctx);
+    h.finish();
+    await c.tick();
+    assert.equal(c.outbox.records[0].delivery, code === 429 ? 'retrying' : 'delivery_unknown');
+    if (code === 429) assert.equal(c.outbox.records[0].retryAt, 40000);
+  }
+});
+test('a crash during a retry send remains uncertain and is not automatically resent', async (t) => {
+  const h = harness(t, {
+    deliver: async () => {
+      throw new Error('fetch failed');
+    },
+  });
+  const c = h.make();
+  await c.inbound(event, ctx);
+  h.finish();
+  await c.tick();
+  const r = c.outbox.get(c.outbox.records[0].key);
+  r.delivery = 'sending';
+  delete r.retryAt;
+  c.outbox.put(r);
+  const restarted = h.make();
+  await restarted.tick();
+  assert.equal(restarted.outbox.records[0].delivery, 'delivery_unknown');
+});
+
+test('wrapped Telegram permanent HTTP failures remain stopped despite network error wording', async (t) => {
+  const h = harness(t, {
+    deliver: async () => {
+      throw Object.assign(new Error("Network request for 'sendMessage' failed! (403: Forbidden)"), {
+        error: { status: 403 },
+      });
+    },
+  });
+  const c = h.make();
+  await c.inbound(event, ctx);
+  h.finish();
+  await c.tick();
+  assert.equal(c.outbox.records[0].delivery, 'delivery_unknown');
+});
+test('malformed retry metadata fails closed when loading the durable outbox', async (t) => {
+  const h = harness(t, {
+    deliver: async () => {
+      throw new Error('fetch failed');
+    },
+  });
+  const c = h.make();
+  await c.inbound(event, ctx);
+  h.finish();
+  await c.tick();
+  const original = readFileSync(h.path, 'utf8');
+  for (const patch of [
+    { deliveryFailures: 7 },
+    { deliveryFailures: 1.5 },
+    { retryAt: -1 },
+    { retryAt: 1.5 },
+    { requestId: undefined },
+    { receipts: ['done-1', 'done-2'] },
+  ]) {
+    const j = JSON.parse(original);
+    Object.assign(j.records[0], patch);
+    writeFileSync(h.path, JSON.stringify(j));
+    assert.throws(() => new Outbox(h.path), /corrupt/);
+  }
+});

@@ -322,3 +322,24 @@ checks across its configured projects. The isolated native custom-launcher
 failure canary passed at `/tmp/cod487-assistant-canary-iYedhu/summary.json`:
 first resume launch failed, the second retained the same conversation and group,
 completed a follow-up, and passed desktop/mobile and connector checks.
+
+## COD-503: retry transient Telegram result delivery
+
+The completed request `083c2902-4aea-4d76-873d-d47780b805ad` had no Telegram
+receipt after the SDK reported a `sendMessage` network failure. The connector now
+persists bounded per-chunk retry state for recognized network, rate-limit and
+server errors. Acknowledged chunks are not resent and the existing Codeman
+request ID remains authoritative. Restarting a retry wait resumes its saved
+schedule; restarting an in-progress send remains uncertain. Unknown/permanent
+errors and exhaustion retain the saved answer for explicit retrieval.
+
+32 connector tests and the root contract wrapper passed, covering restart
+persistence, partial chunks, bounded exhaustion, rate limits, permanent wrapped
+HTTP failures, corruption rejection and crash safety. The native canary's
+`--delivery-retry` option verifies one completed Codex task followed by a failed
+Telegram adapter send and a successful retry of the same answer.
+
+The isolated native/plugin/browser canary passed at
+`/tmp/cod487-assistant-canary-r59VIp/summary.json` (`--delivery-retry`), including
+one native request, two result-send attempts, one final receipt, attachment
+reading and desktop/mobile checks. It uses a test Telegram SDK adapter.
