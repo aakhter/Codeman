@@ -1118,6 +1118,22 @@ describe('TmuxManager (unit)', () => {
       testManager.destroy();
     });
 
+    it.each(['- leading hyphen', '--help', '-n', '- quoted \"text\" $HOME; echo unsafe'])(
+      'keeps %s literal by terminating tmux option parsing',
+      async (text) => {
+        const commands: string[] = [];
+        const testManager = checkpointManager(async (command) => void commands.push(command));
+        await expect(testManager.sendCheckpointCommand('checkpoint-id', `${text}\r`)).resolves.toEqual({
+          ok: true,
+          attempt: 1,
+        });
+        expect(commands).toHaveLength(2);
+        expect(commands[0]).toContain(' -l -- ');
+        expect(commands[1]).toMatch(/send-keys.* Enter$/);
+        testManager.destroy();
+      }
+    );
+
     it('submits a Codex $skill checkpoint with text, selection Enter, then submission Enter', async () => {
       const commands: string[] = [];
       const testManager = checkpointManager(async (command) => void commands.push(command));

@@ -4478,7 +4478,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         // Only Codex long prompts use this terminal protocol; no Enter retries.
         const codexPaste = session.mode === 'codex' && textPart.length > 100;
         const deliveredText = codexPaste ? `\x1b[200~${textPart}\x1b[201~` : textPart;
-        await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(deliveredText)}`, {
+        await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l -- ${shellescape(deliveredText)}`, {
           timeout: EXEC_TIMEOUT_MS,
         });
         await new Promise((resolve) => setTimeout(resolve, codexPaste ? 250 : 50));
@@ -4487,7 +4487,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         });
       } else if (textPart) {
         // Text only, no Enter
-        await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(textPart)}`, {
+        await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l -- ${shellescape(textPart)}`, {
           timeout: EXEC_TIMEOUT_MS,
         });
       } else if (hasCarriageReturn) {
@@ -4526,7 +4526,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     const hasCarriageReturn = input.includes('\r');
     const textPart = input.replace(/\r/g, '').replace(/\n/g, '').trimEnd();
     const isCodexSkillInvocation = session.mode === 'codex' && CODEX_SKILL_INVOCATION_PATTERN.test(textPart);
-    const textCommand = `${this.tmux()} send-keys -t "${session.muxName}" -l ${shellescape(textPart)}`;
+    const textCommand = `${this.tmux()} send-keys -t "${session.muxName}" -l -- ${shellescape(textPart)}`;
     const enterCommand = `${this.tmux()} send-keys -t "${session.muxName}" Enter`;
     let deliveryAttempt = 1;
 
@@ -4731,7 +4731,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       const textPart = input.replace(/\r/g, '').replace(/\n/g, '').trimEnd();
 
       if (textPart && hasCarriageReturn) {
-        execSync(`${tmux} send-keys -t ${shellescape(target)} -l ${shellescape(textPart)}`, {
+        execSync(`${tmux} send-keys -t ${shellescape(target)} -l -- ${shellescape(textPart)}`, {
           encoding: 'utf-8',
           timeout: EXEC_TIMEOUT_MS,
         });
@@ -4740,7 +4740,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           timeout: EXEC_TIMEOUT_MS,
         });
       } else if (textPart) {
-        execSync(`${tmux} send-keys -t ${shellescape(target)} -l ${shellescape(textPart)}`, {
+        execSync(`${tmux} send-keys -t ${shellescape(target)} -l -- ${shellescape(textPart)}`, {
           encoding: 'utf-8',
           timeout: EXEC_TIMEOUT_MS,
         });
