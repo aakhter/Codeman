@@ -296,3 +296,29 @@ code from the same native conversation after service restart. A reply to the
 acknowledgement also completed; duplicate ingress executed once and an unknown
 reply remained ordinary chat. Desktop/mobile controls passed. Telegram delivery
 used a test SDK adapter; the reported booking request was not replayed.
+
+## COD-502: replacement launch, exact custom resume and tab placement
+
+The production replacement failed during Codex app-server draining. Its retained
+PTY PID left recovery blocked even though the native pane had exited. The custom
+Cisco launcher also bypassed the stock launcher's resume arguments. Replacement
+creation now resolves an owner-provided resume template, checks it against the
+current owner profile, and refuses missing or conflicting templates. A native
+all-panes exit probe permits bounded retry; unknown or live candidates remain
+blocked and accepted requests are never replayed.
+
+Recovery profiles retain the owner-scoped tab group for all three supported
+CLIs. Placement is refreshed while the source is alive and captured before
+coordinated deletion. Replacement creation uses that group through the existing
+layout coordinator; removed groups safely fall back to Ungrouped.
+
+The original Brain group was verified from the private pre-deployment state
+backup and restored through the versioned layout API to the Cisco group. The
+Cisco command profile now declares its exact resume template. Neither action
+changed Brain's native conversation or account.
+
+Validation: 47 targeted assistant tests passed; the layout runner passed 917
+checks across its configured projects. The isolated native custom-launcher
+failure canary passed at `/tmp/cod487-assistant-canary-iYedhu/summary.json`:
+first resume launch failed, the second retained the same conversation and group,
+completed a follow-up, and passed desktop/mobile and connector checks.

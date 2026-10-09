@@ -275,3 +275,28 @@ assistant/native conversation. They do not prepend quoted text, change global
 routing, or replay the request being replied to. Chat authorization, groups,
 threads, send policy and tail/internal dispatch restrictions remain enforced.
 Test with `node scripts/smoke-openclaw-assistant.mjs --reply`.
+
+### Recovery placement and custom Codex launchers (COD-502)
+
+Recovered assistants retain their owner-scoped tab group. Moving an assistant
+updates its recovery placement; deletion captures the current placement before
+removing the old tab. If that group has since been removed, the replacement
+appears in Ungrouped. This applies to Codex, Claude and OpenCode.
+
+A custom Codex command must have an explicit resume template in the owner's
+saved command profile, for example `exec codx cisco resume {{resumeId}}`.
+Automatic recovery never guesses arguments for an opaque launcher or starts a
+fresh conversation. Missing, changed or ambiguous templates require review.
+
+A failed replacement launch may retry only when every native pane in that
+replacement is confirmed exited. Unknown or live candidates remain blocked.
+Retries remain bounded to three attempts, with no replay of accepted requests.
+
+Run the isolated native regression canary with:
+
+```sh
+node scripts/smoke-openclaw-assistant.mjs --recovery --recovery-failure
+```
+
+It deliberately exits the first custom-launcher resume attempt, then verifies
+that the next attempt resumes the same conversation in the original group.

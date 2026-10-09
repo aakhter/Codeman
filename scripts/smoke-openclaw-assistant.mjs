@@ -165,8 +165,31 @@ try {
   checks.push('desktop create');
   await page.screenshot({ path: join(root, 'desktop.png') });
   await page.getByRole('button', { name: 'Close', exact: true }).click();
+  let recoveryGroupId;
+  if (process.argv.includes('--recovery-failure')) {
+    assert.equal(mode, 'codex');
+    const wrapper = join(root, 'codex-recovery-wrapper.sh');
+    const marker = join(root, 'first-resume-failed');
+    const bin = execFileSync('which', ['codex'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nif [ "$1" = resume ] && [ ! -f '${marker}' ]; then touch '${marker}'; echo 'fixture transient startup failure'; exit 1; fi\nexec '${bin}' --dangerously-bypass-approvals-and-sandbox "$@"\n`,
+      { mode: 0o700 }
+    );
+    const profile = await api('/codex-command-profiles', 'POST', {
+      name: 'Recovery canary',
+      command: `exec ${wrapper}`,
+      resumeCommandTemplate: `exec ${wrapper} resume {{resumeId}}`,
+    });
+    await api('/cases/link', 'POST', {
+      name: 'canary-recovery',
+      path: workspace,
+      codexCommandSelection: { kind: 'profile', profileId: profile.id },
+    });
+  }
   const created = await api('/sessions', 'POST', {
     mode,
+    caseName: process.argv.includes('--recovery-failure') ? 'canary-recovery' : undefined,
     workingDir: workspace,
     name: 'cod487-canary',
     codexConfig: mode === 'codex' ? { dangerouslyBypassApprovals: true } : undefined,
@@ -174,6 +197,18 @@ try {
     model: mode === 'claude' ? 'haiku' : undefined,
   });
   sessionId = created.session.id;
+  if (process.argv.includes('--recovery')) {
+    recoveryGroupId = 'canary-group';
+    const { layout } = await api('/tab-layout');
+    await api('/tab-layout', 'PUT', {
+      baseVersion: layout.version,
+      operations: [
+        { type: 'createGroup', id: recoveryGroupId, name: 'Recovery group' },
+        { type: 'moveRef', ref: { kind: 'session', id: sessionId }, groupId: recoveryGroupId, index: 0 },
+      ],
+    });
+  }
+
   await api(`/sessions/${sessionId}/interactive`, 'POST');
   await until(async () => {
     const frame = await api(`/sessions/${sessionId}/terminal?frame=1`);
@@ -470,8 +505,17 @@ try {
     const recovered = await until(async () => {
       const current = await api(`/assistants/${assistant.id}`);
       return current.binding.sessionId !== sessionId && current.capabilities.requestExecution ? current : undefined;
-    }, 150000);
+    }, 240000);
     sessionId = recovered.binding.sessionId;
+    const { layout: recoveredLayout } = await api('/tab-layout');
+    assert.ok(
+      recoveredLayout.groups
+        .find((g) => g.id === recoveryGroupId)
+        .refs.some((r) => r.kind === 'session' && r.id === sessionId)
+    );
+    if (process.argv.includes('--recovery-failure')) assert.equal(recovered.capabilities.recovery.attempts, 2);
+    checks.push('automatic recovery preserves original group and explicitly resumes native conversation');
+
     assert.equal(recovered.binding.conversationId, originalBinding.conversationId);
     assert.equal(recovered.binding.codexHome, originalBinding.codexHome);
     assert.equal(recovered.binding.workingDir, originalBinding.workingDir);

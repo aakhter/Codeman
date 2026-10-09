@@ -29,13 +29,20 @@
 
 import { findUser } from '../user-store.js';
 import { AssistantRequestManager } from '../assistant-request-manager.js';
-import { AssistantRecovery, assistantComposerEmpty } from '../assistant-recovery.js';
+import {
+  AssistantRecovery,
+  assistantComposerEmpty,
+  assistantCodexRecoveryProfile,
+  assistantRecoveryGroup,
+  assistantRecoveryCandidateExited,
+} from '../assistant-recovery.js';
 import {
   assistantBindingMode,
   assistantSessionHome,
   findAssistantConversation,
   openCodeAssistantHome,
 } from '../assistant-native.js';
+import { resolveCodexRecoveryStrategy } from '../codex-command-profiles.js';
 import { canonicalizeCodexHome } from '../checkpoint-conversation-identity.js';
 import { _clampExternalCliBypassForOwner } from './routes/session-routes.js';
 import { clampEnvOverridesForOwner } from '../session-env-clamp.js';
@@ -1962,6 +1969,11 @@ export class WebServer extends EventEmitter {
     );
     this.assistantRequests.setRecovery(
       new AssistantRecovery(this.assistantStore, this.assistantRequests, (id) => this.sessions.get(id), {
+        placement: (live) => assistantRecoveryGroup(this.store.getTabLayout(live.owner ?? '@single'), live.id),
+        candidateExited: async (live) => {
+          const session = this.sessions.get(live.id);
+          return Boolean(session?.muxName && (await assistantRecoveryCandidateExited(session.muxName)));
+        },
         snapshot: (live) => {
           const session = this.sessions.get(live.id);
           if (
@@ -1970,6 +1982,7 @@ export class WebServer extends EventEmitter {
             session.getCodexProviderIdentityForPersist()?.credentialSource === 'session-key'
           )
             throw new Error('Session-scoped credentials require manual recovery');
+          const tabGroupId = assistantRecoveryGroup(this.store.getTabLayout(session.owner ?? '@single'), session.id);
           if (session.mode === 'claude') {
             const envOverrides = session.getEnvOverridesForPersist();
             if (Object.keys(envOverrides ?? {}).some((k) => /TOKEN|KEY|AUTH|ENDPOINT|BASE_URL/i.test(k)))
@@ -1977,6 +1990,7 @@ export class WebServer extends EventEmitter {
             const state = session.toState();
             return {
               name: session.name,
+              tabGroupId,
               mode: 'claude' as const,
               codexConfig: {},
               envOverrides,
@@ -1998,6 +2012,7 @@ export class WebServer extends EventEmitter {
               throw new Error('Custom provider configuration requires manual recovery');
             return {
               name: session.name,
+              tabGroupId,
               mode: 'opencode' as const,
               codexConfig: {},
               openCodeConfig: {
@@ -2008,7 +2023,17 @@ export class WebServer extends EventEmitter {
             };
           }
           const { resumeSessionId: _resume, ...codexConfig } = session.codexConfig ?? {};
-          return { name: session.name, codexConfig };
+          const resumeId = session.nativeResumeId || session.codexConfig?.resumeSessionId;
+          if (codexConfig.baseCommand && !resumeId) throw new Error('Custom launcher native identity unavailable');
+          return {
+            name: session.name,
+            tabGroupId,
+            ...assistantCodexRecoveryProfile(
+              codexConfig,
+              this.store.getCodexCommandProfiles(session.owner ?? '@single'),
+              resumeId || ''
+            ),
+          };
         },
         ownerAllowed: async (a) => {
           if (!isMultiUserMode()) return a.owner === undefined;
@@ -2040,8 +2065,10 @@ export class WebServer extends EventEmitter {
             )
               continue;
             const native = await findAssistantConversation(binding, live);
-            if (native?.id === binding.conversationId)
+            if (native?.id === binding.conversationId) {
+              if (live.muxName && (await assistantRecoveryCandidateExited(live.muxName))) continue;
               throw new Error('Original conversation already has another live session');
+            }
           }
           let envOverrides: Record<string, string> | undefined;
           let codexConfig = profile.codexConfig;
@@ -2054,7 +2081,22 @@ export class WebServer extends EventEmitter {
               JSON.stringify(gated.codexConfig) !== JSON.stringify(profile.codexConfig)
             )
               throw new Error('Recovery permissions changed');
-            codexConfig = gated.codexConfig!;
+            const checkedProfile = assistantCodexRecoveryProfile(
+              profile.codexConfig,
+              this.store.getCodexCommandProfiles(assistant.owner ?? '@single'),
+              binding.conversationId
+            );
+            if (checkedProfile.resumeCommandTemplate !== profile.resumeCommandTemplate)
+              throw new Error('Recovery launcher template changed');
+            const strategy = resolveCodexRecoveryStrategy(
+              { command: gated.codexConfig?.baseCommand, resumeCommandTemplate: profile.resumeCommandTemplate },
+              binding.conversationId
+            );
+            if (strategy.kind === 'manual_required') throw new Error('Custom launcher needs explicit resume template');
+            codexConfig =
+              strategy.kind === 'template'
+                ? { ...gated.codexConfig!, baseCommand: strategy.command }
+                : gated.codexConfig!;
           } else if (mode === 'claude') {
             if (
               !claudeConfig ||
@@ -2094,7 +2136,7 @@ export class WebServer extends EventEmitter {
             checkpointEnabled: false,
             truecolorEnabled: await this.getTruecolorEnabled(),
           });
-          await this.registerSessionWithLayout(session);
+          await this.registerSessionWithLayout(session, { tabGroupId: profile.tabGroupId ?? undefined });
           this.store.incrementSessionsCreated();
           this.persistSessionState(session);
           await this.setupSessionListeners(session);
@@ -2363,9 +2405,10 @@ export class WebServer extends EventEmitter {
     const session = this.sessions.get(sessionId);
     const pinned = session?.pinned === true || this.store.getSession(sessionId)?.pinned === true;
     if (coordinateLayout && session && killMux && !pinned) {
-      return this.tabLayouts.runSessionDeletion([{ id: sessionId, owner: session.owner }], () =>
-        this._doCleanupSession(sessionId, killMux, reason, false)
-      );
+      return this.tabLayouts.runSessionDeletion([{ id: sessionId, owner: session.owner }], async () => {
+        this.assistantRequests?.captureRecoveryPlacement(sessionId);
+        return this._doCleanupSession(sessionId, killMux, reason, false);
+      });
     }
     if (session) this.detachAgentActivity(session);
     const lifecycleLog = getLifecycleLog();

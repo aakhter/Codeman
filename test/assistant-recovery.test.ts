@@ -7,7 +7,13 @@ import { AssistantStore } from '../src/assistant-store.js';
 import { AssistantRegistry } from '../src/assistant-registry.js';
 import { AssistantRequestStore } from '../src/assistant-request-store.js';
 import { AssistantRequestManager, type AssistantExecutionSession } from '../src/assistant-request-manager.js';
-import { AssistantRecovery, assistantComposerEmpty, type AssistantRecoveryAdapter } from '../src/assistant-recovery.js';
+import {
+  AssistantRecovery,
+  assistantComposerEmpty,
+  assistantCodexRecoveryProfile,
+  assistantRecoveryGroup,
+  type AssistantRecoveryAdapter,
+} from '../src/assistant-recovery.js';
 import type { AssistantDefinition } from '../src/types/assistant.js';
 
 let root: string, home: string, file: string, conversation: string;
@@ -105,6 +111,69 @@ describe('exact assistant session recovery', () => {
     await manager.tick();
     expect(adapter.create).toHaveBeenCalledTimes(1);
     expect(manager.availability(store.get(a.id)!).requestExecution).toBe(true);
+  });
+  it('persists group moves before deletion and retains them across recovery restart', async () => {
+    adapter.placement = () => 'group-cisco';
+    recovery.capturePlacement(original.id);
+    recovery = coordinator();
+    sessions.delete(original.id);
+    await manager.tick();
+    expect(adapter.create).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.anything(),
+      expect.objectContaining({ tabGroupId: 'group-cisco' })
+    );
+    expect(manager.availability(store.get(a.id)!).requestExecution).toBe(true);
+  });
+  it('records explicit ungrouped placement instead of keeping a previous group', async () => {
+    adapter.placement = () => 'old-group';
+    recovery.capturePlacement(original.id);
+    adapter.placement = () => null;
+    recovery.capturePlacement(original.id);
+    sessions.delete(original.id);
+    await manager.tick();
+    expect(adapter.create).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.anything(),
+      expect.objectContaining({ tabGroupId: null })
+    );
+  });
+  it('retries only a natively proven dead startup candidate, even when its PTY PID remains', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let launches = 0;
+    adapter.create = vi.fn(async (id) => {
+      const candidate = session(id, 200);
+      if (++launches === 1) candidate.status = 'busy';
+      sessions.set(id, candidate);
+      return candidate;
+    });
+    adapter.candidateExited = async (candidate) => candidate.status === 'busy';
+    sessions.delete(original.id);
+    await manager.tick();
+    expect(recovery.status(a.id)).toMatchObject({ state: 'armed', attempts: 1 });
+    now += 31000;
+    await manager.tick();
+    expect(adapter.create).toHaveBeenCalledTimes(2);
+    expect(manager.availability(store.get(a.id)!).requestExecution).toBe(true);
+    expect(writes).toEqual([]);
+  });
+  it('keeps a potentially live failed candidate blocked when exit cannot be proven', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    adapter.create = vi.fn(async (id) => {
+      const candidate = session(id, 200);
+      candidate.status = 'busy';
+      sessions.set(id, candidate);
+      return candidate;
+    });
+    adapter.candidateExited = async () => false;
+    sessions.delete(original.id);
+    await manager.tick();
+    now += 61000;
+    await manager.tick();
+    expect(recovery.status(a.id)).toMatchObject({ state: 'blocked', attempts: 1 });
+    expect(adapter.create).toHaveBeenCalledTimes(1);
   });
   it('moves only unsent queued requests to the recovered binding and submits once', async () => {
     const request = manager.submit(a, 'queued prompt', 'queued-key-123456789');
@@ -243,5 +312,47 @@ describe('empty composer proof', () => {
     expect(assistantComposerEmpty(box('Ask anything… "Try a question"'), 'opencode')).toBe(true);
     expect(assistantComposerEmpty(box('typed input'), 'opencode')).toBe(false);
     expect(assistantComposerEmpty('history Ask anything…', 'opencode')).toBe(false);
+  });
+});
+
+describe('assistant recovery profiles', () => {
+  it('resolves owner-provided raw and already-resumed launchers through a declared template', () => {
+    const profiles = [
+      {
+        id: 'cisco',
+        name: 'Cisco',
+        command: 'exec codx cisco',
+        resumeCommandTemplate: 'exec codx cisco resume {{resumeId}}',
+      },
+    ];
+    for (const baseCommand of ['exec codx cisco', `exec codx cisco resume ${conversation}`])
+      expect(assistantCodexRecoveryProfile({ baseCommand }, profiles, conversation).resumeCommandTemplate).toBe(
+        profiles[0].resumeCommandTemplate
+      );
+  });
+  it('rejects missing, invalid, conflicting, or foreign-owner templates', () => {
+    const p = { id: 'cisco', name: 'Cisco', command: 'exec codx cisco' };
+    for (const profiles of [
+      [],
+      [p],
+      [{ ...p, resumeCommandTemplate: 'exec codx cisco' }],
+      [
+        { ...p, resumeCommandTemplate: 'exec codx cisco resume {{resumeId}}' },
+        { ...p, id: 'other', resumeCommandTemplate: 'exec other resume {{resumeId}}' },
+      ],
+    ])
+      expect(() => assistantCodexRecoveryProfile({ baseCommand: p.command }, profiles, conversation)).toThrow();
+  });
+  it('selects placement from the supplied owner layout only', () => {
+    const layout = {
+      version: 1,
+      updatedAt: 'now',
+      groups: [{ id: 'group', name: 'Cisco', refs: [{ kind: 'session' as const, id: 'original' }] }],
+      ungrouped: [{ kind: 'session' as const, id: 'other' }],
+    };
+    expect(assistantRecoveryGroup(layout, 'original')).toBe('group');
+    expect(assistantRecoveryGroup(layout, 'other')).toBeNull();
+    expect(assistantRecoveryGroup(layout, 'foreign')).toBeUndefined();
+    expect(assistantRecoveryGroup(null, 'original')).toBeUndefined();
   });
 });

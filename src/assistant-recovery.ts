@@ -10,6 +10,12 @@ import {
   renameSync,
 } from 'node:fs';
 import { realpath } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { resolveTmuxSocketName } from './config/instance.js';
+import { resolveCodexRecoveryStrategy } from './codex-command-profiles.js';
+import type { CodexCommandProfile } from './types.js';
+import type { TabLayout } from './tab-layout.js';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -25,6 +31,8 @@ const Profile = z
   .object({
     name: z.string().max(200),
     mode: z.enum(['codex', 'claude', 'opencode']).optional(),
+    tabGroupId: z.string().min(1).max(200).nullable().optional(),
+    resumeCommandTemplate: z.string().max(300).optional(),
     envOverrides: z.record(z.string(), z.string()).optional(),
     claudeConfig: z
       .object({
@@ -55,6 +63,49 @@ const Profile = z
   })
   .strict();
 export type AssistantRecoveryProfile = z.infer<typeof Profile>;
+/** Resolve only an owner-selected, declared resume template; never rewrite opaque launchers. */
+export function assistantCodexRecoveryProfile(
+  config: AssistantRecoveryProfile['codexConfig'],
+  profiles: readonly CodexCommandProfile[],
+  conversationId: string
+): Pick<AssistantRecoveryProfile, 'codexConfig' | 'resumeCommandTemplate'> {
+  if (!config.baseCommand) return { codexConfig: config };
+  const matches = profiles.filter((p) => {
+    const strategy = resolveCodexRecoveryStrategy(p, conversationId);
+    return (
+      p.command === config.baseCommand || (strategy.kind === 'template' && strategy.command === config.baseCommand)
+    );
+  });
+  const templates = [...new Set(matches.map((p) => p.resumeCommandTemplate))];
+  if (templates.length !== 1 || !templates[0]) throw new Error('Custom launcher needs an explicit resume template');
+  const strategy = resolveCodexRecoveryStrategy(
+    { command: config.baseCommand, resumeCommandTemplate: templates[0] },
+    conversationId
+  );
+  if (strategy.kind !== 'template') throw new Error('Custom launcher resume template is invalid');
+  return { codexConfig: config, resumeCommandTemplate: templates[0] };
+}
+export function assistantRecoveryGroup(layout: TabLayout | null, sessionId: string): string | null | undefined {
+  if (!layout) return undefined;
+  const group = layout.groups.find((g) => g.refs.some((r) => r.kind === 'session' && r.id === sessionId));
+  if (group) return group.id;
+  return layout.ungrouped.some((r) => r.kind === 'session' && r.id === sessionId) ? null : undefined;
+}
+/** A failed probe cannot authorize a second launcher over a potentially live candidate. */
+export async function assistantRecoveryCandidateExited(muxName: string): Promise<boolean> {
+  if (!/^codeman-[0-9a-f]{8}$/.test(muxName)) return false;
+  try {
+    const { stdout } = await promisify(execFile)(
+      'tmux',
+      ['-L', resolveTmuxSocketName(), 'list-panes', '-t', muxName, '-F', '#{pane_dead}'],
+      { timeout: 4000 }
+    );
+    const panes = stdout.trim().split('\n');
+    return panes.length > 0 && panes.every((p) => p === '1');
+  } catch {
+    return false;
+  }
+}
 const Binding = z
   .object({
     sessionId: z.string(),
@@ -82,6 +133,8 @@ const RecordSchema = z
 type RecoveryRecord = z.infer<typeof RecordSchema>;
 const FileSchema = z.object({ version: z.literal(1), records: z.array(RecordSchema).max(200) }).strict();
 export interface AssistantRecoveryAdapter {
+  placement?(session: AssistantExecutionSession): string | null | undefined;
+  candidateExited?(session: AssistantExecutionSession): Promise<boolean>;
   snapshot(session: AssistantExecutionSession): AssistantRecoveryProfile;
   create(
     id: string,
@@ -150,6 +203,19 @@ export class AssistantRecovery {
     });
     this.save();
   }
+  capturePlacement(sessionId: string): void {
+    const session = this.session(sessionId);
+    if (!session || !this.adapter.placement) return;
+    const group = this.adapter.placement(session);
+    if (group === undefined) return;
+    let changed = false;
+    for (const r of this.records)
+      if (r.binding.sessionId === sessionId && r.profile.tabGroupId !== group) {
+        r.profile.tabGroupId = group;
+        changed = true;
+      }
+    if (changed) this.save();
+  }
   disarm(id: string): void {
     const r = this.records.find((r) => r.assistantId === id);
     if (r?.candidateId) this.requests.releaseRecoverySession(r.candidateId);
@@ -175,7 +241,10 @@ export class AssistantRecovery {
     if (!a?.enabled || !a.binding || JSON.stringify(a.binding) !== JSON.stringify(r.binding)) return;
     if (r.state === 'blocked' || Date.now() < r.nextAt) return;
     const old = this.session(r.binding.sessionId);
-    if (r.state === 'armed' && old?.pid === r.pid && !old.paneExit) return;
+    if (r.state === 'armed' && old?.pid === r.pid && !old.paneExit) {
+      this.capturePlacement(old.id);
+      return;
+    }
     // Uncertain work is never rebound or replayed. Desktop review must come first.
     if (this.requests.hasUnresolved(a.id))
       return this.blocked(r, 'Review interrupted or uncertain work before recovering this assistant');
@@ -198,6 +267,8 @@ export class AssistantRecovery {
         this.requests.holdRecoverySession(r.candidateId);
         candidate = old?.pid && !old.paneExit ? old : await this.adapter.create(r.candidateId, a, r.profile);
       } else candidate = this.session(r.candidateId!);
+      if (candidate && (await this.adapter.candidateExited?.(candidate)))
+        throw new Error('Recovered native pane exited');
       if (!candidate || !candidate.pid || candidate.paneExit || candidate.status !== 'idle') {
         if (Date.now() - (r.startedAt ?? 0) > 60000) throw new Error('Recovered session did not become ready');
         return;
@@ -251,8 +322,14 @@ export class AssistantRecovery {
       if (r.candidateId) {
         // Never spawn over an existing candidate or abandon a potentially live process.
         const candidate = this.session(r.candidateId);
-        if (candidate?.pid) r.state = 'blocked';
-        else this.requests.releaseRecoverySession(r.candidateId);
+        const exited = candidate && (candidate.paneExit || (await this.adapter.candidateExited?.(candidate)));
+        if (!this.records.includes(r)) return;
+        if (candidate?.pid && !exited) r.state = 'blocked';
+        else {
+          this.requests.releaseRecoverySession(r.candidateId);
+          r.candidateId = undefined;
+          r.startedAt = undefined;
+        }
       }
       this.save();
     }

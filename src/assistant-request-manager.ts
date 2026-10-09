@@ -43,6 +43,9 @@ export class AssistantRequestManager {
   setRecovery(recovery: AssistantRecovery): void {
     this.recovery = recovery;
   }
+  captureRecoveryPlacement(sessionId: string): void {
+    this.recovery?.capturePlacement(sessionId);
+  }
   holdRecoverySession(id: string): void {
     this.recoverySessions.add(id);
   }
