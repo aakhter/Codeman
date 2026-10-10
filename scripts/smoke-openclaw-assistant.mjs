@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Reproducible isolated branch canary: real Codex + HTTP + browser + plugin lifecycle; test Telegram adapter. */
+/** Reproducible isolated branch canary: real Codex + HTTP + browser + plugin lifecycle; test channel adapter. */
 import {
   mkdtempSync,
   mkdirSync,
@@ -311,7 +311,10 @@ try {
     scopes: ['read', 'submit', 'cancel'],
   });
   process.env.COD487_CANARY_TOKEN = issued.token;
-  const mediaRoot = join(root, 'telegram-inbound');
+  const whatsapp = process.argv.includes('--whatsapp');
+  const channel = whatsapp ? 'whatsapp' : 'telegram';
+  const sender = whatsapp ? '+15551234567' : '123';
+  const mediaRoot = join(root, `${channel}-inbound`);
   mkdirSync(mediaRoot, { mode: 0o700 });
   const hiddenCode = randomBytes(6).toString('hex');
   const pdfCode = process.argv.includes('--pdf') ? randomBytes(6).toString('hex') : undefined;
@@ -343,6 +346,7 @@ try {
       allowFrom: ['123'],
       tokenEnv: 'COD487_CANARY_TOKEN',
       mediaRoot,
+      ...(whatsapp ? { whatsapp: { accountId: 'canary', allowFrom: [sender], mediaRoot } } : {}),
     },
     on: (name, handler) => {
       assert.ok(['inbound_claim', 'reply_dispatch'].includes(name));
@@ -355,18 +359,21 @@ try {
     runtime: {
       channel: {
         outbound: {
-          loadAdapter: async () => ({
-            sendText: async (context) => {
-              if (/^(On it|I already have)/.test(context.text)) {
-                acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
-                return { messageId: String(10000 + acknowledgements.length) };
-              }
-              if (++resultDeliveryAttempts === 1 && process.argv.includes('--delivery-retry'))
-                throw new Error("Network request for 'sendMessage' failed!");
-              receipts.push({ accountId: context.accountId, to: context.to, text: context.text });
-              return { messageId: String(receipts.length) };
-            },
-          }),
+          loadAdapter: async (adapterChannel) => {
+            assert.equal(adapterChannel, channel);
+            return {
+              sendText: async (context) => {
+                if (/^(On it|I already have)/.test(context.text)) {
+                  acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
+                  return { messageId: String(10000 + acknowledgements.length) };
+                }
+                if (++resultDeliveryAttempts === 1 && process.argv.includes('--delivery-retry'))
+                  throw new Error(whatsapp ? 'Connection Closed' : "Network request for 'sendMessage' failed!");
+                receipts.push({ accountId: context.accountId, to: context.to, text: context.text });
+                return { messageId: String(receipts.length) };
+              },
+            };
+          },
         },
       },
     },
@@ -384,12 +391,12 @@ try {
         { path: imagePath, contentType: 'image/png', fileName: 'shape.png' },
         ...(pdfCode ? [{ path: pdfPath, contentType: 'application/pdf', fileName: 'note.pdf' }] : []),
       ],
-      OriginatingChannel: 'telegram',
+      OriginatingChannel: channel,
       ChatType: 'direct',
-      CommandAuthorized: true,
+      CommandAuthorized: !whatsapp,
       AccountId: 'canary',
-      OriginatingTo: 'telegram:123',
-      SenderId: '123',
+      OriginatingTo: `${channel}:${sender}`,
+      SenderId: sender,
       MessageSid: '456',
     },
   };
@@ -403,7 +410,7 @@ try {
     markIdle: () => {},
   };
   assert.equal((await ingress(event, context)).handled, true);
-  // Temporary Telegram downloads can expire after durable acceptance.
+  // Temporary channel downloads can expire after durable acceptance.
   const { unlinkSync } = await import('node:fs');
   unlinkSync(documentPath);
   unlinkSync(imagePath);
@@ -411,9 +418,9 @@ try {
   assert.equal((await ingress(event, context)).handled, true);
   assert.match(acknowledgements[0].text, /On it/);
   assert.match(acknowledgements[1].text, /already have/);
-  assert.equal(acknowledgements[0].to, '123');
+  assert.equal(acknowledgements[0].to, sender);
   assert.equal(acknowledgements[0].accountId, 'canary');
-  checks.push('ordinary Telegram message_tool_only takeover and explicit acknowledgements');
+  checks.push(`ordinary ${channel} message_tool_only takeover and explicit acknowledgements`);
   await until(async () => (await api(`/assistants/${assistant.id}/requests`)).requests.length === 1);
   await service.stop();
   await service.start(serviceContext);
@@ -430,13 +437,13 @@ try {
   );
   assert.equal(receipts[0].text, requests[0].result.text);
   assert.equal(receipts.length, 1);
-  assert.equal(receipts[0].to, '123');
+  assert.equal(receipts[0].to, sender);
   if (pdfCode) checks.push(`real ${mode} extracts hidden code from durable PDF attachment`);
   checks.push('real CLI request completion and matching delivery');
   if (process.argv.includes('--delivery-retry')) {
     assert.equal(resultDeliveryAttempts, 2);
     checks.push(
-      'transient Telegram send failure automatically retries the saved answer without rerunning native request'
+      `transient ${channel} send failure automatically retries the saved answer without rerunning native request`
     );
   }
 
@@ -569,7 +576,8 @@ try {
         assistantId: assistant.id,
         conversationId: assistant.binding.conversationId,
         requestId: requests[0].id,
-        telegram: 'test SDK adapter; no real bot credentials or poller',
+        channel,
+        transport: 'test SDK adapter; no real channel credentials or poller',
         artifacts: root,
       },
       null,

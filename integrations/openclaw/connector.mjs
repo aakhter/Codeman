@@ -28,13 +28,18 @@ const states = new Set([
   'outcome_unknown',
 ]);
 const DELIVERY_RETRY_DELAYS = [5000, 15000, 30000, 60000, 120000];
-export function telegramDeliveryRetryDelay(error, failures) {
+export function deliveryRetryDelay(error, failures) {
   if (!Number.isInteger(failures) || failures < 1 || failures > DELIVERY_RETRY_DELAYS.length) return undefined;
   const code = Number(
-    error?.error_code ?? error?.response?.error_code ?? error?.error?.status ?? error?.status ?? error?.statusCode
+    error?.error_code ??
+      error?.response?.error_code ??
+      error?.error?.status ??
+      error?.status ??
+      error?.statusCode ??
+      error?.output?.statusCode
   );
   const network =
-    /Network request for ['"]sendMessage['"] failed|fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/i.test(
+    /Network request for ['"]sendMessage['"] failed|fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|connection closed|connection lost|timed out/i.test(
       String(error?.message ?? '')
     );
   if (code >= 400 && code < 500 && code !== 429) return undefined;
@@ -44,6 +49,33 @@ export function telegramDeliveryRetryDelay(error, failures) {
     DELIVERY_RETRY_DELAYS[failures - 1],
     Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 86400) * 1000 : 0
   );
+}
+export const telegramDeliveryRetryDelay = deliveryRetryDelay; // Preserve existing import compatibility.
+
+// Missing channel on saved records is the pre-WhatsApp Telegram format.
+const channelOf = (destination) => destination?.channel ?? 'telegram';
+const phone = /^\+[1-9][0-9]{6,14}$/;
+const account = /^[A-Za-z0-9_-]{1,100}$/;
+function validMessageId(channel, id) {
+  return (
+    typeof id === 'string' &&
+    (channel === 'telegram' ? /^[1-9][0-9]*$/.test(id) : channel === 'whatsapp' && /^[A-Za-z0-9_-]{1,128}$/.test(id))
+  );
+}
+function validDestination(d, message = false) {
+  const channel = channelOf(d);
+  return (
+    d &&
+    account.test(d.accountId ?? '') &&
+    d.chatId === d.senderId &&
+    (channel === 'telegram'
+      ? /^[1-9][0-9]*$/.test(d.chatId ?? '')
+      : channel === 'whatsapp' && phone.test(d.chatId ?? '')) &&
+    (!message || validMessageId(channel, d.messageId))
+  );
+}
+function channelConfig(config, channel) {
+  return channel === 'telegram' ? config : channel === 'whatsapp' ? config.whatsapp : undefined;
 }
 export function validateConfig(input) {
   const url = new URL(input.baseUrl);
@@ -69,7 +101,18 @@ export function validateConfig(input) {
   )
     throw new Error('Invalid connector configuration');
   if (input.mediaRoot !== undefined && (typeof input.mediaRoot !== 'string' || !isAbsolute(input.mediaRoot)))
-    throw new Error('mediaRoot must be an absolute local Telegram download directory');
+    throw new Error('mediaRoot must be an absolute local download directory');
+  if (
+    input.whatsapp !== undefined &&
+    (!input.whatsapp ||
+      !account.test(input.whatsapp.accountId ?? '') ||
+      !Array.isArray(input.whatsapp.allowFrom) ||
+      !input.whatsapp.allowFrom.length ||
+      input.whatsapp.allowFrom.some((id) => typeof id !== 'string' || !phone.test(id)) ||
+      (input.whatsapp.mediaRoot !== undefined &&
+        (typeof input.whatsapp.mediaRoot !== 'string' || !isAbsolute(input.whatsapp.mediaRoot))))
+  )
+    throw new Error('Invalid WhatsApp connector configuration');
   return { ...input, baseUrl: url.origin, allowFrom: [...input.allowFrom] };
 }
 export function brainRequestText(content) {
@@ -91,32 +134,43 @@ function requestStatus(record) {
     interrupted: 'Your latest request was interrupted. Check Codeman before trying again.',
     outcome_unknown: 'Your latest request needs attention in Codeman. Check it before trying again.',
   };
-  if (record.delivery === 'retrying') return 'Telegram reply delivery is being retried automatically.';
+  if (record.delivery === 'retrying') return 'Reply delivery is being retried automatically.';
   if (record.delivery === 'delivery_unknown')
-    return 'Your answer may not have reached Telegram. Use brain result to retrieve it.';
+    return 'Your answer may not have reached this chat. Use brain result to retrieve it.';
   return statuses[record.status] ?? 'Your latest request is waiting for Brain.';
 }
 export function trustedDestination(event, ctx, config) {
+  const channel = ctx.channelId;
+  const policy = channelConfig(config, channel);
   const sender = ctx.senderId;
-  const chat = typeof ctx.conversationId === 'string' ? ctx.conversationId.replace(/^telegram:/, '') : undefined;
-  const messageId = ctx.messageId;
+  const chat =
+    typeof ctx.conversationId === 'string'
+      ? ctx.conversationId.startsWith(`${channel}:`)
+        ? ctx.conversationId.slice(channel.length + 1)
+        : ctx.conversationId
+      : undefined;
+  const destination = { accountId: ctx.accountId, chatId: chat, senderId: sender, messageId: ctx.messageId };
+  if (channel === 'whatsapp') destination.channel = channel;
+  // WhatsApp normal messages have CommandAuthorized=false when command access
+  // was not checked. Exact private-chat/account/phone allowlisting authorizes
+  // these requests; explicitly denied slash commands remain rejected.
   if (
-    ctx.channelId !== 'telegram' ||
-    event.channel !== 'telegram' ||
+    !policy ||
+    event.channel !== channel ||
     event.isGroup !== false ||
-    event.commandAuthorized !== true ||
-    ctx.accountId !== config.accountId ||
-    !config.allowFrom.includes(sender) ||
-    chat !== sender ||
-    !/^[1-9][0-9]*$/.test(messageId ?? '') ||
+    (channel === 'telegram' && event.commandAuthorized !== true) ||
+    (channel === 'whatsapp' && event.content?.startsWith('/') && event.commandAuthorized !== true) ||
+    ctx.accountId !== policy.accountId ||
+    !policy.allowFrom.includes(sender) ||
+    !validDestination(destination, true) ||
     (event.senderId && event.senderId !== sender) ||
-    (event.messageId && event.messageId !== messageId) ||
+    (event.messageId && event.messageId !== ctx.messageId) ||
     (event.accountId && event.accountId !== ctx.accountId) ||
     (event.conversationId && event.conversationId !== ctx.conversationId) ||
     event.threadId != null
   )
     return undefined;
-  return { accountId: ctx.accountId, chatId: chat, senderId: sender, messageId };
+  return destination;
 }
 export function chunks(text, limit = 3500) {
   const chars = Array.from(text);
@@ -151,28 +205,24 @@ export class Outbox {
               (r) =>
                 !r ||
                 !uuid.test(r.assistantId) ||
-                !/^[1-9][0-9]*$/.test(r.messageId ?? '') ||
-                !/^[A-Za-z0-9_-]{1,100}$/.test(r.destination?.accountId ?? '') ||
-                !/^[1-9][0-9]*$/.test(r.destination?.chatId ?? '') ||
-                r.destination.chatId !== r.destination.senderId
+                !validMessageId(channelOf(r.destination), r.messageId) ||
+                !validDestination(r.destination)
             ) ||
             new Set(
-              file.replyTargets.map((r) => JSON.stringify([r.destination.accountId, r.destination.chatId, r.messageId]))
+              file.replyTargets.map((r) =>
+                JSON.stringify([channelOf(r.destination), r.destination.accountId, r.destination.chatId, r.messageId])
+              )
             ).size !== file.replyTargets.length)) ||
         file.records.some(
           (r) =>
             !/^[a-f0-9]{64}$/.test(r.key) ||
             !uuid.test(r.assistantId) ||
-            !r.destination ||
-            !/^[1-9][0-9]*$/.test(r.destination.chatId) ||
-            r.destination.chatId !== r.destination.senderId ||
+            !validDestination(r.destination, true) ||
             !Array.isArray(r.parts) ||
             !Array.isArray(r.receipts) ||
             r.parts.some((part) => typeof part !== 'string' || part.length > 3500) ||
             r.receipts.some((receipt) => typeof receipt !== 'string' || !receipt) ||
             r.receipts.length > r.parts.length ||
-            !/^[A-Za-z0-9_-]{1,100}$/.test(r.destination.accountId ?? '') ||
-            !/^[1-9][0-9]*$/.test(r.destination.messageId ?? '') ||
             (r.requestId !== undefined && !uuid.test(r.requestId)) ||
             (r.status !== undefined && !states.has(r.status)) ||
             !/^[a-f0-9]{64}$/.test(r.payloadHash ?? '') ||
@@ -214,6 +264,7 @@ export class Outbox {
     const old = next.find(
       (r) =>
         r.messageId === target.messageId &&
+        channelOf(r.destination) === channelOf(target.destination) &&
         r.destination.accountId === target.destination.accountId &&
         r.destination.chatId === target.destination.chatId
     );
@@ -297,17 +348,18 @@ export class Connector {
     return (
       record &&
       record.assistantId === this.config.assistantId &&
+      channelOf(record.destination) === channelOf(destination) &&
       record.destination.accountId === destination.accountId &&
       record.destination.chatId === destination.chatId &&
       record.destination.senderId === destination.senderId
     );
   }
   rememberReplyTarget(destination, messageId) {
-    if (!/^[1-9][0-9]*$/.test(messageId ?? '')) return;
+    if (!validMessageId(channelOf(destination), messageId)) return;
     const { accountId, chatId, senderId } = destination;
     this.outbox.rememberReplyTarget({
       assistantId: this.config.assistantId,
-      destination: { accountId, chatId, senderId },
+      destination: { accountId, chatId, senderId, ...(destination.channel ? { channel: destination.channel } : {}) },
       messageId,
     });
   }
@@ -316,7 +368,7 @@ export class Connector {
     if (explicit !== undefined) return explicit;
     const destination = trustedDestination(event, ctx, this.config);
     const replyId = ctx.replyToMessageId;
-    if (!destination || typeof replyId !== 'string' || !/^[1-9][0-9]*$/.test(replyId)) return undefined;
+    if (!destination || !validMessageId(channelOf(destination), replyId)) return undefined;
     const owned =
       this.outbox.records.some((r) => this.authorizedRecord(r, destination) && r.receipts.includes(replyId)) ||
       this.outbox.replyTargets.some((r) => this.authorizedRecord(r, destination) && r.messageId === replyId);
@@ -408,7 +460,7 @@ export class Connector {
       };
     const key = hash(
       JSON.stringify([
-        'telegram',
+        channelOf(destination),
         destination.accountId,
         destination.chatId,
         destination.senderId,
@@ -455,7 +507,7 @@ export class Connector {
         text = stageMedia({
           text,
           media,
-          mediaRoot: this.config.mediaRoot,
+          mediaRoot: channelConfig(this.config, channelOf(destination))?.mediaRoot,
           workingDir: assistant.binding?.workingDir,
           key,
           baseUrl: this.config.baseUrl,
@@ -494,10 +546,12 @@ export class Connector {
       )
         continue;
       const r = this.outbox.get(snapshot.key);
+      const policy = channelConfig(this.config, channelOf(r.destination));
       if (
+        !policy ||
         r.assistantId !== this.config.assistantId ||
-        r.destination.accountId !== this.config.accountId ||
-        !this.config.allowFrom.includes(r.destination.senderId)
+        r.destination.accountId !== policy.accountId ||
+        !policy.allowFrom.includes(r.destination.senderId)
       )
         continue;
       this.active.add(r.key);
@@ -538,7 +592,7 @@ export class Connector {
             this.outbox.put(r);
           } catch (error) {
             r.deliveryFailures = Math.min((r.deliveryFailures ?? 0) + 1, 6);
-            const delay = telegramDeliveryRetryDelay(error, r.deliveryFailures);
+            const delay = deliveryRetryDelay(error, r.deliveryFailures);
             r.delivery = delay === undefined ? 'delivery_unknown' : 'retrying';
             if (delay !== undefined) r.retryAt = this.now() + delay;
             this.outbox.put(r);

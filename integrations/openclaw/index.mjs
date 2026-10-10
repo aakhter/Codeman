@@ -26,7 +26,7 @@ export default {
       const source = event.ctx ?? {};
       const content = source.BodyForCommands ?? source.RawBody ?? '';
       const channel = source.OriginatingChannel ?? source.Surface ?? source.Provider;
-      if (channel !== 'telegram') return { handled: false };
+      if (!['telegram', 'whatsapp'].includes(channel)) return { handled: false };
       const counts = { tool: 0, block: 0, final: 0 };
       const message = {
         content,
@@ -79,8 +79,8 @@ export default {
       id: 'codeman-assistant-outbox',
       async start(ctx) {
         deliver = async (destination, text) => {
-          const adapter = await api.runtime.channel.outbound.loadAdapter('telegram');
-          if (!adapter?.sendText) throw new Error('Telegram delivery adapter unavailable');
+          const adapter = await api.runtime.channel.outbound.loadAdapter(destination.channel ?? 'telegram');
+          if (!adapter?.sendText) throw new Error('Channel delivery adapter unavailable');
           const receipt = await adapter.sendText({
             cfg: ctx.config,
             accountId: destination.accountId,

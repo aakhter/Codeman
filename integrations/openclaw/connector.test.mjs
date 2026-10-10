@@ -950,3 +950,281 @@ test('malformed retry metadata fails closed when loading the durable outbox', as
     assert.throws(() => new Outbox(h.path), /corrupt/);
   }
 });
+
+const waConfig = { ...config, whatsapp: { accountId: 'wa-test', allowFrom: ['+15551234567'] } };
+const waEvent = { ...event, channel: 'whatsapp', commandAuthorized: false, content: 'brain test' };
+const waCtx = {
+  channelId: 'whatsapp',
+  accountId: 'wa-test',
+  conversationId: '+15551234567',
+  senderId: '+15551234567',
+  messageId: '3EB01234ABCD',
+};
+
+test('WhatsApp accepts only explicitly allowed private phone identities and valid message IDs', () => {
+  assert.ok(trustedDestination(waEvent, waCtx, waConfig));
+  assert.ok(trustedDestination(waEvent, { ...waCtx, conversationId: 'whatsapp:+15551234567' }, waConfig));
+  assert.equal(trustedDestination(waEvent, waCtx, config), undefined);
+  for (const patch of [
+    { senderId: '+15559999999' },
+    { conversationId: '15551234567@s.whatsapp.net' },
+    { conversationId: '123@g.us' },
+    { accountId: 'other' },
+    { messageId: undefined },
+    { messageId: 'abc\nunsafe' },
+    { messageId: 'x'.repeat(129) },
+  ])
+    assert.equal(trustedDestination(waEvent, { ...waCtx, ...patch }, waConfig), undefined);
+  for (const patch of [{ isGroup: true }, { threadId: '1' }, { channel: 'telegram' }])
+    assert.equal(trustedDestination({ ...waEvent, ...patch }, waCtx, waConfig), undefined);
+  for (const allowFrom of [['*'], ['15551234567'], ['+15551234567@s.whatsapp.net']])
+    assert.throws(() => validateConfig({ ...config, whatsapp: { accountId: 'wa-test', allowFrom } }));
+});
+
+test('WhatsApp durable retries and receipt-backed replies survive restart without task replay', async (t) => {
+  let clock = 10000,
+    attempts = 0;
+  const h = harness(t, {
+    config: waConfig,
+    now: () => clock,
+    deliver: async () => {
+      if (++attempts === 2) throw Object.assign(new Error('Connection Closed'), { output: { statusCode: 503 } });
+      return { messageId: `3EB0RESULT${attempts}` };
+    },
+  });
+  let c = h.make();
+  await Promise.all([c.inbound(waEvent, waCtx), c.inbound(waEvent, waCtx)]);
+  h.finish();
+  await c.tick();
+  assert.equal(c.outbox.records[0].delivery, 'retrying');
+  assert.equal(c.outbox.records[0].receipts.length, 1);
+  c = h.make();
+  clock = 15000;
+  await c.tick();
+  assert.equal(c.outbox.records[0].delivery, 'delivered');
+  assert.equal(h.calls.filter((x) => x.options.method === 'POST').length, 1);
+  assert.equal(
+    c.addressedText({ ...waEvent, content: 'follow up' }, { ...waCtx, replyToMessageId: '3EB0RESULT1' }),
+    'follow up'
+  );
+  assert.equal(
+    c.addressedText(
+      { ...waEvent, content: 'follow up' },
+      { ...waCtx, accountId: 'other', replyToMessageId: '3EB0RESULT1' }
+    ),
+    undefined
+  );
+  c.rememberReplyTarget(c.outbox.records[0].destination, '3EB0ACK');
+  c = h.make();
+  assert.equal(
+    c.addressedText({ ...waEvent, content: 'follow up' }, { ...waCtx, replyToMessageId: '3EB0ACK' }),
+    'follow up'
+  );
+});
+
+test('reply ownership and corruption validation are channel scoped with legacy Telegram compatibility', (t) => {
+  const h = harness(t, { config: waConfig });
+  const c = h.make();
+  c.rememberReplyTarget({ accountId: config.accountId, chatId: '123', senderId: '123' }, '789');
+  assert.equal(
+    h.make().addressedText({ ...event, content: 'follow up' }, { ...ctx, replyToMessageId: '789' }),
+    'follow up'
+  );
+  const d = trustedDestination(waEvent, waCtx, waConfig);
+  c.rememberReplyTarget(d, '789');
+  assert.equal(c.outbox.replyTargets.length, 2);
+  const saved = JSON.parse(readFileSync(h.path, 'utf8'));
+  saved.replyTargets[1].destination.channel = 'discord';
+  writeFileSync(h.path, JSON.stringify(saved));
+  assert.throws(() => new Outbox(h.path), /corrupt/);
+});
+test('ordinary WhatsApp reply_dispatch routes trusted metadata and short-circuits the model', async (t) => {
+  const h = harness(t);
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env[config.tokenEnv];
+  globalThis.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: config.assistantId,
+        enabled: true,
+        capabilities: { requestExecution: true },
+      },
+    });
+  process.env[config.tokenEnv] = `cma_${'a'.repeat(43)}`;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env[config.tokenEnv];
+    else process.env[config.tokenEnv] = originalToken;
+  });
+  const deliveries = [];
+  const hooks = new Map();
+  let service;
+  plugin.register({
+    pluginConfig: waConfig,
+    on: (name, handler) => hooks.set(name, handler),
+    registerService: (value) => {
+      service = value;
+    },
+    runtime: {
+      channel: {
+        outbound: {
+          loadAdapter: async (channel) => {
+            assert.equal(channel, 'whatsapp');
+            return {
+              sendText: async (payload) => {
+                deliveries.push(payload);
+                return { messageId: '1' };
+              },
+            };
+          },
+        },
+      },
+    },
+    logger: { error: () => {} },
+  });
+  await service.start({ stateDir: h.path.slice(0, h.path.lastIndexOf('/')), config: {} });
+  t.after(() => service.stop());
+  const handler = hooks.get('reply_dispatch');
+  const source = {
+    BodyForCommands: 'Brain, test',
+    RawBody: 'not canonical',
+    Body: 'wrapped text',
+    OriginatingChannel: 'whatsapp',
+    AccountId: 'wa-test',
+    OriginatingTo: 'whatsapp:+15551234567',
+    SenderId: '+15551234567',
+    MessageSid: '3EB01234ABCD',
+    ChatType: 'direct',
+    CommandAuthorized: false,
+  };
+  const replies = [];
+  const dispatch = {
+    dispatcher: {
+      sendFinalReply: (payload) => {
+        replies.push(payload);
+        return true;
+      },
+    },
+    recordProcessed: () => {},
+    markIdle: () => {},
+  };
+  for (const patch of [
+    { CommandAuthorized: false, BodyForCommands: '/brain test' },
+    { CommandAuthorized: undefined, BodyForCommands: '/brain test' },
+    { SenderId: '999' },
+    { OriginatingTo: 'telegram:-123' },
+    { AccountId: 'other' },
+    { MessageSid: undefined },
+    { ChatType: 'group' },
+    { ChatType: undefined },
+    { MessageThreadId: 123 },
+    { InternalTurnSource: 'cron' },
+  ]) {
+    const result = await handler({ ctx: { ...source, ...patch }, sendPolicy: 'allow' }, dispatch);
+    assert.equal(result.handled, true);
+    assert.equal(result.queuedFinal, false);
+  }
+  assert.equal(replies.length, 0);
+  for (const patch of [{ sendPolicy: 'deny' }, { suppressUserDelivery: true }, { isTailDispatch: true }]) {
+    assert.equal((await handler({ ctx: source, sendPolicy: 'allow', ...patch }, dispatch)).queuedFinal, false);
+  }
+  assert.equal(
+    (await handler({ ctx: { ...source, BodyForCommands: 'hello' }, sendPolicy: 'allow' }, dispatch)).handled,
+    false
+  );
+  assert.equal(
+    (await handler({ ctx: { ...source, OriginatingChannel: 'discord' }, sendPolicy: 'allow' }, dispatch)).handled,
+    false
+  );
+  const result = await handler({ ctx: source, sendPolicy: 'allow' }, dispatch);
+  assert.equal(result.handled, true);
+  assert.equal(result.queuedFinal, true);
+  assert.equal(result.counts.final, 1);
+  const manual = await handler(
+    { ctx: source, sendPolicy: 'allow', suppressUserDelivery: true, sourceReplyDeliveryMode: 'message_tool_only' },
+    dispatch
+  );
+  assert.equal(manual.handled, true);
+  assert.equal(manual.queuedFinal, true);
+  assert.equal(replies.length, 0);
+  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries[0].accountId, 'wa-test');
+  assert.equal(deliveries[0].to, '+15551234567');
+  assert.match(deliveries[1].text, /already have/);
+  for (const patch of [
+    { sendPolicy: 'deny' },
+    { ctx: { ...source, SenderId: '999' } },
+    { ctx: { ...source, MessageThreadId: 123 } },
+    { isTailDispatch: true },
+  ]) {
+    await handler(
+      {
+        ctx: source,
+        sendPolicy: 'allow',
+        suppressUserDelivery: true,
+        sourceReplyDeliveryMode: 'message_tool_only',
+        ...patch,
+      },
+      dispatch
+    );
+  }
+  assert.equal(deliveries.length, 2);
+
+  assert.match(deliveries[0].text, /On it/);
+  assert.equal(
+    JSON.parse(readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8'))
+      .records[0].text,
+    'test'
+  );
+  await service.stop();
+  await service.start({ stateDir: h.path.slice(0, h.path.lastIndexOf('/')), config: {} });
+  const followup = await handler(
+    {
+      ctx: {
+        ...source,
+        BodyForCommands: 'continue with that option',
+        MessageSid: '460',
+        ReplyToId: '1',
+        ReplyToBody: 'ignored quoted text',
+      },
+      sendPolicy: 'allow',
+    },
+    dispatch
+  );
+  assert.equal(followup.handled, true);
+  assert.equal(followup.queuedFinal, true);
+  assert.equal(deliveries.length, 3);
+  const saved = JSON.parse(
+    readFileSync(join(h.path.slice(0, h.path.lastIndexOf('/')), 'codeman-assistant-outbox.json'), 'utf8')
+  );
+  assert.equal(saved.records[1].text, 'continue with that option');
+  assert.equal(saved.replyTargets[0].messageId, '1');
+  for (const patch of [{ sendPolicy: 'deny' }, { isTailDispatch: true }, { suppressUserDelivery: true }])
+    assert.equal(
+      (
+        await handler(
+          {
+            ctx: { ...source, BodyForCommands: 'followup', MessageSid: '461', ReplyToIdFull: '1' },
+            sendPolicy: 'allow',
+            ...patch,
+          },
+          dispatch
+        )
+      ).queuedFinal,
+      false
+    );
+  assert.equal(deliveries.length, 3);
+  assert.equal(
+    (
+      await handler(
+        {
+          ctx: { ...source, BodyForCommands: 'another question', ReplyToId: '999', ReplyToBody: 'Brain result' },
+          sendPolicy: 'allow',
+        },
+        dispatch
+      )
+    ).handled,
+    false
+  );
+});

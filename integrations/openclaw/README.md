@@ -7,7 +7,7 @@ Codex, Claude Code and OpenCode sessions (COD-499).
 Address Brain with `brain <request>`, `Brain, <request>`, or `/brain <request>`
 to bypass OpenClaw's model. You can also reply directly to a connector-delivered
 Brain answer or acknowledgement without repeating `brain`. Replies follow the
-recorded Telegram message ID for the same authorized account/chat/sender; quoted
+recorded provider message ID for the same authorized channel/account/chat/sender; quoted
 text, unrelated bot messages and ordinary unaddressed messages do not select
 Brain. Optional model-driven tools are deferred.
 
@@ -37,6 +37,42 @@ Brain. Optional model-driven tools are deferred.
 }
 ```
 
+### WhatsApp (COD-505)
+
+Install/link OpenClaw's WhatsApp channel and pair its account as usual. Add an
+optional `whatsapp` block to the connector configuration above:
+
+```json
+{
+  "whatsapp": {
+    "accountId": "default",
+    "allowFrom": ["+15551234567"],
+    "mediaRoot": "/home/ubuntu/.openclaw/media/inbound"
+  }
+}
+```
+
+Use the actual WhatsApp account ID and exact authorized E.164 phone numbers.
+OpenClaw's own WhatsApp access policy still applies; the connector applies its
+own allowlist too. Groups, threads, foreign accounts and missing/invalid provider
+message IDs are rejected. Normal WhatsApp messages carry `CommandAuthorized=false`
+when OpenClaw did not check command access; private phone/account allowlisting
+authorizes `brain ...` requests. Slash commands also require command authorization.
+Existing Telegram configuration and saved outbox records remain compatible.
+
+Both channels route to the configured assistant. Replies to a recorded Brain
+answer/acknowledgement select the same assistant without a prefix. Reply ownership,
+latest-request controls and deduplication include the originating channel; results
+always use that channel's outbound adapter. A network failure retries the saved
+answer with bounded backoff and never reruns the accepted task. Crash-time uncertain
+sends still require reconciliation; a provider may accept a message before its
+receipt is lost, so retries can produce duplicate replies.
+
+Attachments use each channel's own `mediaRoot` and the same bounded, private,
+local staging checks. The existing `.codeman-telegram` workspace folder name is
+retained for compatibility for both channels. No historical message is replayed
+when WhatsApp support is enabled. Reload the gateway once configuration is saved.
+
 The manifest declares `activation.onStartup: true` so the gateway imports the
 connector and starts its managed outbox service. Runtime inspection alone does
 not prove startup activation. Verify the gateway log contains
@@ -57,8 +93,8 @@ and native events before upgrading either application.
 
 `Brain, ...`, `brain: ...`, and `/brain ...` also work. Status/result/cancel can
 still take an explicit connector key for troubleshooting. Latest-request lookup
-is limited to the same assistant, Telegram account, private chat and sender.
-A known leading `Mem0 Active | ...` runtime banner is omitted from Telegram
+is limited to the same assistant, channel, account, private chat and sender.
+A known leading `Mem0 Active | ...` runtime banner is omitted from message
 presentation; the native answer stored in Codeman is preserved.
 
 Private numeric chats only: account, sender, chat, stable provider message ID and
@@ -72,16 +108,16 @@ SDK. Ordinary bot chats use `reply_dispatch`, which preserves trusted
 `CommandAuthorized`, sender/account/chat, stable provider message ID and thread
 metadata before model dispatch. `inbound_claim` remains available for explicitly
 plugin-owned conversation bindings; it is not a global ingress hook. Its managed service submits/polls outside
-ingress and sends through `runtime.channel.outbound.loadAdapter('telegram').sendText`.
+ingress and sends through `runtime.channel.outbound.loadAdapter(channel).sendText`.
 Unicode-safe chunks stay within 3500 UTF-16 units. Adapter formatting can affect
 rendered Markdown. In the Codex harness's `message_tool_only` reply mode, acknowledgements are sent
-explicitly through that trusted Telegram adapter too; automatic dispatcher
+explicitly through that trusted originating-channel adapter too; automatic dispatcher
 replies remain suppressed. Delivery-denied, internal, group/thread and unauthorized
 turns remain blocked. Prompts/results are not sent through another model.
 
 ## Incoming photos and files
 
-Attach a photo or document and put the request in its Telegram caption:
+Attach a photo or document and put the request in its Telegram or WhatsApp caption:
 `Brain, explain this photo` or `Brain, summarize this PDF`. A caption of just
 `brain` asks it to review the attached files. Albums preserve attachment order
 when OpenClaw exposes the album as one inbound message. Sending an unaddressed
@@ -193,20 +229,20 @@ credential can only read/submit/cancel its own assistant's requests and cannot
 access settings, management, terminal input, uploads, SSE or WebSockets.
 Disabled/missing/password-reset owners invalidate bearer access.
 
-| Method | Route | Body / behavior |
-| --- | --- | --- |
-| POST / GET | `/assistants` | Create `{name, slug}` / list visible identities |
-| GET / PATCH | `/assistants/:id` | Inspect / `{expectedRevision, name?, enabled?}` |
-| POST | `/assistants/:id/binding` | `{sessionId, expectedRevision, expectedGeneration}` |
-| DELETE | `/assistants/:id` | `{expectedRevision}`; disabled, no outstanding work |
-| POST / GET | `/assistants/:id/tokens` | Issue `{name, scopes}` / metadata only |
-| DELETE | `/assistants/:id/tokens/:tokenId` | Revoke |
-| POST | `/assistants/:id/handoff` | `{expectedRevision, composerEmpty:true}` |
-| POST | `/assistants/:id/take-control` | Pause and release input ownership |
-| POST / GET | `/assistants/:id/requests` | Submit `{text, idempotencyKey}` / list |
-| GET | `/assistant-requests/:requestId` | Current status and completed `result.text` |
-| POST | `/assistant-requests/:requestId/cancel` | Queued cancellation only |
-| POST | `/assistant-requests/:requestId/reconcile` | Desktop-only `{acknowledgeSideEffects:true}` |
+| Method      | Route                                      | Body / behavior                                     |
+| ----------- | ------------------------------------------ | --------------------------------------------------- |
+| POST / GET  | `/assistants`                              | Create `{name, slug}` / list visible identities     |
+| GET / PATCH | `/assistants/:id`                          | Inspect / `{expectedRevision, name?, enabled?}`     |
+| POST        | `/assistants/:id/binding`                  | `{sessionId, expectedRevision, expectedGeneration}` |
+| DELETE      | `/assistants/:id`                          | `{expectedRevision}`; disabled, no outstanding work |
+| POST / GET  | `/assistants/:id/tokens`                   | Issue `{name, scopes}` / metadata only              |
+| DELETE      | `/assistants/:id/tokens/:tokenId`          | Revoke                                              |
+| POST        | `/assistants/:id/handoff`                  | `{expectedRevision, composerEmpty:true}`            |
+| POST        | `/assistants/:id/take-control`             | Pause and release input ownership                   |
+| POST / GET  | `/assistants/:id/requests`                 | Submit `{text, idempotencyKey}` / list              |
+| GET         | `/assistant-requests/:requestId`           | Current status and completed `result.text`          |
+| POST        | `/assistant-requests/:requestId/cancel`    | Queued cancellation only                            |
+| POST        | `/assistant-requests/:requestId/reconcile` | Desktop-only `{acknowledgeSideEffects:true}`        |
 
 Single-line text only, maximum 20,000 characters; terminal controls and CLI slash
 commands are rejected. Request UUID lookups enforce both ownership and token
@@ -317,3 +353,23 @@ task's actions.
 
 The native canary supports `--delivery-retry` to inject one failed result send
 and verify automatic recovery through the plugin service.
+
+### WhatsApp validation
+
+`node --test integrations/openclaw/connector.test.mjs` covers private phone/account
+validation, unauthorized ingress, channel-scoped reply ownership, legacy outbox
+loading, deduplication, adapter selection and retry/restart behavior.
+
+`node scripts/smoke-openclaw-assistant.mjs --whatsapp --delivery-retry --reply`
+uses an isolated Codeman instance, a real native CLI and a test WhatsApp adapter;
+it reads image/text attachments, injects one result-send failure, verifies one
+accepted task and reply routing after restart, and checks desktop/mobile UI.
+It does not send WhatsApp messages or use production Brain.
+
+COD-505 evidence (2026-10-10): 36 connector regression tests and the root test
+wrapper passed. Typecheck, lint (one pre-existing warning), format and lockfile
+checks passed. The WhatsApp/native Codex canary passed with text/image reading,
+result delivery retry, receipt-backed replies after service restart, and desktop
+and mobile checks. Artifacts: `/tmp/cod487-assistant-canary-d4J86l/summary.json`.
+This proves the connector against an isolated native session and a test adapter;
+production WhatsApp receipt acceptance requires a new user message.
