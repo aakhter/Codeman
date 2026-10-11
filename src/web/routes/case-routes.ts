@@ -54,7 +54,7 @@ import {
 import type { GitRemoteProbe, GitUrlParse } from '../../git-clone.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { prepareNewCasePath } from '../case-path.js';
-import { boundedPathExists, probePath } from '../../utils/index.js';
+import { boundedPathExists, describeUnknownPath, probePath } from '../../utils/index.js';
 import { readAgentCaseMarker, type AgentCaseMarker } from '../../agent-case-marker.js';
 import { settingsWriteBlocker, writeHooksConfig } from '../../hooks-config.js';
 import {
@@ -530,7 +530,10 @@ export function registerCaseRoutes(
     );
   };
 
-  async function resolveAccessibleCase(req: FastifyRequest, name: string): Promise<CaseInfo | null> {
+  async function resolveAccessibleCase(
+    req: FastifyRequest,
+    name: string
+  ): Promise<CaseInfo | { unreachableLocal: string } | null> {
     const user = getAuthUser(req);
     const remoteCase = (await readRemoteCases(CODEMAN_CONFIG_DIR)).find(
       (item) => item.name === name && canAccessOwned(user, item.owner)
@@ -577,12 +580,24 @@ export function registerCaseRoutes(
     }
 
     const casePath = await resolveCasePath(name, user);
-    if (!(await boundedPathExists(casePath))) return null;
     const linked = casePath !== join(resolveCasesDir(user), name);
+    // Null means DEFINITELY absent: the Run button creates a case on it, so a
+    // path that merely did not answer (a dead network mount) must never read as
+    // missing. One path, asked for explicitly: probe it even while unrelated
+    // mounts are dead.
+    const state = await probePath(casePath, { pastCap: true });
+    if (state === 'absent') return null;
+    if (state === 'unknown') {
+      // The linked registry knows where the case lives, so say where, and that
+      // it is not answering. A local case has no such record to fall back on.
+      if (!linked) return { unreachableLocal: describeUnknownPath('Case folder', casePath, { pastCap: true }) };
+      return { name, path: casePath, hasClaudeMd: false, linked: true, location: 'linked-local', unreachable: true };
+    }
     return {
       name,
       path: casePath,
-      hasClaudeMd: await boundedPathExists(join(casePath, 'CLAUDE.md')),
+      // Probed like the folder above, or a healthy case reads as having no CLAUDE.md under the cap.
+      hasClaudeMd: (await probePath(join(casePath, 'CLAUDE.md'), { pastCap: true })) === 'present',
       ...(linked && { linked: true }),
       location: linked ? ('linked-local' as const) : ('local' as const),
       codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), name),
@@ -2424,6 +2439,9 @@ export function registerCaseRoutes(
     const caseInfo = await resolveAccessibleCase(req, name);
     if (!caseInfo) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
+    }
+    if ('unreachableLocal' in caseInfo) {
+      return createErrorResponse(ApiErrorCode.OPERATION_FAILED, caseInfo.unreachableLocal);
     }
     return caseInfo;
   });

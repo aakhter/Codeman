@@ -124,8 +124,6 @@ const mockedStat = vi.mocked(fs.stat);
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedWriteFile = vi.mocked(fs.writeFile);
 const mockedRename = vi.mocked(fs.rename);
-const mockedStat = vi.mocked(fs.stat);
-const mockedCheckRemoteTmux = vi.mocked(checkRemoteTmuxAvailable);
 
 interface CaseRouteHarness {
   app: FastifyInstance;
@@ -360,6 +358,7 @@ describe('case-routes', () => {
           hasClaudeMd: false,
           linked: true,
           location: 'linked-local',
+          codexCommandSelection: { kind: 'default' },
           unreachable: true,
         },
       ]);
