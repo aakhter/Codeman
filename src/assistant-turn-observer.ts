@@ -1,11 +1,17 @@
 /** Exact native Codex turn projection. Idle timers and viewer text are never completion evidence. */
+import { CodexInput, type CodexPendingInput } from './assistant-codex-input.js';
 export type TurnObservation =
   | { state: 'waiting' }
-  | { state: 'running'; turnId: string }
+  | { state: 'running'; turnId: string; pendingInput?: CodexPendingInput }
   | { state: 'completed'; turnId: string; text: string }
   | { state: 'unknown'; reason: string };
 
-export function observeAssistantTurn(jsonl: string, conversationId: string, prompt: string): TurnObservation {
+export function observeAssistantTurn(
+  jsonl: string,
+  conversationId: string,
+  prompt: string,
+  answers: Array<{ clientId?: string; text?: string }> = []
+): TurnObservation {
   const lines = jsonl.split('\n');
   lines.pop(); // Only fully flushed records are evidence.
   let rows: Array<{ type?: string; payload?: Record<string, unknown> }>;
@@ -27,8 +33,35 @@ export function observeAssistantTurn(jsonl: string, conversationId: string, prom
   if (items.some((p) => p.turn_id !== turnId || p.thread_id !== conversationId))
     return { state: 'unknown', reason: 'Transcript identity changed' };
   const item = (p: Record<string, unknown>) =>
-    p.item as { type?: string; phase?: string; content?: Array<{ type?: string; text?: string }> } | undefined;
-  const users = items.filter((p) => item(p)?.type === 'UserMessage');
+    p.item as
+      | {
+          type?: string;
+          id?: string;
+          client_id?: string;
+          clientId?: string;
+          delivery?: string;
+          questions?: Array<{ title: string; options?: string[] | null }>;
+          phase?: string;
+          content?: Array<{ type?: string; text?: string }>;
+        }
+      | undefined;
+  const allUsers = items.filter((p) => item(p)?.type === 'UserMessage');
+  const matched = new Set<string>();
+  const users = allUsers.filter((p, index) => {
+    if (index === 0) return true;
+    const message = item(p);
+    const answer = answers.find((a) => a.clientId && a.clientId === (message?.client_id ?? message?.clientId));
+    if (
+      answer &&
+      !matched.has(answer.clientId!) &&
+      message?.content?.every((c) => c.type === 'text') &&
+      message.content.map((c) => c.text).join('') === answer.text
+    ) {
+      matched.add(answer.clientId!);
+      return false;
+    }
+    return true;
+  });
   if (!users.length) return { state: 'waiting' };
   if (
     users.length !== 1 ||
@@ -39,12 +72,40 @@ export function observeAssistantTurn(jsonl: string, conversationId: string, prom
       .join('') !== prompt
   )
     return { state: 'unknown', reason: 'Prompt acceptance does not match this request' };
-  const finals = items.filter((p) => item(p)?.type === 'AgentMessage' && item(p)?.phase === 'final_answer');
+  const finals = items.filter(
+    (p) => item(p)?.type === 'AgentMessage' && item(p)?.phase === 'final_answer' && item(p)?.delivery !== 'async'
+  );
   const completions = events.filter((p) => p.type === 'task_complete');
   if (events.some((p) => ['task_aborted', 'turn_aborted', 'task_interrupted'].includes(String(p.type))))
     return { state: 'unknown', reason: 'Native turn was interrupted' };
   if (finals.length > 1 || completions.length > 1) return { state: 'unknown', reason: 'Ambiguous completion' };
-  if (!completions.length) return { state: 'running', turnId };
+  if (!completions.length) {
+    const afterUser = items.slice(items.indexOf(allUsers[allUsers.length - 1]) + 1);
+    const question = afterUser
+      .filter((p) => item(p)?.type === 'AgentMessage' && item(p)?.delivery === 'async' && item(p)?.questions?.length)
+      .at(-1);
+    let pendingInput: CodexPendingInput | undefined;
+    if (question) {
+      const message = item(question)!;
+      const parsed = CodexInput.safeParse({
+        kind: 'async',
+        requestId: message.id,
+        itemId: message.id,
+        threadId: conversationId,
+        turnId,
+        isBlocking: false,
+        questions: message.questions!.map((q, i) => ({
+          id: String(i),
+          header: '',
+          question: q.title,
+          isOther: true,
+          options: q.options?.map((label) => ({ label, description: '' })) ?? null,
+        })),
+      });
+      if (parsed.success) pendingInput = parsed.data;
+    }
+    return { state: 'running', turnId, ...(pendingInput ? { pendingInput } : {}) };
+  }
   const final = finals[0];
   const text =
     final && item(final)?.content?.every((c) => c.type === 'Text' && typeof c.text === 'string')

@@ -21,6 +21,7 @@ import { observeAssistantTurn } from '../src/assistant-turn-observer.js';
 import { registerAuthMiddleware } from '../src/web/middleware/auth.js';
 import { registerAssistantRoutes } from '../src/web/routes/assistant-routes.js';
 import { installRouteErrorHandler } from '../src/web/route-error-handler.js';
+import { CodexInputBridge, codexQuestionKey } from '../src/assistant-codex-input.js';
 import { Session } from '../src/session.js';
 
 let root: string;
@@ -347,6 +348,59 @@ describe('native projection and API ownership', () => {
       ).toBe(403);
     } finally {
       await app.close();
+    }
+  });
+  it('routes a scoped native answer once, keeps a pending question alive and rejects revoked or stale input', async () => {
+    const a = await ready();
+    const r = manager.submit(a, 'hello', 'question-task-123456');
+    await manager.tick();
+    const nativeTurn = randomUUID();
+    appendFileSync(
+      file,
+      row({ type: 'task_started', turn_id: nativeTurn }) +
+        row({
+          type: 'item_completed',
+          thread_id: conversationId,
+          turn_id: nativeTurn,
+          item: { type: 'UserMessage', content: [{ type: 'text', text: 'hello' }] },
+        })
+    );
+    const q = {
+      requestId: 7,
+      threadId: conversationId,
+      turnId: nativeTurn,
+      itemId: 'question',
+      isBlocking: true,
+      questions: [{ id: 'color', header: 'Color', question: 'Which color?' }],
+    };
+    const inputs = vi.spyOn(CodexInputBridge.prototype, 'inputs').mockResolvedValue([q]);
+    const answer = vi.spyOn(CodexInputBridge.prototype, 'answer').mockResolvedValue();
+    try {
+      await manager.tick();
+      const pending = ledger.get(r.id)!;
+      expect(pending.pendingInput).toEqual(q);
+      ledger.put({ ...pending, deadline: Date.now() - 1 });
+      await manager.tick();
+      expect(ledger.get(r.id)!.status).toBe('running');
+      const key = codexQuestionKey(q);
+      validGrant = false;
+      await expect(
+        manager.answer(pending, key, { color: { answers: ['Purple'] } }, 'answer-key-1234567')
+      ).rejects.toThrow('no longer available');
+      validGrant = true;
+      const answered = await manager.answer(pending, key, { color: { answers: ['Purple'] } }, 'answer-key-1234567');
+      expect(answered.inputAnswers?.[0].state).toBe('answered');
+      expect(answered.pendingInput).toBeUndefined();
+      await manager.answer(answered, key, { color: { answers: ['Purple'] } }, 'answer-key-1234567');
+      expect(answer).toHaveBeenCalledTimes(1);
+      expect(writes).toEqual(['hello\r']);
+      await expect(
+        manager.answer(answered, key, { color: { answers: ['Blue'] } }, 'different-key-123456')
+      ).rejects.toThrow('different answer');
+      inputs.mockResolvedValue([]);
+    } finally {
+      vi.restoreAllMocks();
+      await manager.stop();
     }
   });
   it('gates every shared Session input method, including checkpoint and asynchronous mux writes', async () => {

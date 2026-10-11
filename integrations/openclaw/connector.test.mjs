@@ -21,6 +21,7 @@ import {
   telegramAnswer,
   chunks,
   trustedDestination,
+  deliveryRetryDelay,
   validateConfig,
 } from './connector.mjs';
 import plugin from './index.mjs';
@@ -178,7 +179,7 @@ test('cross-request result, malformed input, phase 2 absence and unauthorized re
   const c = h.make();
   assert.match((await c.inbound(event, ctx)).reply.text, /paused/);
   assert.equal(c.outbox.records.length, 0);
-  assert.match((await c.inbound({ ...event, content: '/brain hello\nother' }, ctx)).reply.text, /one line/);
+  assert.match((await c.inbound({ ...event, content: '/brain hello\x1bother' }, ctx)).reply.text, /terminal controls/);
   assert.deepEqual(await c.inbound(event, { ...ctx, senderId: '999' }), { handled: true });
   assert.throws(
     () =>
@@ -215,8 +216,8 @@ test('concurrent edited message conflicts without replacing the first persisted 
   assert.equal(c.outbox.records[0].text, 'test');
   assert.match(results[1].reply.text, /conflict/);
   assert.match(
-    (await c.inbound({ ...event, content: '/brain\nother' }, { ...ctx, messageId: '777' })).reply.text,
-    /one line/
+    (await c.inbound({ ...event, content: '/brain hello\x00other' }, { ...ctx, messageId: '777' })).reply.text,
+    /terminal controls/
   );
 });
 test('cross-request API response stops polling before any Telegram delivery', async (t) => {
@@ -1227,4 +1228,341 @@ test('ordinary WhatsApp reply_dispatch routes trusted metadata and short-circuit
     ).handled,
     false
   );
+});
+
+test('formatted CSV answer parts remain frozen across retry/restart and legacy partial deliveries stay intact', async (t) => {
+  let clock = 10000,
+    attempts = 0;
+  const h = harness(t, {
+    config: waConfig,
+    now: () => clock,
+    deliver: async (_, part) => {
+      if (typeof part !== 'string' && ++attempts === 1) throw new Error('Connection Closed');
+      return { messageId: typeof part === 'string' ? 'TEXT01' : 'CSV01' };
+    },
+  });
+  let c = h.make();
+  await c.inbound(waEvent, waCtx);
+  const requestId = randomUUID();
+  const text =
+    '| Name | Status |\n| --- | --- |\n' + Array.from({ length: 9 }, (_, i) => `| Row ${i} | Ready |`).join('\n');
+  c.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: requestId,
+        assistantId: config.assistantId,
+        idempotencyKey: c.outbox.records[0].key,
+        status: 'completed',
+        result: { text },
+      },
+    });
+  await c.tick();
+  const saved = new Outbox(h.path).records[0];
+  assert.equal(saved.delivery, 'retrying');
+  assert.equal(saved.receipts.length, 1);
+  assert.equal(saved.parts[1].kind, 'csv');
+  c = h.make();
+  c.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: requestId,
+        assistantId: config.assistantId,
+        idempotencyKey: saved.key,
+        status: 'completed',
+        result: { text: 'Changed output must not replace persisted chunks' },
+      },
+    });
+  clock = saved.retryAt;
+  await c.tick();
+  assert.deepEqual(c.outbox.records[0].parts, saved.parts);
+  assert.equal(c.outbox.records[0].delivery, 'delivered');
+  assert.equal(attempts, 2);
+  assert.equal(
+    c.addressedText({ ...waEvent, content: 'follow up' }, { ...waCtx, replyToMessageId: 'CSV01' }),
+    'follow up'
+  );
+  const result = await c.inbound({ ...waEvent, content: 'brain result' }, { ...waCtx, messageId: 'RESULT01' });
+  assert.equal(result.reply.parts[1].kind, 'csv');
+});
+
+test('WhatsApp result exports use private temporary files, document receipts and cleanup', async (t) => {
+  const h = harness(t, { config: waConfig });
+  const c = h.make();
+  await c.inbound(waEvent, waCtx);
+  const record = c.outbox.records[0];
+  record.requestId = randomUUID();
+  record.status = 'completed';
+  record.delivery = 'delivered';
+  record.parts = ['Preview', { kind: 'csv', name: 'brain-table-1.csv', data: '"Name","Value"\r\n"Brain","Ready"\r\n' }];
+  record.receipts = ['PREVIEW01', 'CSV01'];
+  delete record.text;
+  c.outbox.put(record);
+  const stateDir = h.path.slice(0, h.path.lastIndexOf('/'));
+  writeFileSync(join(stateDir, 'codeman-assistant-outbox.json'), readFileSync(h.path), { mode: 0o600 });
+  const originalFetch = globalThis.fetch,
+    originalToken = process.env[config.tokenEnv];
+  globalThis.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: record.requestId,
+        assistantId: config.assistantId,
+        idempotencyKey: record.key,
+        status: 'completed',
+        result: { text: 'native result preserved' },
+      },
+    });
+  process.env[config.tokenEnv] = `cma_${'a'.repeat(43)}`;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env[config.tokenEnv];
+    else process.env[config.tokenEnv] = originalToken;
+  });
+  const hooks = new Map();
+  let service, path;
+  const sends = [];
+  plugin.register({
+    pluginConfig: waConfig,
+    on: (name, hook) => hooks.set(name, hook),
+    registerService: (s) => (service = s),
+    logger: { error: () => {} },
+    runtime: {
+      channel: {
+        outbound: {
+          loadAdapter: async (channel) => {
+            assert.equal(channel, 'whatsapp');
+            return {
+              sendText: async (payload) => {
+                sends.push(payload.text);
+                return { messageId: 'TEXT02' };
+              },
+              sendMedia: async (payload) => {
+                path = payload.mediaUrl;
+                assert.equal(statSync(path).mode & 0o777, 0o600);
+                assert.equal(payload.forceDocument, true);
+                assert.equal(payload.to, waCtx.senderId);
+                assert.ok(path.startsWith(join(stateDir, 'codeman-assistant-exports')));
+                assert.equal(readFileSync(path, 'utf8'), record.parts[1].data);
+                return { messageId: 'CSV02' };
+              },
+            };
+          },
+        },
+      },
+    },
+  });
+  await service.start({ stateDir, config: {} });
+  t.after(() => service.stop());
+  const reply = await hooks.get('reply_dispatch')(
+    {
+      sendPolicy: 'allow',
+      ctx: {
+        BodyForCommands: 'brain result',
+        OriginatingChannel: 'whatsapp',
+        ChatType: 'direct',
+        CommandAuthorized: false,
+        AccountId: waCtx.accountId,
+        OriginatingTo: waCtx.conversationId,
+        SenderId: waCtx.senderId,
+        MessageSid: 'RESULT02',
+      },
+    },
+    { recordProcessed: () => {}, markIdle: () => {} }
+  );
+  assert.equal(reply.queuedFinal, true);
+  assert.deepEqual(sends, ['Preview']);
+  assert.throws(() => statSync(path), /ENOENT/);
+  const stored = new Outbox(join(stateDir, 'codeman-assistant-outbox.json'));
+  assert.ok(stored.replyTargets.some((r) => r.messageId === 'CSV02'));
+});
+
+for (const channel of ['telegram', 'whatsapp']) {
+  test(`${channel} questions and duplicate quoted answers stay on the original request across restart`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'connector-question-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const path = join(root, 'outbox.json');
+    const cfg = { ...config, whatsapp: { accountId: config.accountId, allowFrom: ['+15551234567'] } };
+    const sender = channel === 'telegram' ? '123' : '+15551234567';
+    const context = { ...ctx, channelId: channel, senderId: sender, conversationId: sender };
+    const inbound = { ...event, channel, content: 'brain ask me' };
+    const id = randomUUID();
+    const pendingInput = {
+      kind: 'async',
+      requestId: 'call_question',
+      itemId: 'call_question',
+      threadId: randomUUID(),
+      turnId: randomUUID(),
+      isBlocking: false,
+      questions: [
+        {
+          id: '0',
+          header: '',
+          question: 'Which color?',
+          options: [
+            { label: 'Purple', description: '' },
+            { label: 'Blue', description: '' },
+          ],
+          isOther: true,
+        },
+      ],
+    };
+    let pending = pendingInput;
+    const answers = [];
+    const calls = [];
+    const sends = [];
+    const fetchImpl = async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith(`/assistants/${config.assistantId}`))
+        return Response.json({
+          success: true,
+          data: { id: config.assistantId, enabled: true, capabilities: { requestExecution: true } },
+        });
+      const key = new Outbox(path).records[0].key;
+      if (url.endsWith('/answer')) {
+        const body = JSON.parse(options.body);
+        assert.deepEqual(body.answers, { 0: { answers: ['Purple'] } });
+        answers.push({ questionKey: body.questionKey, idempotencyKey: body.idempotencyKey, state: 'answered' });
+        pending = undefined;
+      }
+      return Response.json({
+        success: true,
+        data: {
+          id,
+          assistantId: config.assistantId,
+          idempotencyKey: key,
+          status: 'running',
+          pendingInput: pending,
+          inputAnswers: answers,
+        },
+      });
+    };
+    const make = () =>
+      new Connector({
+        config: cfg,
+        outbox: new Outbox(path),
+        token: () => `cma_${'a'.repeat(43)}`,
+        fetchImpl,
+        deliver: async (destination, text) => {
+          sends.push({ destination, text });
+          return { messageId: String(500 + sends.length) };
+        },
+      });
+    let c = make();
+    await c.inbound(inbound, context);
+    await c.tick();
+    await c.tick();
+    assert.equal(sends.length, 1);
+    assert.match(sends[0].text, /Brain has a question/);
+    c = make();
+    const statusReply = await c.inbound(
+      { ...inbound, content: 'brain status' },
+      { ...context, messageId: '459', replyToMessageId: '501' }
+    );
+    assert.match(statusReply.reply.text, /working/);
+    assert.equal(answers.length, 0);
+    const response = { ...inbound, content: '1' };
+    const reply = { ...context, messageId: '457', replyToMessageId: '501' };
+    assert.match((await c.inbound(response, reply)).reply.text, /reached Brain/);
+    assert.match((await c.inbound(response, reply)).reply.text, /already reached/);
+    assert.equal(answers.length, 1);
+    assert.equal(calls.filter((call) => call.url.endsWith('/requests') && call.options.method === 'POST').length, 1);
+    assert.equal(c.outbox.records.length, 1);
+    assert.match(
+      (await c.inbound({ ...response, content: 'different' }, { ...reply, messageId: '458' })).reply.text,
+      /already been resolved/
+    );
+    assert.equal((await c.inbound(response, { ...reply, senderId: '999' })).handled, false);
+    assert.equal(answers.length, 1);
+  });
+}
+
+test('provider-proven not-dispatched startup failures retry, permanent rejection and unknown sends do not', () => {
+  const error = Object.assign(new Error('No active WhatsApp Web listener'), {
+    code: 'OPENCLAW_PLATFORM_MESSAGE_NOT_DISPATCHED',
+    retryable: true,
+  });
+  assert.equal(deliveryRetryDelay(error, 1), 5000);
+  assert.equal(deliveryRetryDelay(error, 6), undefined);
+  assert.equal(deliveryRetryDelay({ ...error, retryable: false }, 1), undefined);
+  assert.equal(deliveryRetryDelay(new Error('Unknown recipient-visible outcome'), 1), undefined);
+});
+test('brain result retrieves a late native completion instead of an old review notification', async (t) => {
+  const h = harness(t);
+  const c = h.make();
+  await c.inbound(event, ctx);
+  await c.tick();
+  const record = c.outbox.records[0];
+  record.status = 'outcome_unknown';
+  record.delivery = 'delivered';
+  record.parts = ['Your latest request needs attention'];
+  record.receipts = ['1'];
+  c.outbox.put(record);
+  h.finish();
+  const result = await c.inbound({ ...event, content: 'brain result' }, { ...ctx, messageId: '457' });
+  assert.equal(result.reply.text, 'answer'.repeat(1000));
+  assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 1);
+});
+
+test('multiline staging preserves exact UTF-8 bytes without wrapping or added breaks', (t) => {
+  const f = mediaFixture(t);
+  for (const text of [
+    'first\n\nsecond\n',
+    '\r\nfirst\r\n\tsecond\r\n',
+    '```sh\ndocker run \\\n  --name test\n```',
+    'a\u2028b\u2029c',
+  ]) {
+    const prompt = stageMedia({ ...f, text, media: [], mediaRoot: undefined });
+    const path = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(prompt)[1]);
+    assert.deepEqual(readFileSync(path), Buffer.from(text, 'utf8'));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.doesNotMatch(prompt, /[\r\n\t\u2028\u2029]/);
+    assert.equal(stageMedia({ ...f, text, media: [], mediaRoot: undefined }), prompt);
+    assert.equal(brainRequestText(`Brain, ${text}`), text);
+  }
+  const prompt = stageMedia({ ...f, text: 'caption\n\nwith blanks' });
+  assert.match(prompt, /Original|original message/);
+  assert.match(prompt, /file and image tools/);
+});
+
+test('multiline ingress survives duplicate delivery and connector restart with unchanged bytes', async (t) => {
+  const f = mediaFixture(t);
+  const h = harness(t, {
+    fetchImpl: async (url, options) => {
+      if (url.endsWith(`/assistants/${config.assistantId}`))
+        return Response.json({
+          success: true,
+          data: {
+            id: config.assistantId,
+            enabled: true,
+            capabilities: { requestExecution: true },
+            binding: { workingDir: f.workingDir },
+          },
+        });
+      assert.doesNotMatch(JSON.parse(options.body).text, /[\r\n]/);
+      return Response.json({
+        success: true,
+        data: {
+          id: randomUUID(),
+          assistantId: config.assistantId,
+          idempotencyKey: JSON.parse(options.body).idempotencyKey,
+          status: 'running',
+        },
+      });
+    },
+  });
+  let c = h.make();
+  const text = '\nfirst\r\n\r\nsecond\tvalue\n';
+  const message = { ...event, content: `brain ${text}` };
+  assert.match((await c.inbound(message, ctx)).reply.text, /On it/);
+  const saved = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(c.outbox.records[0].text)[1]);
+  assert.equal(readFileSync(saved, 'utf8'), text);
+  c = h.make();
+  assert.match((await c.inbound(message, ctx)).reply.text, /already/);
+  assert.equal(c.outbox.records.length, 1);
+  assert.match((await c.inbound({ ...message, content: `brain ${text.replace('\r\n', '\n')}` }, ctx)).reply.text, /conflict/);
+  await c.tick();
+  assert.equal(c.outbox.records[0].status, 'running');
+  assert.equal(readFileSync(saved, 'utf8'), text);
 });

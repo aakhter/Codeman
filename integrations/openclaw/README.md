@@ -115,6 +115,34 @@ explicitly through that trusted originating-channel adapter too; automatic dispa
 replies remain suppressed. Delivery-denied, internal, group/thread and unauthorized
 turns remain blocked. Prompts/results are not sent through another model.
 
+## Questions during a Codex task (COD-507)
+
+When the linked local Codex task asks a question, Brain sends it to the same
+WhatsApp or Telegram chat. Reply directly to that question message, without a
+Brain prefix. You can also send `brain answer <your answer>` when exactly one
+question is pending in that chat. Use an option number or label for choices;
+for several questions, put one answer on each line.
+
+Answers resume the original request and native turn. They do not create another
+queued task. Native async questions use `turn/steer` with the exact active turn
+precondition and a recorded user-message ID. Blocking questions use the native
+server request/response protocol. Codeman only subscribes to an already-loaded
+local daemon thread at the bound `CODEX_HOME`; it never starts a replacement CLI
+or daemon. This question relay requires a Codex version with that daemon API.
+Claude/OpenCode task execution remains supported, but their interactive question
+relay is not implemented here.
+
+Question receipts are saved separately from final results, with the same
+channel/account/private-chat/sender checks and delivery retry policy. Gateway
+restarts preserve reply ownership. Provider-confirmed failures before dispatch
+(including an unavailable WhatsApp listener during startup) use bounded retries;
+unknown sends still require review. Duplicate confirmed answers are acknowledged
+without another native write; stale questions and uncertain answer writes ask
+for review in Codeman. Secret-marked native questions and permission approvals
+stay in Codeman. Pending questions pause the normal observation deadline;
+answering grants another 30 minutes for completion. Async question messages are
+excluded from final-answer detection.
+
 ## Incoming photos and files
 
 Attach a photo or document and put the request in its Telegram or WhatsApp caption:
@@ -373,3 +401,60 @@ result delivery retry, receipt-backed replies after service restart, and desktop
 and mobile checks. Artifacts: `/tmp/cod487-assistant-canary-d4J86l/summary.json`.
 This proves the connector against an isolated native session and a test adapter;
 production WhatsApp receipt acceptance requires a new user message.
+
+### WhatsApp table presentation (COD-506)
+
+New WhatsApp results render ordinary Markdown tables and self-contained tables
+inside plain/text/Markdown code fences as labelled row blocks. Strict bordered
+ASCII tables inside those fences are supported too. Ordinary code and ambiguous
+or malformed tables remain unchanged. All columns are labelled and retained;
+blank cells appear as an em dash. The native answer in Codeman is never rewritten.
+
+Tables exceeding eight rows or 3500 rendered characters use a two-row preview
+and a CSV document with all columns and rows. Spreadsheet formula-like cells are
+prefixed with an apostrophe; CSV quotes and embedded quotes are escaped. Normal
+text is chunked at 3500 UTF-16 units; table rows stay together. Oversized rows go
+to CSV rather than being truncated.
+
+Export data is persisted in the private outbox, so a retry or gateway restart
+uses the exact saved parts and receipts, without rerunning Brain or resending
+acknowledged parts. Existing deliveries keep their saved presentation, including
+partially delivered answers from earlier releases. Export files use private
+per-send directories and are deleted after the awaited adapter send, including
+failed sends. `brain result` can retrieve an answer and its CSV; replies to CSV
+receipts are owned by Brain in the same private chat. No production answer is
+automatically resent when this formatting change is enabled.
+
+Run the native end-to-end canary with
+`node scripts/smoke-openclaw-assistant.mjs --whatsapp --delivery-retry --reply --tables`.
+It verifies the unchanged native table, formatted preview and full CSV using a
+test document adapter without sending a real WhatsApp message.
+
+COD-506 evidence (2026-10-11): 44 formatter/connector regressions and the root
+wrapper passed, along with typecheck, lint (existing warning), format and lockfile
+checks. Native Codex + browser canary passed table/CSV delivery, input attachments,
+retry without replay, prefix-free replies and desktop/mobile controls. Artifacts:
+`/tmp/cod487-assistant-canary-c4Jdpc/summary.json`. The channel adapter was a test
+adapter; real recipient rendering still requires a new user WhatsApp request.
+
+
+## Multiline messages (COD-508)
+
+Telegram and WhatsApp requests can contain multiple lines, blank lines, tabs, and
+pasted commands. The connector removes only the Brain addressing prefix. It saves
+the remaining message as a private UTF-8 file in the bound local workspace,
+without trimming, wrapping, appending a newline, or changing LF/CRLF line breaks.
+The native assistant reads that file as the user's original message. This also
+works with attachments and all supported local assistant CLIs; the underlying
+HTTP request and terminal submission remain single-line. No media download folder
+is required for text-only messages. Terminal escape/control characters remain
+rejected, and the original 20,000-character input limit still applies.
+
+The message file uses the existing bounded private attachment storage and survives
+connector restarts and duplicate delivery. Original-message hashes still detect
+edited duplicate messages. Files may contain sensitive pasted text: archive them
+with the workspace's other retained assistant attachments. Messages rejected
+before this fix are not automatically replayed; send a new message after updating.
+
+Run `node scripts/smoke-openclaw-assistant.mjs --whatsapp --multiline` for an
+isolated native readback with exact saved-byte assertions and temporary attachments.

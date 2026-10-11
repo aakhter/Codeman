@@ -1,4 +1,6 @@
 import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, lstatSync, writeFileSync, rmSync } from 'node:fs';
+import { validAnswerPart } from './whatsapp-format.mjs';
 import { Connector, Outbox, brainRequestText, trustedDestination, validateConfig } from './connector.mjs';
 
 export default {
@@ -62,7 +64,7 @@ export default {
         // Use the receipt-bearing trusted adapter for every connector reply,
         // including acknowledgements/status. Reply ownership survives restart.
         try {
-          await deliver(destination, result.reply.text);
+          for (const part of result.reply.parts ?? [result.reply.text]) await deliver(destination, part);
           queuedFinal = true;
         } catch {
           // The request may already be accepted. Never fall back to the model
@@ -81,13 +83,38 @@ export default {
         deliver = async (destination, text) => {
           const adapter = await api.runtime.channel.outbound.loadAdapter(destination.channel ?? 'telegram');
           if (!adapter?.sendText) throw new Error('Channel delivery adapter unavailable');
-          const receipt = await adapter.sendText({
+          if (!validAnswerPart(text)) throw new Error('Unsupported answer part');
+          const payload = {
             cfg: ctx.config,
             accountId: destination.accountId,
             to: destination.chatId,
-            text,
             signal: AbortSignal.timeout(10000),
-          });
+          };
+          let receipt;
+          if (typeof text === 'string') receipt = await adapter.sendText({ ...payload, text });
+          else {
+            if (destination.channel !== 'whatsapp' || !adapter.sendMedia)
+              throw new Error('Document adapter unavailable');
+            const root = join(ctx.stateDir, 'codeman-assistant-exports');
+            mkdirSync(root, { recursive: true, mode: 0o700 });
+            const info = lstatSync(root);
+            if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o077)
+              throw new Error('Export directory requires review');
+            const directory = mkdtempSync(join(root, 'send-'));
+            try {
+              const path = join(directory, text.name);
+              writeFileSync(path, text.data, { mode: 0o600, flag: 'wx' });
+              receipt = await adapter.sendMedia({
+                ...payload,
+                text: text.name,
+                mediaUrl: path,
+                mediaLocalRoots: [directory],
+                forceDocument: true,
+              });
+            } finally {
+              rmSync(directory, { recursive: true, force: true });
+            }
+          }
           connector?.rememberReplyTarget(destination, String(receipt?.messageId ?? ''));
           return receipt;
         };

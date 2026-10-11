@@ -138,6 +138,7 @@ let browser;
 let service;
 let assistant;
 const receipts = [];
+const documents = [];
 let resultDeliveryAttempts = 0;
 const errors = [];
 const checks = [];
@@ -362,6 +363,15 @@ try {
           loadAdapter: async (adapterChannel) => {
             assert.equal(adapterChannel, channel);
             return {
+              sendMedia: async (context) => {
+                documents.push({
+                  path: context.mediaUrl,
+                  data: readFileSync(context.mediaUrl, 'utf8'),
+                  to: context.to,
+                });
+                assert.equal(context.forceDocument, true);
+                return { messageId: `CSV${documents.length}` };
+              },
               sendText: async (context) => {
                 if (/^(On it|I already have)/.test(context.text)) {
                   acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
@@ -400,6 +410,13 @@ try {
       MessageSid: '456',
     },
   };
+  if (process.argv.includes('--multiline')) {
+    event.ctx.BodyForCommands =
+      event.ctx.BodyForCommands.replace(' and inspect', '\r\n\r\nand inspect').replace(
+        ' Reply only',
+        '\n\nReply only'
+      ) + '\n';
+  }
   const context = {
     dispatcher: {
       sendFinalReply: () => {
@@ -432,6 +449,12 @@ try {
   assert.equal(requests[0].binding.conversationId, assistant.binding.conversationId);
   assert.equal(requests[0].result.text.trim(), `${hiddenCode}${pdfCode ? ` ${pdfCode}` : ''} triangle blue`);
   assert.match(requests[0].text, /\.codeman-telegram/);
+  if (process.argv.includes('--multiline')) {
+    const messagePath = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(requests[0].text)[1]);
+    assert.deepEqual(readFileSync(messagePath), Buffer.from(event.ctx.BodyForCommands.replace(/^Brain, /, ''), 'utf8'));
+    assert.doesNotMatch(requests[0].text, /[\r\n]/);
+    checks.push('multiline original message preserves exact UTF-8 bytes and native CLI follows its instructions');
+  }
   checks.push(
     `real ${mode} reads durable text attachment and visually identifies image after temporary sources expire`
   );
@@ -493,6 +516,36 @@ try {
     );
   }
 
+  if (process.argv.includes('--tables')) {
+    assert.equal(whatsapp, true);
+    const before = receipts.length;
+    const tableEvent = {
+      ...event,
+      ctx: {
+        ...event.ctx,
+        media: [],
+        MessageSid: 'TABLE01',
+        BodyForCommands:
+          'Brain, Return only a Markdown table with columns Item and State and exactly nine data rows Item1 through Item9, each with State Ready. No prose or code fence.',
+      },
+    };
+    assert.equal((await ingress(tableEvent, context)).handled, true);
+    await until(() => documents.length === 1 && receipts.length === before + 1, 120000);
+    assert.match(receipts.at(-1).text, /9 rows/);
+    assert.match(receipts.at(-1).text, /\*\*Item: Item1\*\*/);
+    assert.equal(documents[0].to, sender);
+    assert.equal(documents[0].data.split('\r\n').filter(Boolean).length, 10);
+    assert.ok(!existsSync(documents[0].path));
+    const completed = (await api(`/assistants/${assistant.id}/requests`)).requests.find(
+      (r) => r.text === tableEvent.ctx.BodyForCommands.replace(/^Brain, /, '')
+    );
+    assert.equal(completed.status, 'completed');
+    assert.match(completed.result.text, /\|.*Item.*\|.*State.*\|/);
+    checks.push(
+      'native table preserved in Codeman; WhatsApp receives readable row preview and full CSV through document adapter with private-file cleanup'
+    );
+  }
+
   await page.getByRole('button', { name: 'Open assistants', exact: true }).click();
   await sleep(3500);
   assert.match(await page.locator('#assistantsList').innerText(), /completed/i);
@@ -500,6 +553,41 @@ try {
   assert.equal(await page.locator('.assistant-tiles').count(), 1);
   assert.ok(!(await page.locator('.assistant-card').innerText()).includes(assistant.binding.conversationId));
   await page.screenshot({ path: join(root, 'desktop-assistants.png') });
+  if (process.argv.includes('--questions')) {
+    assert.equal(mode, 'codex');
+    const before = (await api(`/assistants/${assistant.id}/requests`)).requests.length;
+    const startReceipts = receipts.length;
+    const questionEvent = { ...event, ctx: {
+      ...event.ctx, media: [], MessageSid: '50701',
+      BodyForCommands: 'Brain, Call request_user_input_async with arguments {"questions":[{"title":"What is the test color?"}]}. If the answer has not arrived, call clock.sleep for 30000 ms. Wait for the user answer before concluding; the answer will arrive while sleeping. After the answer reply only COLOR=<answer>.',
+    } };
+    assert.equal((await ingress(questionEvent, context)).handled, true);
+    const question = await until(async () => {
+      const all = (await api(`/assistants/${assistant.id}/requests`)).requests;
+      return all.find(r => r.pendingInput && r.text.includes('What is the test color?'));
+    }, 120000);
+    await until(() => receipts.slice(startReceipts).some(r => r.text.startsWith('Brain has a question:')));
+    const questionReceipt = receipts.findIndex((r, i) => i >= startReceipts && r.text.startsWith('Brain has a question:')) + 1;
+    // Restart the connector after the question receipt is durable, then answer without a Brain prefix.
+    await service.stop();
+    await service.start(serviceContext);
+    const answer = { ...event, ctx: { ...event.ctx, media: [], MessageSid: '50702',
+      ReplyToId: String(questionReceipt), BodyForCommands: 'purple' } };
+    assert.equal((await ingress(answer, context)).handled, true);
+    assert.equal((await ingress(answer, context)).handled, true);
+    const completed = await until(async () => {
+      const r = await api(`/assistant-requests/${question.id}`);
+      return r.status === 'completed' ? r : undefined;
+    }, 120000);
+    assert.equal(completed.result.text.trim().toLowerCase(), 'color=purple');
+    assert.equal(completed.turnId, question.turnId);
+    assert.equal(completed.inputAnswers.length, 1);
+    assert.equal(completed.inputAnswers[0].state, 'answered');
+    assert.equal((await api(`/assistants/${assistant.id}/requests`)).requests.length, before + 1);
+    await until(() => receipts.slice(startReceipts).some(r => r.text.trim().toLowerCase() === 'color=purple'));
+    checks.push(`native async question -> ${channel} receipt -> prefix-free duplicate answer -> same Codex turn -> final result; connector restart preserves ownership`);
+  }
+
   const helper = await api('/assistants', 'POST', { name: 'Canary helper', slug: 'canary-helper' });
   await page.evaluate(() => app.refreshAssistants());
   await page.getByRole('button', { name: /Canary helper/ }).click();

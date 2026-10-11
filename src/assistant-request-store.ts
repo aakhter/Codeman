@@ -12,6 +12,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import { CodexInput } from './assistant-codex-input.js';
 import { dataPath } from './config/instance.js';
 const Schema = z
   .object({
@@ -58,6 +59,22 @@ const Schema = z
       .strict()
       .optional(),
     turnId: z.string().optional(),
+    pendingInput: CodexInput.optional(),
+    inputAnswers: z
+      .array(
+        z
+          .object({
+            questionKey: z.string().max(500),
+            clientId: z.string().max(200).optional(),
+            text: z.string().max(300000).optional(),
+            idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+            payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
+            state: z.enum(['sending', 'answered', 'outcome_unknown']),
+          })
+          .strict()
+      )
+      .max(100)
+      .optional(),
     result: z
       .object({ text: z.string().max(1000000) })
       .strict()

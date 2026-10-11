@@ -22,6 +22,7 @@ function requiredScope(req: FastifyRequest, principal: AssistantPrincipal): Assi
   }
   if (/^\/api\/assistant-requests\/[a-zA-Z0-9-]+$/.test(path) && req.method === 'GET') return 'read';
   if (/^\/api\/assistant-requests\/[a-zA-Z0-9-]+\/cancel$/.test(path) && req.method === 'POST') return 'cancel';
+  if (/^\/api\/assistant-requests\/[a-zA-Z0-9-]+\/answer$/.test(path) && req.method === 'POST') return 'submit';
   return undefined;
 }
 
