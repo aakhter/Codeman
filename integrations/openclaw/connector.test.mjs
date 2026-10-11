@@ -1376,3 +1376,97 @@ test('WhatsApp result exports use private temporary files, document receipts and
   const stored = new Outbox(join(stateDir, 'codeman-assistant-outbox.json'));
   assert.ok(stored.replyTargets.some((r) => r.messageId === 'CSV02'));
 });
+
+for (const channel of ['telegram', 'whatsapp']) {
+  test(`${channel} questions and duplicate quoted answers stay on the original request across restart`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'connector-question-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const path = join(root, 'outbox.json');
+    const cfg = { ...config, whatsapp: { accountId: config.accountId, allowFrom: ['+15551234567'] } };
+    const sender = channel === 'telegram' ? '123' : '+15551234567';
+    const context = { ...ctx, channelId: channel, senderId: sender, conversationId: sender };
+    const inbound = { ...event, channel, content: 'brain ask me' };
+    const id = randomUUID();
+    const pendingInput = {
+      kind: 'async',
+      requestId: 'call_question',
+      itemId: 'call_question',
+      threadId: randomUUID(),
+      turnId: randomUUID(),
+      isBlocking: false,
+      questions: [
+        {
+          id: '0',
+          header: '',
+          question: 'Which color?',
+          options: [
+            { label: 'Purple', description: '' },
+            { label: 'Blue', description: '' },
+          ],
+          isOther: true,
+        },
+      ],
+    };
+    let pending = pendingInput;
+    const answers = [];
+    const calls = [];
+    const sends = [];
+    const fetchImpl = async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith(`/assistants/${config.assistantId}`))
+        return Response.json({
+          success: true,
+          data: { id: config.assistantId, enabled: true, capabilities: { requestExecution: true } },
+        });
+      const key = new Outbox(path).records[0].key;
+      if (url.endsWith('/answer')) {
+        const body = JSON.parse(options.body);
+        assert.deepEqual(body.answers, { 0: { answers: ['Purple'] } });
+        answers.push({ questionKey: body.questionKey, idempotencyKey: body.idempotencyKey, state: 'answered' });
+        pending = undefined;
+      }
+      return Response.json({
+        success: true,
+        data: {
+          id,
+          assistantId: config.assistantId,
+          idempotencyKey: key,
+          status: 'running',
+          pendingInput: pending,
+          inputAnswers: answers,
+        },
+      });
+    };
+    const make = () =>
+      new Connector({
+        config: cfg,
+        outbox: new Outbox(path),
+        token: () => `cma_${'a'.repeat(43)}`,
+        fetchImpl,
+        deliver: async (destination, text) => {
+          sends.push({ destination, text });
+          return { messageId: String(500 + sends.length) };
+        },
+      });
+    let c = make();
+    await c.inbound(inbound, context);
+    await c.tick();
+    await c.tick();
+    assert.equal(sends.length, 1);
+    assert.match(sends[0].text, /Brain has a question/);
+    c = make();
+    const response = { ...inbound, content: '1' };
+    const reply = { ...context, messageId: '457', replyToMessageId: '501' };
+    assert.match((await c.inbound(response, reply)).reply.text, /reached Brain/);
+    assert.match((await c.inbound(response, reply)).reply.text, /already reached/);
+    assert.equal(answers.length, 1);
+    assert.equal(calls.filter((call) => call.url.endsWith('/requests') && call.options.method === 'POST').length, 1);
+    assert.equal(c.outbox.records.length, 1);
+    assert.match(
+      (await c.inbound({ ...response, content: 'different' }, { ...reply, messageId: '458' })).reply.text,
+      /already been resolved/
+    );
+    assert.equal((await c.inbound(response, { ...reply, senderId: '999' })).handled, false);
+    assert.equal(answers.length, 1);
+  });
+}

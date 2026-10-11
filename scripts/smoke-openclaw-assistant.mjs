@@ -540,6 +540,41 @@ try {
   assert.equal(await page.locator('.assistant-tiles').count(), 1);
   assert.ok(!(await page.locator('.assistant-card').innerText()).includes(assistant.binding.conversationId));
   await page.screenshot({ path: join(root, 'desktop-assistants.png') });
+  if (process.argv.includes('--questions')) {
+    assert.equal(mode, 'codex');
+    const before = (await api(`/assistants/${assistant.id}/requests`)).requests.length;
+    const startReceipts = receipts.length;
+    const questionEvent = { ...event, ctx: {
+      ...event.ctx, media: [], MessageSid: '50701',
+      BodyForCommands: 'Brain, Call request_user_input_async with arguments {"questions":[{"title":"What is the test color?"}]}. If the answer has not arrived, call clock.sleep for 30000 ms. Wait for the user answer before concluding; the answer will arrive while sleeping. After the answer reply only COLOR=<answer>.',
+    } };
+    assert.equal((await ingress(questionEvent, context)).handled, true);
+    const question = await until(async () => {
+      const all = (await api(`/assistants/${assistant.id}/requests`)).requests;
+      return all.find(r => r.pendingInput && r.text.includes('What is the test color?'));
+    }, 120000);
+    await until(() => receipts.slice(startReceipts).some(r => r.text.startsWith('Brain has a question:')));
+    const questionReceipt = receipts.findIndex((r, i) => i >= startReceipts && r.text.startsWith('Brain has a question:')) + 1;
+    // Restart the connector after the question receipt is durable, then answer without a Brain prefix.
+    await service.stop();
+    await service.start(serviceContext);
+    const answer = { ...event, ctx: { ...event.ctx, media: [], MessageSid: '50702',
+      ReplyToId: String(questionReceipt), BodyForCommands: 'purple' } };
+    assert.equal((await ingress(answer, context)).handled, true);
+    assert.equal((await ingress(answer, context)).handled, true);
+    const completed = await until(async () => {
+      const r = await api(`/assistant-requests/${question.id}`);
+      return r.status === 'completed' ? r : undefined;
+    }, 120000);
+    assert.equal(completed.result.text.trim().toLowerCase(), 'color=purple');
+    assert.equal(completed.turnId, question.turnId);
+    assert.equal(completed.inputAnswers.length, 1);
+    assert.equal(completed.inputAnswers[0].state, 'answered');
+    assert.equal((await api(`/assistants/${assistant.id}/requests`)).requests.length, before + 1);
+    await until(() => receipts.slice(startReceipts).some(r => r.text.trim().toLowerCase() === 'color=purple'));
+    checks.push(`native async question -> ${channel} receipt -> prefix-free duplicate answer -> same Codex turn -> final result; connector restart preserves ownership`);
+  }
+
   const helper = await api('/assistants', 'POST', { name: 'Canary helper', slug: 'canary-helper' });
   await page.evaluate(() => app.refreshAssistants());
   await page.getByRole('button', { name: /Canary helper/ }).click();

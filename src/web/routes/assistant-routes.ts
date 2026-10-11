@@ -183,6 +183,32 @@ export function registerAssistantRoutes(
     },
   }));
   app.get('/api/assistant-requests/:id', async (req) => ({ success: true, data: request(req) }));
+  app.post('/api/assistant-requests/:id/answer', async (req) => {
+    const r = request(req);
+    const input = parseBody(
+      z
+        .object({
+          questionKey: z.string().min(1).max(500),
+          idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+          answers: z
+            .record(
+              z.string().min(1).max(200),
+              z
+                .object({
+                  answers: z.array(z.string().trim().min(1).max(20000)).length(1),
+                })
+                .strict()
+            )
+            .refine((a) => Object.keys(a).length > 0 && Object.keys(a).length <= 10),
+        })
+        .strict(),
+      req.body
+    );
+    return {
+      success: true,
+      data: await mutate(() => engine().answer(r, input.questionKey, input.answers, input.idempotencyKey)),
+    };
+  });
   app.post('/api/assistant-requests/:id/cancel', async (req) => ({
     success: true,
     data: await mutate(() => engine().cancel(request(req))),

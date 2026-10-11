@@ -192,6 +192,78 @@ export function chunks(text, limit = 3500) {
   return result;
 }
 
+const questionKey = (q) => hash(JSON.stringify([q.threadId, q.turnId, q.itemId]));
+function validQuestion(q) {
+  return (
+    q &&
+    typeof q.key === 'string' &&
+    q.key.length <= 500 &&
+    Array.isArray(q.parts) &&
+    q.parts.length <= 50 &&
+    q.parts.every((p) => typeof p === 'string' && p.length <= 3500) &&
+    Array.isArray(q.receipts) &&
+    q.receipts.length <= q.parts.length &&
+    q.receipts.every((p) => typeof p === 'string' && p.length <= 128) &&
+    ['pending', 'sending', 'delivered', 'delivery_unknown', 'resolved'].includes(q.delivery) &&
+    (q.retryAt === undefined || Number.isSafeInteger(q.retryAt)) &&
+    (q.failures === undefined || (Number.isInteger(q.failures) && q.failures >= 0 && q.failures <= 6))
+  );
+}
+function questionParts(input) {
+  if (
+    !input ||
+    [input.threadId, input.turnId, input.itemId].some((v) => typeof v !== 'string' || !v || v.length > 200) ||
+    !['string', 'number'].includes(typeof input.requestId) ||
+    !Array.isArray(input.questions) ||
+    !input.questions.length ||
+    input.questions.length > 10 ||
+    input.questions.some(
+      (q) =>
+        !q ||
+        q.isSecret ||
+        typeof q.id !== 'string' ||
+        typeof q.question !== 'string' ||
+        q.question.length > 10000 ||
+        (q.options != null && !Array.isArray(q.options))
+    )
+  )
+    throw new ContractViolation('Unsupported native question');
+  const text = input.questions
+    .map((q, index) => {
+      const options = (q.options ?? [])
+        .map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`)
+        .join('\n');
+      return `${input.questions.length > 1 ? `${index + 1}) ` : ''}${q.question}${options ? `\n${options}` : ''}`;
+    })
+    .join('\n\n');
+  return chunks(
+    `Brain has a question:\n\n${text}\n\nReply to this message with your answer${input.questions.length > 1 ? ', one line per question' : ''}. You can also send brain answer followed by your answer.`
+  );
+}
+function nativeAnswers(input, text) {
+  const lines =
+    input.questions.length === 1
+      ? [text.trim()]
+      : text
+          .split(/\r?\n/)
+          .map((t) => t.trim())
+          .filter(Boolean);
+  if (lines.length !== input.questions.length || lines.some((t) => !t || t.length > 20000)) return undefined;
+  const answers = {};
+  for (const [i, q] of input.questions.entries()) {
+    let answer = lines[i];
+    const options = q.options ?? [];
+    if (options.length) {
+      const number = /^[1-9][0-9]*$/.test(answer) ? Number(answer) : undefined;
+      const option = number ? options[number - 1] : options.find((o) => o.label.toLowerCase() === answer.toLowerCase());
+      if (option) answer = option.label;
+      else if (!q.isOther) return undefined;
+    }
+    answers[q.id] = { answers: [answer] };
+  }
+  return answers;
+}
+
 export class Outbox {
   constructor(path) {
     this.path = path;
@@ -230,6 +302,10 @@ export class Outbox {
             ) ||
             r.receipts.some((receipt) => typeof receipt !== 'string' || !receipt) ||
             r.receipts.length > r.parts.length ||
+            (r.questions !== undefined &&
+              (!Array.isArray(r.questions) ||
+                r.questions.length > 100 ||
+                r.questions.some((q) => !validQuestion(q)))) ||
             (r.requestId !== undefined && !uuid.test(r.requestId)) ||
             (r.status !== undefined && !states.has(r.status)) ||
             !/^[a-f0-9]{64}$/.test(r.payloadHash ?? '') ||
@@ -254,7 +330,10 @@ export class Outbox {
       this.records = file.records;
       this.replyTargets = file.replyTargets ?? [];
       // A crash during a platform send has an unknown recipient-visible outcome.
-      for (const r of this.records) if (r.delivery === 'sending') r.delivery = 'delivery_unknown';
+      for (const r of this.records) {
+        if (r.delivery === 'sending') r.delivery = 'delivery_unknown';
+        for (const q of r.questions ?? []) if (q.delivery === 'sending') q.delivery = 'delivery_unknown';
+      }
     }
   }
   put(record) {
@@ -377,9 +456,105 @@ export class Connector {
     const replyId = ctx.replyToMessageId;
     if (!destination || !validMessageId(channelOf(destination), replyId)) return undefined;
     const owned =
-      this.outbox.records.some((r) => this.authorizedRecord(r, destination) && r.receipts.includes(replyId)) ||
-      this.outbox.replyTargets.some((r) => this.authorizedRecord(r, destination) && r.messageId === replyId);
+      this.outbox.records.some(
+        (r) =>
+          this.authorizedRecord(r, destination) &&
+          (r.receipts.includes(replyId) || r.questions?.some((q) => q.receipts.includes(replyId)))
+      ) || this.outbox.replyTargets.some((r) => this.authorizedRecord(r, destination) && r.messageId === replyId);
     return owned && typeof event.content === 'string' ? event.content : undefined;
+  }
+  async answerQuestion(destination, replyId, text, explicit) {
+    const records = this.outbox.records.filter((r) => this.authorizedRecord(r, destination));
+    let matches = records.flatMap((r) =>
+      (r.questions ?? [])
+        .filter((q) => (replyId ? q.receipts.includes(replyId) : q.delivery === 'delivered'))
+        .map((q) => ({ r, q }))
+    );
+    if (!replyId) {
+      const live = [];
+      for (const match of matches) {
+        const current = this.request(await this.api(`/assistant-requests/${match.r.requestId}`), match.r);
+        if (current.pendingInput && questionKey(current.pendingInput) === match.q.key) live.push({ ...match, current });
+      }
+      matches = live;
+    }
+    if (!matches.length)
+      return explicit
+        ? { handled: true, reply: { text: 'No pending question is available. Check Brain in Codeman.' } }
+        : undefined;
+    if (matches.length !== 1)
+      return { handled: true, reply: { text: 'Please reply directly to the question you want to answer.' } };
+    const { r, q } = matches[0];
+    const current = matches[0].current ?? this.request(await this.api(`/assistant-requests/${r.requestId}`), r);
+    const key = hash(
+      JSON.stringify([
+        channelOf(destination),
+        destination.accountId,
+        destination.chatId,
+        destination.messageId,
+        r.requestId,
+        q.key,
+      ])
+    );
+    const previous = current.inputAnswers?.find((a) => a.idempotencyKey === key);
+    if (previous?.state === 'answered')
+      return { handled: true, reply: { text: 'Your answer has already reached Brain.' } };
+    if (!current.pendingInput || questionKey(current.pendingInput) !== q.key)
+      return {
+        handled: true,
+        reply: { text: 'That question has already been resolved. Check the latest reply from Brain.' },
+      };
+    const answers = nativeAnswers(current.pendingInput, text);
+    if (!answers)
+      return {
+        handled: true,
+        reply: {
+          text: 'Please use a listed option number or label. For several questions, answer each on its own line.',
+        },
+      };
+    await this.api(`/assistant-requests/${r.requestId}/answer`, 'POST', {
+      questionKey: q.key,
+      answers,
+      idempotencyKey: key,
+    });
+    q.delivery = 'resolved';
+    this.outbox.put(r);
+    return { handled: true, reply: { text: 'Thanks — your answer has reached Brain.' } };
+  }
+  async deliverQuestion(r, input) {
+    const key = questionKey(input);
+    r.questions ??= [];
+    let q = r.questions.find((q) => q.key === key);
+    if (!q) {
+      if (r.questions.length >= 100) throw new ContractViolation('Too many questions');
+      q = { key, parts: questionParts(input), receipts: [], delivery: 'pending' };
+      r.questions.push(q);
+      this.outbox.put(r);
+    }
+    if (q.delivery !== 'pending' || (q.retryAt ?? 0) > this.now()) return;
+    for (let index = q.receipts.length; index < q.parts.length; index++) {
+      q.delivery = 'sending';
+      this.outbox.put(r);
+      try {
+        const receipt = await this.deliver(r.destination, q.parts[index]);
+        if (!validMessageId(channelOf(r.destination), String(receipt?.messageId)))
+          throw new Error('Missing question receipt');
+        q.receipts.push(String(receipt.messageId));
+        q.delivery = 'pending';
+        delete q.failures;
+        delete q.retryAt;
+        this.outbox.put(r);
+      } catch (e) {
+        q.failures = Math.min((q.failures ?? 0) + 1, 6);
+        const delay = deliveryRetryDelay(e, q.failures);
+        q.delivery = delay === undefined ? 'delivery_unknown' : 'pending';
+        if (delay !== undefined) q.retryAt = this.now() + delay;
+        this.outbox.put(r);
+        return;
+      }
+    }
+    q.delivery = 'delivered';
+    this.outbox.put(r);
   }
   async inbound(event, ctx) {
     const body = event.content ?? '';
@@ -387,6 +562,28 @@ export class Connector {
     if (text === undefined) return { handled: false };
     const destination = trustedDestination(event, ctx, this.config);
     if (!destination) return { handled: true }; // Never send unauthorized text to the model or reply destination.
+    const explicitAnswer = /^answer(?:\s|$)/i.test(text);
+    const quotedQuestion = this.outbox.records.some(
+      (r) =>
+        this.authorizedRecord(r, destination) && r.questions?.some((q) => q.receipts.includes(ctx.replyToMessageId))
+    );
+    if (explicitAnswer || quotedQuestion) {
+      try {
+        return (
+          (await this.answerQuestion(
+            destination,
+            quotedQuestion ? ctx.replyToMessageId : undefined,
+            explicitAnswer ? text.replace(/^answer\s*/i, '') : text,
+            explicitAnswer
+          )) ?? { handled: true }
+        );
+      } catch {
+        return {
+          handled: true,
+          reply: { text: 'Your answer could not be confirmed. Check Brain in Codeman before trying again.' },
+        };
+      }
+    }
     let media;
     try {
       media = inboundMedia(event.mediaSource ?? event);
@@ -585,6 +782,8 @@ export class Connector {
         if (this.stopped) continue;
         const result = this.request(await this.api(`/assistant-requests/${r.requestId}`), r);
         r.status = result.status;
+        if (result.pendingInput && ['dispatching', 'running', 'awaiting_approval'].includes(result.status))
+          await this.deliverQuestion(r, result.pendingInput);
         if (result.status === 'completed') {
           if (typeof result.result?.text !== 'string' || !result.result.text || result.result.text.length > 1000000)
             throw new ContractViolation('Unsupported completed result');

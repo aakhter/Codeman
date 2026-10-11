@@ -115,6 +115,32 @@ explicitly through that trusted originating-channel adapter too; automatic dispa
 replies remain suppressed. Delivery-denied, internal, group/thread and unauthorized
 turns remain blocked. Prompts/results are not sent through another model.
 
+## Questions during a Codex task (COD-507)
+
+When the linked local Codex task asks a question, Brain sends it to the same
+WhatsApp or Telegram chat. Reply directly to that question message, without a
+Brain prefix. You can also send `brain answer <your answer>` when exactly one
+question is pending in that chat. Use an option number or label for choices;
+for several questions, put one answer on each line.
+
+Answers resume the original request and native turn. They do not create another
+queued task. Native async questions use `turn/steer` with the exact active turn
+precondition and a recorded user-message ID. Blocking questions use the native
+server request/response protocol. Codeman only subscribes to an already-loaded
+local daemon thread at the bound `CODEX_HOME`; it never starts a replacement CLI
+or daemon. This question relay requires a Codex version with that daemon API.
+Claude/OpenCode task execution remains supported, but their interactive question
+relay is not implemented here.
+
+Question receipts are saved separately from final results, with the same
+channel/account/private-chat/sender checks and delivery retry policy. Gateway
+restarts preserve reply ownership. Duplicate confirmed answers are acknowledged
+without another native write; stale questions and uncertain answer writes ask
+for review in Codeman. Secret-marked native questions and permission approvals
+stay in Codeman. Pending questions pause the normal observation deadline;
+answering grants another 30 minutes for completion. Async question messages are
+excluded from final-answer detection.
+
 ## Incoming photos and files
 
 Attach a photo or document and put the request in its Telegram or WhatsApp caption:

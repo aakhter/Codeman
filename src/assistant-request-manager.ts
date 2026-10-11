@@ -1,4 +1,5 @@
 /** Durable acceptance with conservative reconciliation across the non-atomic PTY-write boundary. */
+import { CodexInputBridge, codexQuestionKey, type CodexAnswers } from './assistant-codex-input.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { open, stat, realpath } from 'node:fs/promises';
 import { AssistantConflict, resolveAssistantBinding, type AssistantSession } from './assistant-registry.js';
@@ -30,6 +31,8 @@ const unresolved = (r: AssistantRequest) =>
   active(r) || (['outcome_unknown', 'interrupted'].includes(r.status) && !r.reconciled);
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 export class AssistantRequestManager {
+  private inputBridges = new Map<string, CodexInputBridge>();
+  private answering = new Set<string>();
   private handoffs = new Map<
     string,
     { sessionId: string; generation: number; permit: string; session: AssistantExecutionSession; pid: number }
@@ -295,6 +298,8 @@ export class AssistantRequestManager {
     this.recovery?.disarm(a.id);
     this.takingControl.add(a.id);
     try {
+      for (const r of this.store.list().filter((r) => r.assistantId === a.id))
+        while (this.answering.has(r.id)) await new Promise((resolve) => setTimeout(resolve, 50));
       await this.dispatches.get(a.id); // The mux submission must settle before input ownership changes.
       for (const r of this.store.list().filter((r) => r.assistantId === a.id)) {
         if (r.status === 'queued') this.cancel(r);
@@ -358,6 +363,109 @@ export class AssistantRequestManager {
     const conversation = await findAssistantConversation(r.binding, live);
     return conversation?.id === r.binding.conversationId ? conversation.path : undefined;
   }
+  private inputBridge(r: AssistantRequest): CodexInputBridge {
+    let bridge = this.inputBridges.get(r.id);
+    if (!bridge) {
+      bridge = new CodexInputBridge(r.binding.codexHome, r.binding.conversationId, r.binding.workingDir);
+      this.inputBridges.set(r.id, bridge);
+    }
+    return bridge;
+  }
+  async answer(
+    r: AssistantRequest,
+    questionKey: string,
+    answers: CodexAnswers,
+    idempotencyKey: string
+  ): Promise<AssistantRequest> {
+    r = this.store.get(r.id)!;
+    const payloadHash = digest(JSON.stringify(Object.entries(answers).sort(([a], [b]) => a.localeCompare(b))));
+    const previous = r.inputAnswers?.find((a) => a.idempotencyKey === idempotencyKey || a.questionKey === questionKey);
+    if (previous) {
+      if (previous.payloadHash !== payloadHash || previous.questionKey !== questionKey)
+        throw new AssistantConflict('This question already has a different answer');
+      if (previous.state !== 'answered')
+        throw new AssistantConflict('Answer outcome needs review in Codeman; no automatic replay');
+      return r;
+    }
+    const q = r.pendingInput;
+    const assistant = this.assistants.get(r.assistantId);
+    if (
+      this.stopped ||
+      this.answering.has(r.id) ||
+      !active(r) ||
+      !q ||
+      codexQuestionKey(q) !== questionKey ||
+      q.turnId !== r.turnId ||
+      q.threadId !== r.binding.conversationId ||
+      !assistant?.enabled ||
+      this.takingControl.has(r.assistantId) ||
+      !(await this.grantValid(r)) ||
+      (await this.transcriptIdentity(r)) !== r.transcript?.path
+    )
+      throw new AssistantConflict('The original question is no longer available');
+    if (
+      Object.keys(answers).length !== q.questions.length ||
+      q.questions.some(
+        (question) =>
+          question.isSecret ||
+          !answers[question.id] ||
+          answers[question.id].answers.length !== 1 ||
+          (!question.isOther &&
+            question.options?.length &&
+            !question.options.some((o) => o.label === answers[question.id].answers[0]))
+      )
+    )
+      throw new AssistantConflict('Answer each question using a listed option, or answer secret questions in Codeman');
+    if ((r.inputAnswers?.length ?? 0) >= 100) throw new AssistantConflict('Question history is full');
+    this.answering.add(r.id);
+    try {
+      const bridge = this.inputBridge(r);
+      const current =
+        q.kind === 'async' && (await bridge.asyncPending(q))
+          ? q
+          : (await bridge.inputs(q.turnId)).find((input) => codexQuestionKey(input) === questionKey);
+      if (!current || JSON.stringify(current) !== JSON.stringify(q))
+        throw new AssistantConflict('Question was already resolved');
+      // Persist before the native response: an uncertain write is never replayed after a crash.
+      const clientId = q.kind === 'async' ? randomUUID() : undefined;
+      const text =
+        q.kind === 'async'
+          ? q.questions
+              .map((question) => `${question.question}\nAnswer: ${answers[question.id].answers[0]}`)
+              .join('\n\n')
+          : undefined;
+      if (
+        this.takingControl.has(r.assistantId) ||
+        !active(this.store.get(r.id)!) ||
+        !this.assistants.get(r.assistantId)?.enabled ||
+        !(await this.grantValid(r))
+      )
+        throw new AssistantConflict('Question ownership changed');
+      const attempt = { questionKey, idempotencyKey, payloadHash, clientId, text, state: 'sending' as const };
+      this.change(this.store.get(r.id)!, { inputAnswers: [...(r.inputAnswers ?? []), attempt] });
+      try {
+        await bridge.answer(q, answers, clientId, text);
+        const latest = this.store.get(r.id)!;
+        return this.change(latest, {
+          pendingInput: undefined,
+          deadline: Date.now() + 30 * 60 * 1000,
+          inputAnswers: latest.inputAnswers!.map((a) =>
+            a.idempotencyKey === idempotencyKey ? { ...a, state: 'answered' } : a
+          ),
+        });
+      } catch {
+        const latest = this.store.get(r.id)!;
+        this.change(latest, {
+          inputAnswers: latest.inputAnswers!.map((a) =>
+            a.idempotencyKey === idempotencyKey ? { ...a, state: 'outcome_unknown' } : a
+          ),
+        });
+        throw new AssistantConflict('Native answer outcome is unknown; check Codeman before retrying');
+      }
+    } finally {
+      this.answering.delete(r.id);
+    }
+  }
   private async observe(r: AssistantRequest): Promise<void> {
     if (!r.transcript) {
       this.change(r, { status: 'outcome_unknown', reason: 'Dispatch evidence missing' });
@@ -390,7 +498,26 @@ export class AssistantRequestManager {
         result =
           assistantBindingMode(r.binding) === 'claude'
             ? observeClaudeAssistantTurn(delta, r.binding.conversationId, r.text)
-            : observeAssistantTurn(delta, r.binding.conversationId, r.text);
+            : observeAssistantTurn(delta, r.binding.conversationId, r.text, r.inputAnswers);
+      }
+      if (result.state === 'running' && assistantBindingMode(r.binding) === 'codex') {
+        try {
+          const inputs = await this.inputBridge(r).inputs(result.turnId);
+          const candidate =
+            inputs.find((q) => !q.questions.some((question) => question.isSecret)) ??
+            (result.pendingInput && (await this.inputBridge(r).asyncPending(result.pendingInput))
+              ? result.pendingInput
+              : undefined);
+          const pendingInput =
+            candidate && !this.store.get(r.id)?.inputAnswers?.some((a) => a.questionKey === codexQuestionKey(candidate))
+              ? candidate
+              : undefined;
+          const current = this.store.get(r.id)!;
+          if (JSON.stringify(current.pendingInput) !== JSON.stringify(pendingInput))
+            this.change(current, { pendingInput });
+        } catch {
+          /* Daemon absence must not discard transcript completion evidence. */
+        }
       }
       const latest = this.store.get(r.id)!;
       if (!active(latest) && latest.status !== 'outcome_unknown') return;
@@ -401,14 +528,15 @@ export class AssistantRequestManager {
           result: { text: result.text },
           reconciled: true,
           reason: undefined,
+          pendingInput: undefined,
         });
       else if (result.state === 'unknown') this.change(latest, { status: 'outcome_unknown', reason: result.reason });
-      else if (Date.now() >= r.deadline)
+      else if (Date.now() >= r.deadline && !latest.pendingInput)
         this.change(latest, {
           status: 'outcome_unknown',
           reason: 'Observation deadline exceeded; task may still be running',
         });
-      else if (result.state === 'running' && latest.status === 'dispatching')
+      else if (result.state === 'running' && (latest.status === 'dispatching' || latest.turnId !== result.turnId))
         this.change(latest, { status: 'running', turnId: result.turnId });
     } catch (err) {
       const latest = this.store.get(r.id)!;
@@ -504,6 +632,13 @@ export class AssistantRequestManager {
     if (this.stopped) return;
     for (const r of this.store.list())
       if (active(r) || (r.status === 'outcome_unknown' && !r.reconciled)) await this.observe(r);
+    for (const [id, bridge] of this.inputBridges) {
+      const r = this.store.get(id);
+      if (!r || !active(r)) {
+        bridge.close();
+        this.inputBridges.delete(id);
+      }
+    }
     await this.recovery?.tick();
     for (const r of this.store.list().filter((r) => r.status === 'queued')) {
       if (this.stopped) return;
@@ -554,6 +689,9 @@ export class AssistantRequestManager {
     this.stopped = true;
     clearInterval(this.timer);
     await this.pumping;
+    while (this.answering.size) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (const bridge of this.inputBridges.values()) bridge.close();
+    this.inputBridges.clear();
     this.handoffs.clear();
   }
 }
