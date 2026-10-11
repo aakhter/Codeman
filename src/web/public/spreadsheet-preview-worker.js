@@ -1,15 +1,35 @@
-/** @fileoverview COD-280 same-origin XLSX parsing worker. */
+/**
+ * @fileoverview Same-origin XLSX parsing worker for the file-preview overlay.
+ *
+ * Runs off the main thread and is the ONLY place the spreadsheet vendor bundles
+ * load: fflate + the pure core at worker start, ExcelJS only after the ZIP has
+ * passed `admitXlsx()` (entry/inflate/ratio/cell/style caps). ExcelJS is then
+ * given a STORE-only archive rebuilt from the entries admission inflated, never
+ * the fetched bytes, so it can only parse what admission counted. The page never
+ * loads either vendor file. Cell values are sent back as plain strings; the
+ * renderer writes them with `textContent`. Formulas are never evaluated (the
+ * cached result is shown, else the formula text), and nothing here fetches:
+ * external links, images and drawings are reported as unsupported features.
+ *
+ * Script URLs are RELATIVE so they resolve against this worker's own URL, which
+ * keeps a reverse-proxy `--base-url` mount working.
+ */
 
 'use strict';
 
 const spreadsheetAssetVersion = new URL(self.location.href).searchParams.get('v') || 'dev';
 const spreadsheetAssetQuery = `?v=${encodeURIComponent(spreadsheetAssetVersion)}`;
-importScripts(`/vendor/fflate.min.js${spreadsheetAssetQuery}`, `/spreadsheet-xlsx-core.js${spreadsheetAssetQuery}`);
+importScripts(`vendor/fflate.min.js${spreadsheetAssetQuery}`, `spreadsheet-xlsx-core.js${spreadsheetAssetQuery}`);
 
 const core = self.CodemanSpreadsheetXlsxCore;
 let workbook = null;
 let sheetsById = new Map();
+// Per sheet: its populated rows in order, each with its populated cells in
+// column order, built once at load from the keys that exist (`populatedRowIndex`).
 let populatedRowsById = new Map();
+// Merges read once at load: `sheet.model` rebuilds every row and cell model,
+// which is far too much to pay on every tile.
+let mergesById = new Map();
 let normalizedStyles = [];
 let styleIds = new Map();
 let themePalette = core.DEFAULT_THEME_PALETTE;
@@ -22,26 +42,20 @@ function postError(error) {
   });
 }
 
-// COD-287: ExcelJS keeps the workbook's raw theme XML on `_themes.theme1`; the
-// fflate re-read is a fallback (admission already bounded the file) and the
-// default Office palette is the last resort.
-function readThemeXml(loadedWorkbook, bytes) {
+// Maximum cells in one tile reply; the renderer draws at most this many too.
+const MAX_TILE_CELLS = 2500;
+
+// ExcelJS keeps the workbook's raw theme XML on `_themes.theme1`; the admitted
+// entry is the fallback and the default Office palette is the last resort.
+function readThemeXml(loadedWorkbook, admittedEntries) {
   const stashed = loadedWorkbook?._themes?.theme1;
   if (typeof stashed === 'string' && stashed.length > 0) return stashed;
-  try {
-    const entries = self.fflate.unzipSync(new Uint8Array(bytes), {
-      filter: (file) => file.name === 'xl/theme/theme1.xml',
-    });
-    const theme = entries['xl/theme/theme1.xml'];
-    if (theme) return new TextDecoder().decode(theme);
-  } catch (error) {
-    void error;
-  }
-  return '';
+  const theme = admittedEntries?.['xl/theme/theme1.xml'];
+  return theme ? new TextDecoder().decode(theme) : '';
 }
 
 function normalizeStyle(cell) {
-  // COD-287: colours are resolved and contrast-checked as a PAIR. Emitting a
+  // Colours are resolved and contrast-checked as a PAIR. Emitting a
   // font colour without its background lets workbook text land on the skin's
   // `var(--bg-primary)` and disappear.
   const colors = core.resolveCellColors(cell.fill?.fgColor, cell.font?.color, themePalette);
@@ -66,23 +80,56 @@ function normalizeStyle(cell) {
   return id;
 }
 
+// Ascending numeric own keys of a sparse array. ExcelJS keeps rows at
+// `_rows[r - 1]` and a row's cells at `_cells[col - 1]`, and one far index puts
+// the array in dictionary mode, where its own `eachRow`, `eachCell` and
+// `hasValues` (forEach/some) visit every index up to the largest: a single XFD
+// cell per row costs 16,384 steps a row. Walking the keys that exist does not.
+function presentIndices(sparse) {
+  const indices = [];
+  for (const key of Object.keys(sparse || [])) {
+    const index = Number(key);
+    if (Number.isInteger(index) && index >= 0) indices.push(index);
+  }
+  return indices.sort((a, b) => a - b);
+}
+
+// The rows and cells `sheet.eachRow({ includeEmpty: false })` and
+// `row.eachCell({ includeEmpty: false })` would visit, in the same order: a
+// cell counts when it exists and its type is not `ValueType.Null`, and a row
+// counts when it holds at least one such cell (ExcelJS's `row.hasValues`).
+function populatedRowIndex(sheet) {
+  const nullType = self.ExcelJS.ValueType.Null;
+  const rows = [];
+  for (const rowIndex of presentIndices(sheet._rows)) {
+    const row = sheet._rows[rowIndex];
+    if (!row) continue;
+    const cells = [];
+    for (const cellIndex of presentIndices(row._cells)) {
+      const cell = row._cells[cellIndex];
+      if (cell && cell.type !== nullType) cells.push(cell);
+    }
+    if (cells.length > 0) rows.push({ number: row.number, row, cells });
+  }
+  return rows;
+}
+
 function worksheetMetadata(sheet) {
   const cellRefs = [];
-  const populatedRows = [];
-  sheet.eachRow({ includeEmpty: false }, (row) => {
-    populatedRows.push(row.number);
-    row.eachCell({ includeEmpty: false }, (cell) => {
+  const rowOverrides = [];
+  const populatedRows = populatedRowIndex(sheet);
+  for (const { number, row, cells } of populatedRows) {
+    for (const cell of cells) {
       cellRefs.push(cell.address);
       normalizeStyle(cell);
-    });
-  });
-  const merges = Array.from(sheet.model?.merges || []);
+    }
+    if (row.hidden) rowOverrides.push([number, 0]);
+    else if (row.height) rowOverrides.push([number, Math.min(546, Math.max(0, row.height * (4 / 3)))]);
+  }
+  // `sheet.model` rebuilds every row and cell model, so merges come straight
+  // from ExcelJS's own merge map, in the order the model getter would list them.
+  const merges = Object.values(sheet._merges || {}).map((merge) => merge.range);
   const extent = core.deriveExtent(cellRefs, merges);
-  const rowOverrides = [];
-  sheet.eachRow({ includeEmpty: false }, (row) => {
-    if (row.hidden) rowOverrides.push([row.number, 0]);
-    else if (row.height) rowOverrides.push([row.number, Math.min(546, Math.max(0, row.height * (4 / 3)))]);
-  });
   const columnOverrides = [];
   for (let col = 1; col <= extent.cols; col += 1) {
     const column = sheet.getColumn(col);
@@ -91,6 +138,7 @@ function worksheetMetadata(sheet) {
   }
   return {
     populatedRows,
+    merges,
     metadata: {
       id: String(sheet.id),
       name: sheet.name,
@@ -113,14 +161,30 @@ function cellDisplay(cell, date1904, warnings) {
 
 async function loadWorkbook(bytes) {
   const admission = core.admitXlsx(new Uint8Array(bytes), self.fflate);
-  if (!self.ExcelJS) importScripts(`/vendor/exceljs.min.js${spreadsheetAssetQuery}`);
+  const admitted = core.buildAdmittedArchive(admission, self.fflate);
+  if (!self.ExcelJS) importScripts(`vendor/exceljs.min.js${spreadsheetAssetQuery}`);
   const nextWorkbook = new self.ExcelJS.Workbook();
-  await nextWorkbook.xlsx.load(bytes);
+  // ExcelJS's DefinedNames model setter expands every range into one object per
+  // cell (a whole-sheet name exhausts the heap), and admission reads only the
+  // `<sheet>` ids in xl/workbook.xml, never defined names. The preview never shows defined names, so they are not
+  // stored at all; print areas and titles are split off before this setter runs.
+  // defineProperty throws if a future ExcelJS renames `_definedNames`, rather
+  // than silently expanding again.
+  Object.defineProperty(nextWorkbook._definedNames, 'model', { configurable: true, get: () => [], set: () => {} });
+  // ExcelJS expands every address of a `<dataValidation sqref>` into its own
+  // object (a whole-column dropdown is a million), and the preview never shows
+  // validations, so they are not parsed at all. `maxRows` is a per-sheet
+  // backstop behind admission's row count, which also caps the workbook total.
+  await nextWorkbook.xlsx.load(admitted, {
+    ignoreNodes: ['dataValidations'],
+    maxRows: core.LIMITS.maxRowsPerSheet,
+  });
   const nextSheets = new Map();
   const nextRows = new Map();
+  const nextMerges = new Map();
   normalizedStyles = [];
   styleIds = new Map();
-  themePalette = core.parseThemePalette(readThemeXml(nextWorkbook, bytes));
+  themePalette = core.parseThemePalette(readThemeXml(nextWorkbook, admission.entries));
   const sheets = [];
   for (const sheet of nextWorkbook.worksheets) {
     if (sheet.state === 'hidden' || sheet.state === 'veryHidden') continue;
@@ -128,11 +192,13 @@ async function loadWorkbook(bytes) {
     const metadata = sheetResult.metadata;
     nextSheets.set(metadata.id, sheet);
     nextRows.set(metadata.id, sheetResult.populatedRows);
+    nextMerges.set(metadata.id, sheetResult.merges);
     sheets.push(metadata);
   }
   workbook = nextWorkbook;
   sheetsById = nextSheets;
   populatedRowsById = nextRows;
+  mergesById = nextMerges;
   self.postMessage({
     type: 'metadata',
     sheets,
@@ -151,9 +217,22 @@ function sendTile(message) {
   const warnings = new Set();
   const cells = [];
   const seenCells = new Set();
+  let truncated = false;
+  // Hidden rows and columns are 0 px, so a viewport can span thousands of them
+  // (a filtered sheet); they are never drawn, so never sent.
+  const hiddenColumns = new Map();
+  const columnHidden = (col) => {
+    if (!hiddenColumns.has(col)) hiddenColumns.set(col, Boolean(sheet.getColumn(col).hidden));
+    return hiddenColumns.get(col);
+  };
   const addCell = (cell) => {
     const key = `${cell.row}:${cell.col}`;
     if (seenCells.has(key) || (cell.isMerged && cell.master !== cell)) return;
+    if (sheet.getRow(cell.row).hidden || columnHidden(cell.col)) return;
+    if (cells.length >= MAX_TILE_CELLS) {
+      truncated = true;
+      return;
+    }
     seenCells.add(key);
     cells.push({
       row: cell.row,
@@ -163,28 +242,31 @@ function sendTile(message) {
     });
   };
   const populatedRows = populatedRowsById.get(String(message.sheetId)) || [];
-  for (const rowNumber of populatedRows) {
-    if (rowNumber < range.r1) continue;
-    if (rowNumber > range.r2) break;
-    const row = sheet.getRow(rowNumber);
-    row.eachCell({ includeEmpty: false }, (cell) => {
-      if (cell.col < range.c1 || cell.col > range.c2) return;
+  for (const populated of populatedRows) {
+    if (truncated) break;
+    if (populated.number < range.r1) continue;
+    if (populated.number > range.r2) break;
+    if (populated.row.hidden) continue;
+    for (const cell of populated.cells) {
+      if (cell.col < range.c1) continue;
+      if (cell.col > range.c2) break;
       addCell(cell);
-    });
-    if (cells.length > 2500) throw new core.XlsxPreviewError('tile-limit', 'Spreadsheet tile exceeds the cell limit');
+    }
   }
-  const merges = core.intersectingMerges(Array.from(sheet.model?.merges || []), range);
+  const merges = core.intersectingMerges(mergesById.get(String(message.sheetId)) || [], range);
   for (const merge of merges) {
     const anchor = core.parseRange(merge);
     if (anchor) addCell(sheet.getCell(anchor.r1, anchor.c1));
   }
+  if (truncated) warnings.add(`View truncated to the first ${MAX_TILE_CELLS} cells`);
   self.postMessage({
     type: 'tile',
     requestId: message.requestId,
     sheetId: String(message.sheetId),
     cells,
     merges,
-    warnings: Array.from(warnings),
+    // One counted entry for many unsupported number formats keeps the notice bar short.
+    warnings: core.foldWarnings(Array.from(warnings)),
   });
 }
 
@@ -197,6 +279,7 @@ self.onmessage = async (event) => {
       workbook = null;
       sheetsById = new Map();
       populatedRowsById = new Map();
+      mergesById = new Map();
       themePalette = core.DEFAULT_THEME_PALETTE;
     }
   } catch (error) {

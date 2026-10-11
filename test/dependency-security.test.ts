@@ -50,7 +50,7 @@ function expectEveryLockedVersionAtLeast(
   lock: PackageLock,
   packageName: string,
   minimum: string,
-  /** Versions this policy deliberately does not cover; see the uuid call site. */
+  /** Exact versions deliberately outside this policy; each call site says why. */
   exempt: string[] = []
 ): void {
   const versions = lockedVersions(lock, packageName);
@@ -143,12 +143,10 @@ describe('dependency security policy', () => {
     // <=10.1.1, so every 9.x is affected and the fix is only on the 10.x line.
     expectEveryLockedVersionAtLeast(lock, '@fastify/static', '10.1.2');
     expectEveryLockedVersionAtLeast(lock, 'ip-address', '10.2.0');
-    // This suite's policy is CRITICAL and HIGH findings. Our own uuid stays >= 14,
-    // but exceljs@4.4.0 (the COD-280 XLSX preview, a fork-only dependency upstream
-    // does not carry) pins uuid@8.3.2 transitively, and npm audit rates that chain
-    // MODERATE — outside this policy. exceljs has no release that moves off uuid@8,
-    // so the alternative is forcing an override of a just-shipped viewer's
-    // dependency to satisfy a rule that was never aimed at it.
+    // Our own uuid stays >= 14. exceljs@4.4.0 (devDependency, vendored into the
+    // XLSX preview worker at build time) pins uuid@8.3.2 and only calls v4();
+    // GHSA-w5hq-g745-h8pq is MODERATE and covers v3/v5/v6 with a caller buffer,
+    // so it is outside this CRITICAL/HIGH policy and unreachable from exceljs.
     expectEveryLockedVersionAtLeast(lock, 'uuid', '14.0.0', ['8.3.2']);
     // ⚠️ Floor stays 8.20.1, NOT 8.21.0. Production ws is already 8.21.0 and clear of
     // GHSA-96hv-2xvq-fx4p, but @remotion/renderer bundles its own ws@8.20.1 and remotion
@@ -162,6 +160,10 @@ describe('dependency security policy', () => {
     expectEveryLockedVersionAtLeast(lock, 'find-my-way', '9.7.0');
     expectEveryLockedVersionAtLeast(lock, 'basic-ftp', '5.3.1');
     expectEveryLockedVersionAtLeast(lock, 'flatted', '3.4.2');
+    // GHSA-px8p-9vwx-vf98 (unbounded loop on a ZIP64 marker in a local header)
+    // covers <=0.8.2. The XLSX preview worker streams untrusted files through
+    // fflate's Unzip before any admission callback runs.
+    expectEveryLockedVersionAtLeast(lock, 'fflate', '0.8.3');
     expectNoVulnerableBraceExpansion(lock);
     expectNoVulnerableVite(lock);
     expectNoVulnerablePicomatch(lock);

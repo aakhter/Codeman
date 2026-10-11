@@ -10,6 +10,9 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = resolve(repoRoot, 'src/web/public');
 const prettierBin = resolve(repoRoot, 'node_modules/.bin/prettier');
 const checkedExtensions = new Set(['.js', '.css', '.html', '.json']);
+// Combined budget for the two XLSX-preview vendor bundles (exceljs + fflate).
+// They load only inside the spreadsheet worker, but a dependency bump that
+// balloons them should be a deliberate decision, not a silent one.
 const SPREADSHEET_VENDOR_MAX_BYTES = 1_100_000;
 
 function collectTextAssets(dir) {
@@ -37,6 +40,10 @@ function findNullByte(buffer) {
 const files = collectTextAssets(publicRoot);
 const failures = [];
 
+// The spreadsheet worker is a stable (unhashed) URL, cache-busted by the
+// SPREADSHEET_ASSET_VERSION token in spreadsheet-preview.js. That token must be
+// the content hash of everything the worker loads, or a deploy can pair a new
+// worker with a stale cached core/vendor file (static assets are cached 1y).
 const spreadsheetWorker = join(publicRoot, 'spreadsheet-preview-worker.js');
 const spreadsheetCore = join(publicRoot, 'spreadsheet-xlsx-core.js');
 const spreadsheetEntry = join(publicRoot, 'spreadsheet-preview.js');
@@ -63,7 +70,7 @@ if ([spreadsheetWorker, spreadsheetCore, spreadsheetEntry, ...spreadsheetVendors
     );
   }
 } else {
-  failures.push('Spreadsheet preview assets are missing; run the locked asset preparation step');
+  failures.push('Spreadsheet preview assets are missing; run `node scripts/prepare-spreadsheet-assets.mjs`');
 }
 
 for (const file of files) {

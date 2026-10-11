@@ -24,11 +24,7 @@
 </p>
 
 <p align="center">
-  ⭐ <strong>喜欢 Codeman？<a href="https://github.com/Ark0N/Codeman">在 GitHub 上给它点个 Star 吧！</a></strong>只需轻点一下，就能帮助更多人发现这个项目。⭐
-</p>
-
-<p align="center">
-  <img src="docs/images/subagent-demo-20260724.gif" alt="Codeman — 并行子智能体可视化" width="900">
+  <img src="docs/images/tiles-crt-stats-20261010.gif" alt="Codeman 平铺视图：六个实时智能体（DeepSeek Harness、Claude Code、Pi、Codex、OpenCode 和一个 shell）以 CRT 动画开启与关闭，顶部实时显示 CPU、内存和 Claude 套餐用量" width="800">
 </p>
 
 > 本文档由英文版 [`README.md`](README.md) 翻译而来。如有出入，以英文版为准。
@@ -385,6 +381,14 @@ WATCHING → IDLE DETECTED → SEND UPDATE → /clear → /init → CONTINUE →
 ## 多会话仪表盘
 
 运行 **20 个并行会话**且全程可见 —— 60fps 的实时 xterm.js 终端、按会话的 token 与成本跟踪、基于标签的导航，以及一键管理。
+
+### 平铺网格
+
+<p align="center">
+  <img src="docs/images/tile-grid-20261009.gif" alt="平铺网格：点击平铺按钮，六个实时会话并排打开（DeepSeek Harness、Claude Code、Codex、一个 shell、OpenCode 和 Pi），再点击一次即回到单个会话" width="800">
+</p>
+
+在一个窗口里并排查看和操作最多**六个会话**。点击顶栏的**平铺**按钮（或按 `Ctrl+Shift+G`），会话会以实时终端网格的形式打开：每个窗格都能直接接收键盘输入，并在窗格标题栏中显示智能体的图标、模型和状态。右键单击**平铺**可选择 2、4 或 6 个窗格，按住窗格标题栏拖动即可移动窗格。再次点击**平铺**即回到单个会话，网格会被记住，下次直接恢复。仅限桌面端（窗口宽度约 1180px 以上）。完整说明：[Tile Grid](docs/wiki/Tile-Grid.md)（英文）。
 
 ### 持久化会话
 

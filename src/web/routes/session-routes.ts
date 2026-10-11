@@ -36,6 +36,7 @@ import {
   isAltScreenStripMode,
   isExternalCliMode,
   isMuxAltScreenOnlyStripMode,
+  isMuxMouseStripMode,
 } from '../../session.js';
 import type { PaneCaptureOptions } from '../../mux-interface.js';
 import { SseEvent } from '../sse-events.js';
@@ -119,6 +120,7 @@ import { clampEnvOverridesForOwner } from '../../session-env-clamp.js';
 import { enabledClis, getCli } from '../../config/cli-registry/registry.js';
 import type { NewlineSequence } from '../../config/cli-registry/types.js';
 import { resolveCliLaunchError } from '../../utils/cli-launcher.js';
+import { applyLaunchDefaults } from '../launch-defaults.js';
 import { legacyConfigForMode } from '../../session-cli-registry-bridge.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
@@ -200,11 +202,13 @@ import {
   readDockerHosts,
   toSessionDocker,
 } from '../../docker-hosts.js';
+import { describeUnknownPath, probePathKind } from '../../utils/index.js';
 import { findLatestOmpSessionId } from '../../utils/omp-session-resolver.js';
 import { scanOmpSessionsHistory } from '../../omp-transcript.js';
 import { scanCodexSessionsHistory, codexThreadBySessionId } from '../../codex-transcript.js';
 import { readDeepSeekLastResponse } from '../../deepseek-transcript.js';
 import { appendClaudeCustomTitle } from '../../claude-session-title.js';
+import { UPLOADS_DIR } from '../paste-image-gc.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
@@ -354,6 +358,37 @@ function geminiHome(): string {
 }
 
 /**
+ * The replay half of the strip parity triangle: what `_handleTerminalOutput` (session.ts)
+ * removes from the live stream, removed again from a stored buffer before it is replayed,
+ * because a buffer recorded before the live-side strip existed (or by an older server)
+ * still carries the sequences, and one replayed enable is enough to re-park xterm.
+ *
+ * - `strip-full` (claude/codex/gemini): alt-screen toggles, `3J` and mouse DECSETs.
+ *   xterm obeys the toggles by switching to its scrollback-less alt buffer and wiping
+ *   saved lines, so history disappeared on tab switch.
+ * - `strip-mux-and-mouse` (opencode, tmux-backed): alt-screen toggles and mouse DECSETs.
+ *   A replayed tracking enable parks xterm in report mode, where a drag goes to the CLI
+ *   instead of selecting text (and Ctrl+C without a selection is opencode's app_exit).
+ *   `3J` stays: a TUI is not a `clear` consumer.
+ * - every other mode, tmux-backed: tmux's own client smcup only (#205).
+ *
+ * Exported so the parity with the live strip is a test (claude-scrollback-strip.test.ts).
+ */
+export function stripReplayBuffer(buffer: string, mode: SessionMode, usesMux: boolean): string {
+  if (isAltScreenStripMode(mode)) {
+    return buffer
+      .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
+      .replace(ERASE_SCROLLBACK_PATTERN, '')
+      .replace(MOUSE_TRACKING_PATTERN, '');
+  }
+  if (isMuxMouseStripMode(mode, usesMux)) {
+    return buffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '').replace(MOUSE_TRACKING_PATTERN, '');
+  }
+  if (isMuxAltScreenOnlyStripMode(mode, usesMux)) return buffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '');
+  return buffer;
+}
+
+/**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
  * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA) to animate
  * the spinner and update the status bar. During long thinking phases, these frames
@@ -485,6 +520,51 @@ async function writeRemotePasteImage(remote: SessionRemote, imageDir: string, fi
     transferLabel: 'remote image upload',
     notADirectoryMessage: '.claude-images is not a regular directory',
   });
+}
+
+/**
+ * Create or re-verify `{workingDir}/.codeman-uploads` for a prompt upload, or
+ * null when something other than a regular directory sits there. An agent or
+ * postinstall script could plant `.codeman-uploads -> ~/.ssh/` and redirect
+ * future writes outside workingDir: lstat (not stat) sees the symlink itself,
+ * and mkdir without `recursive` does not follow one for the leaf either;
+ * O_EXCL|O_NOFOLLOW on the file open makes the write itself symlink-safe.
+ * The folder ignores itself: a `.gitignore` of `*`, written once with O_EXCL,
+ * so the user's repository never sees uploads, their own ignore file is never
+ * touched, and a file already there is theirs and stays as it is.
+ */
+async function ensureUploadDir(workingDir: string): Promise<string | null> {
+  // workingDir is guaranteed to exist (live session).
+  const uploadDir = join(workingDir, UPLOADS_DIR);
+  try {
+    const dirStat = await fs.lstat(uploadDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return null;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    try {
+      await fs.mkdir(uploadDir);
+    } catch (mkErr: unknown) {
+      // Concurrent uploads (a batch of photos) race to create the dir — the
+      // losers get EEXIST. Treat an already-present REAL directory as success,
+      // but re-verify it isn't a symlink a racing actor planted.
+      if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
+      const raceStat = await fs.lstat(uploadDir);
+      if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) return null;
+    }
+  }
+  const ignoreFile = join(uploadDir, '.gitignore');
+  try {
+    // 'wx' = O_CREAT|O_EXCL, which also fails on a symlink at the path.
+    await fs.writeFile(ignoreFile, '*\n', { flag: 'wx' });
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return uploadDir;
+    // The create can succeed before the write fails (ENOSPC): an empty ignore
+    // file would read as the user's on the next upload, so take it back; its own
+    // failure must not replace the cause.
+    await fs.rm(ignoreFile, { force: true }).catch(() => {});
+    throw err;
+  }
+  return uploadDir;
 }
 
 // Per-(IP, sessionId) token bucket for paste-image. 30 requests/minute.
@@ -1224,15 +1304,22 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'workingDir is outside your workspace');
     }
 
-    // Validate workingDir exists and is a directory
+    // Validate workingDir exists and is a directory. Bounded: a workingDir on a
+    // network mount that stopped answering must not freeze the event loop, and
+    // "did not answer" is reported as such, never as "does not exist".
     if ((body.workingDir || body.caseName) && !remote) {
-      try {
-        const stat = statSync(workingDir);
-        if (!stat.isDirectory()) {
-          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir is not a directory');
-        }
-      } catch {
+      const kind = await probePathKind(workingDir, { pastCap: true });
+      if (kind === 'unknown') {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          describeUnknownPath('workingDir', workingDir, { pastCap: true })
+        );
+      }
+      if (kind === 'absent') {
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir does not exist');
+      }
+      if (kind !== 'directory') {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir is not a directory');
       }
     }
 
@@ -1382,6 +1469,10 @@ export function registerSessionRoutes(
 
     const globalNice = await ctx.getGlobalNiceConfig();
     const modelConfig = await ctx.getModelConfig();
+    // Synced App Settings launch defaults (capabilities.launchDefaults, codex's model and
+    // effort today) fill the CLI's own config object where the caller left it unset.
+    // Local launches only: a remote attach runs whatever the remote pane already runs.
+    const launchBody = remote ? body : await applyLaunchDefaults(mode, body);
     // Where a model override comes from is a capability, and the three answers are
     // genuinely different mechanisms:
     //   'flag'                 — the CLI takes --model, so read the value the caller sent
@@ -1396,9 +1487,9 @@ export function registerSessionRoutes(
     const modelSource = getCli(mode)?.capabilities.model;
     const model =
       modelSource?.source === 'flag'
-        ? (legacyConfigForMode(mode, body as unknown as Record<string, unknown>)?.[modelSource.param ?? 'model'] as
-            | string
-            | undefined)
+        ? (legacyConfigForMode(mode, launchBody as unknown as Record<string, unknown>)?.[
+            modelSource.param ?? 'model'
+          ] as string | undefined)
         : modelSource?.source === 'claude-settings-file'
           ? body.model || modelConfig?.defaultModel || undefined
           : undefined;
@@ -1415,12 +1506,12 @@ export function registerSessionRoutes(
       deepSeekConfig: gatedDeepSeekConfig,
     } = await _clampExternalCliBypassForOwner(
       owner,
-      body.codexConfig,
-      body.geminiConfig,
-      body.antigravityConfig,
-      body.piConfig,
-      body.grokConfig,
-      body.deepSeekConfig
+      launchBody.codexConfig,
+      launchBody.geminiConfig,
+      launchBody.antigravityConfig,
+      launchBody.piConfig,
+      launchBody.grokConfig,
+      launchBody.deepSeekConfig
     );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
@@ -1435,7 +1526,7 @@ export function registerSessionRoutes(
       model,
       claudeMode: effectiveClaudeMode,
       allowedTools: claudeModeConfig.allowedTools,
-      openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
+      openCodeConfig: mode === 'opencode' ? launchBody.openCodeConfig : undefined,
       codexConfig:
         mode === 'codex'
           ? localCodexCommand !== undefined
@@ -1447,7 +1538,7 @@ export function registerSessionRoutes(
       piConfig: mode === 'pi' ? gatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? gatedGrokConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? gatedDeepSeekConfig : undefined,
-      ompConfig: resolveOmpConfigForCreate(mode, workingDir, body.ompConfig),
+      ompConfig: resolveOmpConfigForCreate(mode, workingDir, launchBody.ompConfig),
       resumeSessionId: validatedResumeId,
       envOverrides: await clampEnvOverridesForOwner(owner, body.envOverrides),
       effort: body.effort,
@@ -3552,21 +3643,9 @@ export function registerSessionRoutes(
         ? rawBuffer
         : stripInkRedrawBloat(rawBuffer);
 
-    // Strip alt-screen toggles and scrollback-erase from Codex/Claude byte
-    // streams. xterm.js obeys them by switching to its scrollback-less alt
-    // buffer and wiping saved lines, so conversation history disappears on tab
-    // switch. Same gate as the live-stream strip in session.ts.
-    if (isAltScreenStripMode(session.mode)) {
-      strippedBuffer = strippedBuffer
-        .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
-        .replace(ERASE_SCROLLBACK_PATTERN, '')
-        .replace(MOUSE_TRACKING_PATTERN, '');
-    } else if (isMuxAltScreenOnlyStripMode(session.mode, session.usesMux)) {
-      // tmux-backed shell/opencode/antigravity: drop tmux's own client smcup only.
-      // A byte buffer recorded before the live-side strip existed can still carry
-      // it, and one replayed `\x1b[?1049h` re-parks xterm in the alt buffer (#205).
-      strippedBuffer = strippedBuffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '');
-    }
+    // Same strip as the live stream (session.ts), so a buffer recorded before the
+    // live-side strip existed cannot re-park xterm on replay. See stripReplayBuffer.
+    strippedBuffer = stripReplayBuffer(strippedBuffer, session.mode, session.usesMux);
 
     if (tailBytes > 0 && strippedBuffer.length > tailBytes) {
       // Fast path: tail from the end, skip expensive banner search on full 2MB buffer.
@@ -4225,9 +4304,21 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'case path is outside your workspace');
     }
 
+    // Bounded probe of a local case folder: a linked case can sit on a network mount
+    // that stopped answering, and a synchronous check there froze the whole server.
+    // Only a DEFINITE absence may scaffold a new case; "did not answer" must not
+    // create one over the top of where the real case is mounted.
+    const localCaseState = remote || docker ? undefined : await probePathKind(resolvedCasePath, { pastCap: true });
+    if (localCaseState === 'unknown') {
+      return createErrorResponse(
+        ApiErrorCode.OPERATION_FAILED,
+        describeUnknownPath('Case folder', resolvedCasePath, { pastCap: true })
+      );
+    }
+
     // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked, non-remote,
     // non-docker cases — docker workspaces are scaffolded in their own block below)
-    if (!remote && !docker && !existsSync(resolvedCasePath)) {
+    if (localCaseState === 'absent') {
       try {
         mkdirSync(resolvedCasePath, { recursive: true });
         mkdirSync(join(resolvedCasePath, 'src'), { recursive: true });
@@ -4342,19 +4433,31 @@ export function registerSessionRoutes(
     // Apply global Nice priority config and model config from settings
     const niceConfig = await ctx.getGlobalNiceConfig();
     const qsModelConfig = await ctx.getModelConfig();
+    // Synced App Settings launch defaults, as on the create path: local launches only, so
+    // never a remote or Docker case, and never a custom model endpoint launch.
+    const qsRequestConfigs = {
+      openCodeConfig,
+      codexConfig,
+      geminiConfig,
+      antigravityConfig,
+      piConfig,
+      grokConfig,
+      deepSeekConfig,
+      ompConfig,
+    };
+    const qsLaunchConfigs =
+      remote || docker ? qsRequestConfigs : await applyLaunchDefaults(mode, qsRequestConfigs, !!customModel);
+    // ⚠️ The model is read from a bag WITHOUT ompConfig, as it always was here: quick-start
+    // has never taken omp's session model from ompConfig (the create path does). Kept as
+    // found rather than changed in passing.
+    const { ompConfig: qsLaunchOmpConfig, ...qsModelConfigs } = qsLaunchConfigs;
     // See the create path for why this is a capability rather than a mode ladder.
     const qsModelSource = getCli(mode)?.capabilities.model;
     const qsModel =
       qsModelSource?.source === 'flag'
-        ? (legacyConfigForMode(mode, {
-            openCodeConfig,
-            codexConfig,
-            geminiConfig,
-            antigravityConfig,
-            piConfig,
-            grokConfig,
-            deepSeekConfig,
-          } as unknown as Record<string, unknown>)?.[qsModelSource.param ?? 'model'] as string | undefined)
+        ? (legacyConfigForMode(mode, qsModelConfigs as unknown as Record<string, unknown>)?.[
+            qsModelSource.param ?? 'model'
+          ] as string | undefined)
         : qsModelSource?.source === 'claude-settings-file'
           ? qsModelConfig?.defaultModel || undefined
           : undefined;
@@ -4370,16 +4473,16 @@ export function registerSessionRoutes(
       deepSeekConfig: qsGatedDeepSeekConfig,
     } = await _clampExternalCliBypassForOwner(
       owner,
-      codexConfig,
-      geminiConfig,
-      antigravityConfig,
-      piConfig,
-      grokConfig,
-      deepSeekConfig
+      qsLaunchConfigs.codexConfig,
+      qsLaunchConfigs.geminiConfig,
+      qsLaunchConfigs.antigravityConfig,
+      qsLaunchConfigs.piConfig,
+      qsLaunchConfigs.grokConfig,
+      qsLaunchConfigs.deepSeekConfig
     );
     // Same owner clamp for env overrides as POST /api/sessions (upstream 74194e4f).
     const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
-    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig);
+    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, resolvedCasePath, qsLaunchOmpConfig);
 
     // Custom Model Endpoint Profiles, applied AT CREATE TIME (docs/custom-model-endpoints-plan.md)
     // rather than via the dedicated restart-in-place route (POST /api/sessions/:id/custom-
@@ -4545,7 +4648,7 @@ export function registerSessionRoutes(
       claudeMode: qsEffectiveClaudeMode,
       allowedTools: qsClaudeModeConfig.allowedTools,
       owner,
-      openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
+      openCodeConfig: mode === 'opencode' ? qsLaunchConfigs.openCodeConfig : undefined,
       codexConfig:
         mode === 'codex'
           ? qsLocalCodexCommand !== undefined
@@ -5686,6 +5789,20 @@ export function registerSessionRoutes(
 
     const session = findSessionOrFail(ctx, id, req);
 
+    // The file lands on THIS host under the session's working directory, which
+    // for a remote (SSH) session is the remote path: the agent there could never
+    // read it, and the write would land in a same-named local directory or fail.
+    // An owned Docker case is fine, its workspace is bind-mounted at the same
+    // absolute path; an adopted container (owned: false) mounts nothing, so its
+    // agent reads the file only if the container exposes that host path.
+    if (session.remote) {
+      reply.code(400);
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'Prompt uploads are not supported for remote (SSH) sessions'
+      );
+    }
+
     if (!req.isMultipart()) {
       reply.code(400);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Expected multipart/form-data');
@@ -5782,62 +5899,25 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Image bytes do not match declared type ${ext}`);
     }
 
-    if (ext === '.heic' || ext === '.heif') {
-      try {
-        imageBytes = await convertHeicToJpeg(imageBytes);
-        ext = '.jpg';
-      } catch (err: unknown) {
-        console.warn(
-          `[paste-image] HEIC conversion failed: filename=${JSON.stringify(part.filename)} mime=${JSON.stringify(part.mimetype)} error=${getErrorMessage(err)}`
-        );
-        reply.code(415);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Could not convert HEIC image to JPEG');
-      }
-    }
-
     // Date.now() collides on same-ms uploads from two tabs (last-write wins
     // silently). Append 8 hex chars so concurrent pastes get distinct names.
     const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${ext}`;
     const remote = getSessionRemote(session);
+    // Remote sessions keep `.claude-images` (written over ssh by the shared
+    // symlink-safe remote writer); local sessions use the self-ignoring
+    // {workingDir}/.codeman-uploads/, see ensureUploadDir.
     const imageDir = remote
       ? pathPosix.join(session.workingDir, '.claude-images')
-      : join(session.workingDir, '.claude-images');
+      : await ensureUploadDir(session.workingDir);
+    if (!imageDir) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, `${UPLOADS_DIR} is not a regular directory`);
+    }
     const filepath = remote ? pathPosix.join(imageDir, filename) : join(imageDir, filename);
 
     if (remote) {
       await writeRemotePasteImage(remote, imageDir, filepath, imageBytes);
     } else {
-      // Save to {workingDir}/.claude-images/
-      // Refuse symlinks at imageDir — an agent or postinstall script could plant
-      // `.claude-images -> ~/.ssh/` and redirect future writes outside workingDir.
-      // We lstat (not stat) so we see the symlink itself. Use mkdir without
-      // `recursive` so the leaf creation does not follow a symlink either, and
-      // O_EXCL|O_NOFOLLOW on the file open so the write itself is symlink-safe.
-      try {
-        const dirStat = await fs.lstat(imageDir);
-        if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-          reply.code(403);
-          return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
-        }
-      } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        // Non-recursive mkdir: does not follow symlinks for the leaf.
-        // session.workingDir is guaranteed to exist (live session).
-        try {
-          await fs.mkdir(imageDir);
-        } catch (mkErr: unknown) {
-          // Concurrent uploads (a batch of photos) race to create .claude-images —
-          // the losers get EEXIST. Treat an already-present REAL directory as
-          // success, but re-verify it isn't a symlink a racing actor planted
-          // (preserve the symlink-safety guarantee above).
-          if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
-          const raceStat = await fs.lstat(imageDir);
-          if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) {
-            reply.code(403);
-            return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
-          }
-        }
-      }
       // O_EXCL: refuse to overwrite (collision is impossible with random suffix,
       // but defends against TOCTOU). O_NOFOLLOW: refuse if filepath is a symlink.
       const fh = await fs.open(

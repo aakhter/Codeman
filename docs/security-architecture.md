@@ -356,8 +356,9 @@ checked before the global download bound and before the range, `nosniff`) and re
 the `/root` and `/etc` trees, extendable via `attachmentBlockedPaths` /
 `CODEMAN_ATTACHMENT_BLOCKED_PATHS`) on every request. Unlike the workspace file
 routes, attachments are intentionally **cross‑workspace** — so the effective gate
-is the blocklist + a 6‑extension allowlist (`png/pdf/docx/pptx/md/txt`), not
-realpath containment.
+is the blocklist + an extension allowlist (`SUPPORTED_ATTACHMENT_EXTENSIONS` in
+`src/attachment-registry.ts`: images, pdf/docx/pptx/xlsx, audio/video, md/txt and
+other text), not realpath containment.
 
 Two registration paths, with **different trust**:
 

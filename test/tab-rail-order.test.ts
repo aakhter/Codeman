@@ -109,10 +109,6 @@ type Row = {
 type RailApp = {
   isTabRailSorted: () => boolean;
   _tabRailSortOrder: (ids: string[]) => Map<string, number> | null;
-  _tabRailVisualOrder: (ref: { kind: string; id: string }, order: Map<string, number>) => number | undefined;
-  tabLayout?: { groups: { id: string; refs: { kind: string; id: string }[] }[] };
-  activeSessionId?: string;
-  sessions: Map<string, Row>;
 };
 
 /**
@@ -139,39 +135,6 @@ const NOW = 1_700_000_000_000;
 const minsAgo = (m: number) => NOW - m * 60_000;
 
 describe('vertical tab rail row order', () => {
-  it('keeps named groups in saved order across selection and activity updates while sorting Ungrouped', () => {
-    const app = makeApp([
-      { id: 'a', status: 'idle', lastActivityAt: minsAgo(1) },
-      { id: 'c', status: 'idle', lastActivityAt: minsAgo(3) },
-      { id: 'quiet', status: 'idle', lastActivityAt: minsAgo(2) },
-      { id: 'blocked', status: 'idle', lastActivityAt: minsAgo(9), hooks: ['permission_prompt'] },
-    ]);
-    app.tabLayout = {
-      groups: [
-        {
-          id: 'g',
-          refs: [
-            { kind: 'session', id: 'a' },
-            { kind: 'webview', id: 'dashboard' },
-            { kind: 'session', id: 'c' },
-          ],
-        },
-      ],
-    };
-    const saved = JSON.stringify(app.tabLayout);
-    const ids = ['a', 'c', 'quiet', 'blocked'];
-    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
-    app.activeSessionId = 'c';
-    app.sessions.get('c')!.lastActivityAt = NOW;
-    app.sessions.get('c')!.status = 'busy';
-    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
-    const order = app._tabRailSortOrder(ids)!;
-    expect(app._tabRailVisualOrder({ kind: 'session', id: 'c' }, order)).toBeUndefined();
-    expect(app._tabRailVisualOrder({ kind: 'webview', id: 'dashboard' }, order)).toBeUndefined();
-    expect(app._tabRailVisualOrder({ kind: 'webview', id: 'ungrouped-web' }, order)).toBe(9999);
-    expect(JSON.stringify(app.tabLayout)).toBe(saved);
-  });
-
   it('puts a blocked session first, longest-blocked ahead of the newest block', () => {
     const ids = ['fresh-block', 'old-block', 'quiet'];
     const app = makeApp([
@@ -242,45 +205,34 @@ describe('vertical tab rail row order', () => {
   it('keeps the Alt+N badge on the tab index while the cards are sorted', () => {
     // `_tabIdx` counts the loop over sessionOrder, and only `style="order:…"`
     // moves the card — so the badge names a shortcut, not a row position.
-    // Downstream's `tabOrder` holds REFS ({kind,id}) from the grouped tab-layout
-    // projection, not ids, so the ids are pulled out before sorting (passing refs
-    // straight through made every sessions.has() false = a silently unsorted rail).
-    expect(appJs).toContain(
-      "tabOrder.filter((ref) => ref.kind !== 'webview' && this.sessions.has(ref.id)).map((ref) => ref.id)"
-    );
-    expect(appJs).toContain('` style="order:${railSortOrder.get(id)}"`');
+    // `listOrder` is the rail sort's map, or the state grouping's when that is
+    // on (test/tab-triage.test.ts); either way it only sets the inline order.
+    expect(appJs).toContain('const liveIds = tabOrder.filter((id) => this.sessions.has(id));');
+    expect(appJs).toContain('const railSortOrder = this._tabRailSortOrder(liveIds);');
+    expect(appJs).toContain('` style="order:${listOrder.get(id)}"`');
     expect(appJs).toMatch(/_tabIdx < 9 \? '<span class="tab-number">' \+ \(_tabIdx \+ 1\)/);
     // The loop itself still walks the user's order, which is what makes the
     // badge, drag-and-drop and the arrow-key walk agree with each other.
-    // Downstream builds the loop order from the grouped layout projection rather
-    // than straight off sessionOrder; the guarantee under test is that the loop
-    // walks the USER's order and only `style="order:"` moves the card.
-    expect(appJs).toContain('const tabOrder = [');
-    expect(appJs).toContain('...projection.visibleRefs,');
+    expect(appJs).toContain('const tabOrder = this.sessionOrder;');
   });
 
   it('re-applies the order from the incremental path, since a state change adds no tab', () => {
     // A session going working→idle never adds or removes a tab, so the full
     // rebuild is not reached — and a rebuild here would restart every card's
     // animation on every SSE tick anyway.
-    expect(appJs).toContain(
-      'const railSortOrder = this._tabRailSortOrder(this.sessionOrder.filter((sid) => this.sessions.has(sid)));'
-    );
+    expect(appJs).toContain('const liveIds = this.sessionOrder.filter((sid) => this.sessions.has(sid));');
+    expect(appJs).toContain('const railSortOrder = this._tabRailSortOrder(liveIds);');
     expect(appJs).toContain('if (tab.style.order !== railOrder) tab.style.order = railOrder;');
     // An empty string is what clears the property when the rail stops sorting.
-    expect(appJs).toContain("const railOrder = railSortOrder?.has(id) ? String(railSortOrder.get(id)) : '';");
+    expect(appJs).toContain("const railOrder = listOrder?.has(id) ? String(listOrder.get(id)) : '';");
   });
 
   it('drops the drag affordance while sorting, so a card cannot snap back', () => {
-    // Downstream replaced upstream's HTML5 `draggable` implementation with a
-    // delegated Pointer-Events drag, so the affordance is dropped by REFUSING the
-    // gesture in pointerdown rather than by clearing an attribute. Same guarantee:
-    // a sorted list cannot also be hand-ordered. Scoped to a FLAT rail, because
-    // with groups a ref drag also moves a tab between groups, which the sort does
-    // not undo, and a Focus-shortcut drag orders its own list.
     const drag = appJs.slice(appJs.indexOf('setupTabDragHandlers() {'));
-    expect(drag).toContain('this.isTabRailSorted?.() &&');
-    expect(drag).toContain('(this.tabLayout?.groups?.length ?? 0) === 0');
+    expect(drag.indexOf('if (this.isTabRailSorted()) {')).toBeLessThan(
+      drag.indexOf("tab.setAttribute('draggable', 'true')")
+    );
+    expect(drag).toContain("tabs.forEach((tab) => tab.setAttribute('draggable', 'false'));");
   });
 
   it('classifies and compares through the shared helpers, never a local copy', () => {
@@ -328,9 +280,10 @@ describe('vertical tab rail sort setting', () => {
     expect(html).toContain("document.documentElement.dataset.tabRailSort='activity';");
     expect(settingsUi).toContain('root.dataset.tabRailSort = sort;');
     // A sort flip leaves orientation on 'vertical' both times, so it has to
-    // count as a change of its own or nothing re-renders.
+    // count as a change of its own or nothing re-renders. The same holds for a
+    // tab layout or state order flip (test/tab-triage.test.ts).
     expect(settingsUi).toContain(
-      'const changed = orientationChanged || previousDetail !== detail || previousSort !== sort;'
+      'const changed = orientationChanged || previousDetail !== detail || previousSort !== sort || previousArrangement !== arrangement || previousStateOrder !== stateOrder;'
     );
   });
 });

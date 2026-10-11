@@ -702,6 +702,13 @@ export const CreateCaseSchema = z.object({
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
   description: z.string().max(1000).optional(),
   codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
+  /**
+   * Create the case in this folder instead of under the cases directory. Absolute, or starting with
+   * `~`. Only length-bounded here: what makes it acceptable (shape, blocked trees, symlinks, an
+   * existing folder with contents) is judged by `prepareNewCasePath()` in web/case-path.ts, which
+   * also produces the user-facing reason.
+   */
+  path: z.string().min(1).max(1000).optional(),
 });
 
 /**
@@ -1512,6 +1519,13 @@ export const SettingsUpdateSchema = z
     // Declared here (like tabTwoRows) so it persists server-side and can seed a
     // fresh device; it is still PER-DEVICE by client policy — settings-ui.js lists
     // it in `displayKeys`, so a server value never overwrites a device's own choice.
+    /**
+     * CLI Logos on Tabs. Display key (per-device), default ON: only an explicit
+     * false hides the agent logo on session tabs and the desktop home rail
+     * (`html[data-tab-logos='off']`, a CSS-only switch). Tile and split headers
+     * and the Run menus keep their logos.
+     */
+    showTabCliLogos: z.boolean().optional(),
     tabOrientation: z.enum(['horizontal', 'vertical']).optional(),
     tabRailWidth: z.number().int().min(208).max(360).optional(),
     tabRailDetail: z.enum(['simple', 'rich']).optional(),
@@ -1524,6 +1538,25 @@ export const SettingsUpdateSchema = z
      *              rail drag-reorderable.
      */
     tabRailSort: z.enum(['activity', 'manual']).optional(),
+    /**
+     * Tab layout, the arrangement of the tab list (Discussion #426). Display key
+     * (per-device).
+     * 'classic' = one flat list in tab order, as before. The default.
+     * 'state'   = a row per state in the header strip (needs you, waiting,
+     *             working, idle; option C), sections in the flat side rail and
+     *             the sidebar. Opt-in.
+     * 'case'    = one cluster per case (option A): a labelled box in the strip,
+     *             a section in the side rail and the sidebar. Opt-in.
+     * 'ledger'  = the flat list on an aligned column grid with a status bar
+     *             per cell (option B). Header strip on desktop only. Opt-in.
+     */
+    tabArrangement: z.enum(['state', 'case', 'ledger', 'classic']).optional(),
+    /**
+     * Which end the state groups start from when `tabArrangement` is 'state'.
+     * Display key (per-device). 'urgent-first' = needs you on top (the
+     * default); 'urgent-last' = the other way up, needs you in the bottom row.
+     */
+    tabStateOrder: z.enum(['urgent-first', 'urgent-last']).optional(),
     /**
      * Session list layout. Display key (per-device).
      * 'header'       = horizontal tab strip
@@ -1586,6 +1619,15 @@ export const SettingsUpdateSchema = z
     // UI visibility
     showFontControls: z.boolean().optional(),
     showSystemStats: z.boolean().optional(),
+    /**
+     * How the header draws its WS / CPU / MEM / plan-usage cluster. Display key
+     * (per-device), desktop only (the cluster is hidden below 768px).
+     * 'classic' = the bars and the 5H · 7D chip, as before
+     * 'compact' = two pills (WS/CPU/MEM, the plan windows), a ring beside every value.
+     *             The default.
+     * 'tiles'   = label over value with a bar underneath, no icons
+     */
+    headerStatsStyle: z.enum(['classic', 'compact', 'tiles']).optional(),
     showTokenCount: z.boolean().optional(),
     showCost: z.boolean().optional(),
     showLifecycleLog: z.boolean().optional(),
@@ -1612,6 +1654,12 @@ export const SettingsUpdateSchema = z
     /** Hide/show the response-viewer (eye) header button */
     showResponseViewer: z.boolean().optional(),
     // Codex CLI settings
+    codexModel: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._\-/]*$/)
+      .optional(),
+    codexReasoningEffort: z.enum(['', ...CODEX_REASONING_EFFORTS]).optional(),
     codexDangerouslyBypassApprovals: z.boolean().optional(),
     codexAnimationsEnabled: z.boolean().nullable().optional(),
     // Terminal history and retention
@@ -1638,6 +1686,8 @@ export const SettingsUpdateSchema = z
         browserNotifications: z.boolean().optional(),
         audioAlerts: z.boolean().optional(),
         stuckThresholdMs: z.number().optional(),
+        toastDurationMs: z.number().optional(),
+        browserAutoCloseMs: z.number().optional(),
         muteCritical: z.boolean().optional(),
         muteWarning: z.boolean().optional(),
         muteInfo: z.boolean().optional(),

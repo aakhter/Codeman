@@ -14,9 +14,10 @@ It renders what it can:
 | Kind                     | Behaviour                                                                 |
 | ------------------------ | ------------------------------------------------------------------------- |
 | Text and code            | Plain preview with Lines (line numbers) and Wrap toggles in the header. Long files are truncated in plain preview. |
-| Markdown                 | Rendered by default: headings, tables, code blocks with copy buttons, images and links relative to the file (root-relative ones resolve from the workspace root, as on GitHub). Opened from an attachment card, where the file's folder is unknown, relative images show their alt text and relative links show as plain text. The MD pill in the header flips to source. |
+| Markdown                 | Rendered by default: headings, tables, code blocks with copy buttons, images and links relative to the file (root-relative ones resolve from the workspace root, as on GitHub). Links to another heading of the same file (`[Install](#installation)`) scroll to it, with GitHub's heading names (lower-case, punctuation dropped, repeats numbered `-1`, `-2`), and never leave the page. Opened from an attachment card, where the file's folder is unknown, relative images show their alt text and relative links show as plain text. The MD pill in the header flips to source. |
 | Images                   | Inline.                                                                    |
 | Audio and video          | Inline with a working scrub bar, because range requests are supported.     |
+| Spreadsheets (`.xlsx`)   | Read-only grid, parsed in your browser (never on the server), up to 10 MB. `.xls` and `.ods` are download only. |
 | PDF and Office documents | Converted for preview when a converter is available.                       |
 | Anything else            | Download.                                                                  |
 
@@ -162,6 +163,44 @@ HEIC images from an iPhone are converted to JPEG on the way in.
 
 When an agent produces a file the UI can show (a chart, a diagram, a document), it can
 surface as an artifact attachment rather than a path you have to go and find.
+
+## Git changes
+
+Agents often leave work uncommitted or unpushed. Turn on **App Settings → Header & Panels →
+Bottom bar → Git status** (per device, off by default) and the right of the bottom bar shows
+the active session's repository: `● 3` uncommitted files, `↑ 2` commits not pushed, `⚠` merge
+conflicts, `? 1` a repository git could not read, `✓` when everything is committed and pushed.
+
+Click it for a draggable window, in the style of the File Viewer:
+
+- **Uncommitted changes**, grouped as staged, not staged, untracked and conflicted, each with a
+  status letter (`M` modified, `A` added, `D` deleted, `R` renamed, `?` new, `U` conflict).
+- **Not pushed**: the commits no remote has. A branch with no upstream says so, and so does one whose
+  upstream does not exist on the remote, because it was never pushed or was deleted there ("Upstream
+  not on remote"), which counts every commit on no remote rather than showing a green tick.
+- Files are grouped under their folders, collapsed until you click a folder (a chain of single-child
+  folders is one row, and the folders you opened stay open when the list refreshes). Turn off
+  **App Settings → Header & Panels → Bottom bar → Git status: group files by folder** for a flat
+  list of full paths instead.
+- **Click a file** to see what changed in it, as a unified diff with added and removed lines
+  coloured. Staged files show index versus last commit, not-staged files show working tree
+  versus index, untracked files show as all additions and deleted files as all removals.
+  **Open file** jumps to the File Viewer; **Back** returns to the list. A binary file shows a
+  note instead, and a diff over 400 KB is cut short.
+- A session folder that holds several projects gets one collapsible section per repository
+  found up to two levels down (up to **Git status: max repositories**, 12 by default; the window says
+  when there are more). A repository git could not read, typically a timeout on a slow network
+  share, is listed with the reason and counted as `? N` in the bottom-bar indicator, never silently
+  left out; the **git timeout** setting raises how long it waits. They all start collapsed (each summary line shows its branch and
+  what is outstanding), and the ones you open stay open when the window refreshes; an unrelated repository above the workspace (a dotfiles repo
+  in your home folder) is ignored.
+
+It is read-only and offline: Codeman never fetches, commits or changes the repository, so
+"behind" is as of your last fetch. It is not shown for Docker or remote (SSH) sessions, and a repository at or inside a Docker case
+workspace is skipped even from a local session (a container can write there, and git would run
+that repository's own configuration on the host). The
+data comes from `GET /api/sessions/:id/git-status` and `GET /api/sessions/:id/git-diff`
+(see the [API reference](https://github.com/Ark0N/Codeman/blob/master/docs/api-reference.md)).
 
 ## Gotchas
 

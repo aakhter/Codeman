@@ -7,10 +7,11 @@
  *
  * @dependency test/mocks/mock-route-context.ts (createMockRouteContext)
  * @dependency src/web/routes/ws-routes.ts (registerWsRoutes)
- * Port: 3170 (ws-routes tests)
+ * Port: ephemeral (`listen({ port: 0 })`)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { AddressInfo } from 'node:net';
 
 const terminalClassifierState = vi.hoisted(() => ({ throwFor: null as string | null }));
 const traceTimingState = vi.hoisted(() => ({
@@ -61,7 +62,8 @@ import { registerWsRoutes } from '../../src/web/routes/ws-routes.js';
 import { MAX_INPUT_LENGTH } from '../../src/config/terminal-limits.js';
 import { createMobileInputTraceCollector, type MobileInputTraceCollector } from '../../src/perf/mobile-input-trace.js';
 
-const PORT = 3170;
+/** Assigned by the OS on every listen (`port: 0`); see beforeEach. */
+let PORT = 0;
 
 /** Helper: open a WebSocket connection and wait for it to reach OPEN state. */
 function connectWs(path: string, timeoutMs = 5000): Promise<WebSocket> {
@@ -148,7 +150,8 @@ describe('ws-routes', () => {
     });
     registerWsRoutes(app, ctx as never, () => ({ bindHost: '127.0.0.1', allowedHosts: [], tunnelHost: null }), trace);
 
-    await app.listen({ port: PORT, host: '127.0.0.1' });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    PORT = (app.server.address() as AddressInfo).port;
   });
 
   afterEach(async () => {

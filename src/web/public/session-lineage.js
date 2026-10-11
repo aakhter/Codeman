@@ -1,33 +1,54 @@
 /**
- * @fileoverview Session lineage lines — the arcs joining a tab to the tabs it spawned.
+ * @fileoverview Session lineage lines: the tree joining a tab to the tabs it spawned.
  *
  * A session that starts another session (the `codeman` agent skill spawning a worker,
  * which passes its own `$CODEMAN_SESSION_ID`) gets `parentSessionId` stamped on its
- * state server-side. This module turns that field into the same kind of glowing
- * connection line the subagent windows use, but tab → tab, so the strip shows at a
- * glance which tab spawned which.
+ * state server-side. This module turns that field into a quiet orthogonal tree, one per
+ * spawning tab, routed through the gaps between tab rows so it never crosses a label or
+ * the terminal (geometry: `CodemanLineage.computeTree` in constants.js).
+ *
+ * EVERY FAMILY IS ALWAYS DRAWN, AND THE SELECTED TAB'S IS EMPHASIZED: the family the
+ * active tab spawned, and the family it belongs to as a child, get the
+ * `lineage-family--focus` group (thicker, full opacity, drawn last so nothing covers
+ * it). Drawing ONLY the selected family was tried first and rejected by the owner
+ * (2026-10-07: "I wanna see all the connections always"). Selection still has to
+ * redraw to move the emphasis, which `_updateActiveTabImmediate()` does whenever any
+ * lineage exists (`_lineageTotalEdges`).
  *
  * It is an ADDITIONAL LAYER on the existing SVG pass, not a second pass: the core
  * `_updateConnectionLinesImmediate()` (subagent-windows.js) calls
  * `_appendLineageConnectionLines(svg, rects)` at its tail, exactly like ultracode does,
  * so every layer shares ONE batched read → write reflow and one tab-rect cache.
  *
- * Two constraints that are not obvious from the code:
- * - DESKTOP ONLY. The overlay is `z-index: 999`; the desktop header is 100 (arcs paint
+ * Constraints that are not obvious from the code:
+ * - DESKTOP ONLY. The overlay is `z-index: 999`; the desktop header is 100 (lines paint
  *   over it, which is what lets them touch tab bottoms), but under 1024px mobile.css
  *   makes the header `position: fixed; z-index: 1200` and would bury them. The phone
  *   strip is also a scroller where both endpoints are rarely on screen at once.
+ * - The routing room is RESERVED in CSS (`.session-tabs.lineage-tree`), toggled by
+ *   `_syncLineageGutter()` from `updateTabOverflowMode()`. It keys on whether ANY
+ *   family exists, never on the selection, so switching tabs never resizes the header
+ *   (and with it the terminal and the PTY).
  * - Paths carry `data-agent-id="lineage:<childId>"` because that is the attribute
  *   `_applyLineEntrances()` queries, so the draw-in animation and its
  *   negative-`animation-delay` resume across `svg.innerHTML = ''` come for free.
  *
  * @mixin Extends CodemanApp.prototype via Object.assign
  * @dependency subagent-windows.js (_updateConnectionLinesImmediate, #connectionLines)
- * @dependency constants.js (window.CodemanLineage.computePath + .COLORS)
+ * @dependency constants.js (window.CodemanLineage.computeTree + .COLORS)
  * @dependency settings-ui.js (loadAppSettingsFromStorage, getDefaultSettings)
  * @loadorder 15.6 (after ultracode-windows.js — appended to the same SVG pass)
  */
 /* global CodemanApp, MobileDetection */
+
+// A child that is working, or waiting on / checking its own agents, draws an
+// active (marching) line; the two agent states also get a class of their own.
+function lineageActive(status) {
+  return status === 'working' || status === 'waiting_agents' || status === 'checking_agents';
+}
+function lineageActivityClass(status, base) {
+  return status === 'waiting_agents' || status === 'checking_agents' ? ` ${base}--${status.replaceAll('_', '-')}` : '';
+}
 
 Object.assign(CodemanApp.prototype, {
   /**
@@ -62,51 +83,100 @@ Object.assign(CodemanApp.prototype, {
   applyLineageLineSettings() {
     const prev = this._lineageLinesOn;
     const next = this._syncLineageLinesEnabled();
-    if (prev !== next) this.updateConnectionLines();
+    if (prev !== next) {
+      // The reserved routing room follows the setting; updateTabOverflowMode()
+      // re-syncs it and re-measures the wrap with the new padding.
+      this.updateTabOverflowMode?.();
+      this.updateConnectionLines();
+    }
   },
 
   /**
-   * Every parent → child pair worth drawing, with the child's index among its siblings
-   * (that index is what nests sibling arcs instead of overprinting them).
+   * Reserve (or release) the strip's routing room: `.lineage-tree` on #sessionTabs
+   * widens the row gap, pads the bottom for the last row's gap, and opens the spine
+   * channel on the left of a wrapped strip (styles.css). Called at the top of
+   * `updateTabOverflowMode()`, so it runs on every tab render, BEFORE the wrap is
+   * measured.
    *
-   * Walks `sessionOrder` rather than the sessions Map so sibling depth follows the
-   * strip's own left-to-right order, which is what the user sees.
+   * Keyed on whether any family exists at all, never on which one is selected: a
+   * class that followed the selection would grow and shrink the header on every tab
+   * switch, and the header's height is the terminal's height.
+   *
+   * Only the header strip routes through reserved gaps. The vertical rail keeps its
+   * own `--lineage-vertical-gutter`, and the sidebar draws no lineage.
+   */
+  _syncLineageGutter() {
+    const edges = this._lineageLinesEnabled() ? this._collectLineageEdges() : [];
+    this._lineageTotalEdges = edges.length;
+    const strip = document.getElementById('sessionTabs');
+    if (!strip) return;
+    const want = edges.length > 0 && !this._isVerticalTabList?.();
+    if (strip.classList.contains('lineage-tree') !== want) strip.classList.toggle('lineage-tree', want);
+  },
+
+  /**
+   * Every parent → child pair, in strip order. Walks `sessionOrder` rather than the
+   * sessions Map so sibling order follows the strip's own left-to-right order, which
+   * is what the user sees.
    */
   _collectLineageEdges() {
     const edges = [];
-    if (this._tabLayoutFirstPaintPending) return edges;
     if (!this.sessions || this.sessions.size < 2) return edges;
     const order = this.sessionOrder && this.sessionOrder.length ? this.sessionOrder : [...this.sessions.keys()];
-    const seenPerParent = new Map();
     for (const id of order) {
       const session = this.sessions.get(id);
       const parentId = session && session.parentSessionId;
       // A parent that is gone (closed, or never came back after a restart) draws
       // nothing: the field is decoration, so a dangling one is simply not rendered.
       if (!parentId || parentId === id || !this.sessions.has(parentId)) continue;
-      const depth = seenPerParent.get(parentId) || 0;
-      seenPerParent.set(parentId, depth + 1);
       const status = window.CodemanSessionActivity?.resolve(session).effectiveStatus || session.status || 'idle';
-      edges.push({ parentId, childId: id, depth, status });
+      edges.push({ parentId, childId: id, status });
     }
     return edges;
   },
 
+  /** Every family as `{ parentId, edges }`, in strip order of first appearance. */
+  _lineageFamilies(edges) {
+    const families = new Map();
+    for (const edge of edges) {
+      if (!families.has(edge.parentId)) families.set(edge.parentId, []);
+      families.get(edge.parentId).push(edge);
+    }
+    return [...families].map(([parentId, familyEdges]) => ({ parentId, edges: familyEdges }));
+  },
+
   /**
-   * Colour for one arc, from CodemanLineage.COLORS, keyed on the SPAWNING tab.
+   * Parent ids of the families the selection emphasizes: the family the selected tab
+   * spawned, and the family it was spawned into (its parent plus its siblings). Empty
+   * when a web tab holds the stage, or the selected tab has no lineage at all.
+   */
+  _lineageFocusParents(edges) {
+    const parents = new Set();
+    const focus = this.activeWebviewId ? null : this.activeSessionId;
+    if (!focus) return parents;
+    for (const edge of edges) {
+      if (edge.parentId === focus || edge.childId === focus) parents.add(edge.parentId);
+    }
+    return parents;
+  },
+
+  /**
+   * Colour for one family, from CodemanLineage.COLORS, keyed on the SPAWNING tab.
    *
-   * ⚠️ Per PARENT, not per child: every arc leaving one tab is the same colour, no
+   * ⚠ Per PARENT, not per child: every line leaving one tab is the same colour, no
    * matter how many workers it spawns, so the strip reads as "these five came from
    * w1, those two came from w2". Keying it per child instead gave one tab's own
    * children a different colour each, which is the thing the colours exist to tell
    * apart. A child that goes on to spawn its own workers is a parent in its turn and
-   * gets its own colour for the arcs BELOW it, so a chain changes colour at each
+   * gets its own colour for the lines BELOW it, so a chain changes colour at each
    * generation while each generation's fan-out stays uniform.
    *
    * Assigned in FIRST-SEEN order and remembered per parent id. First-seen rather than
    * draw-index keeps a colour stable across re-renders, tab reorders and sibling
    * closes (the SVG is wiped and rebuilt constantly, so an index-based colour would
-   * flicker). An empty string means "no override": the CSS falls back to
+   * flicker). The draw pass claims a colour for EVERY family in strip order before it
+   * draws anything, so neither the draw order (the selected family goes last) nor
+   * which family was selected first ever decides who gets which colour. An empty string means "no override": the CSS falls back to
    * --session-blue, so the first spawning tab keeps the skin-aware blue.
    */
   _lineageColorFor(parentId) {
@@ -142,117 +212,179 @@ Object.assign(CodemanApp.prototype, {
   _appendLineageConnectionLines(svg, rects) {
     this._lineageEdgeCount = 0;
     if (!svg || !this._lineageLinesEnabled()) return;
-    // Sidebar layout: computeLineagePath()'s whole geometry — the U-bridge hung
-    // from the STRIP's bottom edge, the 64px dip corridor — assumes a horizontal
-    // tab row. Against a vertical list the "strip bottom" is the bottom of the
-    // sidebar, so every arc would draw a giant loop to the foot of the list.
-    // Parent/child adjacency reads fine in a vertical list without arcs; a
-    // sideways lineage shape is a follow-up with its own visual tuning, not a
-    // by-product of a layout port.
+    // Sidebar layout: the tree is routed for a horizontal strip or the vertical
+    // rail. The sidebar is a vertical list with its own scroller and no reserved
+    // channel; parent/child adjacency reads fine there without lines.
     if (this.isSessionSidebarActive?.()) return;
-    const compute = window.CodemanLineage && window.CodemanLineage.computePath;
-    if (!compute) return;
+    const computeTree = window.CodemanLineage && window.CodemanLineage.computeTree;
+    if (!computeTree) return;
 
     const edges = this._collectLineageEdges();
+    this._lineageTotalEdges = edges.length;
     if (edges.length === 0) return;
+    // Claim colours in strip order for every family before drawing (_lineageColorFor).
+    for (const edge of edges) this._lineageColorFor(edge.parentId);
+    const families = this._lineageFamilies(edges);
+    const focusParents = this._lineageFocusParents(edges);
     if (!rects) rects = new Map();
 
     // PHASE 1 — reads.
     const strip = document.getElementById('sessionTabs');
     if (!strip) return;
     const stripRect = strip.getBoundingClientRect();
-    // COD-311: the geometry helper must know the axis explicitly. Inferring it
-    // from coincident X centers is exactly what produced a line through labels.
     const orientation =
       document.documentElement.getAttribute('data-tab-orientation') === 'vertical' ? 'vertical' : 'horizontal';
+    // A session hidden inside a collapsed group of the grouped rail has no row
+    // to anchor to, so its end of the line moves to that group's header (a
+    // "proxied" endpoint, drawn quieter). A child proxied to the same header as
+    // its parent would be a line from a row to itself: skipped.
     const resolveEndpoint = (id) => {
       const tab = strip.querySelector(`.session-tab[data-id="${CSS.escape(id)}"]`);
       if (tab) return { key: 'tab:' + id, element: tab, proxied: false };
-      if (orientation !== 'vertical') return null;
       const groupId = this._hiddenTabGroupByRef?.get('session:' + id);
-      if (!groupId) return null;
+      if (!groupId) return { key: 'tab:' + id, element: null, proxied: false };
       const header = strip.querySelector(`[data-tab-group-header="${CSS.escape(groupId)}"]`);
-      return header ? { key: 'group:' + groupId, element: header, proxied: true } : null;
+      return { key: 'group:' + groupId, element: header, proxied: !!header };
     };
-    const resolvedEdges = [];
-    for (const edge of edges) {
-      const parentEndpoint = resolveEndpoint(edge.parentId);
-      const childEndpoint = resolveEndpoint(edge.childId);
-      if (!parentEndpoint || !childEndpoint || parentEndpoint.key === childEndpoint.key) continue;
-      resolvedEdges.push({ edge, parentEndpoint, childEndpoint });
-      for (const endpoint of [parentEndpoint, childEndpoint]) {
-        const { key } = endpoint;
-        if (rects.has(key)) continue;
-        rects.set(key, endpoint.element.getBoundingClientRect());
+    const measure = (endpoint) => {
+      if (!rects.has(endpoint.key)) {
+        rects.set(endpoint.key, endpoint.element ? endpoint.element.getBoundingClientRect() : null);
+      }
+      return rects.get(endpoint.key);
+    };
+    const resolvedFamilies = [];
+    for (const family of families) {
+      const parentEndpoint = resolveEndpoint(family.parentId);
+      const parentRect = measure(parentEndpoint);
+      if (!parentRect) continue;
+      const children = [];
+      for (const edge of family.edges) {
+        const childEndpoint = resolveEndpoint(edge.childId);
+        if (childEndpoint.key === parentEndpoint.key) continue;
+        const rect = measure(childEndpoint);
+        if (rect) children.push({ edge, endpoint: childEndpoint, rect });
+      }
+      if (children.length > 0) resolvedFamilies.push({ family, parentEndpoint, parentRect, children });
+    }
+    if (resolvedFamilies.length === 0) return;
+    // The header strip's rows come from EVERY tab in it (computeTree hangs a row's
+    // gap under its tallest tab), web tabs included. The rail needs none.
+    const tabRects = [];
+    let spineLeft;
+    if (orientation === 'horizontal') {
+      // Where the spine channel is: the reserved --lineage-spine-channel just left
+      // of the strip's content edge. Usually that is the strip's own left edge,
+      // but grouped by state the label column comes first (styles.css), and a
+      // spine at the edge ran through every label. Read back from the padding
+      // the CSS laid out, so geometry and stylesheet cannot disagree.
+      const style = typeof getComputedStyle === 'function' ? getComputedStyle(strip) : null;
+      const channel = style ? parseFloat(style.getPropertyValue('--lineage-spine-channel')) : NaN;
+      if (Number.isFinite(channel)) {
+        const inset = (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.paddingLeft) || 0);
+        spineLeft = stripRect.left + inset - channel;
+      }
+      for (const tab of strip.querySelectorAll('.session-tab')) {
+        const id = tab.getAttribute('data-id');
+        const key = id ? 'tab:' + id : null;
+        if (key && rects.has(key)) tabRects.push(rects.get(key));
+        else {
+          const rect = tab.getBoundingClientRect();
+          if (key) rects.set(key, rect);
+          tabRects.push(rect);
+        }
       }
     }
-    this._lineageEdgeCount = resolvedEdges.length;
 
     // PHASE 2 — writes, from the cache only.
-    for (const { edge, parentEndpoint, childEndpoint } of resolvedEdges) {
-      const parentRect = rects.get(parentEndpoint.key);
-      const childRect = rects.get(childEndpoint.key);
-      if (!parentRect || !childRect) continue;
-
-      const geom = compute({
+    // Lanes follow STRIP order, so a family keeps its lane when the selection moves;
+    // only the DRAW order changes (the emphasized families last, on top). A row gap
+    // fits a few lanes, so they cycle: families that share one are told apart by colour.
+    const laneLimit = Math.max(1, (window.CodemanLineage && window.CodemanLineage.MAX_LANES) || 3);
+    const laneCount = Math.min(laneLimit, resolvedFamilies.length);
+    const drawOrder = resolvedFamilies
+      .map((resolved, index) => ({
+        ...resolved,
+        lane: index % laneCount,
+        focus: focusParents.has(resolved.family.parentId),
+      }))
+      .sort((a, b) => a.focus - b.focus);
+    for (const { family, parentEndpoint, parentRect, children, lane, focus } of drawOrder) {
+      const geom = computeTree({
         parent: parentRect,
-        child: childRect,
+        children: children.map((c) => ({ id: c.edge.childId, rect: c.rect })),
         strip: stripRect,
-        depth: edge.depth,
+        tabs: tabRects,
+        spineLeft,
         orientation,
+        lane,
+        laneCount,
       });
-      if (!geom) continue; // scrolled out of the strip, or a degenerate rect
-
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      line.setAttribute('d', geom.d);
-      // The working class marches the dashes, so an active worker is visible along
-      // the line itself. `status` is the CHILD's, which is the interesting end.
-      const active = edge.status === 'working' || edge.status === 'waiting_agents' || edge.status === 'checking_agents';
-      const working = active ? ' lineage-line--working' : '';
-      const activity =
-        edge.status === 'waiting_agents' || edge.status === 'checking_agents'
-          ? ` lineage-line--${edge.status.replaceAll('_', '-')}`
-          : '';
-      // `proxied` marks an arc whose endpoint was re-anchored to the vertical
-      // rail's gutter track (COD-311) rather than sitting on a tab edge.
-      const proxied = parentEndpoint.proxied || childEndpoint.proxied ? ' lineage-line--proxied' : '';
-      line.setAttribute('class', 'connection-line lineage-line' + working + activity + proxied);
-      // The PARENT's colour rides a CSS custom property so the stylesheet keeps owning
-      // opacity, glow and dash; an empty colour leaves the --session-blue fallback.
-      // Every arc out of one tab shares it — see _lineageColorFor().
-      const color = this._lineageColorFor(edge.parentId);
-      if (color) line.style.setProperty('--lineage-color', color);
-      // `data-agent-id` is what _applyLineEntrances() queries — see the file header.
-      line.setAttribute('data-agent-id', 'lineage:' + edge.childId);
-      line.setAttribute('data-parent-tab', edge.parentId);
-      line.setAttribute('data-child-tab', edge.childId);
-      svg.appendChild(line);
-
-      // Direction marker at the CHILD end. A circle rather than an SVG <marker>:
-      // markers need a <defs> block and fight the dash pattern.
-      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      dot.setAttribute('cx', String(geom.endX));
-      dot.setAttribute('cy', String(geom.endY));
-      // Resting radius; `lineage-dot-pulse` breathes it 3.5 → 4.5 while the child
-      // works, so the two have to be changed together.
-      dot.setAttribute('r', '3.5');
-      const dotWorking = active ? ' lineage-line-dot--working' : '';
-      const dotActivity =
-        edge.status === 'waiting_agents' || edge.status === 'checking_agents'
-          ? ` lineage-line-dot--${edge.status.replaceAll('_', '-')}`
-          : '';
-      const dotProxied = parentEndpoint.proxied || childEndpoint.proxied ? ' lineage-line-dot--proxied' : '';
-      dot.setAttribute('class', 'lineage-line-dot' + dotWorking + dotActivity + dotProxied);
-      dot.setAttribute('data-child-tab', edge.childId);
-      if (color) dot.style.setProperty('--lineage-color', color);
-      svg.appendChild(dot);
+      if (!geom || geom.routes.length === 0) continue;
+      const byId = new Map(children.map((c) => [c.edge.childId, c]));
+      const color = this._lineageColorFor(family.parentId);
+      // One group per family: it carries the translucency, so the stretches its
+      // routes share (the trunk) do not stack into a brighter line than the branches,
+      // and the emphasis for the selected tab's families (styles.css).
+      const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      group.setAttribute('class', 'lineage-family' + (focus ? ' lineage-family--focus' : ''));
+      group.setAttribute('data-parent-tab', family.parentId);
+      // Working routes go in FIRST, so an idle sibling's solid stroke covers the
+      // shared trunk and only the working child's own branch shows its dashes.
+      const routes = geom.routes
+        .map((route) => ({ route, child: byId.get(route.id) }))
+        .filter((r) => r.child)
+        .sort((a, b) => lineageActive(b.child.edge.status) - lineageActive(a.child.edge.status));
+      for (const { route, child } of routes) {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        line.setAttribute('d', route.d);
+        // `status` is the CHILD's, which is the interesting end: a working child's
+        // route is dashed (and marches, motion permitting).
+        // Waiting on or checking its own agents counts as working (agent activity),
+        // and carries its own class so the stylesheet can tell the states apart.
+        const working = lineageActive(child.edge.status) ? ' lineage-line--working' : '';
+        const activity = lineageActivityClass(child.edge.status, 'lineage-line');
+        const proxied = parentEndpoint.proxied || child.endpoint.proxied;
+        line.setAttribute(
+          'class',
+          'connection-line lineage-line' + working + activity + (proxied ? ' lineage-line--proxied' : '')
+        );
+        // The PARENT's colour rides a CSS custom property so the stylesheet keeps
+        // owning weight and dash; an empty colour leaves the --session-blue fallback.
+        if (color) line.style.setProperty('--lineage-color', color);
+        // `data-agent-id` is what _applyLineEntrances() queries — see the file header.
+        line.setAttribute('data-agent-id', 'lineage:' + child.edge.childId);
+        line.setAttribute('data-parent-tab', family.parentId);
+        line.setAttribute('data-child-tab', child.edge.childId);
+        group.appendChild(line);
+      }
+      // Direction marker at each CHILD end, after every path so no stroke covers it.
+      for (const { route, child } of routes) {
+        const working = lineageActive(child.edge.status) ? ' lineage-line--working' : '';
+        const activity = lineageActivityClass(child.edge.status, 'lineage-line-dot');
+        const proxied = parentEndpoint.proxied || child.endpoint.proxied;
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        dot.setAttribute('cx', String(route.endX));
+        dot.setAttribute('cy', String(route.endY));
+        // Fallback radius only: styles.css sizes the dot through `--lineage-dot-r`
+        // (larger in an emphasized family), and `lineage-dot-pulse` breathes from it.
+        dot.setAttribute('r', '2.5');
+        dot.setAttribute(
+          'class',
+          'lineage-line-dot' + working + activity + (proxied ? ' lineage-line-dot--proxied' : '')
+        );
+        dot.setAttribute('data-child-tab', child.edge.childId);
+        if (color) dot.style.setProperty('--lineage-color', color);
+        group.appendChild(dot);
+      }
+      svg.appendChild(group);
+      this._lineageEdgeCount += routes.length;
     }
   },
 
   /**
-   * The strip scrolls horizontally in the header and vertically in the rail. Either
-   * axis moves both endpoints without firing a render, so the paths would slide off
-   * their tabs. Passive listener, and the redraw is the normal coalesced one.
+   * The strip scrolls (desktop `overflow-x: auto` and every wrapped layout), and a
+   * scroll moves both endpoints without firing any render, so the lines would slide
+   * off their tabs. Passive listener, and the redraw is the normal coalesced one.
    *
    * Installed once; the guard also keeps a re-init from stacking listeners.
    */
@@ -263,11 +395,24 @@ Object.assign(CodemanApp.prototype, {
     this._lineageScrollHandler = () => {
       // Sidebar layout and the vertical rail scroll the SAME element
       // vertically, and there the subagent/ultracode connectors anchor to tab
-      // rects too (the sidebar skips lineage arcs entirely, and the rail can
-      // show connectors with zero lineage edges, so _lineageEdgeCount alone
-      // would never redraw them).
+      // rects too (the sidebar skips lineage entirely, and the rail can show
+      // connectors with zero lineage edges, so _lineageEdgeCount alone would
+      // never redraw them).
       if (this._lineageEdgeCount > 0 || this._isVerticalTabList?.()) this.updateConnectionLines();
     };
     strip.addEventListener('scroll', this._lineageScrollHandler, { passive: true });
+
+    // ⚠ A SELECTION RESIZES TABS AFTER THE REDRAW. The active tab reveals its gear
+    // and close icons by transitioning their padding (styles.css), so it keeps
+    // widening for ~150ms after `_updateActiveTabImmediate()` has already redrawn,
+    // and the tab it was selected from shrinks. That can move tabs or re-wrap a row,
+    // which left a family's trunk hanging under the tab's OLD position. Redraw once
+    // a size transition inside the strip ends (coalesced, like every other redraw).
+    this._lineageTransitionHandler = (event) => {
+      const prop = event.propertyName || '';
+      if (!(prop === 'width' || prop === 'max-width' || prop.startsWith('padding'))) return;
+      if (this._lineageTotalEdges > 0) this.updateConnectionLines();
+    };
+    strip.addEventListener('transitionend', this._lineageTransitionHandler);
   },
 });

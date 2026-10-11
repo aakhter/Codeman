@@ -26,7 +26,7 @@ function loadTerminalUiHarness() {
   // Mutable so a test can move time (gesture gaps); defaults to a frozen clock.
   const clock = { now: () => 1_000 };
   const context = vm.createContext({
-    window: {},
+    window: windowRef,
     CodemanApp,
     console: { warn: vi.fn(), log: (msg: string) => logs.push(msg) },
     _crashDiag: { log: vi.fn() },
@@ -54,7 +54,14 @@ function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number; cliMou
   const sent: Array<{ id: string; data: string }> = [];
   app.activeSessionId = 'sess-1';
   app.sessions = new Map([
-    ['sess-1', { mode: 'claude', cliVersion: overrides.cliVersion, cliMouseTracking: overrides.cliMouseTracking }],
+    [
+      'sess-1',
+      {
+        mode: overrides.mode ?? 'claude',
+        cliVersion: overrides.cliVersion,
+        cliMouseTracking: overrides.cliMouseTracking,
+      },
+    ],
   ]);
   app._sendInputEphemeral = (id: string, data: string) => sent.push({ id, data });
   app.terminal = {
@@ -137,7 +144,7 @@ describe('full-history re-pull downgrade guard (issue #205 round 2)', () => {
 
 describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2)', () => {
   it('pages the CLI transcript when the wheel gate is false and there is no scrollback', () => {
-    const { app, sent } = hollowClaudeApp(); // cliVersion unknown → gate false
+    const { app, sent } = hollowApp(); // cliVersion unknown → gate false
 
     // Half a screen of travel (rows 36 → 18 lines) buys exactly one PageUp.
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(true);
@@ -191,15 +198,34 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   });
 
   it('caps the keys one gesture batch can emit', () => {
-    const { app, sent } = hollowClaudeApp();
+    const { app, sent } = hollowApp();
 
     app._maybePageCliTranscript({ shiftKey: false }, -1000); // 55 pages of travel
     app._flushWheelSgrQueue();
     expect(sent).toEqual([{ id: 'sess-1', data: '\x1b[5~'.repeat(3) }]);
   });
 
+  it('pages an OpenCode pane too, whose TUI never fills the local buffer', () => {
+    // OpenCode's TUI runs on the ALTERNATE SCREEN (measured on 1.18.31: tmux
+    // `alternate_on=1`, `history_size=0`), so the browser's normal buffer stays at
+    // one screen exactly like a repaint-mode Claude pane. The difference is that
+    // OpenCode IGNORES SGR wheel reports (verified against an idle pane: six
+    // `\x1b[<64;…M` reports left the capture byte-identical), so PageUp/PageDown
+    // — its `messages_page_up/down` binds — is the ONLY gesture that reaches its
+    // transcript. Without this the wheel was silently dead in every OpenCode tab.
+    const { app, sent } = hollowApp({ mode: 'opencode' });
+
+    expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(true);
+    app._flushWheelSgrQueue();
+    expect(sent).toEqual([{ id: 'sess-1', data: '\x1b[5~' }]);
+
+    app._maybePageCliTranscript({ shiftKey: false }, 18);
+    app._flushWheelSgrQueue();
+    expect(sent[1]).toEqual({ id: 'sess-1', data: '\x1b[6~' });
+  });
+
   it('leaves every session that has real local scrollback alone', () => {
-    const { app } = hollowClaudeApp();
+    const { app } = hollowApp();
 
     // Shift is the explicit "give me local scrollback" gesture — never paged.
     expect(app._maybePageCliTranscript({ shiftKey: true }, -18)).toBe(false);
@@ -209,10 +235,14 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
     app.terminal.buffer.active.baseY = 0;
 
-    // Shell and Gemini retain their existing local-scroll behavior.
+    // Modes with real terminal scrollback keep their existing behavior (shell/pi
+    // own tmux history through the alt-screen strip; codex/gemini/antigravity/…
+    // page-key behaviour is unverified — docs/scrollback-fix-plan.md).
     app.sessions = new Map([['sess-1', { mode: 'shell' }]]);
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
     app.sessions = new Map([['sess-1', { mode: 'gemini' }]]);
+    expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
+    app.sessions = new Map([['sess-1', { mode: 'antigravity' }]]);
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(false);
 
     // An alternate-screen pane belongs to xterm's own alt-scroll handling.
@@ -239,7 +269,7 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
     // repaint-mode CLI, is empty — a user who flipped it while hunting for a fix
     // on 1.11.x would have ended up with a completely dead wheel on 1.12.0.
     // Version and tracking both qualify, so the opt-out is the only thing saying no.
-    const { app, sent } = hollowClaudeApp({ cliVersion: '2.1.223', cliMouseTracking: true }); // gate would forward…
+    const { app, sent } = hollowApp({ cliVersion: '2.1.223', cliMouseTracking: true }); // gate would forward…
     app.loadAppSettingsFromStorage = () => ({ terminalWheelLocalScrollback: true });
 
     expect(app._shouldForwardWheelToApp({ shiftKey: false })).toBe(false); // …but the opt-out wins
@@ -249,7 +279,7 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   });
 
   it('drops travel accumulated on another tab', () => {
-    const { app, sent } = hollowClaudeApp();
+    const { app, sent } = hollowApp();
 
     app._maybePageCliTranscript({ shiftKey: false }, -1); // first event pages sess-1 at once
     app._maybePageCliTranscript({ shiftKey: false }, -34); // just short of sess-1's second page
@@ -273,9 +303,83 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   });
 });
 
+describe('the paging gates asked for another pane (a TerminalTile)', () => {
+  it('exports the paging math, and the primary pane runs on it', () => {
+    const { app, sent, windowRef } = hollowApp();
+    const { wheelDeltaLines, pageKeysForTravel } = windowRef.CodemanTerminalInput;
+
+    expect(wheelDeltaLines({ deltaY: -50, deltaMode: 0 }, 36)).toBe(-2); // pixels, 25 a line
+    expect(wheelDeltaLines({ deltaY: 3, deltaMode: 1 }, 36)).toBe(3); // lines (Firefox)
+    expect(wheelDeltaLines({ deltaY: 1, deltaMode: 2 }, 36)).toBe(36); // pages: the given rows
+    expect(wheelDeltaLines({ deltaY: 0, deltaX: -75, shiftKey: true, deltaMode: 0 }, 36)).toBe(-3); // Shift axis
+    expect(pageKeysForTravel(0, -10, 36)).toEqual({ pending: -10, keys: '' });
+    expect(pageKeysForTravel(-10, -8, 36)).toEqual({ pending: 0, keys: '\x1b[5~' });
+    expect(pageKeysForTravel(0, -1000, 36).keys).toBe('\x1b[5~'.repeat(3));
+    expect(pageKeysForTravel(0, 40, 36)).toEqual({ pending: 4, keys: '\x1b[6~'.repeat(2) });
+
+    // The primary pane's own methods agree with them.
+    const ev = { deltaY: -250, deltaMode: 2 };
+    expect(app._wheelScrollLinesFloat(ev)).toBe(wheelDeltaLines(ev, 36));
+    let pending = 0;
+    let expected = '';
+    for (const lines of [-10, -10, 30, -1000, 7]) {
+      const step = pageKeysForTravel(pending, lines, 36);
+      pending = step.pending;
+      expected += step.keys;
+      app._maybePageCliTranscript({ shiftKey: false }, lines);
+    }
+    app._flushWheelSgrQueue();
+    expect(app._pageKeyPending).toBe(pending);
+    expect(expected).not.toBe('');
+    expect(sent).toEqual([{ id: 'sess-1', data: expected }]);
+  });
+
+  it("_localScrollbackIsHollow reads the target's session, buffer and rows, never the active ones", () => {
+    const { app } = hollowApp({ mode: 'shell' }); // the ACTIVE session is a shell
+    app.sessions.set('tile-1', { mode: 'opencode' });
+    const tileBuffer = { type: 'normal', viewportY: 16, baseY: 16 };
+    const tileTerminal = { rows: 24, buffer: { active: tileBuffer } };
+
+    expect(app._localScrollbackIsHollow()).toBe(false); // the primary's own answer
+    // 16 rows above the tile's screen, all of them its own overflow: hollow.
+    expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 0 })).toBe(true);
+    // Real history in the tile: not hollow, whatever the primary holds.
+    expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 3 })).toBe(false);
+    // No localRows: the tile's own baseY decides.
+    expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal })).toBe(false);
+    tileBuffer.type = 'alternate';
+    expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 0 })).toBe(false);
+    tileBuffer.type = 'normal';
+    app.sessions.set('tile-1', { mode: 'codex' });
+    expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 0 })).toBe(false);
+  });
+
+  it("_shouldForwardWheelToApp reads the target's session and the target terminal's tracking mode", () => {
+    const { app } = hollowApp({ mode: 'opencode' }); // the ACTIVE session would never forward
+    app.sessions.set('tile-1', { mode: 'claude', cliVersion: '2.1.223', cliMouseTracking: true });
+    const tileTerminal = { rows: 24, modes: { mouseTrackingMode: 'none' } };
+
+    expect(app._shouldForwardWheelToApp({ shiftKey: false })).toBe(false);
+    expect(app._shouldForwardWheelToApp({ shiftKey: false }, { sessionId: 'tile-1', terminal: tileTerminal })).toBe(
+      true
+    );
+    // The tile's own xterm encoder owns the wheel while its tracking is on.
+    tileTerminal.modes.mouseTrackingMode = 'any';
+    expect(app._shouldForwardWheelToApp({ shiftKey: false }, { sessionId: 'tile-1', terminal: tileTerminal })).toBe(
+      false
+    );
+    // And the primary's tracking mode does not leak into the tile's answer.
+    tileTerminal.modes.mouseTrackingMode = 'none';
+    app.terminal.modes.mouseTrackingMode = 'any';
+    expect(app._shouldForwardWheelToApp({ shiftKey: false }, { sessionId: 'tile-1', terminal: tileTerminal })).toBe(
+      true
+    );
+  });
+});
+
 describe('scroll routing diagnostic (issue #205 round 2)', () => {
   it('prints the decision and its inputs once per session, and again when it changes', () => {
-    const { app, logs } = hollowClaudeApp({ cliVersion: '2.1.100' });
+    const { app, logs } = hollowApp({ cliVersion: '2.1.100' });
     app.loadAppSettingsFromStorage = () => ({ terminalWheelLocalScrollback: false });
 
     app._logScrollRouting('local-scrollback');
@@ -302,7 +406,7 @@ describe('scroll routing diagnostic (issue #205 round 2)', () => {
   });
 
   it('reports an unknown CLI version, the false-path that disables forwarding', () => {
-    const { app, logs } = hollowClaudeApp(); // no cliVersion — the probe failed
+    const { app, logs } = hollowApp(); // no cliVersion — the probe failed
     app._logScrollRouting('page-keys');
     expect(logs[0]).toContain('cliVersion=unknown');
   });

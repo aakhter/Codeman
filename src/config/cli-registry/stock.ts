@@ -216,6 +216,9 @@ const CLAUDE: CliEntry = {
     // in them, so a copy can drop two and paste flush. Claude and codex are the only
     // entries that declare this, because theirs are the only gutters that have been measured.
     transcriptGutter: 2,
+    // The composer's own hint text (`⏵⏵ … (shift+tab to cycle)`), not `❯`, which the
+    // trust dialog's selected row also carries. Measured by the agent skill's spawn_worker.
+    composerReadyMark: 'shift+tab',
     // The historical hard-coded pair, now stated as data. `workingLine` matches both the
     // `✻ Actualizing… (39s · ↓ 2.0k tokens)` status line and the bare `esc to interrupt`
     // footer, because tmux repaints partially and only one of the two may land in a chunk.
@@ -519,8 +522,45 @@ const OPENCODE: CliEntry = {
     // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
     // which is why this is its own capability and not derived from `hooks`.
     approvals: true,
-    altScreen: 'strip-mux-only',
+    altScreen: 'strip-mux-and-mouse',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' }, predictProfile: undefined },
+    // Measured on a live opencode 1.3.0 pane (capture-pane every 250-300 ms through real
+    // turns at 40, 60, 120 and 200 columns, plus the raw PTY stream, 2026-10-09). Every
+    // composer row starts with a `┃` bar, and the submitted prompt lands in the transcript
+    // with the same bar, so a turn's first repaint arms the idle confirmation and tmux's
+    // reattach repaint does the same for a restored pane. While a turn runs the footer row
+    // starts with an 8-cell knight-rider spinner, `⬝■■■■■■⬝  esc interrupt`, redrawn about
+    // every 40 ms (never a 2.5 s gap mid-turn, so silence cannot end one early); at rest the
+    // row holds only the key hints and nothing on screen draws a `⬝`/`■` run, the wide
+    // layout's sidebar included. The working line is the spinner run, not the label: tmux
+    // ships `esc` and `interrupt` as separate words joined by cursor moves, and below about
+    // 45 columns the footer wraps the label itself. A pending permission prompt replaces
+    // the composer and stops the spinner, so it reads as idle (waiting on the user).
+    // ⚠️ Without this entry an opencode session latched `busy` after any turn that ran a
+    // tool: the braille spinner on a running tool row trips SPINNER_PATTERN, and opencode
+    // never draws Claude's `❯`, the fallback that would have armed the idle check. The
+    // last `┃` row on screen is the composer's agent/model row (or the permission box's
+    // closing bar), never the prompt text, so the submit verifier stands down.
+    workDetect: {
+      promptGlyph: '┃',
+      workingLine: '[⬝■]{8}',
+    },
+    // The composer's agent row, measured on live opencode 1.3.0 panes (home screen and in
+    // session, at 40, 60, 120 and 200 columns, 2026-10-09): `┃  Build  Big Pickle OpenCode
+    // Zen`, directly above the box's bottom edge `╹▀▀▀`. opencode renders it as the agent,
+    // then the model's name, then the provider's name (then `· <variant>` when the model
+    // has one), and only colour tells model from provider, so the field is all of it: what
+    // opencode itself shows, owner's choice. A double space ends it, which is where the
+    // 200-column layout's sidebar shares the row. The lookahead takes the LAST such row in
+    // the window, so nothing the agent prints higher up can stand in for it; below the
+    // composer there is only opencode's own chrome (key hints, a tip, the cwd/version
+    // row), which is why the window can be 8 rows: the home screen puts up to 5 of those
+    // rows under it. A permission prompt or shell mode hides the row, and the last model
+    // is kept. `No provider ` is opencode's placeholder before a provider is connected.
+    modelDetect: {
+      screenLine: String.raw`┃ {2}[^\s·]+ {2}(?!No provider )([^ \n](?:[^ \n]| (?! ))*)(?: {2}.*)?\n *╹(?![\s\S]*\n *╹)`,
+      screenLines: 8,
+    },
     // opencode's global config dir is xdg-basedir's `$XDG_CONFIG_HOME/opencode`.
     mcpConfig: {
       path: '.config/opencode/opencode.json',
@@ -652,10 +692,15 @@ const CODEX: CliEntry = {
     // Measured against a live codex-cli 0.154.0 pane on 2026-09-22: the row appears when
     // the terminal starts, follows the composer down as the conversation grows, and is
     // gone after `/stop`.
+    // ⚠️ Codex 0.162.0 (measured 2026-10-09) draws a hint row under the status line at
+    // rest (`  ← for agents · ? for shortcuts`) and drops it while a prompt is typed, so
+    // the chip is FOURTH from the bottom at rest and third while typing. A three-row
+    // window never saw it at rest, which is exactly when the idle probe reads it, so a
+    // session waiting on its terminal read as plainly idle. Four rows cover both.
     // ⚠️ This entry CANNOT promise what Claude's does, and the difference is Codex's
-    // layout rather than its pattern. The third row from the bottom is the chip only
+    // layout rather than its pattern. The fourth row from the bottom is the chip only
     // while a terminal runs; with none running it is the last row of the transcript,
-    // which the agent writes. Matching the complete row raises the bar — an assistant
+    // which the agent writes (and while a prompt is typed, the last two). Matching the complete row raises the bar — an assistant
     // message has to end with this exact line, to the character — but nothing here makes
     // forging it impossible, so do not read the Claude comment above as applying here.
     // What contains it is that codex declares `hooks: 'none'`: no hook event from a codex
@@ -674,8 +719,37 @@ const CODEX: CliEntry = {
       promptGlyph: '›',
       workingLine: '[Ee]sc to interrupt',
       watchingLine: String.raw`^\s{0,4}(\d+ background terminals?) running · /ps to view · /stop to close$`,
-      watchingLines: 3,
+      watchingLines: 4,
     },
+    // The footer under the composer, measured on a live 0.147.0 pane:
+    // `  gpt-5.6-terra default · ~/codeman-cases/th-scratch` (model, reasoning effort,
+    // cwd). It sits below the composer, so the transcript never reaches it, and the
+    // effort word right after the model is codex's own format: an open slash-command
+    // popup or a bare line of prose does not have that shape. A footer without an effort
+    // word (a model with no reasoning setting) is not read, and the session keeps its
+    // last known or launch model.
+    // The effort words are built from CODEX_REASONING_EFFORTS, the same list the
+    // `reasoningEffort` launch param above admits, plus `default` (what codex prints when
+    // no effort is configured). A hand-kept copy once left out `ultra`, so a session at
+    // that level never named its model. Every word is plain letters, so the join adds no
+    // quantifier and only a few characters to the 200-character compileVersionRegex cap.
+    // ⚠️ It is not always the LAST row. 0.162.0 (measured 2026-10-09) adds a hint row
+    // under it at rest, `  ← for agents · ? for shortcuts` or `  ? for shortcuts`, and
+    // drops it again while a prompt is being typed. With a one-row window the footer was
+    // never seen and every codex tile showed no model. So the window is two rows and the
+    // footer is either the last one or followed by exactly one more two-space-indented
+    // row. The `$` (no `m` flag: the end of the window) is what keeps the guard the
+    // one-row rule had: with the footer hidden, the last two rows are a transcript line
+    // and the `›` composer, and a forged footer-shaped transcript line is not followed by
+    // an indented row, so it is not read.
+    modelDetect: {
+      screenLine: String.raw`(?:^|\n) {2}([A-Za-z0-9][\w.:/@+-]{0,79}) (?:${[...CODEX_REASONING_EFFORTS, 'default'].join('|')}) · [^\n]*(?:\n {2}[^\n]*)?$`,
+      screenLines: 2,
+    },
+    // App Settings → Codex model / reasoning effort (synced), filled into a LOCAL launch's
+    // codexConfig wherever the caller left the field unset. Launch-only: nothing writes
+    // codex's own config.toml. Read by applyLaunchDefaults() in src/web/launch-defaults.ts.
+    launchDefaults: { model: 'codexModel', reasoningEffort: 'codexReasoningEffort' },
     // Two columns, like claude's, measured on a live 0.154.0 answer: the `•`/`›`/`⚠`
     // markers sit in the gutter, prose continuations sit at 2, and a nested YAML block
     // the model wrote rendered at 2/4/6/8 for its own 0/2/4/6. Replayed at 100, 120,
@@ -828,6 +902,28 @@ const GEMINI: CliEntry = {
     ...agentDefaults(),
     altScreen: 'strip-full',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
+    // Measured on a live Gemini CLI 0.63.0 pane (capture-pane every 300 ms through real
+    // turns with a shell call at 40, 120 and 200 columns, YOLO and default approval mode,
+    // plus the raw PTY stream, 2026-10-09). The TUI repaints its whole bottom region on
+    // every frame, composer included, and the composer sits between a `▄` bar and a `▀`
+    // bar; the submitted prompt is echoed between the same bars. So the `▀` bar arms the
+    // idle confirmation (every repaint and tmux's reattach repaint carry it), and it is the
+    // glyph rather than the composer's prompt character, which follows the approval mode
+    // (`*` in YOLO) and whose `>` also starts the echoed prompt. While a turn runs a line
+    // `⠦ Thinking... (esc to cancel, 6s)` animates about every 80 ms (largest gap mid-turn:
+    // 214 ms); the label can be any loading phrase, so the working line is the
+    // `(esc to cancel, <n>` suffix, or a spinner frame opening a line where a long phrase
+    // pushed that suffix onto the next one. At rest nothing on screen matches either. A tool
+    // confirmation (default mode) replaces the composer and stops the spinner, and the pane
+    // goes silent, so it reads as idle (waiting on the user).
+    // ⚠️ Without this entry a gemini session latched `busy` after its first turn: the braille
+    // spinner trips SPINNER_PATTERN, and gemini never draws Claude's `❯`, the fallback that
+    // would have armed the idle check. A line starting with `▀` is a bar, never prompt text,
+    // so the submit verifier stands down.
+    workDetect: {
+      promptGlyph: '▀',
+      workingLine: String.raw`\(esc to cancel, \d|(?:^|\n) ?[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] `,
+    },
     // gemini's builder defaults an ABSENT approvalMode to 'yolo', so the clamp must
     // MATERIALIZE a config (not just touch an already-sent one) or a non-granted owner who
     // sends no geminiConfig at all would still get yolo for free.
@@ -1017,6 +1113,37 @@ const PI: CliEntry = {
     ...agentDefaults(),
     altScreen: 'preserve', // pi's TUI renders into the main screen with terminal-owned scrollback
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
+    // Measured on a live pi 1.1.0 pane (capture-pane every 250 ms through a turn,
+    // 2026-10-09): pi has no composer glyph. Its composer sits between two `─` rules, and
+    // while a turn runs it embeds its status in the TOP rule as `── ⠏ Working ───…`, the
+    // braille frame animating every ~80 ms; at rest both rules are plain `─`. So the rule
+    // is the glyph that arms the idle confirmation, and a spinner frame inside it is the
+    // working line (the frame, not the word: an extension can replace "Working").
+    // ⚠️ Without this entry a pi session never left `busy` once marked working: the
+    // braille spinner trips SPINNER_PATTERN, and pi never draws Claude's `❯`, the
+    // fallback that would have armed the idle check. The rules carry no prompt text, so
+    // the submit verifier reading them stands down instead of re-pressing Enter.
+    workDetect: {
+      promptGlyph: '─',
+      workingLine: '── [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ',
+    },
+    // pi's footer stats row, read from pi 1.1.0's footer code (0.84.4's is the same) and
+    // measured live as `0.8%/253k (auto)            qwen3.8-27b-pi • xhigh`: usage and
+    // context on the left, then at least two spaces and `[(provider) ]<model>` followed
+    // by ` • <thinking>` for a reasoning model and ` → <routed model>` when routed. Only
+    // the last two rows are read, which sit below the composer where the transcript never
+    // reaches (an extension's status row may sit under the stats row), and the context
+    // field (`12.3%/253k`, `?/128k`) picks the stats row out of them.
+    // ⚠️ A narrow pane truncates the right side with NO ellipsis, leaving exactly two
+    // spaces of padding. So a model with nothing after it is read only with 3+ spaces in
+    // front; with two, only when a following ` •`/` →` proves the name is whole (the
+    // bullet only ever follows a complete name, even when the cut lands right after it).
+    // A cut name is never shown. `no-model` is pi's placeholder when none is selected.
+    modelDetect: {
+      screenLine: String.raw`[%?]/[\d.]+[kKM]?(?: \(auto\))?(?: • xp)? {2}(?: +|(?=(?:\(\S{1,40}\) )?\S{1,80} [•→]))(?:\([\w.@-]{1,40}\) )?([A-Za-z0-9][\w.:/@+-]{0,79})(?= [•→]|\n|$)`,
+      screenLines: 2,
+      rejectWords: ['no-model'],
+    },
     // pi's absent-config default is an interactive trust PROMPT the session user could
     // just answer "yes" to, so omitting --approve is not itself a clamp — MATERIALIZE
     // approveProjectTrust:false so buildPiCommand emits --no-approve outright.
@@ -1134,8 +1261,9 @@ const GROK: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
-    // Fullscreen alt-screen TUI with mouse support — same shape as opencode/antigravity:
-    // only the tmux-attach-time smcup strip, not Ink's full erase-scrollback+DECSET strip.
+    // Fullscreen alt-screen TUI with mouse support, same strip as antigravity until measured
+    // (opencode's mouse strip is #443): only the tmux-attach-time smcup strip, not Ink's full
+    // erase-scrollback+DECSET strip.
     altScreen: 'strip-mux-only',
     // Buffer-policy fallthrough default, unmeasured against an authenticated grok composer
     // (the existing hedge, preserved verbatim) — same as gemini/antigravity/pi.
@@ -1309,11 +1437,42 @@ const DEEPSEEK: CliEntry = {
     // supervisor and Codeman is that supervisor. 'supervised' rather than 'always' because
     // the session can disarm the bridge, and docker/remote cannot reach it at all.
     hooks: 'supervised',
+    // dsh's composer glyph, drawn once the harness TUI can take a prompt.
+    composerReadyMark: '❯',
     transcript: 'deepseek-zstd',
     altScreen: 'strip-mux-only',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
     // Model is NOT a session field for dsh — it is a profile composition entry.
     model: { source: 'none' },
+    // So the screen is where the model is known: dsh-TUI resolves the route itself
+    // (profile cordis.yml pin, else the persisted `/model` choice, else its default;
+    // lib/types/modelRoute.js) and its status line draws "the route requests actually
+    // take", model first (StatusLine.js; `statusBar.model` is on by default and forced
+    // on in minimal mode). Measured on dsh-TUI 0.10.0-beta.1: the composer's rounded box
+    // and, on the row right under its bottom border, ` qwen3.8-27b · medium · <cwd>`.
+    // The border anchors it: nothing the agent writes can sit below the composer, and a
+    // suggestion popup there starts with `/` or `+`, never a model id.
+    // ⚠ The first field is the model only while the status bar's model field is on (the
+    // default). Switched off, the first field is the next one (StatusLine.js): tokens per
+    // second (`12 t/s`) and the token count (`1.2k→3.4k`), which the pattern cannot match,
+    // then the reasoning effort (` medium · th-config`, measured live), then the session
+    // mode, then the cwd's basename. So `rejectWords` lists what those can be, from the
+    // dsh 0.1.1-rc.2 / dsh-TUI 0.10.0-beta.1 sources: every effort id (pi-ai's
+    // THINKING_LEVELS and the DeepSeek adapter's off/low/high/max), and the shipped mode
+    // ids. A mode's drawn label (`plan mode`, `full access`, CJK) never matches one token,
+    // and a field equal to the session's folder name is refused by the shared reader.
+    // Known gaps, all off by default: a custom mode id drawn raw, a git branch or a
+    // one-word session title as the first field; and the non-compact layout, whose
+    // left/right justification never ends a field with ` · `, so nothing is read there
+    // and the session shows its route config.
+    modelDetect: {
+      screenLine: String.raw`╰─+╯\n ?([A-Za-z0-9][\w.:/@+-]{0,79})(?= · |\n|$)`,
+      screenLines: 3,
+      rejectWords: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default', 'plan', 'full'],
+      // With the status bar's model field off (or before it paints), the route the
+      // session's profile pins, read the way dsh-TUI resolves it: src/deepseek-route-config.ts.
+      configResolver: 'deepseek-route',
+    },
     // Only-if-sent, like codex/antigravity/grok: an ABSENT permissionMode means the
     // launcher's own default, `workspace-write`, which already asks. Clamping to
     // `read-only` instead would break the workspace rather than protect it.
@@ -1439,13 +1598,27 @@ const OMP: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
-    // Fullscreen alt-screen TUI, same shape as opencode/antigravity/grok: only the
+    // Fullscreen alt-screen TUI, same shape as antigravity/grok: only the
     // tmux-attach-time smcup strip, not Ink's full erase-scrollback+DECSET strip.
     altScreen: 'strip-mux-only',
     // Codeman reads omp's own `~/.omp/agent/sessions/**/*.jsonl` host-side, which is what
     // makes an omp conversation survive a full session kill.
     transcript: 'omp-jsonl',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
+    // Measured on live omp 18.8.6 and 18.0.11 panes (2026-10-09, a turn held open against
+    // an endpoint that never answers): the input row is `╰─ <text>`, redrawn when a turn
+    // ends, at launch and on reattach. While a turn runs the status bar's leading `π`
+    // becomes a braille spinner plus the elapsed time (` ⠼ 14s > ⬢ model > 📁 ~/dir ▶──`;
+    // 18.0.11 pads it with two spaces, past a minute it reads `1m`), and a `⎋ Working…`
+    // row appears above it. At rest the bar starts ` π > `.
+    // ⚠️ Without this entry an omp session never left `busy` once marked working, like pi:
+    // the spinner trips SPINNER_PATTERN and omp never draws Claude's `❯` after setup.
+    // The glyph also switches the submit verifier on for omp. A prompt sent mid-turn goes
+    // to omp's `Steering` queue and clears the input row, so the verifier stands down.
+    workDetect: {
+      promptGlyph: '╰─',
+      workingLine: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] [0-9hms ]+> |⎋ Working',
+    },
     // No permission prompts and no bypass flag, so nothing config-shaped to clamp — the
     // whole privileged surface here is env-shaped.
     privilegedParams: [],

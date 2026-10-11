@@ -1,44 +1,107 @@
 /**
- * @fileoverview Framework-independent browser projection for owner tab layouts.
+ * @fileoverview Browser projection and editing of the owner tab layout.
  *
- * Browser assets cannot import the TypeScript server model, so this small mirror
- * owns read-time projection, a deliberately small semantic-operation mirror,
- * and request sequencing. The server remains the validation and persistence
- * authority; operations are named so conflicts can be rebased without merging
- * arrays.
+ * `GET /api/tab-layout` returns the owner's named tab GROUPS (`src/tab-layout.ts`
+ * is the server model). Browser assets cannot import that TypeScript, so this
+ * module is a small, dependency-free mirror that owns four things:
+ *
+ *  1. Projection: which live sessions and open web tabs land in which group,
+ *     and which rows a collapsed group hides.
+ *  2. Rendering: the grouped markup for the vertical tab rail. Rows themselves
+ *     are rendered by the caller (app.js, webview-tabs.js), so a grouped row is
+ *     byte-identical to the flat rail's row.
+ *  3. Load sequencing: concurrent layout reads settle newest-wins, and a failed
+ *     read degrades to the flat rail with a capped, backed-off retry.
+ *  4. Editing: named operations (create/rename/delete/reorder a group, move a
+ *     row) applied optimistically and saved through ONE serialized
+ *     `PUT /api/tab-layout` at a time, rebased onto the server's layout on a
+ *     version conflict.
+ *
+ * The server stays the only authority for layout content. Collapse is a
+ * per-device view preference and lives in localStorage only.
+ *
+ * Grouped rendering is opt-in by construction: a layout with no groups (every
+ * owner until they create one) projects to `null`, and the caller keeps the flat
+ * rail exactly as it was.
+ *
+ * @dependency none
+ * @loadorder 5.9 (before app.js, which reads window.CodemanTabLayout)
  */
 
 (function initCodemanTabLayout(global) {
   'use strict';
 
+  const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
+
   const refKey = (ref) => `${ref.kind}:${ref.id}`;
   const validRef = (ref) =>
-    ref && (ref.kind === 'session' || ref.kind === 'webview') && typeof ref.id === 'string' && ref.id.length > 0;
+    !!ref && (ref.kind === 'session' || ref.kind === 'webview') && typeof ref.id === 'string' && ref.id.length > 0;
   const asIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []);
   const stableIds = (value) => [...new Set(asIds(value))];
-  const uniqueRefs = (refsInput) => {
-    const seen = new Set();
-    const refs = [];
-    for (const ref of Array.isArray(refsInput) ? refsInput : []) {
-      if (!validRef(ref) || seen.has(refKey(ref))) continue;
-      seen.add(refKey(ref));
-      refs.push({ kind: ref.kind, id: ref.id });
-    }
-    return refs;
-  };
-  const COLLAPSED_STORAGE_KEY = 'codeman:tab-groups-collapsed';
-  const FOCUS_COLLAPSED_STORAGE_KEY = 'codeman:focus-group-collapsed';
+  // `placement: 'manual'` must survive the round trip: the browser writes whole
+  // layouts back, and dropping it would re-attach a hand-placed child session to
+  // its parent's subtree on the next save.
+  const copyRef = (r) =>
+    r.placement === 'manual' ? { kind: r.kind, id: r.id, placement: 'manual' } : { kind: r.kind, id: r.id };
+  const copyRefs = (value) => (Array.isArray(value) ? value.filter(validRef).map(copyRef) : []);
 
+  /** Server limits (src/tab-layout.ts), mirrored so a bad edit fails before the PUT. */
+  const MAX_GROUPS = 32;
+  const MAX_NAME_LENGTH = 60;
+
+  /**
+   * Defensive copy of a server layout. Unknown fields are dropped, so a newer
+   * server adding model fields cannot leak half-understood state into the view.
+   */
+  function normalizeLayout(value) {
+    if (!value || typeof value !== 'object') throw new Error('Invalid tab layout');
+    const groups = Array.isArray(value.groups) ? value.groups : [];
+    return {
+      version: Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0,
+      updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
+      groups: groups
+        .filter((group) => group && typeof group.id === 'string' && group.id.length > 0)
+        .map((group) => ({
+          id: group.id,
+          name: typeof group.name === 'string' ? group.name : '',
+          refs: copyRefs(group.refs),
+        })),
+      ungrouped: copyRefs(value.ungrouped),
+    };
+  }
+
+  function hasGroups(layout) {
+    return !!layout && Array.isArray(layout.groups) && layout.groups.length > 0;
+  }
+
+  /** Stored collapse ids, or null when the stored value is not a JSON array. */
+  function parseCollapsedIds(raw) {
+    if (raw === null) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? stableIds(parsed) : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  /**
+   * Read the per-device collapse ids. `ok: false` means the STORE failed (a read
+   * or write threw), and the caller then keeps every group expanded. A malformed
+   * VALUE is not a store failure: it reads as "nothing collapsed" and is
+   * rewritten, or a shape left behind by another build (a rollback) would leave
+   * collapse disabled on this device for good.
+   */
   function loadCollapsedGroupIds(storage, validGroupIds) {
     try {
-      const raw = storage.getItem(COLLAPSED_STORAGE_KEY);
-      const parsed = raw === null ? [] : JSON.parse(raw);
-      if (!Array.isArray(parsed)) throw new Error('Invalid collapsed tab groups');
-      const loaded = stableIds(parsed);
+      const parsed = parseCollapsedIds(storage.getItem(COLLAPSED_STORAGE_KEY));
+      const loaded = parsed || [];
       if (validGroupIds === undefined) return { ids: loaded, ok: true };
+      // Garbage-collect ids of groups that no longer exist, so a deleted group's
+      // id cannot silently collapse a future group that reuses it.
       const valid = new Set(stableIds(validGroupIds));
       const kept = loaded.filter((id) => valid.has(id));
-      if (kept.length !== loaded.length) storage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(kept));
+      if (!parsed || kept.length !== loaded.length) storage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(kept));
       return { ids: kept, ok: true };
     } catch (_error) {
       return { ids: [], ok: false };
@@ -55,822 +118,213 @@
     }
   }
 
-  function loadFocusGroupCollapsed(storage) {
-    try {
-      const raw = storage.getItem(FOCUS_COLLAPSED_STORAGE_KEY);
-      if (raw === null || raw === 'false') return { collapsed: false, ok: true };
-      if (raw === 'true') return { collapsed: true, ok: true };
-      throw new Error('Invalid Focus collapse state');
-    } catch (_error) {
-      return { collapsed: false, ok: false };
-    }
-  }
-
-  function saveFocusGroupCollapsed(storage, collapsed) {
-    try {
-      storage.setItem(FOCUS_COLLAPSED_STORAGE_KEY, collapsed === true ? 'true' : 'false');
-      return { collapsed: collapsed === true, ok: true };
-    } catch (_error) {
-      return { collapsed: false, ok: false };
-    }
-  }
-
-  function normalizedLayout(value) {
-    if (!value || typeof value !== 'object') throw new Error('Invalid tab layout');
-    const groups = Array.isArray(value.groups) ? value.groups : [];
-    const ungrouped = Array.isArray(value.ungrouped) ? value.ungrouped : [];
-    return {
-      version: Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0,
-      updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
-      groups: groups.map((group) => ({
-        id: typeof group?.id === 'string' ? group.id : '',
-        name: typeof group?.name === 'string' ? group.name : '',
-        refs: Array.isArray(group?.refs)
-          ? group.refs.filter(validRef).map((ref) => ({
-              kind: ref.kind,
-              id: ref.id,
-              ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
-              ...(ref.focus === true ? { focus: true } : {}),
-            }))
-          : [],
-      })),
-      ungrouped: ungrouped.filter(validRef).map((ref) => ({
-        kind: ref.kind,
-        id: ref.id,
-        ...(ref.placement === 'manual' ? { placement: 'manual' } : {}),
-        ...(ref.focus === true ? { focus: true } : {}),
-      })),
-      ...(Array.isArray(value.focusOrder) ? { focusOrder: uniqueRefs(value.focusOrder) } : {}),
-    };
-  }
-
   /**
-   * Focus section order: explicitly ordered refs first, then focused refs the
-   * stored order has not been asked about, in stored order. Mirrors
-   * orderedFocusRefs() in src/tab-layout.ts.
+   * Project a layout onto what is live in this browser.
+   *
+   * Every live session and open web tab appears exactly once: stored refs keep
+   * their group and stored order; anything the layout has not caught up with yet
+   * (a session created a moment ago, a web tab opened on this device only) is
+   * appended to the ungrouped section in the caller's order. Saved web tabs that
+   * are not open here are skipped, as are refs to sessions that are gone.
+   *
+   * A collapsed group hides its rows, EXCEPT the highlighted one (the active web
+   * tab, else the active session), so selecting a hidden session by keyboard,
+   * palette or Alt+N never leaves the user with no visible selection.
+   *
+   * @returns {null | { sections, visibleRefs, hiddenTabGroupByRef, sectionByRef }}
+   *   null when the layout has no groups: the caller renders the flat rail
+   *   unchanged. Each section lists the rows it shows (`refs`) and the rows its
+   *   collapse hides (`hidden`); `sectionByRef` maps every placed row
+   *   (`<kind>:<id>`) to its section id (null = Ungrouped), shown or hidden.
    */
-  function orderedFocusRefs(layout, accept) {
-    const focused = new Map();
-    for (const { ref } of refLocations(layout)) {
-      if (ref.focus !== true) continue;
-      if (typeof accept === 'function' && !accept(ref)) continue;
-      focused.set(refKey(ref), { kind: ref.kind, id: ref.id });
-    }
-    const result = [];
-    const emitted = new Set();
-    for (const ref of Array.isArray(layout.focusOrder) ? layout.focusOrder : []) {
-      const key = refKey(ref);
-      if (!focused.has(key) || emitted.has(key)) continue;
-      emitted.add(key);
-      result.push(focused.get(key));
-    }
-    for (const [key, ref] of focused) {
-      if (emitted.has(key)) continue;
-      emitted.add(key);
-      result.push(ref);
-    }
-    return result;
-  }
-
-  /** Drop Focus order entries that are no longer stored or no longer focused. */
-  function prunedFocusOrder(layout) {
-    if (!Array.isArray(layout.focusOrder)) return layout;
-    const focusedKeys = new Set(
-      refLocations(layout)
-        .filter((item) => item.ref.focus === true)
-        .map((item) => refKey(item.ref))
-    );
-    const kept = layout.focusOrder.filter((ref) => focusedKeys.has(refKey(ref)));
-    if (kept.length === layout.focusOrder.length) return layout;
-    if (kept.length === 0) {
-      const { focusOrder: _dropped, ...rest } = layout;
-      return rest;
-    }
-    return { ...layout, focusOrder: kept };
-  }
-
-  function operationError(message) {
-    throw new Error(`Tab layout edit failed: ${message}`);
-  }
-
-  function boundedIndex(value, length) {
-    if (!Number.isInteger(value) || value < 0 || value > length) operationError('invalid destination');
-    return value;
-  }
-
-  function refLocations(layout) {
-    return [
-      ...layout.groups.flatMap((group) => group.refs.map((ref) => ({ groupId: group.id, ref }))),
-      ...layout.ungrouped.map((ref) => ({ groupId: null, ref })),
-    ];
-  }
-
-  function mapStoredRef(layout, target, transform) {
-    const targetKey = refKey(target);
-    let found = false;
-    const apply = (ref) => {
-      if (refKey(ref) !== targetKey) return ref;
-      found = true;
-      return transform(ref);
-    };
-    layout.groups = layout.groups.map((group) => ({ ...group, refs: group.refs.map(apply) }));
-    layout.ungrouped = layout.ungrouped.map(apply);
-    if (!found) operationError('unknown ref');
-    return layout;
-  }
-
-  function inheritedDescendantKeys(layout, target, metadata) {
-    const stored = new Map(refLocations(layout).map((item) => [refKey(item.ref), item.ref]));
-    const children = new Map();
-    for (const item of Array.isArray(metadata) ? metadata : []) {
-      if (item?.kind !== 'session' || !item.parentSessionId) continue;
-      const child = stored.get(refKey(item));
-      const parentKey = refKey({ kind: 'session', id: item.parentSessionId });
-      if (!child || child.placement === 'manual' || !stored.has(parentKey)) continue;
-      const siblings = children.get(item.parentSessionId) || [];
-      siblings.push(item.id);
-      children.set(item.parentSessionId, siblings);
-    }
-    const result = new Set();
-    const visit = (ref) => {
-      const key = refKey(ref);
-      if (result.has(key)) return;
-      result.add(key);
-      if (ref.kind === 'session') {
-        for (const childId of children.get(ref.id) || []) visit({ kind: 'session', id: childId });
-      }
-    };
-    visit(target);
-    return result;
-  }
-
-  function previewOperation(layoutInput, operation) {
-    const layout = normalizedLayout(layoutInput);
-    if (operation?.type !== 'moveRef' || !validRef(operation.ref)) return { refs: [], operation };
-    const keys = inheritedDescendantKeys(layout, operation.ref, operation.metadata);
-    return {
-      refs: refLocations(layout)
-        .filter((item) => keys.has(refKey(item.ref)))
-        .map((item) => ({ ...item.ref })),
-      operation,
-    };
-  }
-
-  function applyOperation(layoutInput, operation) {
-    let layout = normalizedLayout(layoutInput);
-    if (!operation || typeof operation.type !== 'string') operationError('missing operation');
-    if (operation.type === 'createGroup') {
-      if (!operation.id) operationError('invalid group id');
-      const name = String(operation.name || '').trim();
-      if (!name || name.length > 60) operationError('group name must be 1–60 characters');
-      const existing = layout.groups.find((group) => group.id === operation.id);
-      if (existing) {
-        if (existing.name === name) return layout;
-        operationError('invalid group id');
-      }
-      if (layout.groups.length >= 32) operationError('group limit reached');
-      layout.groups.splice(boundedIndex(operation.index ?? layout.groups.length, layout.groups.length), 0, {
-        id: operation.id,
-        name,
-        refs: [],
-      });
-      return layout;
-    }
-    const groupIndex = layout.groups.findIndex((group) => group.id === (operation.groupId || operation.id));
-    if (operation.type === 'renameGroup') {
-      if (groupIndex < 0) operationError('unknown group');
-      const name = String(operation.name || '').trim();
-      if (!name || name.length > 60) operationError('group name must be 1–60 characters');
-      layout.groups[groupIndex].name = name;
-      return layout;
-    }
-    if (operation.type === 'deleteGroup') {
-      if (groupIndex < 0) return layout;
-      const [removed] = layout.groups.splice(groupIndex, 1);
-      layout.ungrouped.push(...removed.refs);
-      return layout;
-    }
-    if (operation.type === 'reorderGroup') {
-      if (groupIndex < 0) operationError('unknown group');
-      const [moved] = layout.groups.splice(groupIndex, 1);
-      layout.groups.splice(boundedIndex(operation.index, layout.groups.length), 0, moved);
-      return layout;
-    }
-    if (operation.type === 'moveRef') {
-      if (!validRef(operation.ref)) operationError('invalid ref');
-      if (operation.groupId !== null && !layout.groups.some((group) => group.id === operation.groupId)) {
-        operationError('unknown destination group');
-      }
-      const locations = refLocations(layout);
-      const targetKey = refKey(operation.ref);
-      if (!locations.some((item) => refKey(item.ref) === targetKey)) operationError('unknown ref');
-      const blockKeys = inheritedDescendantKeys(layout, operation.ref, operation.metadata);
-      const block = locations.filter((item) => blockKeys.has(refKey(item.ref))).map((item) => ({ ...item.ref }));
-      const meta = (Array.isArray(operation.metadata) ? operation.metadata : []).find(
-        (item) => refKey(item) === targetKey
-      );
-      if (operation.ref.kind === 'session' && meta?.parentSessionId) block[0].placement = 'manual';
-      for (const group of layout.groups) group.refs = group.refs.filter((ref) => !blockKeys.has(refKey(ref)));
-      layout.ungrouped = layout.ungrouped.filter((ref) => !blockKeys.has(refKey(ref)));
-      const destination =
-        operation.groupId === null
-          ? layout.ungrouped
-          : layout.groups.find((group) => group.id === operation.groupId).refs;
-      destination.splice(boundedIndex(operation.index, destination.length), 0, ...block);
-      return layout;
-    }
-    if (operation.type === 'setManualPlacement') {
-      if (!validRef(operation.ref) || operation.manual !== true) operationError('invalid manual placement');
-      return mapStoredRef(layout, operation.ref, (ref) => ({ ...ref, placement: 'manual' }));
-    }
-    if (operation.type === 'setFocus') {
-      if (!validRef(operation.ref) || typeof operation.focused !== 'boolean') operationError('invalid Focus state');
-      return prunedFocusOrder(
-        mapStoredRef(layout, operation.ref, (ref) => {
-          if (operation.focused) return { ...ref, focus: true };
-          const { focus: _focus, ...rest } = ref;
-          return rest;
-        })
-      );
-    }
-    if (operation.type === 'moveFocus') {
-      if (!validRef(operation.ref)) operationError('invalid ref');
-      const targetKey = refKey(operation.ref);
-      if (!refLocations(layout).some((item) => refKey(item.ref) === targetKey)) operationError('unknown ref');
-      const ordered = orderedFocusRefs(layout);
-      const from = ordered.findIndex((ref) => refKey(ref) === targetKey);
-      if (from < 0) operationError('ref is not in Focus');
-      const focusOrder = [...ordered];
-      const [moved] = focusOrder.splice(from, 1);
-      focusOrder.splice(boundedIndex(operation.index, focusOrder.length), 0, moved);
-      layout.focusOrder = focusOrder;
-      return layout;
-    }
-    if (operation.type === 'followParent') {
-      if (!validRef(operation.ref) || operation.ref.kind !== 'session') operationError('only a session can follow');
-      if (!refLocations(layout).some((item) => refKey(item.ref) === refKey(operation.ref)))
-        operationError('unknown ref');
-      return layout;
-    }
-    operationError(`unknown operation ${operation.type}`);
-  }
-
-  function layoutContentKey(layoutInput) {
-    const layout = normalizedLayout(layoutInput);
-    return JSON.stringify({
-      groups: layout.groups,
-      ungrouped: layout.ungrouped,
-      focusOrder: layout.focusOrder ?? null,
-    });
-  }
-
-  function operationsAfterAppliedPrefix(baseLayout, operationsInput, currentLayout, authoritativeAppliedCount) {
-    const operations = Array.isArray(operationsInput) ? operationsInput : [];
-    if (
-      Number.isSafeInteger(authoritativeAppliedCount) &&
-      authoritativeAppliedCount >= 0 &&
-      authoritativeAppliedCount <= operations.length
-    ) {
-      return operations.slice(authoritativeAppliedCount);
-    }
-    const currentKey = layoutContentKey(currentLayout);
-    let candidate = normalizedLayout(baseLayout);
-    let appliedCount = layoutContentKey(candidate) === currentKey ? 0 : -1;
-    for (let index = 0; index < operations.length; index++) {
-      // Follow-parent is a server-authoritative lineage operation. Skip its
-      // derivation but keep scanning ordinary suffix operations. Shipping
-      // responses provide the exact authoritative prefix count when Follow
-      // changed structure; this fallback remains useful with older responses.
-      if (operations[index]?.type === 'followParent') continue;
-      candidate = applyOperation(candidate, operations[index]);
-      if (layoutContentKey(candidate) === currentKey) appliedCount = index + 1;
-    }
-    return operations.slice(appliedCount < 0 ? 0 : appliedCount);
-  }
-
   function project(layoutInput, options = {}) {
-    const layout = normalizedLayout(layoutInput);
-    const liveSessionIds = new Set(asIds(options.liveSessionIds));
-    const openWebviewIds = new Set(asIds(options.openWebviewIds));
-    const legacySessionOrder = stableIds(options.legacySessionOrder);
+    if (!layoutInput) return null;
+    const layout = normalizeLayout(layoutInput);
+    if (!hasGroups(layout)) return null;
+    const liveSessionIds = stableIds(options.liveSessionIds);
+    const openWebviewIds = stableIds(options.openWebviewIds);
+    const live = new Set(liveSessionIds);
+    const open = new Set(openWebviewIds);
     const collapsed = new Set(asIds(options.collapsedGroupIds));
-    const orientation = options.orientation === 'vertical' ? 'vertical' : 'horizontal';
     const highlighted = options.activeWebviewId
       ? `webview:${options.activeWebviewId}`
       : options.activeSessionId
         ? `session:${options.activeSessionId}`
         : '';
-    const seen = new Set();
-    const storedKeys = new Set([
-      ...layout.groups.flatMap((group) => group.refs.map(refKey)),
-      ...layout.ungrouped.map(refKey),
-    ]);
-    const processedStoredKeys = new Set();
-    const ownerSessions = [];
-    const completeRefs = [];
-    const completeSeen = new Set();
+    const renderable = (ref) => (ref.kind === 'session' ? live.has(ref.id) : open.has(ref.id));
+    const placed = new Set();
     const visibleRefs = [];
-    const focusRefs = [];
-    const sections = [];
     const hiddenTabGroupByRef = {};
+    const sectionByRef = {};
+    const sections = [];
 
-    const renderable = (ref) => (ref.kind === 'session' ? liveSessionIds.has(ref.id) : openWebviewIds.has(ref.id));
-    if (orientation === 'vertical') {
-      focusRefs.push(...orderedFocusRefs(layout, renderable));
-    }
-    const addVisible = (ref, sectionRefs, isCollapsed, groupId = null, stored = true) => {
-      const key = refKey(ref);
-      if (stored) {
-        if (processedStoredKeys.has(key)) return false;
-        processedStoredKeys.add(key);
-      } else if (storedKeys.has(key)) {
-        return false;
+    const place = (refs, sectionId, isCollapsed) => {
+      const shown = [];
+      const hidden = [];
+      let count = 0;
+      for (const ref of refs) {
+        const key = refKey(ref);
+        if (placed.has(key) || !renderable(ref)) continue;
+        placed.add(key);
+        sectionByRef[key] = sectionId;
+        count++;
+        const copy = { kind: ref.kind, id: ref.id };
+        if (isCollapsed && key !== highlighted) {
+          hiddenTabGroupByRef[key] = sectionId;
+          hidden.push(copy);
+          continue;
+        }
+        shown.push(copy);
+        visibleRefs.push(copy);
       }
-      if (!renderable(ref)) return false;
-      if (!completeSeen.has(key)) {
-        completeSeen.add(key);
-        completeRefs.push({ kind: ref.kind, id: ref.id });
-      }
-      if (seen.has(key)) return false;
-      if (orientation === 'vertical' && isCollapsed && key !== highlighted) {
-        if (groupId) hiddenTabGroupByRef[key] = groupId;
-        return false;
-      }
-      seen.add(key);
-      const copy = { kind: ref.kind, id: ref.id };
-      visibleRefs.push(copy);
-      sectionRefs.push(copy);
-      return true;
+      return { shown, hidden, count };
     };
 
-    // Compatibility projection includes every owner session in the authoritative
-    // layout, even when collapse removes it from the visible rail.
-    const ownerSeen = new Set();
     for (const group of layout.groups) {
-      for (const ref of group.refs) {
-        if (ref.kind === 'session' && liveSessionIds.has(ref.id) && !ownerSeen.has(ref.id)) {
-          ownerSeen.add(ref.id);
-          ownerSessions.push(ref.id);
-        }
-      }
-    }
-    for (const ref of layout.ungrouped) {
-      if (ref.kind === 'session' && liveSessionIds.has(ref.id) && !ownerSeen.has(ref.id)) {
-        ownerSeen.add(ref.id);
-        ownerSessions.push(ref.id);
-      }
-    }
-    for (const id of legacySessionOrder) {
-      if (liveSessionIds.has(id) && !ownerSeen.has(id)) {
-        ownerSeen.add(id);
-        ownerSessions.push(id);
-      }
-    }
-    for (const id of liveSessionIds) if (!ownerSeen.has(id)) ownerSessions.push(id);
-
-    for (const group of layout.groups) {
-      const refs = [];
-      const refIndices = [];
       const isCollapsed = collapsed.has(group.id);
-      group.refs.forEach((ref, storedIndex) => {
-        if (addVisible(ref, refs, isCollapsed, group.id)) refIndices.push(storedIndex);
-      });
-      if (orientation === 'vertical') {
-        sections.push({
-          id: group.id,
-          name: group.name,
-          refs,
-          refIndices,
-          count: group.refs.length,
-          collapsed: isCollapsed,
-        });
-      }
+      const { shown, hidden, count } = place(group.refs, group.id, isCollapsed);
+      sections.push({ id: group.id, name: group.name, refs: shown, hidden, count, collapsed: isCollapsed });
     }
-    const ungroupedRefs = [];
-    const ungroupedRefIndices = [];
-    layout.ungrouped.forEach((ref, storedIndex) => {
-      if (addVisible(ref, ungroupedRefs, false, null)) ungroupedRefIndices.push(storedIndex);
-    });
-
-    // A newly opened local webview or live session may predate server
-    // reconciliation. Append omissions deterministically without moving saved refs.
-    for (const id of ownerSessions) {
-      if (addVisible({ kind: 'session', id }, ungroupedRefs, false, null, false)) {
-        ungroupedRefIndices.push(layout.ungrouped.length);
-      }
-    }
-    for (const id of openWebviewIds) {
-      if (addVisible({ kind: 'webview', id }, ungroupedRefs, false, null, false)) {
-        ungroupedRefIndices.push(layout.ungrouped.length);
-      }
-    }
-    if (orientation === 'vertical') {
+    const omissions = [
+      ...liveSessionIds.map((id) => ({ kind: 'session', id })),
+      ...openWebviewIds.map((id) => ({ kind: 'webview', id })),
+    ];
+    const ungrouped = place([...layout.ungrouped, ...omissions], null, false);
+    if (ungrouped.count > 0) {
       sections.push({
         id: null,
         name: '',
-        refs: ungroupedRefs,
-        refIndices: ungroupedRefIndices,
-        count: layout.ungrouped.length,
+        refs: ungrouped.shown,
+        hidden: [],
+        count: ungrouped.count,
         collapsed: false,
       });
     }
-    const altRefs = uniqueRefs(orientation === 'vertical' ? [...focusRefs, ...completeRefs] : visibleRefs);
-
-    return {
-      sessionOrder: ownerSessions,
-      completeRefs,
-      visibleRefs,
-      altRefs,
-      focusRefs,
-      focusCollapsed: orientation === 'vertical' && options.focusCollapsed === true,
-      sections,
-      hiddenTabGroupByRef,
-    };
+    return { sections, visibleRefs, hiddenTabGroupByRef, sectionByRef };
   }
 
-  function filterSessionProjection(projection, matchingSessionIds) {
-    const matches = new Set(asIds(matchingSessionIds));
-    const keep = (ref) => ref?.kind === 'session' && matches.has(ref.id);
-    const sections = (Array.isArray(projection?.sections) ? projection.sections : [])
-      .map((section) => {
-        const refs = [];
-        const refIndices = [];
-        (Array.isArray(section.refs) ? section.refs : []).forEach((ref, index) => {
-          if (!keep(ref)) return;
-          refs.push({ kind: ref.kind, id: ref.id });
-          refIndices.push(section.refIndices?.[index] ?? index);
-        });
-        return { ...section, refs, refIndices, count: refs.length, collapsed: false };
-      })
-      .filter((section) => section.refs.length > 0);
-    const visibleRefs = (Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [])
-      .filter(keep)
-      .map((ref) => ({ kind: ref.kind, id: ref.id }));
-    const focusRefs = (Array.isArray(projection?.focusRefs) ? projection.focusRefs : [])
-      .filter(keep)
-      .map((ref) => ({ kind: ref.kind, id: ref.id }));
-    const altRefs = uniqueRefs([...focusRefs, ...visibleRefs]);
-    return {
-      ...projection,
-      visibleRefs,
-      altRefs,
-      focusRefs,
-      focusCollapsed: false,
-      sections,
-      hiddenTabGroupByRef: {},
-      searchActive: true,
-      matchCount: new Set([...visibleRefs, ...focusRefs].map((ref) => ref.id)).size,
-    };
+  const ALERT_RANK = { action: 2, idle: 1 };
+
+  /**
+   * The most urgent alert behind each COLLAPSED header: `{ [groupId]: 'action' |
+   * 'idle' }` over the session rows the collapse hides. A shown row (the kept
+   * selection, any expanded group) draws its own alert, so it is not counted
+   * here. `alertOf(sessionId)` is the caller's tab alert lookup.
+   */
+  function hiddenGroupAlerts(projection, alertOf) {
+    const result = {};
+    const sections = projection && Array.isArray(projection.sections) ? projection.sections : [];
+    for (const section of sections) {
+      if (section.id === null || !Array.isArray(section.hidden)) continue;
+      let best = null;
+      for (const ref of section.hidden) {
+        if (ref.kind !== 'session') continue;
+        const alert = alertOf(ref.id);
+        if (ALERT_RANK[alert] && (!best || ALERT_RANK[alert] > ALERT_RANK[best])) best = alert;
+      }
+      if (best) result[section.id] = best;
+    }
+    return result;
   }
 
-  function projectFallback(options = {}) {
-    const legacy = stableIds(options.legacySessionOrder);
-    const live = stableIds(options.liveSessionIds);
-    const sessionOrder = [...legacy.filter((id) => live.includes(id)), ...live.filter((id) => !legacy.includes(id))];
-    const visibleRefs = [
-      ...sessionOrder.map((id) => ({ kind: 'session', id })),
-      ...stableIds(options.openWebviewIds).map((id) => ({ kind: 'webview', id })),
-    ];
-    return {
-      sessionOrder,
-      completeRefs: visibleRefs.map((ref) => ({ ...ref })),
-      visibleRefs,
-      altRefs: visibleRefs.map((ref) => ({ ...ref })),
-      sections: [],
-    };
-  }
-
-  function collapsedHash(value) {
-    return stableIds(value).sort().join('\u001f');
-  }
-
-  function structureKey(input = {}) {
+  /**
+   * Everything that changes the grouped rail's STRUCTURE (which rows exist and
+   * where, the headers' names, what a collapse hides), as opposed to a row's own
+   * status/name/badges. The incremental render path only patches rows in place,
+   * so a change here forces a full rebuild.
+   *
+   * Deliberately NOT the layout version: the server bumps it on every session
+   * create/close and order PUT, and a bump that moves nothing visible must not
+   * cost every client a full tab-strip rebuild. `layout` is accepted for
+   * signature stability only.
+   */
+  function structureKey(_layout, projection, collapsedGroupIds) {
+    if (!projection) return null;
     return JSON.stringify({
-      version: Number.isSafeInteger(input.version) ? input.version : null,
-      collapsed: collapsedHash(input.collapsedGroupIds),
-      orientation: input.orientation || 'horizontal',
-      openWebviews: stableIds(input.openWebviewIds),
-      activeSessionId: input.activeSessionId || null,
-      activeWebviewId: input.activeWebviewId || null,
-      focusCollapsed: input.focusCollapsed === true,
-      focusRefs: (Array.isArray(input.focusRefs) ? input.focusRefs : []).filter(validRef).map(refKey),
-      altRefs: (Array.isArray(input.altRefs) ? input.altRefs : []).filter(validRef).map(refKey),
-      placementStates: Array.isArray(input.placementStates) ? input.placementStates : [],
-      refs: (Array.isArray(input.visibleRefs) ? input.visibleRefs : []).filter(validRef).map(refKey),
+      collapsed: stableIds(collapsedGroupIds).sort(),
+      sections: projection.sections.map((section) => [
+        section.id,
+        section.name,
+        section.count,
+        section.refs.map(refKey),
+        (section.hidden || []).map(refKey),
+      ]),
     });
   }
 
-  function refAtAltNumber(refs, number) {
-    if (!Number.isInteger(number) || number < 1 || number > 9) return null;
-    const ref = Array.isArray(refs) ? refs[number - 1] : null;
-    return validRef(ref) ? { kind: ref.kind, id: ref.id } : null;
-  }
-
-  function altNumberForRef(refs, target) {
-    if (!validRef(target)) return null;
-    const targetKey = refKey(target);
-    const index = (Array.isArray(refs) ? refs.slice(0, 9) : []).findIndex(
-      (ref) => validRef(ref) && refKey(ref) === targetKey
-    );
-    return index < 0 ? null : index + 1;
-  }
-
-  function adjacentSession(orderInput, activeId, delta) {
-    const order = stableIds(orderInput);
-    if (order.length <= 1) return null;
-    const current = order.indexOf(activeId);
-    const start = current < 0 ? (delta < 0 ? 0 : -1) : current;
-    return order[(start + (delta < 0 ? -1 : 1) + order.length) % order.length] || null;
-  }
-
-  function renderProjection(
-    projection,
-    orientation,
-    renderRef,
-    escapeHtml,
-    renderFocusRef = renderRef,
-    visualOrderForRef
-  ) {
-    const refs = Array.isArray(projection?.visibleRefs) ? projection.visibleRefs : [];
-    const sections = Array.isArray(projection?.sections) ? projection.sections : [];
-    if (orientation !== 'vertical' || sections.length === 0) {
-      return refs.map((ref, index) => renderRef(ref, index)).join('');
-    }
-    const focusRefs = Array.isArray(projection?.focusRefs) ? projection.focusRefs : [];
-    const focusCollapsed = projection?.focusCollapsed === true;
-    const searchActive = projection?.searchActive === true;
-    const focusContent = focusCollapsed
-      ? ''
-      : focusRefs
-          .map((ref, index) => {
-            let rendered = renderFocusRef(ref, -1, { focusShortcut: true })
-              .replace(/role="tab"/, 'role="treeitem"')
-              .replace(/tabindex="0"/g, 'tabindex="-1"')
-              .replace(/<button(?![^>]*tabindex)/g, '<button tabindex="-1"');
-            if (!/role="treeitem"/.test(rendered)) rendered = rendered.replace(/^<([a-z]+)/, '<$1 role="treeitem"');
-            return `<div class="tab-layout-drop-zone tab-focus-drop-zone" role="presentation" data-tab-focus-drop-index="${index}"></div>${rendered}`;
-          })
-          .join('') +
-        `<div class="tab-layout-drop-zone tab-focus-drop-zone" role="presentation" data-tab-focus-drop-index="${focusRefs.length}"></div>`;
-    const focusToggle = searchActive
-      ? '<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="Focus search results" aria-expanded="true" aria-disabled="true" disabled><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>'
-      : `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-focus-toggle aria-label="${focusCollapsed ? 'Expand' : 'Collapse'} Focus" aria-expanded="${focusCollapsed ? 'false' : 'true'}" onclick="app.toggleFocusGroupCollapsed()"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`;
-    const focus = focusRefs.length
-      ? `<section class="tab-layout-group tab-layout-focus-group" role="presentation" data-tab-focus-group><div class="tab-layout-group-header tab-layout-focus-header" role="treeitem" tabindex="-1" aria-labelledby="tab-focus-header" aria-expanded="${focusCollapsed ? 'false' : 'true'}">${focusToggle}<span id="tab-focus-header" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>Focus</span><span class="tab-layout-group-count">${focusRefs.length}</span></div>${focusCollapsed ? '' : `<div class="tab-layout-group-refs" role="group" aria-labelledby="tab-focus-header">${focusContent}</div>`}</section>`
-      : '';
-    let index = 0;
-    const groups = sections
-      .map((section, sectionIndex) => {
-        const name = section.id === null ? 'Ungrouped' : section.name;
-        const content = (Array.isArray(section.refs) ? section.refs : [])
-          .map((ref, refIndex) => {
-            let rendered = renderRef(ref, index++)
-              .replace(/role="tab"/, 'role="treeitem"')
-              .replace(/tabindex="0"/g, 'tabindex="-1"')
-              .replace(/<button(?![^>]*tabindex)/g, '<button tabindex="-1"');
-            if (!/role="treeitem"/.test(rendered)) rendered = rendered.replace(/^<([a-z]+)/, '<$1 role="treeitem"');
-            const storedIndex = section.refIndices?.[refIndex] ?? refIndex;
-            // The rail sorts rows with flex `order`. Their drop zones must carry
-            // the same order or every default-order zone gathers above the rows.
-            const visualOrder = visualOrderForRef?.(ref);
-            const zoneOrder = Number.isInteger(visualOrder) ? ` style="order:${visualOrder}"` : '';
-            return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${storedIndex}"${zoneOrder}></div>${rendered}`;
-          })
-          .join('');
-        const headerId = section.id === null ? '' : `tab-group-header-${sectionIndex}`;
-        const groupToggle = searchActive
-          ? `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id || '')}" aria-label="${escapeHtml(name)} search results" aria-expanded="true" aria-disabled="true" disabled><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`
-          : `<button type="button" tabindex="-1" class="tab-layout-group-toggle" data-tab-group-header="${escapeHtml(section.id || '')}" aria-label="${section.collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(name)}" aria-expanded="${section.collapsed ? 'false' : 'true'}" onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)"><span class="tab-layout-group-chevron" aria-hidden="true"></span></button>`;
-        const header =
-          section.id === null
-            ? `<div class="tab-layout-ungrouped-header" role="treeitem" tabindex="-1"><span class="tab-layout-group-name">${escapeHtml(name)}</span><span class="tab-layout-group-count">${section.count ?? section.refs.length}</span></div>`
-            : `<div class="tab-layout-group-header" role="treeitem" tabindex="-1" aria-labelledby="${escapeHtml(headerId)}" aria-expanded="${section.collapsed ? 'false' : 'true'}">${groupToggle}<span id="${escapeHtml(headerId)}" class="tab-layout-group-name tab-layout-group-label" data-i18n-skip>${escapeHtml(name)}</span><span class="tab-layout-group-count">${section.count ?? section.refs.length}</span><button type="button" tabindex="-1" class="tab-layout-group-drag-handle" aria-label="Move ${escapeHtml(name)}" data-tab-group-drag="${escapeHtml(section.id)}">&#x2630;</button><button type="button" tabindex="-1" class="tab-layout-group-menu" aria-label="Actions for ${escapeHtml(name)}" aria-haspopup="menu" aria-expanded="false" onclick="app.openTabGroupMenu(event, this.closest('.tab-layout-group-header').querySelector('[data-tab-group-header]').dataset.tabGroupHeader)">&#x22EF;</button></div>`;
-        const label =
-          section.id === null ? `aria-label="${escapeHtml(name)}"` : `aria-labelledby="${escapeHtml(headerId)}"`;
-        // Webview rows sort at 9999, so the trailing insertion zone follows
-        // every card even when the section contains webviews.
-        const endZoneOrder = visualOrderForRef ? ' style="order:10000"' : '';
-        const members = section.collapsed
-          ? `<div class="tab-layout-group-refs tab-layout-collapsed-exception" role="presentation"${section.refs.length ? ` data-tab-highlighted-exception="${escapeHtml(section.id)}"` : ''}>${content}<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${section.count ?? section.refs.length}"${endZoneOrder}></div></div>`
-          : `<div class="tab-layout-group-refs" role="group" ${label}>${content}<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-group="${escapeHtml(section.id || '')}" data-tab-drop-index="${section.count ?? section.refs.length}"${endZoneOrder}></div></div>`;
-        return `<div class="tab-layout-drop-zone" role="presentation" data-tab-drop-before-group="${escapeHtml(section.id || '')}"></div><section class="tab-layout-group" role="presentation" data-tab-group-id="${escapeHtml(section.id || '')}">${header}${members}</section>`;
+  /**
+   * Grouped rail markup. `renderRef(ref)` returns one row's HTML ('' to skip it);
+   * `escapeHtml` is the caller's escaper. Group names are user content, so they
+   * are escaped and marked `data-i18n-skip`.
+   *
+   * The caller makes the list itself the `tree` and marks rows up as treeitems
+   * (app.js `_applyTabTreeSemantics`); this markup supplies the structure:
+   *  - a named group's header is a level-1 `treeitem` carrying `aria-expanded`.
+   *    Its rows are a sibling `group`, so the header OWNS it via `aria-owns`
+   *    (the rows sit below the header visually, not inside it).
+   *  - a COLLAPSED group owns nothing: the one row it still shows (the
+   *    selection) is a level-1 sibling, never the child of a closed node.
+   *  - a group with NO open rows is a leaf: no `aria-expanded`, no owned group,
+   *    so it is not announced as an expanded parent of an empty group.
+   *  - Ungrouped rows are level-1 items. Their "Ungrouped" heading is a visual
+   *    divider only, hidden from assistive tech, and its rows are not a group.
+   */
+  function renderProjection(projection, renderRef, escapeHtml) {
+    const sections = projection && Array.isArray(projection.sections) ? projection.sections : [];
+    return sections
+      .map((section, index) => {
+        const rows = section.refs.map((ref) => renderRef(ref)).join('');
+        if (section.id === null) {
+          return (
+            '<section class="tab-layout-group tab-layout-ungrouped" role="presentation" data-tab-group-id="">' +
+            `<div class="tab-layout-group-header tab-layout-ungrouped-header" aria-hidden="true"><span class="tab-layout-group-name">Ungrouped</span><span class="tab-layout-group-count">${section.count}</span></div>` +
+            `<div class="tab-layout-group-refs" role="presentation">${rows}</div></section>`
+          );
+        }
+        const id = escapeHtml(section.id);
+        const refsId = `tab-layout-group-refs-${index}`;
+        const nameId = `tab-layout-group-name-${index}`;
+        const leaf = section.count === 0;
+        const expanded = !section.collapsed && !leaf;
+        const expandedAttr = leaf ? '' : ` aria-expanded="${expanded ? 'true' : 'false'}"`;
+        return (
+          `<section class="tab-layout-group${section.collapsed ? ' tab-layout-group--collapsed' : ''}" role="presentation" data-tab-group-id="${id}">` +
+          `<div class="tab-layout-group-header tab-layout-group-toggle" role="treeitem" tabindex="-1" data-tab-group-header="${id}"${expandedAttr}${expanded ? ` aria-owns="${refsId}"` : ''} onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)" oncontextmenu="event.preventDefault(); app.openTabGroupMenu(event, this.dataset.tabGroupHeader)">` +
+          '<span class="tab-layout-group-chevron" aria-hidden="true"></span>' +
+          `<span class="tab-layout-group-name" id="${nameId}" data-i18n-skip>${escapeHtml(section.name)}</span>` +
+          `<span class="tab-layout-group-count">${section.count}</span>` +
+          // Pointer path to the group menu (right-click on the header works too).
+          // Deliberately NOT a button and not focusable: a treeitem holds no
+          // interactive children, and the keyboard path is Shift+F10 /
+          // ContextMenu on the header itself. aria-hidden keeps the glyph out of
+          // the header's accessible name.
+          '<span class="tab-layout-group-menu" aria-hidden="true" title="Group actions" ' +
+          'onclick="event.stopPropagation(); app.openTabGroupMenu(event, this.closest(\'[data-tab-group-header]\').dataset.tabGroupHeader)">&#x22EF;</span></div>' +
+          `<div class="tab-layout-group-refs" id="${refsId}" ${expanded ? `role="group" aria-labelledby="${nameId}"` : 'role="presentation"'}>${rows}</div></section>`
+        );
       })
       .join('');
-    return `<div class="tab-layout-tree" role="tree" aria-label="Sessions">${focus}${groups}</div><button type="button" tabindex="-1" class="tab-layout-create-group" onclick="app.createTabGroup()">Create group</button>`;
   }
 
-  function createEditCoordinator(options) {
-    let authoritative = normalizedLayout(options.initialLayout);
-    let optimistic = normalizedLayout(authoritative);
-    let pending = [];
-    let pendingRecoveryBase = null;
-    let inFlight = null;
-    let inFlightBase = null;
-    let inFlightRecoveryBase = null;
-    let timer = null;
-    let writing = false;
-    let generation = 0;
-    const schedule = options.schedule || setTimeout;
-    const cancel = options.cancel || clearTimeout;
-    const apply = (layout, meta) => options.applyLayout?.(normalizedLayout(layout), meta);
-    const report = (message) => options.reportError?.(message);
-
-    const replay = (base, operations) =>
-      operations.reduce((current, operation) => applyOperation(current, operation), base);
-    const stopAndAdopt = (layout, placements) => {
-      if (timer !== null) cancel(timer);
-      timer = null;
-      pending = [];
-      pendingRecoveryBase = null;
-      authoritative = normalizedLayout(layout);
-      optimistic = normalizedLayout(authoritative);
-      apply(optimistic, { authoritative: true, authoritativeLayout: authoritative, placements });
-    };
-    const flush = async () => {
-      timer = null;
-      if (writing || pending.length === 0) return;
-      writing = true;
-      const batch = pending;
-      pending = [];
-      const recoveryBase = pendingRecoveryBase;
-      pendingRecoveryBase = null;
-      inFlight = batch;
-      const requestGeneration = ++generation;
-      let base = normalizedLayout(authoritative);
-      const requestBase = recoveryBase ? normalizedLayout(recoveryBase) : base;
-      inFlightBase = requestBase;
-      inFlightRecoveryBase = recoveryBase ? requestBase : null;
-      let desired;
-      try {
-        desired = recoveryBase ? normalizedLayout(optimistic) : replay(base, batch);
-        let response = await options.put({
-          baseVersion: requestBase.version,
-          layout: desired,
-          operations: batch,
-          recoveryBaseLayout: requestBase,
-        });
-        if (requestGeneration !== generation) return;
-        if (!response.ok && response.status === 409 && response.layout) {
-          const remaining = operationsAfterAppliedPrefix(
-            requestBase,
-            batch,
-            response.layout,
-            response.appliedOperationCount
-          );
-          base = normalizedLayout(response.layout);
-          inFlight = remaining;
-          inFlightBase = base;
-          inFlightRecoveryBase = null;
-          if (remaining.length === 0) {
-            authoritative = base;
-            optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
-            apply(optimistic, {
-              authoritative: true,
-              authoritativeLayout: authoritative,
-              placements: response.placements,
-              committedOperations: batch,
-            });
-            return;
-          }
-          try {
-            desired = replay(base, remaining);
-          } catch (_error) {
-            stopAndAdopt(base, response.placements);
-            report('Tab layout changed; your edit could not be reapplied.');
-            return;
-          }
-          response = await options.put({
-            baseVersion: base.version,
-            layout: desired,
-            operations: remaining,
-            recoveryBaseLayout: base,
-          });
-          if (requestGeneration !== generation) return;
-          if (!response.ok && response.status === 409 && response.layout) {
-            stopAndAdopt(response.layout, response.placements);
-            report('Tab layout changed again; server layout restored.');
-            return;
-          }
-        }
-        if (!response.ok || !response.layout) {
-          stopAndAdopt(response.layout || base, response.placements);
-          report('Could not save tab layout.');
-          return;
-        }
-        authoritative = normalizedLayout(response.layout);
-        optimistic = pending.length ? replay(authoritative, pending) : normalizedLayout(authoritative);
-        apply(optimistic, {
-          authoritative: true,
-          authoritativeLayout: authoritative,
-          placements: response.placements,
-          committedOperations: batch,
-        });
-      } catch (_error) {
-        stopAndAdopt(authoritative);
-        report('Could not save tab layout.');
-      } finally {
-        if (requestGeneration === generation) {
-          inFlight = null;
-          inFlightBase = null;
-          inFlightRecoveryBase = null;
-          writing = false;
-          if (pending.length) queue();
-          else options.onSettled?.();
-        }
-      }
-    };
-    const queue = () => {
-      if (timer !== null) cancel(timer);
-      timer = schedule(flush, options.debounceMs ?? 180);
-    };
-    return {
-      enqueue(operation) {
-        optimistic = applyOperation(optimistic, operation);
-        pending.push(operation);
-        apply(optimistic, { optimistic: true, operation });
-        queue();
-        return normalizedLayout(optimistic);
-      },
-      restoreOperations(baseLayout, operationsInput) {
-        const operations = Array.isArray(operationsInput) ? operationsInput : [];
-        if (!operations.length) return false;
-        pendingRecoveryBase = normalizedLayout(baseLayout);
-        pending.push(...operations);
-        queue();
-        return true;
-      },
-      flush,
-      getLayout: () => normalizedLayout(optimistic),
-      hasPending: () => writing || pending.length > 0,
-      pendingOperations: () => JSON.parse(JSON.stringify([...(inFlight || []), ...pending])),
-      recoverySnapshot: () => ({
-        baseLayout: normalizedLayout(inFlightBase || pendingRecoveryBase || authoritative),
-        operations: JSON.parse(JSON.stringify([...(inFlight || []), ...pending])),
-      }),
-      flushKeepalive() {
-        if (!options.putKeepalive || (!writing && pending.length === 0)) return false;
-        if (timer !== null) cancel(timer);
-        timer = null;
-        const recoveryBase = inFlightBase || pendingRecoveryBase;
-        options.putKeepalive({
-          baseVersion: (recoveryBase || authoritative).version,
-          layout: normalizedLayout(optimistic),
-          operations: JSON.parse(JSON.stringify([...(inFlight || []), ...pending])),
-          ...(recoveryBase ? { recoveryBaseLayout: normalizedLayout(recoveryBase) } : {}),
-        });
-        return true;
-      },
-      adoptExternal(layout, meta = {}) {
-        const next = normalizedLayout(layout);
-        if (next.version < authoritative.version) return false;
-        generation++;
-        if (inFlight?.length) {
-          pending = [...inFlight, ...pending];
-          pendingRecoveryBase = inFlightRecoveryBase;
-        }
-        inFlight = null;
-        inFlightBase = null;
-        inFlightRecoveryBase = null;
-        writing = false;
-        authoritative = next;
-        try {
-          optimistic = pendingRecoveryBase
-            ? normalizedLayout(next)
-            : pending.length
-              ? replay(next, pending)
-              : normalizedLayout(next);
-        } catch (_error) {
-          pending = [];
-          optimistic = normalizedLayout(next);
-          report('Tab layout changed; your pending edit was discarded.');
-        }
-        apply(optimistic, {
-          authoritative: true,
-          authoritativeLayout: authoritative,
-          external: true,
-          placements: meta.placements,
-        });
-        if (pending.length) queue();
-        return true;
-      },
-      dispose() {
-        generation++;
-        if (timer !== null) cancel(timer);
-        timer = null;
-        pending = [];
-        pendingRecoveryBase = null;
-        inFlight = null;
-        inFlightRecoveryBase = null;
-        writing = false;
-      },
-    };
-  }
-
+  /**
+   * Newest-wins layout loading. A response that was overtaken by a later load is
+   * dropped; a failure applies the fallback (the flat rail) and schedules ONE
+   * retry, replacing any retry already pending.
+   *
+   * Retries back off and stop: the delay doubles from `retryDelayMs` up to
+   * `maxRetryDelayMs`, and after `maxRetries` consecutive failures nothing more
+   * is scheduled (`scheduleRetry(fn, delayMs)`). The next outside load (an SSE
+   * reconnect re-runs init, a `tab:layoutChanged` re-reads) tries again, and
+   * any success resets the count.
+   */
   function createLoadCoordinator(options) {
+    const baseDelay = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : 5000;
+    const maxDelay = Number.isFinite(options.maxRetryDelayMs) ? options.maxRetryDelayMs : 60000;
+    const maxRetries = Number.isSafeInteger(options.maxRetries) ? options.maxRetries : 4;
     let generation = 0;
     let disposed = false;
     let retryHandle = null;
-
+    let failures = 0;
     const clearRetry = () => {
       if (retryHandle !== null && options.cancelRetry) options.cancelRetry(retryHandle);
       retryHandle = null;
@@ -882,12 +336,17 @@
       try {
         const layout = await options.fetchLayout();
         if (disposed || requestGeneration !== generation) return false;
+        failures = 0;
         options.applyLayout(layout);
         return true;
-      } catch {
+      } catch (_error) {
         if (disposed || requestGeneration !== generation) return false;
-        options.applyFallback({ readOnly: true });
-        retryHandle = options.scheduleRetry(() => load());
+        failures++;
+        options.applyFallback();
+        if (failures <= maxRetries) {
+          const delay = Math.min(maxDelay, baseDelay * 2 ** (failures - 1));
+          retryHandle = options.scheduleRetry(() => load(), delay);
+        }
         return false;
       }
     };
@@ -901,26 +360,391 @@
     };
   }
 
+  // ─── Editing ────────────────────────────────────────────────────────────
+  //
+  // The browser edits through NAMED operations, not by diffing arrays: a write
+  // that loses a version race (409) is rebased by replaying the same operations
+  // on the layout the server returned, so a concurrent edit elsewhere survives.
+  // The server stays the authority: it re-validates and normalizes every PUT.
+
+  function editError(message) {
+    throw new Error(`Tab layout edit failed: ${message}`);
+  }
+
+  const clampIndex = (value, length) => (Number.isInteger(value) ? Math.max(0, Math.min(value, length)) : length);
+
+  function groupName(value) {
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (!name || name.length > MAX_NAME_LENGTH) editError(`group name must be 1-${MAX_NAME_LENGTH} characters`);
+    return name;
+  }
+
+  function refLocations(layout) {
+    return [
+      ...layout.groups.flatMap((group) => group.refs.map((ref) => ({ groupId: group.id, ref }))),
+      ...layout.ungrouped.map((ref) => ({ groupId: null, ref })),
+    ];
+  }
+
+  function containerRefs(layout, groupId) {
+    if (groupId === null) return layout.ungrouped;
+    const group = layout.groups.find((candidate) => candidate.id === groupId);
+    if (!group) editError('unknown group');
+    return group.refs;
+  }
+
+  /**
+   * The rows that move together with `ref`: the session plus every descendant
+   * that still follows its parent (non-manual, parent stored). Mirrors the
+   * server's moveRef block so the optimistic rail matches what it will store.
+   * `parents` maps a session id to its parent session id.
+   */
+  function lineageBlock(layout, ref, parents) {
+    const stored = new Map(refLocations(layout).map((item) => [refKey(item.ref), item.ref]));
+    const children = new Map();
+    for (const [childId, parentId] of Object.entries(parents || {})) {
+      const child = stored.get(`session:${childId}`);
+      if (!child || child.placement === 'manual' || !stored.has(`session:${parentId}`)) continue;
+      if (!children.has(parentId)) children.set(parentId, []);
+      children.get(parentId).push(childId);
+    }
+    const keys = new Set();
+    const visit = (key) => {
+      if (keys.has(key)) return;
+      keys.add(key);
+      if (key.startsWith('session:')) for (const id of children.get(key.slice(8)) || []) visit(`session:${id}`);
+    };
+    visit(refKey(ref));
+    return keys;
+  }
+
+  /**
+   * Where a moved row lands, as the server's `index` (counted AFTER the moved
+   * block is taken out): before or after `anchor` in that container, or at its
+   * end when there is no anchor.
+   */
+  function moveDestination(layoutInput, ref, groupId, anchor, placement, parents) {
+    const layout = normalizeLayout(layoutInput);
+    const block = lineageBlock(layout, ref, parents);
+    const remaining = containerRefs(layout, groupId).filter((candidate) => !block.has(refKey(candidate)));
+    // No anchor means "at the end", and an operation with no index keeps
+    // meaning that when it is replayed onto a layout that has changed since.
+    if (!anchor) return { groupId };
+    const at = remaining.findIndex((candidate) => refKey(candidate) === refKey(anchor));
+    if (at < 0) return { groupId };
+    return { groupId, index: placement === 'after' ? at + 1 : at };
+  }
+
+  /**
+   * Map a finished drag to ONE operation (or null for a drop that changes
+   * nothing). Pure, so the drop -> PUT mapping is testable without a pointer.
+   *
+   * source: { type: 'ref', ref } | { type: 'group', groupId }
+   * target: { type: 'ref', ref, groupId, placement: 'before' | 'after' }
+   *       | { type: 'group', groupId }   (a named group's header or empty body)
+   *       | { type: 'ungrouped' }
+   *
+   * A group dropped on another group (or any row in it) takes that group's slot;
+   * dropped on the Ungrouped section it goes last. A row dropped on a row lands
+   * before/after it, on a header it is appended to that group.
+   */
+  function dropOperation(layoutInput, source, target, parents) {
+    const layout = normalizeLayout(layoutInput);
+    if (!source || !target) return null;
+    if (source.type === 'group') {
+      const from = layout.groups.findIndex((group) => group.id === source.groupId);
+      if (from < 0) return null;
+      const targetId = target.type === 'ungrouped' ? null : (target.groupId ?? null);
+      const to = targetId === null ? layout.groups.length - 1 : layout.groups.findIndex((g) => g.id === targetId);
+      if (to < 0 || to === from) return null;
+      return { type: 'reorderGroup', groupId: source.groupId, index: to };
+    }
+    if (source.type !== 'ref' || !validRef(source.ref)) return null;
+    const location = refLocations(layout).find((item) => refKey(item.ref) === refKey(source.ref));
+    if (!location) return null;
+    let groupId;
+    let anchor = null;
+    let placement = 'before';
+    if (target.type === 'ref' && validRef(target.ref)) {
+      // Onto itself or onto a row that moves with it: nowhere to go.
+      if (lineageBlock(layout, source.ref, parents).has(refKey(target.ref))) return null;
+      groupId = target.groupId ?? null;
+      anchor = target.ref;
+      placement = target.placement === 'after' ? 'after' : 'before';
+    } else if (target.type === 'group') {
+      groupId = target.groupId ?? null;
+      if (groupId === location.groupId) return null;
+    } else if (target.type === 'ungrouped') {
+      groupId = null;
+      if (location.groupId === null) return null;
+    } else return null;
+    if (groupId !== null && !layout.groups.some((group) => group.id === groupId)) return null;
+    const destination = moveDestination(layout, source.ref, groupId, anchor, placement, parents);
+    const operation = {
+      type: 'moveRef',
+      ref: { kind: source.ref.kind, id: source.ref.id },
+      groupId: destination.groupId,
+      ...(destination.index === undefined ? {} : { index: destination.index }),
+      parents: parents || {},
+    };
+    return contentKey(applyOperation(layout, operation)) === contentKey(layout) ? null : operation;
+  }
+
+  /**
+   * Apply one operation to a copy of the layout. Throws when the operation no
+   * longer makes sense (an unknown group or row); a rebase drops that one
+   * operation and keeps the rest. Replays are idempotent where it matters for
+   * recovery: creating a group that already exists is a no-op.
+   */
+  function applyOperation(layoutInput, operation) {
+    const layout = normalizeLayout(layoutInput);
+    const op = operation || {};
+    const groupIndex = layout.groups.findIndex((group) => group.id === op.groupId);
+    switch (op.type) {
+      case 'createGroup': {
+        if (typeof op.id !== 'string' || !op.id) editError('invalid group id');
+        const name = groupName(op.name);
+        if (layout.groups.some((group) => group.id === op.id)) return layout;
+        if (layout.groups.length >= MAX_GROUPS) editError('group limit reached');
+        layout.groups.splice(clampIndex(op.index, layout.groups.length), 0, { id: op.id, name, refs: [] });
+        return layout;
+      }
+      case 'renameGroup':
+        if (groupIndex < 0) editError('unknown group');
+        layout.groups[groupIndex].name = groupName(op.name);
+        return layout;
+      case 'deleteGroup': {
+        // Already gone (deleted elsewhere): nothing left to do.
+        if (groupIndex < 0) return layout;
+        const [removed] = layout.groups.splice(groupIndex, 1);
+        layout.ungrouped.push(...removed.refs);
+        return layout;
+      }
+      case 'reorderGroup': {
+        if (groupIndex < 0) editError('unknown group');
+        const [moved] = layout.groups.splice(groupIndex, 1);
+        layout.groups.splice(clampIndex(op.index, layout.groups.length), 0, moved);
+        return layout;
+      }
+      case 'moveRef': {
+        if (!validRef(op.ref)) editError('invalid row');
+        const targetKey = refKey(op.ref);
+        if (!refLocations(layout).some((item) => refKey(item.ref) === targetKey)) editError('unknown row');
+        const destinationId = op.groupId ?? null;
+        containerRefs(layout, destinationId);
+        const keys = lineageBlock(layout, op.ref, op.parents);
+        const block = refLocations(layout)
+          .filter((item) => keys.has(refKey(item.ref)))
+          .map((item) => copyRef(item.ref));
+        // A hand-moved child stops following its parent (server moveRef does the same).
+        const head = block.find((item) => refKey(item) === targetKey);
+        if (op.ref.kind === 'session' && op.parents?.[op.ref.id]) head.placement = 'manual';
+        block.sort((a, b) => (a === head ? -1 : b === head ? 1 : 0));
+        for (const group of layout.groups) group.refs = group.refs.filter((ref) => !keys.has(refKey(ref)));
+        layout.ungrouped = layout.ungrouped.filter((ref) => !keys.has(refKey(ref)));
+        const destination = containerRefs(layout, destinationId);
+        destination.splice(clampIndex(op.index, destination.length), 0, ...block);
+        return layout;
+      }
+      default:
+        return editError(`unknown operation ${op.type}`);
+    }
+  }
+
+  /** Layout content without version metadata: equal keys mean "nothing to save". */
+  function contentKey(layoutInput) {
+    const layout = normalizeLayout(layoutInput);
+    return JSON.stringify([layout.groups, layout.ungrouped]);
+  }
+
+  /** Replay operations, dropping (and counting) the ones that no longer apply. */
+  function replayOperations(base, operations) {
+    let layout = normalizeLayout(base);
+    const kept = [];
+    let dropped = 0;
+    for (const operation of operations) {
+      try {
+        layout = applyOperation(layout, operation);
+        kept.push(operation);
+      } catch (_error) {
+        dropped++;
+      }
+    }
+    return { layout, kept, dropped };
+  }
+
+  /**
+   * Serialized, optimistic writer for `PUT /api/tab-layout`.
+   *
+   *  - enqueue() applies an operation at once (the rail repaints optimistically)
+   *    and schedules a flush; operations enqueued in the same turn share a PUT.
+   *  - Exactly ONE write is in flight. Operations enqueued meanwhile wait and are
+   *    sent on top of the version that write returns.
+   *  - A 409 carries the server's current layout: the in-flight operations are
+   *    replayed onto it and re-sent with its version (bounded attempts). A 400
+   *    (a row vanished between read and write) re-reads and rebases the same way.
+   *  - Anything else, or attempts exhausted, drops the batch and reports it; the
+   *    caller re-reads so the rail shows the server's truth.
+   *
+   * options: { initialLayout, put({ baseVersion, layout }) -> { ok, status,
+   *   layout }, fetchLayout?(), applyLayout(layout, meta), reportError?(message),
+   *   onSettled?(), onFailure?(), schedule?(fn), cancel?(handle), maxAttempts? }
+   */
+  function createEditCoordinator(options) {
+    let authoritative = normalizeLayout(options.initialLayout);
+    let optimistic = authoritative;
+    let pending = [];
+    let inFlight = [];
+    let writing = false;
+    let timer = null;
+    let disposed = false;
+    const schedule = options.schedule || ((fn) => setTimeout(fn, 0));
+    const cancel = options.cancel || ((handle) => clearTimeout(handle));
+    const maxAttempts = options.maxAttempts || 3;
+    const report = (message) => options.reportError?.(message);
+    const publish = (meta) => options.applyLayout(normalizeLayout(optimistic), meta);
+    const queue = () => {
+      if (timer === null) timer = schedule(flush);
+    };
+
+    async function flush() {
+      timer = null;
+      if (disposed || writing || pending.length === 0) return;
+      writing = true;
+      inFlight = pending;
+      pending = [];
+      let failed = false;
+      let reportedDrop = false;
+      let rereadFor400 = false;
+      try {
+        for (let attempt = 0; attempt < maxAttempts && inFlight.length; attempt++) {
+          const desired = replayOperations(authoritative, inFlight);
+          inFlight = desired.kept;
+          if (desired.dropped && !reportedDrop) {
+            reportedDrop = true;
+            report('Tab groups changed elsewhere; part of your edit no longer applies.');
+          }
+          // Nothing left to change (dropped, or already true on the server).
+          if (!inFlight.length || contentKey(desired.layout) === contentKey(authoritative)) {
+            inFlight = [];
+            break;
+          }
+          const response = await options.put({ baseVersion: authoritative.version, layout: desired.layout });
+          if (disposed) return;
+          if (response?.ok && response.layout) {
+            authoritative = normalizeLayout(response.layout);
+            inFlight = [];
+          } else if (response?.status === 409 && response.layout) {
+            authoritative = normalizeLayout(response.layout);
+          } else if (response?.status === 400 && options.fetchLayout && !rereadFor400) {
+            // Maybe our base was stale in a way the server reports as invalid:
+            // re-read once. A 400 that survives that is a refusal, not a race.
+            rereadFor400 = true;
+            authoritative = normalizeLayout(await options.fetchLayout());
+            if (disposed) return;
+          } else {
+            throw new Error('Tab layout save failed');
+          }
+        }
+        if (inFlight.length) {
+          failed = true;
+          report('Tab groups kept changing elsewhere; your edit was not saved.');
+        }
+      } catch (_error) {
+        failed = true;
+        report('Could not save tab groups.');
+      } finally {
+        inFlight = [];
+        writing = false;
+        if (!disposed) {
+          const rebased = replayOperations(authoritative, pending);
+          // Edits made while the write was in flight are rebased here, so one the
+          // conflict made inapplicable is dropped here too, and says so (once).
+          if (rebased.dropped && !failed && !reportedDrop) {
+            report('Tab groups changed elsewhere; part of your edit no longer applies.');
+          }
+          pending = rebased.kept;
+          optimistic = rebased.layout;
+          publish({ authoritative: true });
+          if (failed) options.onFailure?.();
+          if (pending.length) queue();
+          else options.onSettled?.();
+        }
+      }
+    }
+
+    return {
+      /** Apply now, save soon. Throws (and changes nothing) for an invalid edit. */
+      enqueue(operation) {
+        optimistic = applyOperation(optimistic, operation);
+        pending.push(operation);
+        publish({ optimistic: true });
+        queue();
+        return normalizeLayout(optimistic);
+      },
+      /**
+       * Re-apply operations recovered after a reload. Returns false (and queues
+       * nothing) when the layout already reflects them, e.g. the keepalive save
+       * landed before the page went away.
+       */
+      restore(operations) {
+        const replayed = replayOperations(optimistic, Array.isArray(operations) ? operations : []);
+        if (!replayed.kept.length || contentKey(replayed.layout) === contentKey(optimistic)) return false;
+        optimistic = replayed.layout;
+        pending.push(...replayed.kept);
+        publish({ optimistic: true });
+        queue();
+        return true;
+      },
+      /**
+       * Adopt a layout read from the server (SSE reload). Pending operations are
+       * rebased onto it. Refused while a write is in flight (its result decides)
+       * and for a layout older than the one already held.
+       */
+      adoptExternal(layout) {
+        if (disposed || writing) return false;
+        const next = normalizeLayout(layout);
+        if (next.version < authoritative.version) return false;
+        authoritative = next;
+        const rebased = replayOperations(next, pending);
+        if (rebased.dropped) report('Tab groups changed elsewhere; part of your edit no longer applies.');
+        pending = rebased.kept;
+        optimistic = rebased.layout;
+        publish({ authoritative: true, external: true });
+        return true;
+      },
+      flush,
+      isWriting: () => writing,
+      hasPending: () => writing || pending.length > 0,
+      /** Every operation not yet confirmed by the server, oldest first. */
+      pendingOperations: () => JSON.parse(JSON.stringify([...inFlight, ...pending])),
+      baseVersion: () => authoritative.version,
+      getLayout: () => normalizeLayout(optimistic),
+      dispose() {
+        disposed = true;
+        if (timer !== null) cancel(timer);
+        timer = null;
+        pending = [];
+      },
+    };
+  }
+
   global.CodemanTabLayout = {
+    normalizeLayout,
+    hasGroups,
     project,
-    filterSessionProjection,
-    projectFallback,
-    collapsedHash,
+    hiddenGroupAlerts,
     structureKey,
-    refAtAltNumber,
-    altNumberForRef,
-    adjacentSession,
     renderProjection,
     applyOperation,
-    contentKey: layoutContentKey,
-    focusOrder: (layout) => orderedFocusRefs(normalizedLayout(layout)),
-    operationsAfterAppliedPrefix,
-    previewOperation,
+    moveDestination,
+    movingRefKeys: (layout, ref, parents) => [...lineageBlock(normalizeLayout(layout), ref, parents)],
+    dropOperation,
+    contentKey,
     createEditCoordinator,
     createLoadCoordinator,
     loadCollapsedGroupIds,
     saveCollapsedGroupIds,
-    loadFocusGroupCollapsed,
-    saveFocusGroupCollapsed,
+    MAX_GROUPS,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

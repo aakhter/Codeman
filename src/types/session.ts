@@ -714,6 +714,24 @@ export interface CustomModelSelection {
 }
 
 /**
+ * Where a session's {@link DisplayModel} came from (src/session-display-model.ts):
+ * - `custom-endpoint`: the Custom Model Endpoint Profile's model, which wins.
+ * - `statusline`: the CLI reported it (claude's statusLine exporter), follows a switch.
+ * - `screen`: read off the CLI's own footer (`capabilities.modelDetect`), follows a switch.
+ * - `config`: what the CLI's own config pins for this session
+ *   (`capabilities.modelDetect.configResolver`), while its screen names none.
+ * - `launch`: what the session was launched with; nothing has reported since.
+ */
+export type DisplayModelSource = 'custom-endpoint' | 'statusline' | 'screen' | 'config' | 'launch';
+
+/** The model a session runs as far as the server knows, for a session header. */
+export interface DisplayModel {
+  /** Display text: sanitized (no control characters) and at most 64 characters. */
+  model: string;
+  source: DisplayModelSource;
+}
+
+/**
  * The full custom-model selection a session keeps: the public selection plus the
  * bookkeeping `Session.setCustomModel()` needs to UNDO it later without guessing what
  * it once wrote. Persisted to state.json only as the disk-only `__customModel` field
@@ -909,7 +927,8 @@ export interface SessionState {
   /**
    * True while the CLI in the pane has a mouse-tracking DECSET on, as observed
    * by the server on its way out of the stream (those sequences are stripped for
-   * claude/codex/gemini, so the browser can never see them itself). The browser
+   * the strip-full and strip-mux-and-mouse modes, claude/codex/gemini and opencode
+   * under tmux, so the browser can never see them itself). The browser
    * hand-encodes a click report ONLY when this is true; without it, every click
    * sent mouse reports to a CLI that never asked for them.
    */
@@ -971,6 +990,16 @@ export interface SessionState {
    * written) is {@link CustomModelBookkeeping}, persisted disk-only like `__envOverrides`.
    */
   customModel?: CustomModelSelection;
+  /**
+   * The model this session runs, as far as the server knows it, and where that came from
+   * (src/session-display-model.ts): the custom endpoint's model, else the newest report
+   * from the CLI itself (statusline or its own footer), else the model its config pins,
+   * else the launch model. Absent when
+   * none is known; a session header then shows the harness alone. Untrusted display text
+   * (pane-derived for `screen`): render it as text. Persisted, and a `statusline`/`screen`
+   * value is restored after a restart until the next report replaces it.
+   */
+  displayModel?: DisplayModel;
   /** Sanitized per-session attachment history. */
   attachmentHistory?: SessionAttachmentHistoryItem[];
   /** Per-session reference sources (COD-65). */

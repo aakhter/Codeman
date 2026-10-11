@@ -389,6 +389,7 @@ Object.assign(CodemanApp.prototype, {
     // Header visibility settings
     document.getElementById('appSettingsShowFontControls').checked = settings.showFontControls ?? defaults.showFontControls ?? false;
     document.getElementById('appSettingsShowSystemStats').checked = settings.showSystemStats ?? defaults.showSystemStats ?? true;
+    document.getElementById('appSettingsHeaderStatsStyle').value = this.resolveHeaderStatsStyle(settings);
     document.getElementById('appSettingsShowLifecycleLog').checked = settings.showLifecycleLog ?? defaults.showLifecycleLog ?? false;
     document.getElementById('appSettingsShowResponseViewer').checked = settings.showResponseViewer ?? defaults.showResponseViewer ?? false;
     document.getElementById('appSettingsShowAwayDigest').checked = settings.showAwayDigest ?? defaults.showAwayDigest ?? false;
@@ -431,6 +432,7 @@ Object.assign(CodemanApp.prototype, {
     this._mcpSyncSavedOn = settings.mcpSyncEnabled === true;
     document.getElementById('appSettingsMcpSync').checked = this._mcpSyncSavedOn;
     this.applyMcpSyncVisibility();
+    this._applyDoctorAdminGate();
     this.loadWebhook();
     // Read My Mind: synced, default OFF (opt-in; capture + prediction cost real tokens).
     document.getElementById('appSettingsReadMyMind').checked = settings.readMyMindEnabled === true;
@@ -438,6 +440,7 @@ Object.assign(CodemanApp.prototype, {
       settings.ultracodeFloatingWindows ?? defaults.ultracodeFloatingWindows ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
     document.getElementById('appSettingsShowSplitButton').checked = settings.showSplitButton ?? defaults.showSplitButton ?? false;
+    document.getElementById('appSettingsShowTileGridButton').checked = settings.showTileGridButton ?? defaults.showTileGridButton ?? true;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = this.planUsageChipEnabled(settings);
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Phone overview home screen: only meaningful under 600px, so the row is
@@ -459,6 +462,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowSessionButton').checked = settings.showSessionButton ?? defaults.showSessionButton ?? false;
     document.getElementById('appSettingsShowAwayDigestButton').checked = settings.showAwayDigestButton ?? defaults.showAwayDigestButton ?? false;
     document.getElementById('appSettingsShowCronButton').checked = settings.showCronButton ?? defaults.showCronButton ?? false;
+    document.getElementById('appSettingsShowGitStatus').checked = settings.showGitStatus ?? defaults.showGitStatus ?? false;
+    document.getElementById('appSettingsGitStatusTree').checked = settings.gitStatusTree ?? defaults.gitStatusTree ?? true;
+    document.getElementById('appSettingsGitStatusMaxRepos').value = settings.gitStatusMaxRepos ?? defaults.gitStatusMaxRepos ?? 12;
+    document.getElementById('appSettingsGitStatusTimeout').value = settings.gitStatusTimeoutSeconds ?? defaults.gitStatusTimeoutSeconds ?? 30;
     // Gesture control lives in the Input section (alongside Local Echo / CJK Input)
     // but is only available when the instance runs with CODEMAN_GESTURE=1 (server sets
     // window.__codemanGestureAvailable). Hide just this item otherwise so the toggle
@@ -490,6 +497,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
+    document.getElementById('appSettingsShowTabCliLogos').checked = this.tabCliLogosEnabled(settings);
     document.getElementById('appSettingsTabOrientation').value =
       settings.tabOrientation ?? defaults.tabOrientation ?? 'horizontal';
     const tabRailWidth = window.CodemanTabRail?.resolveWidth({
@@ -502,14 +510,17 @@ Object.assign(CodemanApp.prototype, {
       // it rendered at 320 — and a routine Save then PERSISTED the 256.
       width: settings.tabRailWidth ?? this._defaultTabRailWidth?.() ?? defaults.tabRailWidth ?? 256,
     }) ?? 256;
-    const tabRailWidthSelect = document.getElementById('appSettingsTabRailWidth');
-    if (tabRailWidthSelect) this.syncTabRailWidthSetting?.(tabRailWidth);
-    const tabRailDetailSelect = document.getElementById('appSettingsTabRailDetail');
-    if (tabRailDetailSelect) tabRailDetailSelect.value = settings.tabRailDetail ?? defaults.tabRailDetail ?? 'rich';
-    const tabRailSortSelect = document.getElementById('appSettingsTabRailSort');
-    if (tabRailSortSelect) tabRailSortSelect.value = settings.tabRailSort ?? defaults.tabRailSort ?? 'activity';
+    this.syncTabRailWidthSetting?.(tabRailWidth);
+    document.getElementById('appSettingsTabRailDetail').value =
+      settings.tabRailDetail ?? defaults.tabRailDetail ?? 'rich';
+    document.getElementById('appSettingsTabRailSort').value =
+      settings.tabRailSort ?? defaults.tabRailSort ?? 'activity';
+    document.getElementById('appSettingsTabArrangement').value = this.resolveTabArrangement(settings);
+    document.getElementById('appSettingsTabStateOrder').value = this.resolveTabStateOrder(settings);
+    document.getElementById('appSettingsShowTabDetachButton').checked =
+      this.tabDetachButtonEnabled?.(settings, defaults)
+      ?? (settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false);
     this.renderShortcutSettingsList(settings.shortcutOverrides || {});
-    document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
     document.getElementById('appSettingsSessionListLayout').value =
       settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
     const sessionSidebarFontSize = this.resolveSessionSidebarFontSize(
@@ -535,6 +546,8 @@ Object.assign(CodemanApp.prototype, {
       settings.codexDangerouslyBypassApprovals ?? false;
     document.getElementById('appSettingsCodexAnimations').value =
       codexAnimationsControlValue(settings.codexAnimationsEnabled);
+    document.getElementById('appSettingsCodexModel').value = settings.codexModel ?? '';
+    document.getElementById('appSettingsCodexReasoningEffort').value = settings.codexReasoningEffort ?? '';
     this._applyCodexSettingsVisibility();
     // Terminal history settings
     document.getElementById('appSettingsTerminalScrollbackLines').value =
@@ -584,6 +597,12 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsNotifBrowser').checked = notifPrefs.browserNotifications ?? false;
     document.getElementById('appSettingsNotifAudio').checked = notifPrefs.audioAlerts ?? false;
     document.getElementById('appSettingsNotifStuckMins').value = Math.round((notifPrefs.stuckThresholdMs || 600000) / 60000);
+    document.getElementById('appSettingsNotifToastSecs').value = Math.round(
+      (this.notificationManager?.getToastDurationMs?.() ?? DEFAULT_TOAST_DURATION_MS) / 1000
+    );
+    document.getElementById('appSettingsNotifBrowserSecs').value = Math.round(
+      (notifPrefs.browserAutoCloseMs ?? AUTO_CLOSE_NOTIFICATION_MS) / 1000
+    );
     document.getElementById('appSettingsNotifCritical').checked = !notifPrefs.muteCritical;
     document.getElementById('appSettingsNotifWarning').checked = !notifPrefs.muteWarning;
     document.getElementById('appSettingsNotifInfo').checked = !notifPrefs.muteInfo;
@@ -1237,18 +1256,30 @@ Object.assign(CodemanApp.prototype, {
     group.style.display = me.multiUser && me.role !== 'admin' ? 'none' : '';
   },
 
+  /**
+   * GET /api/doctor is admin-only in multi-user mode (it names install paths on the host), so a
+   * non-admin gets no Diagnostics group instead of a button that can only answer 403. Also
+   * wired to `codeman:me` for the same late-resolving role as the groups above.
+   */
+  _applyDoctorAdminGate() {
+    const group = document.getElementById('doctorGroup');
+    if (!group) return;
+    const me = window.__codemanUser || {};
+    group.style.display = me.multiUser && me.role !== 'admin' ? 'none' : '';
+  },
+
   /** Preview (apply=false) or run (apply=true) the MCP server sync across enabled CLIs. */
   async mcpSync(apply) {
     const out = this.$('mcpSyncResult');
-    const show = (html) => {
-      if (out) { out.style.display = 'block'; out.innerHTML = html; }
+    const show = (html, hint = '') => {
+      if (out) { out.style.display = 'block'; out.innerHTML = html; out.dataset.hint = hint; }
     };
     // Switched on in this modal but not saved yet: the routes would only answer "disabled".
     if (!this._mcpSyncSavedOn) {
-      show('Save settings to turn MCP sync on first, then reopen Settings to preview or sync.');
+      show('Apply or Save settings to turn MCP sync on first, then preview or sync.', 'save-first');
       return;
     }
-    if (apply && !confirm('Add missing MCP servers to every installed, enabled CLI\'s config file? Env values and headers on those servers are copied too.')) return;
+    if (apply && !confirm('Add missing MCP servers to every installed, enabled CLI\'s config file (and GitHub Copilot CLI\'s, when it is installed)? Env values and headers on those servers are copied too.')) return;
     show('Working…');
     const res = apply ? await this._apiPost('/api/mcp-sync', {}) : await this._api('/api/mcp-sync');
     let body = null;
@@ -1404,6 +1435,69 @@ Object.assign(CodemanApp.prototype, {
       }
       const r = body.data;
       this._webhookSay(r.ok ? 'Test sent. Check your phone or channel.' : `Delivery failed: ${r.error}`, !r.ok);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  },
+
+  /**
+   * Settings → System → Diagnostics: run `codeman doctor` on the server (GET /api/doctor) and list
+   * each tool. Built with DOM nodes and textContent: paths and versions come from the host.
+   */
+  async runDoctor() {
+    const out = document.getElementById('doctorResult');
+    const btn = document.getElementById('doctorRunBtn');
+    if (!out) return;
+    const say = (text) => {
+      out.replaceChildren(document.createTextNode(text));
+      out.style.display = 'block';
+    };
+    if (btn) btn.disabled = true;
+    say('Checking…');
+    try {
+      const res = await this._api('/api/doctor');
+      let body = null;
+      try { body = res ? await res.json() : null; } catch { /* fall through */ }
+      if (!res || !res.ok || !body || body.success === false) {
+        say(body?.error || 'The check failed.');
+        return;
+      }
+      const { tools, summary, platform } = body.data;
+      const glyph = { ok: '✓', missing: '✗', outdated: '!', error: '!', skipped: '–' };
+      const list = document.createElement('ul');
+      list.style.margin = '0';
+      list.style.paddingLeft = '1.2em';
+      for (const t of tools) {
+        const li = document.createElement('li');
+        const strong = document.createElement('b');
+        // As the terminal doctor marks it: a missing OPTIONAL tool is ○, only a required one ✗.
+        const mark = t.status === 'missing' && !t.required ? '○' : glyph[t.status] || '?';
+        strong.textContent = `${mark} ${t.label}`;
+        li.append(strong);
+        const bits = [t.status];
+        if (t.version) bits.push(t.version);
+        if (t.status !== 'ok' && t.status !== 'skipped') bits.push(t.required ? 'required' : 'optional');
+        if (t.reason) bits.push(t.reason);
+        li.append(document.createTextNode(` ${bits.join(' · ')}`));
+        if (t.path) {
+          const p = document.createElement('div');
+          p.className = 'mono';
+          p.textContent = t.path;
+          li.append(p);
+        }
+        if (t.status === 'missing' && t.installHint) {
+          const h = document.createElement('div');
+          h.textContent = `Install: ${t.installHint}`;
+          li.append(h);
+        }
+        list.append(li);
+      }
+      const head = document.createElement('p');
+      head.textContent =
+        `${summary.ok} ok · ${summary.requiredMissing} required missing · ${summary.optionalMissing} optional missing` +
+        ` (${platform.environment})`;
+      out.replaceChildren(head, list);
+      out.style.display = 'block';
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -1669,40 +1763,88 @@ Object.assign(CodemanApp.prototype, {
     return flags[tool] !== false;
   },
 
-  /** Render the registry's enabled, available CLIs as welcome-screen actions. */
+  /**
+   * Render the registry's enabled, available CLIs as welcome-screen actions:
+   * ONE primary button, then every other entry as a slim chip in a row under it.
+   *
+   * The primary is the first AGENT in catalog order (the first entry whose kind
+   * is not 'shell'), so on a stock install it is Claude Code, and with Claude
+   * disabled or missing it is simply the next agent; only a catalog with no agent
+   * at all promotes the shell. Chosen from the catalog's order and kind, never by
+   * an id: the registry decides what comes first. Everything else keeps catalog
+   * order inside the chip row, so the DOM order across both is the catalog's.
+   *
+   * The CLI id travels only as DATA: `data-mode` for the click, and the
+   * `run-mode-dot <id>` logo slot every Run menu shares (styles.css draws the
+   * brand mark, or a plain dot for an id it has no logo for). No per-id class on
+   * the buttons themselves, so no rule anywhere can give one CLI its own look.
+   */
   renderWelcomeCliActions() {
     const container = document.getElementById('welcomeCliActions');
     if (!container) return;
     const catalog = Array.isArray(window.__codemanCliCatalog) ? window.__codemanCliCatalog : [];
+    const offered = catalog.filter((cli) => cli.enabled && this.isCliAvailable(cli.id));
+    const primary = offered.find((cli) => cli.kind !== 'shell') || offered[0];
+    // "Run <label>", the strings i18n.js translates ("Run Claude Code", "Run Shell");
+    // a custom CLI's label simply has no dictionary entry, so it renders as typed.
+    const runLabel = (cli) => `Run ${cli.kind === 'shell' ? 'Shell' : cli.label}`;
+    const logo = (cli) => {
+      const dot = document.createElement('span');
+      dot.className = `run-mode-dot ${cli.id}`;
+      dot.setAttribute('aria-hidden', 'true');
+      return dot;
+    };
+    const launch = (cli) => () => {
+      this.setRunMode(cli.id);
+      void this.run();
+    };
     container.replaceChildren();
-    for (const cli of catalog) {
-      if (!cli.enabled || !this.isCliAvailable(cli.id)) continue;
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `welcome-btn welcome-btn-cli welcome-btn-${cli.id}`;
-      btn.dataset.mode = cli.id;
-      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      icon.setAttribute('width', '20');
-      icon.setAttribute('height', '20');
-      icon.setAttribute('viewBox', '0 0 24 24');
-      icon.setAttribute('fill', 'none');
-      icon.setAttribute('stroke', 'currentColor');
-      icon.setAttribute('stroke-width', '2');
-      icon.setAttribute('aria-hidden', 'true');
-      const play = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-      play.setAttribute('points', '5 3 19 12 5 21 5 3');
-      icon.appendChild(play);
-      btn.appendChild(icon);
-      // Same "Run <label>" text the static buttons had ("Run Claude Code", "Run Shell"),
-      // left translatable on purpose: i18n.js carries these strings, and a custom CLI's
-      // label simply has no dictionary entry, so it renders as typed.
-      btn.append(`Run ${cli.kind === 'shell' ? 'Shell' : cli.label}`);
-      btn.onclick = () => {
-        this.setRunMode(cli.id);
-        void this.run();
-      };
-      container.appendChild(btn);
+    if (!primary) return;
+
+    const main = document.createElement('button');
+    main.type = 'button';
+    main.className = 'welcome-primary';
+    main.dataset.mode = primary.id;
+    // The mark sits on a small light disc: brand marks (Claude's is orange) turn
+    // muddy straight on the accent fill, and the disc reads on every skin.
+    const disc = document.createElement('span');
+    disc.className = 'welcome-primary-logo';
+    disc.appendChild(logo(primary));
+    main.appendChild(disc);
+    // One raw string, kept whole: i18n.js matches the exact text node. The span
+    // only lets a long custom label ellipsize (styles.css .welcome-label).
+    const mainLabel = document.createElement('span');
+    mainLabel.className = 'welcome-label';
+    mainLabel.textContent = runLabel(primary);
+    main.appendChild(mainLabel);
+    main.onclick = launch(primary);
+    container.appendChild(main);
+
+    const rest = offered.filter((cli) => cli !== primary);
+    if (!rest.length) return;
+    const chips = document.createElement('div');
+    chips.className = 'welcome-chips';
+    chips.setAttribute('role', 'group');
+    chips.setAttribute('aria-label', 'More tools');
+    for (const cli of rest) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'welcome-chip';
+      chip.dataset.mode = cli.id;
+      // The chip shows the bare name (the row under "Run …" already says what it
+      // does); the full "Run <label>" is its accessible name and tooltip, both of
+      // which i18n.js translates.
+      chip.title = runLabel(cli);
+      chip.setAttribute('aria-label', runLabel(cli));
+      chip.appendChild(logo(cli));
+      const chipLabel = document.createElement('span');
+      chipLabel.className = 'welcome-label';
+      chipLabel.textContent = cli.kind === 'shell' ? 'Shell' : cli.label;
+      chip.appendChild(chipLabel);
+      chip.onclick = launch(cli);
+      chips.appendChild(chip);
     }
+    container.appendChild(chips);
   },
 
   /**
@@ -1736,17 +1878,16 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  _updateTunnelUrlRow(rowId, displayId, url, suffix = '') {
-    const row = document.getElementById(rowId);
-    const display = document.getElementById(displayId);
+  _updateTunnelUrlDisplay(url) {
+    const row = document.getElementById('tunnelUrlRow');
+    const display = document.getElementById('tunnelUrlDisplay');
     if (!row || !display) return;
     if (url) {
-      const fullUrl = url + suffix;
       row.style.display = '';
-      display.textContent = fullUrl;
+      display.textContent = url;
       display.onclick = () => {
-        navigator.clipboard.writeText(fullUrl).then(() => {
-          this.showToast(`${suffix ? 'Upload' : 'Tunnel'} URL copied`, 'success');
+        navigator.clipboard.writeText(url).then(() => {
+          this.showToast('Tunnel URL copied', 'success');
         });
       };
     } else {
@@ -1754,11 +1895,6 @@ Object.assign(CodemanApp.prototype, {
       display.textContent = '';
       display.onclick = null;
     }
-  },
-
-  _updateTunnelUrlDisplay(url) {
-    this._updateTunnelUrlRow('tunnelUrlRow', 'tunnelUrlDisplay', url);
-    this._updateTunnelUrlRow('tunnelUploadUrlRow', 'tunnelUploadUrlDisplay', url, '/upload.html');
   },
 
   showTunnelQR() {
@@ -2549,7 +2685,31 @@ Object.assign(CodemanApp.prototype, {
     claudeEl.className = 'voice-provider-status' + (status?.available ? ' active' : '');
   },
 
+  /**
+   * Apply button: the same save as Save, but the modal stays open and the MCP sync group (its
+   * Preview and Sync need the saved flag) and the CLI management writes are refreshed in place, so
+   * turning either on needs no close-and-reopen. It is a wrapper rather than an option on
+   * saveAppSettings() so that function's signature (which tests locate by text) stays as it was.
+   *
+   * `_keepSettingsOpenOnce` is the one-shot intent and `_applyInFlight` the double-click guard:
+   * saveAppSettings() consumes the intent before its first await, so a Save clicked while an Apply
+   * is still in flight is an ordinary Save and closes the modal.
+   */
+  async applyAppSettings() {
+    if (this._applyInFlight) return;
+    this._applyInFlight = true;
+    this._keepSettingsOpenOnce = true;
+    try {
+      await this.saveAppSettings();
+    } finally {
+      this._applyInFlight = false;
+      this._keepSettingsOpenOnce = false;
+    }
+  },
+
   async saveAppSettings() {
+    const keepOpen = this._keepSettingsOpenOnce === true;
+    this._keepSettingsOpenOnce = false;
     // Gesture overlay is injected at page render (server-side), so a change to it
     // only takes effect on reload — remember the prior value to decide below.
     const _prev = this.loadAppSettingsFromStorage();
@@ -2570,6 +2730,7 @@ Object.assign(CodemanApp.prototype, {
       // Header visibility settings
       showFontControls: document.getElementById('appSettingsShowFontControls').checked,
       showSystemStats: document.getElementById('appSettingsShowSystemStats').checked,
+      headerStatsStyle: document.getElementById('appSettingsHeaderStatsStyle').value,
       showLifecycleLog: document.getElementById('appSettingsShowLifecycleLog').checked,
       showResponseViewer: document.getElementById('appSettingsShowResponseViewer').checked,
       showAwayDigest: document.getElementById('appSettingsShowAwayDigest').checked,
@@ -2588,6 +2749,7 @@ Object.assign(CodemanApp.prototype, {
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
       showSplitButton: document.getElementById('appSettingsShowSplitButton').checked,
+      showTileGridButton: document.getElementById('appSettingsShowTileGridButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
@@ -2596,6 +2758,11 @@ Object.assign(CodemanApp.prototype, {
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
       showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
       showCronButton: document.getElementById('appSettingsShowCronButton').checked,
+      showGitStatus: document.getElementById('appSettingsShowGitStatus').checked,
+      gitStatusTree: document.getElementById('appSettingsGitStatusTree').checked,
+      // Clamped here and again on the server; an empty or odd value falls back to the default.
+      gitStatusMaxRepos: Math.min(50, Math.max(1, parseInt(document.getElementById('appSettingsGitStatusMaxRepos').value, 10) || 12)),
+      gitStatusTimeoutSeconds: Math.min(120, Math.max(5, parseInt(document.getElementById('appSettingsGitStatusTimeout').value, 10) || 30)),
       gestureControlEnabled: document.getElementById('appSettingsGestureControl').checked,
       subagentTrackingEnabled: document.getElementById('appSettingsSubagentTracking').checked,
       subagentActiveTabOnly: document.getElementById('appSettingsSubagentActiveTabOnly').checked,
@@ -2615,11 +2782,14 @@ Object.assign(CodemanApp.prototype, {
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
+      showTabCliLogos: document.getElementById('appSettingsShowTabCliLogos').checked,
       tabOrientation: document.getElementById('appSettingsTabOrientation').value,
       tabRailWidth: this.readTabRailWidthSetting?.() ?? 256,
       shortcutOverrides: this.readShortcutOverridesFromSettings(),
       tabRailDetail: document.getElementById('appSettingsTabRailDetail').value,
       tabRailSort: document.getElementById('appSettingsTabRailSort').value,
+      tabArrangement: document.getElementById('appSettingsTabArrangement').value,
+      tabStateOrder: document.getElementById('appSettingsTabStateOrder').value,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
       sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       sessionSidebarFontSize: this.resolveSessionSidebarFontSize(
@@ -2630,6 +2800,8 @@ Object.assign(CodemanApp.prototype, {
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
       allowedTools: document.getElementById('appSettingsAllowedTools').value.trim(),
       // Codex CLI settings
+      codexModel: document.getElementById('appSettingsCodexModel').value.trim(),
+      codexReasoningEffort: document.getElementById('appSettingsCodexReasoningEffort').value,
       codexDangerouslyBypassApprovals: document.getElementById('appSettingsCodexDangerouslyBypassApprovals').checked,
       // Terminal history settings
       terminalScrollbackLines: parseInt(document.getElementById('appSettingsTerminalScrollbackLines').value, 10) || 100000,
@@ -2665,6 +2837,15 @@ Object.assign(CodemanApp.prototype, {
       // Authoring actions (COD-64) — read editor rows, drop blanks, cap 20
       authoringActions: this.readAuthoringActionsFromEditor(),
     };
+
+    // SettingsUpdateSchema is .strict() and checks codexModel with this same
+    // pattern, so one bad character 400s the WHOLE settings PUT while the toast
+    // still says "Settings saved". Refuse it here, before anything is persisted.
+    if (!/^[A-Za-z0-9._\/-]*$/.test(settings.codexModel)) {
+      this.showToast('Default Codex model may only contain letters, digits, ".", "_", "-" and "/"', 'error');
+      document.getElementById('appSettingsCodexModel')?.focus();
+      return;
+    }
 
     // The "Token Count" / "Show Cost ($)" header toggles were removed from the
     // UI, but their features still read settings.showTokenCount / settings.showCost
@@ -2712,6 +2893,8 @@ Object.assign(CodemanApp.prototype, {
       browserNotifications: document.getElementById('appSettingsNotifBrowser').checked,
       audioAlerts: document.getElementById('appSettingsNotifAudio').checked,
       stuckThresholdMs: (parseInt(document.getElementById('appSettingsNotifStuckMins').value) || 10) * 60000,
+      toastDurationMs: (parseInt(document.getElementById('appSettingsNotifToastSecs').value) || 3) * 1000,
+      browserAutoCloseMs: (parseInt(document.getElementById('appSettingsNotifBrowserSecs').value) || 8) * 1000,
       muteCritical: !document.getElementById('appSettingsNotifCritical').checked,
       muteWarning: !document.getElementById('appSettingsNotifWarning').checked,
       muteInfo: !document.getElementById('appSettingsNotifInfo').checked,
@@ -2781,7 +2964,7 @@ Object.assign(CodemanApp.prototype, {
       _version: 5,
     };
     if (this.notificationManager) {
-      this.notificationManager.preferences = notifPrefsToSave;
+      this.notificationManager.preferences = this.notificationManager.normalizePreferences(notifPrefsToSave);
       this.notificationManager.savePreferences();
     }
 
@@ -2849,6 +3032,9 @@ Object.assign(CodemanApp.prototype, {
       // SettingsUpdateSchema (.strict()) — sending it 400s the whole PUT
       // (moving it into displayKeys alone is not the strip; this is).
       showSplitButton: _ssp,
+      // Same as Split: a per-device header button (and the Tiles chord), absent
+      // from SettingsUpdateSchema (.strict()), so sending it 400s the whole PUT.
+      showTileGridButton: _stg,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
       // Copy-on-select. Per-device (clipboard access differs by device and by
@@ -2873,6 +3059,11 @@ Object.assign(CodemanApp.prototype, {
       showSessionButton: _ssb,
       showAwayDigestButton: _adb,
       showCronButton: _crb,
+      // Per-device bottom-bar indicator, absent from SettingsUpdateSchema (.strict()): it must not reach the PUT.
+      showGitStatus: _sgs,
+      gitStatusTree: _gst,
+      gitStatusMaxRepos: _gsm,
+      gitStatusTimeoutSeconds: _gst2,
       showTabDetachButton: _tdb,
       // COD-299: rail width is a device-local display preference. Never sync a
       // wide-monitor choice onto a smaller browser.
@@ -2883,9 +3074,17 @@ Object.assign(CodemanApp.prototype, {
       // .strict() schema — syncing it would push a desktop-shaped choice onto
       // devices that cannot render it at all.
       sessionLineageLines: _sll,
+      // Keyboard shortcut overrides are per-device (bindings follow the keyboard
+      // and the OS: Cmd on macOS, Ctrl elsewhere) and absent from the .strict()
+      // SettingsUpdateSchema. They used to ride along here, so the first
+      // Shortcuts change on a device (even a Reset, which leaves an empty {})
+      // made EVERY later App Settings save a 400, and every synced key stopped
+      // reaching the server while the toast still said "Settings saved".
+      shortcutOverrides: _sco,
       ...serverSettings
     } = settings;
     let webhookError = '';
+    let serverSaved = false;
     try {
       const res = await this._apiPut('/api/settings', {
         ...serverSettings,
@@ -2903,9 +3102,13 @@ Object.assign(CodemanApp.prototype, {
         this.saveAppSettingsToStorage(settings);
         const cb = document.getElementById('appSettingsTunnelEnabled');
         if (cb) cb.checked = false;
-        this.closeAppSettings();
+        if (!keepOpen) this.closeAppSettings();
         return;
       }
+
+      // `_apiPut` answers null or a non-ok response instead of throwing, so this is the only
+      // evidence the server kept the flags the Apply refresh below reads.
+      serverSaved = !!res?.ok;
 
       // Save model configuration separately
       await this.saveModelConfigFromSettings();
@@ -2918,7 +3121,7 @@ Object.assign(CodemanApp.prototype, {
       if (webhookError) {
         this.showToast(`Settings saved, but not the webhook: ${webhookError}`, 'warning');
       } else {
-        this.showToast('Settings saved', 'success');
+        this.showToast(keepOpen ? 'Settings applied' : 'Settings saved', 'success');
       }
 
       // Show tunnel-specific feedback if toggled on
@@ -2930,9 +3133,13 @@ Object.assign(CodemanApp.prototype, {
       this.showToast('Settings saved locally', 'warning');
     }
 
+    // Only when the settings PUT landed: after a 400 or a dropped connection the server still has the
+    // old flags, and a webhook-only failure still saved the rest, so this runs ahead of that branch.
+    if (keepOpen && serverSaved) this._refreshSettingsAfterApply(settings);
+
     if (webhookError) {
       document.getElementById('webhookGroup')?.scrollIntoView({ block: 'center' });
-    } else {
+    } else if (!keepOpen) {
       this.closeAppSettings();
     }
 
@@ -2951,6 +3158,25 @@ Object.assign(CodemanApp.prototype, {
       );
       setTimeout(() => location.reload(), 400);
     }
+  },
+
+  /**
+   * After Apply: bring the groups whose contents depend on a SAVED value up to date without
+   * reopening the modal. openAppSettings does the same on open; this is the part of it that
+   * a save can change, without touching what the user is editing or the scroll position.
+   */
+  _refreshSettingsAfterApply(settings) {
+    // The MCP routes read the saved flag, so switching it on is only usable from now.
+    this._mcpSyncSavedOn = settings.mcpSyncEnabled === true;
+    const out = this.$('mcpSyncResult');
+    if (this._mcpSyncSavedOn && out && out.dataset?.hint === 'save-first') {
+      out.style.display = 'none';
+      out.innerHTML = '';
+    }
+    this.applyMcpSyncVisibility();
+    this.applyCustomModelEndpointsVisibility();
+    this.applyCliManagementVisibility();
+    this._applyDoctorAdminGate();
   },
 
   // Load model configuration from server for the settings modal
@@ -3279,12 +3505,18 @@ Object.assign(CodemanApp.prototype, {
   /** Keep the launch surfaces in sync with Settings mutations without a reload. */
   _syncCliLaunchCatalog() {
     if (!Array.isArray(this._cliList) || this._cliList.length === 0) return;
+    // /api/clis rows carry no capabilities, so keep the served catalog's `external`
+    // (isExternalCliSession() reads it). A new custom CLI has none and falls back to `kind`.
+    const previous = new Map(
+      (Array.isArray(window.__codemanCliCatalog) ? window.__codemanCliCatalog : []).map((cli) => [cli.id, cli])
+    );
     window.__codemanCliCatalog = this._cliList.map((cli) => ({
       id: cli.id,
       label: cli.label,
       shortBadge: cli.shortBadge,
       order: cli.order,
       kind: cli.kind,
+      external: previous.get(cli.id)?.external,
       enabled: cli.enabled,
       available: cli.kind === 'shell' || (cli.enabled && cli.installed),
     }));
@@ -3627,6 +3859,7 @@ Object.assign(CodemanApp.prototype, {
         ultracodeFloatingWindows: false,
         showMultiMonitorButton: false,
         showSplitButton: false,
+        showTileGridButton: false,
         // Desktop defaults this ON (see planUsageChipEnabled); handhelds keep it
         // OFF so the phone header stays minimal and the mobile-header-buttons
         // policy guard keeps passing.
@@ -3650,12 +3883,15 @@ Object.assign(CodemanApp.prototype, {
         imageWatcherEnabled: false,
         ralphTrackerEnabled: false,
         tabTwoRows: false,
+        showTabCliLogos: true,
         // COD-286: phones are forced horizontal by resolveTabOrientation anyway;
         // this keeps the picker honest if the layout ever reaches a tablet width.
         tabOrientation: 'horizontal',
         tabRailWidth: 256,
         tabRailDetail: 'rich',
         tabRailSort: 'activity',
+        tabArrangement: 'classic',
+        tabStateOrder: 'urgent-first',
         sessionListLayout: 'header',
         sessionSidebarFontSize: 12,
         cjkInputEnabled: false,
@@ -3666,7 +3902,14 @@ Object.assign(CodemanApp.prototype, {
     }
     // Desktop defaults - rely on ?? operators in apply functions
     // This allows desktop to have different defaults without duplication
-    return terminalDefaults;
+    // A touch-primary tablet (iPad, an Android tablet: not a handheld, so it
+    // lands here) keeps the Tiles button opt-in, as Split is: a tile has none of
+    // the main terminal's touch, IME and soft-keyboard handling. The PRIMARY
+    // pointer decides, never MobileDetection.isTouchDevice(), which is true on a
+    // touchscreen laptop too (fine primary pointer: the desktop default stays).
+    const coarsePrimaryPointer =
+      typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches === true;
+    return coarsePrimaryPointer ? { ...terminalDefaults, showTileGridButton: false } : terminalDefaults;
   },
 
   loadAppSettingsFromStorage() {
@@ -3683,8 +3926,15 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       console.error('Failed to load app settings:', err);
     }
-    // Return device-specific defaults
-    this._cachedAppSettings = this.getDefaultSettings();
+    // Return device-specific defaults, without showTileGridButton: its default
+    // on a non-handheld follows the LIVE primary pointer (getDefaultSettings),
+    // and this object is what a fresh device caches and the server-settings
+    // merge then persists, which would freeze a 2-in-1's first-load posture
+    // into a stored value. Every reader resolves the absent key through a
+    // fresh getDefaultSettings() (?? defaults.showTileGridButton ?? true).
+    const defaults = { ...this.getDefaultSettings() };
+    delete defaults.showTileGridButton;
+    this._cachedAppSettings = defaults;
     return this._cachedAppSettings;
   },
 
@@ -3814,6 +4064,10 @@ Object.assign(CodemanApp.prototype, {
     if (result && this.notificationManager) {
       this.notificationManager.originalTitle = document.title;
     }
+    // The connection tile's value word (Header Stats Style Tiles) is written
+    // already translated into a data-i18n-skip span, so the translator above
+    // cannot revert it; its own language compare makes this one call repaint it.
+    this._updateConnectionIndicator?.();
   },
 
   // Resolved per-device state of the plan-usage chip. Desktop defaults ON,
@@ -3841,6 +4095,91 @@ Object.assign(CodemanApp.prototype, {
     return now === before ? undefined : now;
   },
 
+  /**
+   * The stored tab layout, or the default. Anything but the four known values
+   * (an absent key, a value from a newer build) reads as 'classic', the default:
+   * the single strip as before, the owner's pick on the 1.36.0 beta. 'state'
+   * (Discussion #426, option C), 'case' and 'ledger' are opt-in.
+   */
+  resolveTabArrangement(settings) {
+    const value = settings?.tabArrangement ?? this.getDefaultSettings().tabArrangement;
+    return value === 'state' || value === 'case' || value === 'ledger' ? value : 'classic';
+  },
+
+  /**
+   * CLI Logos on Tabs (`showTabCliLogos`, per-device, default ON on every
+   * device). Anything but an explicit false reads as on, the same test the
+   * pre-paint script in index.html applies, so a reload and a Save never
+   * disagree about an odd stored value.
+   */
+  tabCliLogosEnabled(settings) {
+    return (settings?.showTabCliLogos ?? this.getDefaultSettings().showTabCliLogos) !== false;
+  },
+
+  /** The stored state-group order: 'urgent-last' only when chosen, else 'urgent-first'. */
+  resolveTabStateOrder(settings) {
+    const value = settings?.tabStateOrder ?? this.getDefaultSettings().tabStateOrder;
+    return value === 'urgent-last' ? 'urgent-last' : 'urgent-first';
+  },
+
+  /**
+   * The stored header-stats style, or the default. Anything but the three
+   * known values (an absent key, a value from a newer build) reads as
+   * 'compact', the default (the two-pill ring variant of Discussion #426's
+   * option G, picked by the owner on the 1.36.0 beta over 'tiles').
+   */
+  resolveHeaderStatsStyle(settings) {
+    const value = settings?.headerStatsStyle ?? this.getDefaultSettings().headerStatsStyle;
+    return value === 'classic' || value === 'tiles' ? value : 'compact';
+  },
+
+  /**
+   * Apply a header-stats style: the `data-header-stats` attribute every rule in
+   * the "Header stats styles" block of styles.css keys on, plus the two DOM
+   * moves the clustered styles need.
+   *
+   * The template keeps the classic order, where the connection indicator sits
+   * before the font controls and the plan-usage chip near the end of the header.
+   * Compact and Tiles draw them as ONE cluster (WS · CPU · MEM, then the plan
+   * windows), so the indicator moves into #headerSystemStats as its first child
+   * and the chip moves right after it. Comment anchors left at the template
+   * positions are what 'classic' moves them back to, so switching back restores
+   * the header exactly.
+   *
+   * ⚠️ The indicator only joins the pill while System Stats is shown: the pill
+   * is hidden with `display: none`, and the WS readout must not disappear with
+   * it. Both elements keep their ids, so every writer (setConnectionStatus,
+   * updatePlanUsageChip) finds them wherever they sit.
+   *
+   * @param {{style: 'classic'|'compact'|'tiles', showSystemStats: boolean}} opts
+   */
+  applyHeaderStatsStyle({ style, showSystemStats }) {
+    document.documentElement.dataset.headerStats = style;
+    const stats = document.getElementById('headerSystemStats');
+    const conn = document.getElementById('connectionIndicator');
+    const plan = document.getElementById('planUsageChip');
+    if (!stats || !conn || !plan) return;
+    if (!this._headerStatsAnchors) {
+      const connAnchor = document.createComment(' connection indicator (classic position) ');
+      const planAnchor = document.createComment(' plan usage chip (classic position) ');
+      conn.before(connAnchor);
+      plan.before(planAnchor);
+      this._headerStatsAnchors = { conn: connAnchor, plan: planAnchor };
+    }
+    const anchors = this._headerStatsAnchors;
+    const clustered = style !== 'classic';
+    if (clustered && showSystemStats) {
+      if (stats.firstElementChild !== conn) stats.prepend(conn);
+    } else if (anchors.conn.nextSibling !== conn) {
+      anchors.conn.after(conn);
+    }
+    if (clustered) {
+      if (stats.nextElementSibling !== plan) stats.after(plan);
+    } else if (anchors.plan.nextSibling !== plan) {
+      anchors.plan.after(plan);
+    }
+  },
+
   applyHeaderVisibilitySettings() {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
@@ -3849,7 +4188,11 @@ Object.assign(CodemanApp.prototype, {
     // default OFF, per-device). Mirrored as a class on <html>: styles.css hides
     // .tab-detach without it (a tab that is already detached keeps its icon as
     // the re-focus affordance for the popped-out window).
-    const showTabDetach = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
+    // Under a host that opens windows (see hasHostWindows) popping out is the
+    // way to get two panes side by side, so the button defaults on there.
+    const showTabDetach =
+      this.tabDetachButtonEnabled?.(settings, defaults)
+      ?? (settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false);
     document.documentElement.classList.toggle('tabs-show-detach', showTabDetach);
     const compactHeader = MobileDetection.getDeviceType() !== 'desktop';
     const showFontControls = compactHeader ? false : (settings.showFontControls ?? defaults.showFontControls ?? false);
@@ -3871,6 +4214,12 @@ Object.assign(CodemanApp.prototype, {
     if (tokenCountEl) {
       tokenCountEl.style.display = showTokenCount ? '' : 'none';
     }
+    // After the System Stats visibility above: whether WS joins the stats pill
+    // depends on the pill being shown.
+    this.applyHeaderStatsStyle({
+      style: compactHeader || this.isSoloWindow ? 'classic' : this.resolveHeaderStatsStyle(settings),
+      showSystemStats,
+    });
 
     // Hide lifecycle log button when setting is disabled
     // Default OFF: the lifecycle-log document icon is opt-in; the default header
@@ -3923,6 +4272,10 @@ Object.assign(CodemanApp.prototype, {
     // pattern — the CSS in styles.css is the backstop, this is the check).
     const showSplitButton = settings.showSplitButton ?? defaults.showSplitButton ?? false;
     this._applySplitButtonVisibility?.(showSplitButton);
+
+    // Tiles button: same gate and backstop as Split (tile-grid.js).
+    const showTileGridButton = settings.showTileGridButton ?? defaults.showTileGridButton ?? true;
+    this._applyTileGridButtonVisibility?.(showTileGridButton);
 
     // Ultracode/Workflow agents launcher — hidden by default; reveal when enabled.
     // Marker class only (base is display:inline-flex !important) so it's auto-excluded
@@ -3987,6 +4340,10 @@ Object.assign(CodemanApp.prototype, {
       cronBtn.classList.toggle('btn-cron--hidden', !showCronButton);
     }
 
+    // Bottom-bar Git indicator (git-status-ui.js): opt-in, per-device. Starts or stops its poll to
+    // match the setting, so a live toggle needs no reload.
+    this.applyGitStatusVisibility?.();
+
     // Notification bell is retired (notifications live in Settings → Notifications
     // + the drawer); keep it hidden regardless of the notification-enabled state.
     const notifBtn = document.querySelector('.btn-notifications');
@@ -4025,9 +4382,9 @@ Object.assign(CodemanApp.prototype, {
           })
         : 'horizontal';
 
-    if (orientation !== 'vertical' && this._tabRailSessionSearch) {
-      this._clearTabRailSessionSearchState?.({ render: false });
-    }
+    // The search box lives in the rail: a search left applied after the list
+    // moves out would hide tabs with no box to clear it from.
+    if (orientation !== 'vertical' && this._tabRailSearch) this._resetTabRailSearch?.();
 
     const root = document.documentElement;
     const previous = root.getAttribute('data-tab-orientation') || 'horizontal';
@@ -4048,6 +4405,27 @@ Object.assign(CodemanApp.prototype, {
     const previousSort = root.dataset.tabRailSort || 'activity';
     const sort = (settings.tabRailSort ?? defaults.tabRailSort ?? 'activity') === 'manual' ? 'manual' : 'activity';
     root.dataset.tabRailSort = sort;
+
+    // The tab layout rides on a fourth attribute, for the same reason: it is
+    // applied by the render paths (inline `order` plus headings, or cluster
+    // boxes), so a flip has to re-render, and the gates in app.js
+    // (`isTabTriage()`, `isTabClusters()`, `isTabLedger()`) read one attribute
+    // per pass instead of re-parsing localStorage.
+    const previousArrangement = root.dataset.tabArrangement || 'state';
+    const arrangement = this.resolveTabArrangement(settings);
+    root.dataset.tabArrangement = arrangement;
+    // Which end the state groups start from; read by _tabTriageLayout().
+    const previousStateOrder = root.dataset.tabStateOrder || 'urgent-first';
+    const stateOrder = this.resolveTabStateOrder(settings);
+    root.dataset.tabStateOrder = stateOrder;
+    // CLI Logos on Tabs. Unlike the attributes above this one is pure CSS
+    // (styles.css hides `.tab-harness` and `.home-sessions-harness` under
+    // html[data-tab-logos='off']), so a flip re-renders nothing and stays out
+    // of `changed` below: the logo spans are always in the markup. It still
+    // resizes every agent tab, which the tail of this function settles.
+    const previousLogos = root.dataset.tabLogos;
+    const logos = this.tabCliLogosEnabled(settings) ? 'on' : 'off';
+    root.dataset.tabLogos = logos;
 
     const tabsEl = document.getElementById('sessionTabs');
     const rail = document.getElementById('tabRail');
@@ -4083,7 +4461,7 @@ Object.assign(CodemanApp.prototype, {
     // the row template, not toggled by CSS — same reasoning as the sidebar's
     // detail half in applySessionListLayout(). Taller rows also move every
     // connector anchored to a tab rect.
-    const changed = orientationChanged || previousDetail !== detail || previousSort !== sort;
+    const changed = orientationChanged || previousDetail !== detail || previousSort !== sort || previousArrangement !== arrangement || previousStateOrder !== stateOrder;
     if (orientationChanged) {
       this.updateTabOverflowMode?.();
       if (!settleRailWidth) this.syncTerminalGeometry?.();
@@ -4108,6 +4486,14 @@ Object.assign(CodemanApp.prototype, {
       if (!wrapRendered) this._fullRenderSessionTabs?.();
       this._updateConnectionLinesImmediate?.();
       this._refreshHomeSessionsIfVisible?.();
+    } else if (previousLogos !== logos) {
+      // A logo flip narrows or widens every agent tab with no render behind
+      // it, so re-take what a render would have: the strip's one-row wrap
+      // decision and the lines anchored to tab rects (lineage, subagent
+      // connectors). A header that gains or loses a row resizes the terminal
+      // container, whose ResizeObserver (terminal-ui.js) owns the PTY geometry.
+      this.updateTabOverflowMode?.();
+      this._updateConnectionLinesImmediate?.();
     }
     // Only detailed rows carry stamps that go stale with no event behind them.
     // _fullRenderSessionTabs() settles this too, but applyTabOrientation() runs
@@ -4410,21 +4796,22 @@ Object.assign(CodemanApp.prototype, {
         // NOTE: Feature toggles (subagentTrackingEnabled, imageWatcherEnabled, ralphTrackerEnabled)
         // are NOT display keys — they control server-side behavior and must sync from server.
         const displayKeys = new Set([
-          'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
+          'showFontControls', 'showSystemStats', 'headerStatsStyle', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'tabRailSort', 'sessionListLayout', 'sessionSidebarFontSize', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'showTabCliLogos', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'tabRailSort', 'tabArrangement', 'tabStateOrder', 'sessionListLayout', 'sessionSidebarFontSize', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
           'terminalFontFamily', 'terminalFontWeight', 'terminalFontWeightBold',
           'language',
           'terminalWheelLocalScrollback',
           'autoCopySelection', 'copyStripMargin',
-          'showSessionButton', 'showAwayDigestButton', 'showCronButton',
+          'showSessionButton', 'showAwayDigestButton', 'showCronButton', 'showGitStatus', 'gitStatusTree', 'gitStatusMaxRepos', 'gitStatusTimeoutSeconds',
           'showTabDetachButton',
           'mobileOverviewEnabled',
           'liveMirrorEnabled',
           'sessionLineageLines',
           'showSplitButton',
+          'showTileGridButton',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. Drop
@@ -5346,4 +5733,5 @@ document.addEventListener?.('codeman:me', () => {
   window.app?._applyCustomModelAdminGate?.();
   window.app?._applyCliManagementAdminGate?.();
   window.app?._applyMcpSyncAdminGate?.();
+  window.app?._applyDoctorAdminGate?.();
 });

@@ -6,19 +6,26 @@
  * - Close modal shows "Kill Tmux & OpenCode" (not "Claude Code")
  * - needsRefresh handler sends resize
  *
- * Port: 3211 (opencode UI tests)
+ * Port: ephemeral
  *
  * Run: npx vitest run test/opencode-resize.test.ts
  */
 
+import { execSync } from 'node:child_process';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { WebServer } from '../src/web/server.js';
 
-const PORT = 3211;
-const BASE_URL = `http://localhost:${PORT}`;
-const TARGET = 'opencode';
-const targetPrefix = `[target:${TARGET}]`;
+let baseUrl: string;
+
+const HAS_OPENCODE = (() => {
+  try {
+    execSync('command -v opencode', { stdio: 'ignore', shell: '/bin/bash' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 let server: WebServer;
 let browser: Browser;
@@ -32,15 +39,16 @@ async function freshPage(): Promise<{ context: BrowserContext; page: Page }> {
 }
 
 async function navigateAndWait(page: Page): Promise<void> {
-  await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => document.body.classList.contains('app-loaded'), {
     timeout: 5000,
   });
 }
 
 beforeAll(async () => {
-  server = new WebServer(PORT, false, true); // testMode
+  server = new WebServer(0, false, true); // testMode
   await server.start();
+  baseUrl = `http://localhost:${server.boundPort}`;
   browser = await chromium.launch({ headless: true });
 }, 30_000);
 
@@ -130,7 +138,8 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-resize-test' }),
       });
       const data = await res.json();
-      return data.data?.session?.id ?? data.id ?? data.session?.id;
+      // POST /api/sessions answers in the { success, data: { session } } envelope.
+      return data.data?.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -194,7 +203,8 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-earlyret-test' }),
       });
       const data = await res.json();
-      return data.data?.session?.id ?? data.id ?? data.session?.id;
+      // POST /api/sessions answers in the { success, data: { session } } envelope.
+      return data.data?.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -243,7 +253,8 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-refresh-test' }),
       });
       const data = await res.json();
-      return data.data?.session?.id ?? data.id ?? data.session?.id;
+      // POST /api/sessions answers in the { success, data: { session } } envelope.
+      return data.data?.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -254,7 +265,23 @@ describe(`${targetPrefix} OpenCode session initial resize`, () => {
       await app.selectSession(sid);
     }, sessionId);
 
-    await page.waitForTimeout(300);
+    // The handler only resizes after it has replayed a NON-EMPTY terminal
+    // buffer, so give the session a real PTY with some output first.
+    await page.evaluate(async (sid: string) => {
+      await fetch(`/api/sessions/${sid}/shell`, { method: 'POST' });
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        await fetch(`/api/sessions/${sid}/input`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input: 'echo needs-refresh-seed\r', useMux: false }),
+        });
+        await new Promise((r) => setTimeout(r, 400));
+        const res = await fetch(`/api/sessions/${sid}/terminal?full=1`);
+        if ((((await res.json())?.data?.terminalBuffer as string) ?? '').includes('needs-refresh-seed')) break;
+        if (Date.now() > deadline) throw new Error('seed output never appeared');
+      }
+    }, sessionId);
 
     const stateBefore = await page.evaluate((sid) => {
       const app = (
@@ -410,7 +437,7 @@ describe(`${targetPrefix} OpenCode close modal text`, () => {
     await context?.close();
   });
 
-  it('shows "Kill Tmux & OpenCode" for opencode sessions', async () => {
+  it.skipIf(!HAS_OPENCODE)('shows "Kill Tmux & OpenCode" for opencode sessions', async () => {
     ({ context, page } = await freshPage());
     await navigateAndWait(page);
 
@@ -424,7 +451,8 @@ describe(`${targetPrefix} OpenCode close modal text`, () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'oc-close-test' }),
       });
       const data = await res.json();
-      return data.data?.session?.id ?? data.id ?? data.session?.id;
+      // POST /api/sessions answers in the { success, data: { session } } envelope.
+      return data.data?.session?.id;
     });
 
     expect(sessionId).toBeTruthy();
@@ -474,7 +502,8 @@ describe(`${targetPrefix} OpenCode close modal text`, () => {
         body: JSON.stringify({ workingDir: '/tmp', name: 'cc-close-test' }),
       });
       const data = await res.json();
-      return data.data?.session?.id ?? data.id ?? data.session?.id;
+      // POST /api/sessions answers in the { success, data: { session } } envelope.
+      return data.data?.session?.id;
     });
 
     expect(sessionId).toBeTruthy();

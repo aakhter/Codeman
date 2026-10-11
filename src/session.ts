@@ -30,6 +30,7 @@
 
 import { EventEmitter } from 'node:events';
 import { workerResumeOptions } from './remote-worker-recovery.js';
+import { basename } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -112,6 +113,7 @@ import {
   getClaudeBinaryPath,
   spawnPtyWithHelperRepair,
   resolveLocalShell,
+  waitForProcessesExit,
 } from './utils/index.js';
 import {
   MAX_TERMINAL_BUFFER_SIZE,
@@ -173,6 +175,18 @@ import {
   type MobileInputTraceCollector,
   type MobileInputTraceStage,
 } from './perf/mobile-input-trace.js';
+import type { DisplayModel } from './types/session.js';
+import { resolveConfigModel } from './model-config-resolvers.js';
+import { legacyConfigForMode } from './session-cli-registry-bridge.js';
+import {
+  launchModelFor,
+  readScreenModel,
+  resolveDisplayModel,
+  restoredReportedModel,
+  sanitizeModelName,
+  type ReportedModel,
+  type ReportedModelSource,
+} from './session-display-model.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -269,7 +283,10 @@ const WIRE_ACTIVITY_SETTLE_MS = 15_000;
 
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
-/** Graceful shutdown delay when stopping session (100ms) */
+/**
+ * Longest the PTY process gets to exit on SIGTERM before SIGKILL when stopping a
+ * session. A deadline, not a sleep: stop() moves on as soon as it has exited.
+ */
 const GRACEFUL_SHUTDOWN_DELAY_MS = 100;
 
 /** SIGKILL can race a process or its process group exiting after SIGTERM. */
@@ -520,10 +537,11 @@ function cliNeedsVersionProbe(mode: SessionMode): boolean {
  * Codex, Claude Code, and Gemini are known, controlled (Ink/React) TUIs that
  * repaint via cursor positioning, so dropping the alt-screen switch is safe —
  * content stays in the normal buffer. Excluded: `shell` (arbitrary programs like
- * vim/less/htop legitimately need the alt screen), `opencode` (renders its own
- * TUI that may rely on it), `pi` (below) and `grok` (a fullscreen alt-screen TUI
- * with mouse support, i.e. the opencode case, not the Ink case). Keep parity
- * with the replay-side strip in session-routes.ts.
+ * vim/less/htop legitimately need the alt screen), `opencode` (its own MIDDLE strip,
+ * isMuxMouseStripMode), `pi` (below) and `grok` (a fullscreen alt-screen TUI with
+ * mouse support). Keep parity with the replay-side strip (`stripReplayBuffer` in
+ * session-routes.ts); the table in `CliCapabilities.altScreen` is pinned for every
+ * stock CLI in test/claude-scrollback-strip.test.ts.
  *
  * ⚠️ Being excluded here does NOT preserve the alt screen. Every excluded mode
  * falls through to isMuxAltScreenOnlyStripMode(), which strips the alt-screen
@@ -543,8 +561,10 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
 
 /**
  * Modes that need the NARROW strip: alt-screen toggles only, leaving `\x1b[3J`
- * and the mouse-tracking DECSETs alone. Applies to every mode `isAltScreenStripMode`
- * excludes, but ONLY when the session is tmux-backed (`useMux`).
+ * and the mouse-tracking DECSETs alone. Applies to every mode that is neither
+ * `strip-full` (isAltScreenStripMode) nor `strip-mux-and-mouse` (isMuxMouseStripMode),
+ * so `strip-mux-only` and `preserve` alike, but ONLY when the session is tmux-backed
+ * (`useMux`).
  *
  * The bug (issue #205): the tmux CLIENT emits `smcup` (`\x1b[?1049h`) as its first
  * bytes on attach, before any program has run. Unstripped, xterm.js parks in the
@@ -569,7 +589,31 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
  * `\x1b[3J` from a user's own `clear` is a deliberate "wipe my scrollback".
  */
 export function isMuxAltScreenOnlyStripMode(mode: SessionMode, useMux: boolean): boolean {
-  return useMux && !isAltScreenStripMode(mode);
+  if (!useMux) return false;
+  const altScreen = getCli(mode)?.capabilities.altScreen;
+  return altScreen !== 'strip-full' && altScreen !== 'strip-mux-and-mouse';
+}
+
+/**
+ * Modes whose mouse-tracking DECSETs must be stripped, leaving `3J` alone:
+ * `altScreen: 'strip-mux-and-mouse'`, i.e. a mouse-capable full-screen TUI.
+ *
+ * Why this exists (opencode, measured 2026-09-16): the TUI enables tracking
+ * DECSETs, tmux runs with `mouse off` and therefore passes the PANE's DECSETs
+ * straight through to the tmux client, and the browser's xterm obeyed them —
+ * `mouseTrackingMode` flipped to `'any'` and xterm then reported DRAGS to the TUI
+ * instead of selecting locally. "Mark text, copy on select" silently did nothing
+ * (measured 62 `none` / 18 `any` over 16s, and 5/5 dead drags while `any`), and
+ * the obvious fallback — Ctrl+C — is opencode's `app_exit`, so the failure also
+ * ended sessions. Stripping at the source keeps xterm in selection mode; clicks
+ * still reach the CLI through the browser's hand-encoded tap, which this strip
+ * publishes as `cliMouseTracking` (`_recordStrippedMouseMode`).
+ *
+ * Gated on `useMux` for the same reason as the narrow strip: on the direct-PTY
+ * fallback the program's own DECSETs really do reach xterm and must be honoured.
+ */
+export function isMuxMouseStripMode(mode: SessionMode, useMux: boolean): boolean {
+  return useMux && getCli(mode)?.capabilities.altScreen === 'strip-mux-and-mouse';
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
@@ -857,6 +901,27 @@ export class Session extends EventEmitter {
   private _watchingWindow = WATCHING_TAIL_LINES;
   /** Lazily compiled `capabilities.workDetect.awaitingLine`. See _awaitingLinePattern(). */
   private _awaitingLineRe: RegExp | null | undefined = undefined;
+  /**
+   * The newest model the running CLI reported for itself (its statusline, or its own
+   * footer read off the probe's capture), or null when none has. Feeds `displayModel`
+   * (src/session-display-model.ts). Persisted through `toState()` and restored after a
+   * restart, so an idle session keeps naming its model until the next report.
+   */
+  private _reportedModel: ReportedModel | null = null;
+  /**
+   * The model the CLI's own config pins for this session (`modelDetect.configResolver`),
+   * read at each pane start, attach or relaunch; null when it pins none. Below any
+   * report from the running CLI in `displayModel`. Not persisted: the next start reads it.
+   */
+  private _configModel: string | null = null;
+  /** Bumped per config read, so a read that lands after a newer one is dropped. */
+  private _configModelGen = 0;
+  /** Lazily compiled `capabilities.modelDetect.screenLine`. See _modelLinePattern(). */
+  private _modelLineRe: RegExp | null | undefined = undefined;
+  /** Resolved with the pattern above: how many rows at the foot of the screen it sees. */
+  private _modelLineRows = 1;
+  /** Resolved with the pattern above: the fields it shows that are never the model. */
+  private _modelRejectWords: readonly string[] = [];
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
@@ -1153,6 +1218,8 @@ export class Session extends EventEmitter {
       claudeSessionChain?: string[];
       /** Restored agent-exit observation for this session's pane (see `paneExit`). */
       paneExit?: PaneExit;
+      /** The previous run's `displayModel`; a CLI-reported one is restored (see `displayModel`). */
+      displayModel?: DisplayModel;
       /** This session was rebuilt from the tmux socket, so its metadata is a guess. */
       discoveredMuxSession?: boolean;
       /** Restored wall-clock ms of the pane's last output (recovery only; see `_wireActivityAt`). */
@@ -1358,6 +1425,7 @@ export class Session extends EventEmitter {
     // replaces it with a first-hand reading. NOT the stats collector, which a
     // browser panel arms and disarms — see `startPaneExitWatcher`.
     this.setPaneExit(config.paneExit);
+    this._reportedModel = restoredReportedModel(config.displayModel) ?? null;
     // Never self-parent: a session pointing at itself would draw a zero-length
     // lineage arc under its own tab. Only reachable via the recovery path, where
     // both the id and the saved parent come from disk.
@@ -1708,6 +1776,9 @@ export class Session extends EventEmitter {
     } finally {
       this._paneLifecycleOps--;
       this._paneStartedAt = Date.now();
+      // A start, attach or relaunch is when the CLI read its config, so it is when
+      // the model that config pins is read here too.
+      this._refreshConfigModel();
     }
   }
 
@@ -1757,7 +1828,7 @@ export class Session extends EventEmitter {
   /**
    * True when this session's PTY is a tmux client rather than the program itself.
    * Read by the replay-side alt-screen strip, which must apply the same
-   * `useMux` gate as the live strip (isMuxAltScreenOnlyStripMode).
+   * `useMux` gate as the live strip (isMuxAltScreenOnlyStripMode, isMuxMouseStripMode).
    */
   get usesMux(): boolean {
     return this._useMux;
@@ -2719,6 +2790,7 @@ export class Session extends EventEmitter {
       model: cliTakesSessionModel(this.mode) ? this._model : undefined,
       advisorModel: this._advisorModel,
       customModel: this.customModel,
+      displayModel: this.displayModel,
       // COD-118: runtime-only — surfaced so the frontend can require explicit user
       // intent before restarting a crash-looped session. Deliberately NOT restored
       // by the constructor: a Codeman restart starts with a fresh breaker so boot
@@ -3447,14 +3519,21 @@ export class Session extends EventEmitter {
     // redraws overwrite only the cells they target, so non-erased rows keep
     // their content. Gated to Codex/Claude/Gemini (isAltScreenStripMode).
     //
-    // Every OTHER mode (shell/opencode/antigravity) gets the NARROW strip when it
-    // is tmux-backed: alt-screen toggles only, because the sequence that breaks
+    // Every OTHER mode (shell/antigravity/pi/grok/deepseek/omp) gets the NARROW strip
+    // when it is tmux-backed: alt-screen toggles only, because the sequence that breaks
     // scrollback there is tmux's own client-side smcup at attach, not anything the
     // program in the pane emitted (issue #205, see isMuxAltScreenOnlyStripMode).
     // 3J and the mouse DECSETs stay, so `clear` and mouse-aware TUIs keep working.
+    //
+    // The MIDDLE case (isMuxMouseStripMode) is a mouse-capable full-screen TUI:
+    // it needs smcup AND the mouse DECSETs gone — otherwise the pane's tracking
+    // reaches xterm and every drag becomes a mouse report instead of a text
+    // selection, which is what killed mark-and-copy in opencode — while 3J stays,
+    // because a TUI is not a `clear` consumer.
     const fullStrip = isAltScreenStripMode(this.mode);
-    const altOnlyStrip = !fullStrip && isMuxAltScreenOnlyStripMode(this.mode, this._useMux);
-    if (fullStrip || altOnlyStrip) {
+    const mouseStrip = isMuxMouseStripMode(this.mode, this._useMux);
+    const altOnlyStrip = !fullStrip && !mouseStrip && isMuxAltScreenOnlyStripMode(this.mode, this._useMux);
+    if (fullStrip || mouseStrip || altOnlyStrip) {
       // Debug capture (codex only): when CODEMAN_CODEX_RAW_LOG=1, write the raw
       // codex PTY output (pre-strip) to a per-session log file. Used to diagnose
       // the stacked-status-bar / ghost-row rendering issues by inspecting the
@@ -3497,14 +3576,18 @@ export class Session extends EventEmitter {
       // eslint-disable-next-line no-control-regex
       data = data.replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '');
       if (fullStrip) {
-        data = data
+        // eslint-disable-next-line no-control-regex
+        data = data.replace(/\x1b\[3J/g, '');
+      }
+      if (fullStrip || mouseStrip) {
+        data = data.replace(
           // eslint-disable-next-line no-control-regex
-          .replace(/\x1b\[3J/g, '')
-          // eslint-disable-next-line no-control-regex
-          .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, (seq) => {
+          /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g,
+          (seq) => {
             this._recordStrippedMouseMode(seq);
             return '';
-          });
+          }
+        );
       }
     }
 
@@ -3762,19 +3845,14 @@ export class Session extends EventEmitter {
           this.id;
 
         // For NEW mux sessions: wait for readiness then clean buffer
-        // For RESTORED mux sessions: don't do anything - client will fetch buffer on tab switch
+        // For RESTORED mux sessions: leave the buffer alone - client will fetch it on tab switch
         if (!isRestored) {
           if (isExternalCliMode(this.mode)) {
-            // External CLIs use custom TUIs — no Claude ❯ prompt to detect.
-            // Wait for TUI to stabilize, then mark ready. Don't clear the buffer — the TUI's
-            // initial render IS the useful content. Emit needsRefresh so the client fetches
-            // the full buffer once the TUI has rendered.
-            this._promptCheckTimeout = setTimeout(() => {
-              this._promptCheckTimeout = null;
-              if (this._isStopped) return;
-              this._status = 'idle';
-              this.emit('needsRefresh');
-            }, 3000);
+            // External CLIs use custom TUIs — no ❯ prompt to detect.
+            // Wait for TUI to stabilize (output stops changing), then mark ready.
+            // Don't clear the buffer — the TUI's initial render IS the useful content.
+            // Emit needsRefresh so the client fetches the full buffer once the TUI has rendered.
+            this._armPaneSettle(false);
           } else {
             // Claude mode: wait for ❯ prompt
             this._promptCheckInterval = setInterval(() => {
@@ -3806,6 +3884,8 @@ export class Session extends EventEmitter {
               this._promptCheckTimeout = null;
             }, 5000);
           }
+        } else {
+          this._armPaneSettle(true);
         }
       } catch (err) {
         console.error('[Session] Failed to create mux session, falling back to direct PTY:', err);
@@ -4218,7 +4298,128 @@ export class Session extends EventEmitter {
     this._lastPaneProbeWorking =
       text === null ? null : this._workingLinePattern().test(text) || this._paneAwaitsWorkers(text);
     this._readWatching(text);
+    this._readScreenModel(text);
     return this._lastPaneProbeWorking;
+  }
+
+  /**
+   * Read the model the CLI's own footer names off the same capture, for a CLI whose
+   * registry entry declares `capabilities.modelDetect`.
+   *
+   * Unlike `_readWatching`, a capture that could not be read, or a footer the pattern
+   * does not find (a popup covering it, a footer turned off), KEEPS the last model. The
+   * two are not symmetric: background work ends and its badge must go, while a model does
+   * not stop running because something was drawn over the row that names it.
+   */
+  private _readScreenModel(paneText: string | null): void {
+    if (paneText === null) return;
+    const pattern = this._modelLinePattern();
+    if (!pattern) return;
+    const model = readScreenModel(paneText, pattern, this._modelLineRows, {
+      rejectWords: this._modelRejectWords,
+      // A footer field equal to the folder this session runs in is the folder, never the
+      // model: the generic half of the rule, for every CLI.
+      cwdBasename: basename(this.workingDir),
+    });
+    if (model) this.noteReportedModel('screen', model);
+  }
+
+  /**
+   * The regex reading this CLI's model off its footer, or null for a CLI that declares
+   * none. Compiled once per session through `compileVersionRegex()` (null, never a throw,
+   * for a pattern it refuses), like the working- and watching-line patterns.
+   */
+  private _modelLinePattern(): RegExp | null {
+    if (this._modelLineRe === undefined) {
+      const detect = getCli(this.mode)?.capabilities.modelDetect;
+      this._modelLineRe = detect?.screenLine ? compileVersionRegex(detect.screenLine) : null;
+      this._modelLineRows = detect?.screenLines ?? 1;
+      this._modelRejectWords = detect?.rejectWords ?? [];
+    }
+    return this._modelLineRe;
+  }
+
+  /**
+   * Record a model the running CLI reported for itself: its statusline (claude's
+   * exporter, via `POST /api/status-telemetry`) or its own footer. The newest report
+   * wins whatever its source. An empty or unprintable report changes nothing.
+   *
+   * @returns true when the reported model changed (and `displayModelChanged` was emitted)
+   */
+  noteReportedModel(source: ReportedModelSource, raw: unknown): boolean {
+    const model = sanitizeModelName(raw);
+    if (!model) return false;
+    if (this._reportedModel?.model === model && this._reportedModel.source === source) return false;
+    this._reportedModel = { model, source };
+    // The status does not change with it, so it needs a broadcast (and a persist) of its own.
+    this.emit('displayModelChanged');
+    return true;
+  }
+
+  /**
+   * The model this session runs as far as the server knows, and where that came from:
+   * the custom endpoint's model, else the newest report from the CLI, else the launch
+   * model (src/session-display-model.ts). Undefined when none is known.
+   */
+  get displayModel(): DisplayModel | undefined {
+    return resolveDisplayModel({
+      customModelId: this._customModel?.modelId,
+      reported: this._reportedModel,
+      configModel: this._configModel,
+      launchModel: launchModelFor(this.mode, this._launchOptionBag()),
+    });
+  }
+
+  /**
+   * The same option bag the spawn reads its launch params from: `model` at the top for
+   * claude (the `--model` or app-wide default it was created with; inert for every other
+   * CLI, which is why it is not handed over for them), each other CLI's own
+   * `<Mode>Config`. Where a param lives is registry data (`legacyConfigForMode`).
+   */
+  private _launchOptionBag(): Record<string, unknown> {
+    return {
+      model: cliTakesSessionModel(this.mode) ? this._model : undefined,
+      openCodeConfig: this._openCodeConfig,
+      codexConfig: this._codexConfig,
+      geminiConfig: this._geminiConfig,
+      antigravityConfig: this._antigravityConfig,
+      piConfig: this._piConfig,
+      grokConfig: this._grokConfig,
+      deepSeekConfig: this._deepSeekConfig,
+      ompConfig: this._ompConfig,
+    };
+  }
+
+  /**
+   * Read the model this session's CLI config pins, with the reader its registry entry
+   * names (`capabilities.modelDetect.configResolver`), and announce a change. Async and
+   * bounded (the reader probes before it reads); a read that lands after a newer one,
+   * or after the session stopped, is dropped. A remote or docker session's CLI reads its
+   * config on another machine or in its container, so nothing local is read for it.
+   */
+  private _refreshConfigModel(): void {
+    const name = getCli(this.mode)?.capabilities.modelDetect?.configResolver;
+    if (!name || this._remote || this._docker) return;
+    const gen = ++this._configModelGen;
+    const overrides = this._envOverrides;
+    resolveConfigModel(name, {
+      config: legacyConfigForMode(this.mode, this._launchOptionBag()),
+      // The session's own env first (already clamped for a non-granted owner), then the
+      // server's: what the pane's CLI inherits.
+      env: (key) => overrides?.[key] ?? process.env[key],
+    }).then(
+      (model) => {
+        if (gen !== this._configModelGen || this._isStopped) return;
+        // Sanitized where it is published (resolveDisplayModel), like every source.
+        const next = model || null;
+        if (next === this._configModel) return;
+        this._configModel = next;
+        this.emit('displayModelChanged');
+      },
+      () => {
+        /* A reader answers null on doubt and never throws; a throw changes nothing. */
+      }
+    );
   }
 
   /**
@@ -4357,14 +4558,74 @@ export class Session extends EventEmitter {
     // 1. Claude was working and is now at prompt (normal case)
     // 2. Session just started and is ready (status is 'busy' but _isWorking is false)
     const wasWorking = this._isWorking;
-    const isInitialReady = this._status === 'busy' && !this._isWorking;
-    if (wasWorking || isInitialReady) {
-      this._isWorking = false;
-      this._status = 'idle';
-      this._lastPromptTime = Date.now();
-      if (wasWorking) this._maybeCaptureOmpSessionId();
-      this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
-    }
+    if (wasWorking || this._status === 'busy') this._concludeIdle(wasWorking);
+  }
+
+  /**
+   * The one place a pane is concluded idle: status, working flag and prompt stamp
+   * change together, and the change is ANNOUNCED. The `idle` event is what the web
+   * server turns into `session:idle` plus a state broadcast, so a path that flips
+   * `_status` without it leaves every browser on the `busy` it was last sent. A fresh
+   * codex pane used to stay "working" in the UI for its whole life that way.
+   *
+   * @param turnEnded a real turn just finished (not a pane becoming ready at launch)
+   */
+  private _concludeIdle(turnEnded: boolean): void {
+    this._isWorking = false;
+    this._status = 'idle';
+    this._lastPromptTime = Date.now();
+    // Only a finished turn proves omp has written its session file; a pane that is
+    // merely ready has nothing to resolve yet and could claim a neighbour's file.
+    if (turnEnded) this._maybeCaptureOmpSessionId();
+    this.emit('idle', { reason: turnEnded ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
+  }
+
+  /**
+   * Arm the launch settle (`_settlePaneStartup`) for a pane `startInteractive()` just
+   * started or re-attached, when one applies:
+   * - a NEW pane of an external CLI, whose TUI has no ❯ for the Claude wait to find;
+   * - a RESTORED pane (Codeman restart, auto-reattach, tile Attach) of a CLI that
+   *   declares no `capabilities.workDetect`. It is `busy` from `_resetBuffers()` like a
+   *   new pane, and with no composer glyph to arm `_confirmIdle()` nothing else would
+   *   ever settle it. A restored claude or codex pane is left to its glyph, which
+   *   reads the screen first, so a restart in mid-turn is never called idle.
+   */
+  private _armPaneSettle(isRestored: boolean): void {
+    const applies = isRestored ? !getCli(this.mode)?.capabilities.workDetect : isExternalCliMode(this.mode);
+    if (!applies) return;
+    const armedAt = Date.now();
+    this._promptCheckTimeout = setTimeout(() => this._settlePaneStartup(!isRestored, armedAt), 3000);
+  }
+
+  /**
+   * The launch settle: 3 s after a NEW external-CLI pane spawned, or after ANY pane of a
+   * CLI without work detection was re-attached, its TUI is taken to have rendered. A pane
+   * still in its spawn-time `busy` is concluded idle (announced, see `_concludeIdle`),
+   * then, for a new pane, the browser is told to refetch the rendered screen.
+   *
+   * ⚠️ This used to set `_status = 'idle'` without an event. When the launch paint
+   * never tripped `_markWorking()`, the later `_confirmIdle()` found the status
+   * already idle and emitted nothing, so no browser ever learned the pane was ready.
+   *
+   * A pane is left to `_confirmIdle()` only when its CLI declares
+   * `capabilities.workDetect` (its composer glyph arms that confirmation, which reads
+   * the screen first) AND it is already working, or a prompt was submitted since the
+   * timer was armed: a turn started 2.9 s in is not marked working before the deferred
+   * parsers run, and an idle edge here would end a send-and-wait registered for it.
+   * For every other CLI this timer is the only thing that ever settles a fresh pane,
+   * so it settles it even if a stray spinner glyph in the launch paint latched
+   * `_isWorking`.
+   *
+   * @param refreshScreen emit `needsRefresh` (a new pane; an attach refetches by itself)
+   * @param armedAt when the timer was armed (a submit at or after it means a prompt)
+   */
+  private _settlePaneStartup(refreshScreen: boolean, armedAt: number): void {
+    this._promptCheckTimeout = null;
+    if (this._isStopped) return;
+    const busyWithTurn = this._isWorking || this.lastSubmitAt >= armedAt;
+    const leaveToConfirm = busyWithTurn && !!getCli(this.mode)?.capabilities.workDetect;
+    if (this._status === 'busy' && !leaveToConfirm) this._concludeIdle(false);
+    if (refreshScreen) this.emit('needsRefresh');
   }
 
   /**
@@ -5685,7 +5946,7 @@ export class Session extends EventEmitter {
           : this._mux.capturePaneText?.(this._muxSession.muxName),
       sendEnter: () => (this.assistantInputAllowed() ? this._mux?.sendInput(this.id, '\r') : undefined),
       // ⚠ NO fallback glyph here, unlike the screen-reading probe elsewhere in this file.
-      // Only claude and codex declare a promptGlyph; the other eight modes would fall back
+      // Only claude, codex, pi, opencode, omp and gemini declare a promptGlyph; the other modes would fall back
       // to claude's `❯`, which is ALSO starship's default shell prompt (and pure's, and
       // spaceship's, and p10k lean's). On a shell session the line `❯ npm run build` sits
       // on screen for as long as the command runs, promptStillInComposer() reads that as
@@ -6052,8 +6313,10 @@ export class Session extends EventEmitter {
           console.warn('[Session] Failed to send SIGTERM to PTY process (may already be dead):', err);
         }
 
-        // Give it a moment to terminate gracefully
-        await new Promise((resolve) => setTimeout(resolve, GRACEFUL_SHUTDOWN_DELAY_MS));
+        // Give it a moment to terminate gracefully. For a tmux-backed session this
+        // is the attach client, gone within a few ms of SIGTERM, and this used to be
+        // a fixed 100ms sleep on every close.
+        if (pid) await waitForProcessesExit([pid], { timeoutMs: GRACEFUL_SHUTDOWN_DELAY_MS });
 
         // Force kill with SIGKILL if still alive
         try {
