@@ -410,6 +410,13 @@ try {
       MessageSid: '456',
     },
   };
+  if (process.argv.includes('--multiline')) {
+    event.ctx.BodyForCommands =
+      event.ctx.BodyForCommands.replace(' and inspect', '\r\n\r\nand inspect').replace(
+        ' Reply only',
+        '\n\nReply only'
+      ) + '\n';
+  }
   const context = {
     dispatcher: {
       sendFinalReply: () => {
@@ -442,6 +449,12 @@ try {
   assert.equal(requests[0].binding.conversationId, assistant.binding.conversationId);
   assert.equal(requests[0].result.text.trim(), `${hiddenCode}${pdfCode ? ` ${pdfCode}` : ''} triangle blue`);
   assert.match(requests[0].text, /\.codeman-telegram/);
+  if (process.argv.includes('--multiline')) {
+    const messagePath = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(requests[0].text)[1]);
+    assert.deepEqual(readFileSync(messagePath), Buffer.from(event.ctx.BodyForCommands.replace(/^Brain, /, ''), 'utf8'));
+    assert.doesNotMatch(requests[0].text, /[\r\n]/);
+    checks.push('multiline original message preserves exact UTF-8 bytes and native CLI follows its instructions');
+  }
   checks.push(
     `real ${mode} reads durable text attachment and visually identifies image after temporary sources expire`
   );

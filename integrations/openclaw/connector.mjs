@@ -676,14 +676,16 @@ export class Connector {
         reply: { text: 'Use brain status, brain result, or brain cancel for your latest request.' },
       };
     if (
-      (!text && !media.length) ||
+      (!text.trim() && !media.length) ||
       text.length > 20000 ||
-      /[\x00-\x1f\x7f]/.test(body) ||
+      /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(body) ||
       text.trimStart().startsWith('/')
     )
       return {
         handled: true,
-        reply: { text: 'Tell Brain what you need in one line, for example: brain summarize my notes.' },
+        reply: {
+          text: 'Tell Brain what you need, for example: brain summarize my notes. Avoid terminal controls and CLI slash commands.',
+        },
       };
     const key = hash(
       JSON.stringify([

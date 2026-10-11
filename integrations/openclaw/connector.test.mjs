@@ -179,7 +179,7 @@ test('cross-request result, malformed input, phase 2 absence and unauthorized re
   const c = h.make();
   assert.match((await c.inbound(event, ctx)).reply.text, /paused/);
   assert.equal(c.outbox.records.length, 0);
-  assert.match((await c.inbound({ ...event, content: '/brain hello\nother' }, ctx)).reply.text, /one line/);
+  assert.match((await c.inbound({ ...event, content: '/brain hello\x1bother' }, ctx)).reply.text, /terminal controls/);
   assert.deepEqual(await c.inbound(event, { ...ctx, senderId: '999' }), { handled: true });
   assert.throws(
     () =>
@@ -216,8 +216,8 @@ test('concurrent edited message conflicts without replacing the first persisted 
   assert.equal(c.outbox.records[0].text, 'test');
   assert.match(results[1].reply.text, /conflict/);
   assert.match(
-    (await c.inbound({ ...event, content: '/brain\nother' }, { ...ctx, messageId: '777' })).reply.text,
-    /one line/
+    (await c.inbound({ ...event, content: '/brain hello\x00other' }, { ...ctx, messageId: '777' })).reply.text,
+    /terminal controls/
   );
 });
 test('cross-request API response stops polling before any Telegram delivery', async (t) => {
@@ -1503,4 +1503,66 @@ test('brain result retrieves a late native completion instead of an old review n
   const result = await c.inbound({ ...event, content: 'brain result' }, { ...ctx, messageId: '457' });
   assert.equal(result.reply.text, 'answer'.repeat(1000));
   assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 1);
+});
+
+test('multiline staging preserves exact UTF-8 bytes without wrapping or added breaks', (t) => {
+  const f = mediaFixture(t);
+  for (const text of [
+    'first\n\nsecond\n',
+    '\r\nfirst\r\n\tsecond\r\n',
+    '```sh\ndocker run \\\n  --name test\n```',
+    'a\u2028b\u2029c',
+  ]) {
+    const prompt = stageMedia({ ...f, text, media: [], mediaRoot: undefined });
+    const path = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(prompt)[1]);
+    assert.deepEqual(readFileSync(path), Buffer.from(text, 'utf8'));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.doesNotMatch(prompt, /[\r\n\t\u2028\u2029]/);
+    assert.equal(stageMedia({ ...f, text, media: [], mediaRoot: undefined }), prompt);
+    assert.equal(brainRequestText(`Brain, ${text}`), text);
+  }
+  const prompt = stageMedia({ ...f, text: 'caption\n\nwith blanks' });
+  assert.match(prompt, /Original|original message/);
+  assert.match(prompt, /file and image tools/);
+});
+
+test('multiline ingress survives duplicate delivery and connector restart with unchanged bytes', async (t) => {
+  const f = mediaFixture(t);
+  const h = harness(t, {
+    fetchImpl: async (url, options) => {
+      if (url.endsWith(`/assistants/${config.assistantId}`))
+        return Response.json({
+          success: true,
+          data: {
+            id: config.assistantId,
+            enabled: true,
+            capabilities: { requestExecution: true },
+            binding: { workingDir: f.workingDir },
+          },
+        });
+      assert.doesNotMatch(JSON.parse(options.body).text, /[\r\n]/);
+      return Response.json({
+        success: true,
+        data: {
+          id: randomUUID(),
+          assistantId: config.assistantId,
+          idempotencyKey: JSON.parse(options.body).idempotencyKey,
+          status: 'running',
+        },
+      });
+    },
+  });
+  let c = h.make();
+  const text = '\nfirst\r\n\r\nsecond\tvalue\n';
+  const message = { ...event, content: `brain ${text}` };
+  assert.match((await c.inbound(message, ctx)).reply.text, /On it/);
+  const saved = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(c.outbox.records[0].text)[1]);
+  assert.equal(readFileSync(saved, 'utf8'), text);
+  c = h.make();
+  assert.match((await c.inbound(message, ctx)).reply.text, /already/);
+  assert.equal(c.outbox.records.length, 1);
+  assert.match((await c.inbound({ ...message, content: `brain ${text.replace('\r\n', '\n')}` }, ctx)).reply.text, /conflict/);
+  await c.tick();
+  assert.equal(c.outbox.records[0].status, 'running');
+  assert.equal(readFileSync(saved, 'utf8'), text);
 });

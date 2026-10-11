@@ -436,3 +436,25 @@ checks. Native Codex + browser canary passed table/CSV delivery, input attachmen
 retry without replay, prefix-free replies and desktop/mobile controls. Artifacts:
 `/tmp/cod487-assistant-canary-c4Jdpc/summary.json`. The channel adapter was a test
 adapter; real recipient rendering still requires a new user WhatsApp request.
+
+
+## Multiline messages (COD-508)
+
+Telegram and WhatsApp requests can contain multiple lines, blank lines, tabs, and
+pasted commands. The connector removes only the Brain addressing prefix. It saves
+the remaining message as a private UTF-8 file in the bound local workspace,
+without trimming, wrapping, appending a newline, or changing LF/CRLF line breaks.
+The native assistant reads that file as the user's original message. This also
+works with attachments and all supported local assistant CLIs; the underlying
+HTTP request and terminal submission remain single-line. No media download folder
+is required for text-only messages. Terminal escape/control characters remain
+rejected, and the original 20,000-character input limit still applies.
+
+The message file uses the existing bounded private attachment storage and survives
+connector restarts and duplicate delivery. Original-message hashes still detect
+edited duplicate messages. Files may contain sensitive pasted text: archive them
+with the workspace's other retained assistant attachments. Messages rejected
+before this fix are not automatically replayed; send a new message after updating.
+
+Run `node scripts/smoke-openclaw-assistant.mjs --whatsapp --multiline` for an
+isolated native readback with exact saved-byte assertions and temporary attachments.
