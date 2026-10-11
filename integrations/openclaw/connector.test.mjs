@@ -1456,6 +1456,12 @@ for (const channel of ['telegram', 'whatsapp']) {
     assert.equal(sends.length, 1);
     assert.match(sends[0].text, /Brain has a question/);
     c = make();
+    const statusReply = await c.inbound(
+      { ...inbound, content: 'brain status' },
+      { ...context, messageId: '459', replyToMessageId: '501' }
+    );
+    assert.match(statusReply.reply.text, /working/);
+    assert.equal(answers.length, 0);
     const response = { ...inbound, content: '1' };
     const reply = { ...context, messageId: '457', replyToMessageId: '501' };
     assert.match((await c.inbound(response, reply)).reply.text, /reached Brain/);

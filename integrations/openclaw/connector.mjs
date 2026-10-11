@@ -569,8 +569,15 @@ export class Connector {
       (r) =>
         this.authorizedRecord(r, destination) && r.questions?.some((q) => q.receipts.includes(ctx.replyToMessageId))
     );
-    if (explicitAnswer || quotedQuestion) {
+    const explicitControl =
+      brainRequestText(body) !== undefined && /^(status|result|cancel)(?: +[a-f0-9]{64})?$/i.test(text);
+    if (explicitAnswer || (quotedQuestion && !explicitControl)) {
       try {
+        if (inboundMedia(event.mediaSource ?? event).length)
+          return {
+            handled: true,
+            reply: { text: 'Please answer this question with text. Attachments can be sent with a new Brain request.' },
+          };
         return (
           (await this.answerQuestion(
             destination,
