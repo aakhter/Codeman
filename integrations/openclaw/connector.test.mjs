@@ -21,6 +21,7 @@ import {
   telegramAnswer,
   chunks,
   trustedDestination,
+  deliveryRetryDelay,
   validateConfig,
 } from './connector.mjs';
 import plugin from './index.mjs';
@@ -1470,3 +1471,30 @@ for (const channel of ['telegram', 'whatsapp']) {
     assert.equal(answers.length, 1);
   });
 }
+
+test('provider-proven not-dispatched startup failures retry, permanent rejection and unknown sends do not', () => {
+  const error = Object.assign(new Error('No active WhatsApp Web listener'), {
+    code: 'OPENCLAW_PLATFORM_MESSAGE_NOT_DISPATCHED',
+    retryable: true,
+  });
+  assert.equal(deliveryRetryDelay(error, 1), 5000);
+  assert.equal(deliveryRetryDelay(error, 6), undefined);
+  assert.equal(deliveryRetryDelay({ ...error, retryable: false }, 1), undefined);
+  assert.equal(deliveryRetryDelay(new Error('Unknown recipient-visible outcome'), 1), undefined);
+});
+test('brain result retrieves a late native completion instead of an old review notification', async (t) => {
+  const h = harness(t);
+  const c = h.make();
+  await c.inbound(event, ctx);
+  await c.tick();
+  const record = c.outbox.records[0];
+  record.status = 'outcome_unknown';
+  record.delivery = 'delivered';
+  record.parts = ['Your latest request needs attention'];
+  record.receipts = ['1'];
+  c.outbox.put(record);
+  h.finish();
+  const result = await c.inbound({ ...event, content: 'brain result' }, { ...ctx, messageId: '457' });
+  assert.equal(result.reply.text, 'answer'.repeat(1000));
+  assert.equal(h.calls.filter((v) => v.options.method === 'POST').length, 1);
+});

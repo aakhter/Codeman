@@ -134,7 +134,9 @@ relay is not implemented here.
 
 Question receipts are saved separately from final results, with the same
 channel/account/private-chat/sender checks and delivery retry policy. Gateway
-restarts preserve reply ownership. Duplicate confirmed answers are acknowledged
+restarts preserve reply ownership. Provider-confirmed failures before dispatch
+(including an unavailable WhatsApp listener during startup) use bounded retries;
+unknown sends still require review. Duplicate confirmed answers are acknowledged
 without another native write; stale questions and uncertain answer writes ask
 for review in Codeman. Secret-marked native questions and permission approvals
 stay in Codeman. Pending questions pause the normal observation deadline;

@@ -31,6 +31,8 @@ const states = new Set([
 const DELIVERY_RETRY_DELAYS = [5000, 15000, 30000, 60000, 120000];
 export function deliveryRetryDelay(error, failures) {
   if (!Number.isInteger(failures) || failures < 1 || failures > DELIVERY_RETRY_DELAYS.length) return undefined;
+  const notDispatched = error?.code === 'OPENCLAW_PLATFORM_MESSAGE_NOT_DISPATCHED';
+  if (notDispatched && error.retryable === false) return undefined;
   const code = Number(
     error?.error_code ??
       error?.response?.error_code ??
@@ -44,7 +46,7 @@ export function deliveryRetryDelay(error, failures) {
       String(error?.message ?? '')
     );
   if (code >= 400 && code < 500 && code !== 429) return undefined;
-  if (code !== 429 && !(code >= 500 && code <= 599) && !network) return undefined;
+  if (code !== 429 && !(code >= 500 && code <= 599) && !network && !notDispatched) return undefined;
   const retryAfter = Number(error?.parameters?.retry_after ?? error?.response?.parameters?.retry_after);
   return Math.max(
     DELIVERY_RETRY_DELAYS[failures - 1],
@@ -627,8 +629,13 @@ export class Connector {
       if (record.requestId && control[1] !== 'cancel') {
         try {
           const latest = this.request(await this.api(`/assistant-requests/${record.requestId}`), record);
+          const previousStatus = record.status;
           record.status = latest.status;
-          if (latest.status === 'completed' && typeof latest.result?.text === 'string' && !record.parts.length)
+          if (
+            latest.status === 'completed' &&
+            typeof latest.result?.text === 'string' &&
+            (!record.parts.length || previousStatus !== 'completed')
+          )
             record.parts = answerParts(latest.result.text, record.destination);
           this.outbox.put(record);
         } catch {
