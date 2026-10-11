@@ -373,3 +373,38 @@ result delivery retry, receipt-backed replies after service restart, and desktop
 and mobile checks. Artifacts: `/tmp/cod487-assistant-canary-d4J86l/summary.json`.
 This proves the connector against an isolated native session and a test adapter;
 production WhatsApp receipt acceptance requires a new user message.
+
+### WhatsApp table presentation (COD-506)
+
+New WhatsApp results render ordinary Markdown tables and self-contained tables
+inside plain/text/Markdown code fences as labelled row blocks. Strict bordered
+ASCII tables inside those fences are supported too. Ordinary code and ambiguous
+or malformed tables remain unchanged. All columns are labelled and retained;
+blank cells appear as an em dash. The native answer in Codeman is never rewritten.
+
+Tables exceeding eight rows or 3500 rendered characters use a two-row preview
+and a CSV document with all columns and rows. Spreadsheet formula-like cells are
+prefixed with an apostrophe; CSV quotes and embedded quotes are escaped. Normal
+text is chunked at 3500 UTF-16 units; table rows stay together. Oversized rows go
+to CSV rather than being truncated.
+
+Export data is persisted in the private outbox, so a retry or gateway restart
+uses the exact saved parts and receipts, without rerunning Brain or resending
+acknowledged parts. Existing deliveries keep their saved presentation, including
+partially delivered answers from earlier releases. Export files use private
+per-send directories and are deleted after the awaited adapter send, including
+failed sends. `brain result` can retrieve an answer and its CSV; replies to CSV
+receipts are owned by Brain in the same private chat. No production answer is
+automatically resent when this formatting change is enabled.
+
+Run the native end-to-end canary with
+`node scripts/smoke-openclaw-assistant.mjs --whatsapp --delivery-retry --reply --tables`.
+It verifies the unchanged native table, formatted preview and full CSV using a
+test document adapter without sending a real WhatsApp message.
+
+COD-506 evidence (2026-10-11): 44 formatter/connector regressions and the root
+wrapper passed, along with typecheck, lint (existing warning), format and lockfile
+checks. Native Codex + browser canary passed table/CSV delivery, input attachments,
+retry without replay, prefix-free replies and desktop/mobile controls. Artifacts:
+`/tmp/cod487-assistant-canary-c4Jdpc/summary.json`. The channel adapter was a test
+adapter; real recipient rendering still requires a new user WhatsApp request.

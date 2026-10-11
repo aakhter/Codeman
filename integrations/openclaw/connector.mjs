@@ -12,6 +12,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
+import { whatsappParts, validAnswerPart } from './whatsapp-format.mjs';
 import { inboundMedia, mediaIdentity, stageMedia, MediaError } from './media.mjs';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -124,6 +125,10 @@ export function telegramAnswer(text) {
   const answer = banner ? text.slice(banner[0].length) : text;
   return answer.trim() ? answer : text;
 }
+function answerParts(text, destination) {
+  const answer = telegramAnswer(text);
+  return channelOf(destination) === 'whatsapp' ? whatsappParts(answer) : chunks(answer);
+}
 function requestStatus(record) {
   const statuses = {
     queued: 'Your latest request is queued.',
@@ -220,7 +225,9 @@ export class Outbox {
             !validDestination(r.destination, true) ||
             !Array.isArray(r.parts) ||
             !Array.isArray(r.receipts) ||
-            r.parts.some((part) => typeof part !== 'string' || part.length > 3500) ||
+            r.parts.some(
+              (part) => !validAnswerPart(part) || (typeof part !== 'string' && channelOf(r.destination) !== 'whatsapp')
+            ) ||
             r.receipts.some((receipt) => typeof receipt !== 'string' || !receipt) ||
             r.receipts.length > r.parts.length ||
             (r.requestId !== undefined && !uuid.test(r.requestId)) ||
@@ -424,8 +431,8 @@ export class Connector {
         try {
           const latest = this.request(await this.api(`/assistant-requests/${record.requestId}`), record);
           record.status = latest.status;
-          if (latest.status === 'completed' && typeof latest.result?.text === 'string')
-            record.parts = chunks(telegramAnswer(latest.result.text));
+          if (latest.status === 'completed' && typeof latest.result?.text === 'string' && !record.parts.length)
+            record.parts = answerParts(latest.result.text, record.destination);
           this.outbox.put(record);
         } catch {
           return {
@@ -435,7 +442,16 @@ export class Connector {
         }
       }
       if (control[1] === 'result')
-        return { handled: true, reply: { text: record.parts.join('') || 'No completed result is available.' } };
+        return {
+          handled: true,
+          reply: {
+            text:
+              record.parts
+                .filter((p) => typeof p === 'string')
+                .join(channelOf(destination) === 'whatsapp' ? '\n\n' : '') || 'No completed result is available.',
+            ...(channelOf(destination) === 'whatsapp' && record.parts.length ? { parts: record.parts } : {}),
+          },
+        };
       return {
         handled: true,
         reply: {
@@ -572,7 +588,7 @@ export class Connector {
         if (result.status === 'completed') {
           if (typeof result.result?.text !== 'string' || !result.result.text || result.result.text.length > 1000000)
             throw new ContractViolation('Unsupported completed result');
-          r.parts = chunks(telegramAnswer(result.result.text));
+          if (!r.parts.length) r.parts = answerParts(result.result.text, r.destination);
         } else if (['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(result.status)) {
           r.parts = [requestStatus({ ...r, delivery: 'polling' })];
         }

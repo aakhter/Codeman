@@ -1228,3 +1228,151 @@ test('ordinary WhatsApp reply_dispatch routes trusted metadata and short-circuit
     false
   );
 });
+
+test('formatted CSV answer parts remain frozen across retry/restart and legacy partial deliveries stay intact', async (t) => {
+  let clock = 10000,
+    attempts = 0;
+  const h = harness(t, {
+    config: waConfig,
+    now: () => clock,
+    deliver: async (_, part) => {
+      if (typeof part !== 'string' && ++attempts === 1) throw new Error('Connection Closed');
+      return { messageId: typeof part === 'string' ? 'TEXT01' : 'CSV01' };
+    },
+  });
+  let c = h.make();
+  await c.inbound(waEvent, waCtx);
+  const requestId = randomUUID();
+  const text =
+    '| Name | Status |\n| --- | --- |\n' + Array.from({ length: 9 }, (_, i) => `| Row ${i} | Ready |`).join('\n');
+  c.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: requestId,
+        assistantId: config.assistantId,
+        idempotencyKey: c.outbox.records[0].key,
+        status: 'completed',
+        result: { text },
+      },
+    });
+  await c.tick();
+  const saved = new Outbox(h.path).records[0];
+  assert.equal(saved.delivery, 'retrying');
+  assert.equal(saved.receipts.length, 1);
+  assert.equal(saved.parts[1].kind, 'csv');
+  c = h.make();
+  c.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: requestId,
+        assistantId: config.assistantId,
+        idempotencyKey: saved.key,
+        status: 'completed',
+        result: { text: 'Changed output must not replace persisted chunks' },
+      },
+    });
+  clock = saved.retryAt;
+  await c.tick();
+  assert.deepEqual(c.outbox.records[0].parts, saved.parts);
+  assert.equal(c.outbox.records[0].delivery, 'delivered');
+  assert.equal(attempts, 2);
+  assert.equal(
+    c.addressedText({ ...waEvent, content: 'follow up' }, { ...waCtx, replyToMessageId: 'CSV01' }),
+    'follow up'
+  );
+  const result = await c.inbound({ ...waEvent, content: 'brain result' }, { ...waCtx, messageId: 'RESULT01' });
+  assert.equal(result.reply.parts[1].kind, 'csv');
+});
+
+test('WhatsApp result exports use private temporary files, document receipts and cleanup', async (t) => {
+  const h = harness(t, { config: waConfig });
+  const c = h.make();
+  await c.inbound(waEvent, waCtx);
+  const record = c.outbox.records[0];
+  record.requestId = randomUUID();
+  record.status = 'completed';
+  record.delivery = 'delivered';
+  record.parts = ['Preview', { kind: 'csv', name: 'brain-table-1.csv', data: '"Name","Value"\r\n"Brain","Ready"\r\n' }];
+  record.receipts = ['PREVIEW01', 'CSV01'];
+  delete record.text;
+  c.outbox.put(record);
+  const stateDir = h.path.slice(0, h.path.lastIndexOf('/'));
+  writeFileSync(join(stateDir, 'codeman-assistant-outbox.json'), readFileSync(h.path), { mode: 0o600 });
+  const originalFetch = globalThis.fetch,
+    originalToken = process.env[config.tokenEnv];
+  globalThis.fetch = async () =>
+    Response.json({
+      success: true,
+      data: {
+        id: record.requestId,
+        assistantId: config.assistantId,
+        idempotencyKey: record.key,
+        status: 'completed',
+        result: { text: 'native result preserved' },
+      },
+    });
+  process.env[config.tokenEnv] = `cma_${'a'.repeat(43)}`;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env[config.tokenEnv];
+    else process.env[config.tokenEnv] = originalToken;
+  });
+  const hooks = new Map();
+  let service, path;
+  const sends = [];
+  plugin.register({
+    pluginConfig: waConfig,
+    on: (name, hook) => hooks.set(name, hook),
+    registerService: (s) => (service = s),
+    logger: { error: () => {} },
+    runtime: {
+      channel: {
+        outbound: {
+          loadAdapter: async (channel) => {
+            assert.equal(channel, 'whatsapp');
+            return {
+              sendText: async (payload) => {
+                sends.push(payload.text);
+                return { messageId: 'TEXT02' };
+              },
+              sendMedia: async (payload) => {
+                path = payload.mediaUrl;
+                assert.equal(statSync(path).mode & 0o777, 0o600);
+                assert.equal(payload.forceDocument, true);
+                assert.equal(payload.to, waCtx.senderId);
+                assert.ok(path.startsWith(join(stateDir, 'codeman-assistant-exports')));
+                assert.equal(readFileSync(path, 'utf8'), record.parts[1].data);
+                return { messageId: 'CSV02' };
+              },
+            };
+          },
+        },
+      },
+    },
+  });
+  await service.start({ stateDir, config: {} });
+  t.after(() => service.stop());
+  const reply = await hooks.get('reply_dispatch')(
+    {
+      sendPolicy: 'allow',
+      ctx: {
+        BodyForCommands: 'brain result',
+        OriginatingChannel: 'whatsapp',
+        ChatType: 'direct',
+        CommandAuthorized: false,
+        AccountId: waCtx.accountId,
+        OriginatingTo: waCtx.conversationId,
+        SenderId: waCtx.senderId,
+        MessageSid: 'RESULT02',
+      },
+    },
+    { recordProcessed: () => {}, markIdle: () => {} }
+  );
+  assert.equal(reply.queuedFinal, true);
+  assert.deepEqual(sends, ['Preview']);
+  assert.throws(() => statSync(path), /ENOENT/);
+  const stored = new Outbox(join(stateDir, 'codeman-assistant-outbox.json'));
+  assert.ok(stored.replyTargets.some((r) => r.messageId === 'CSV02'));
+});

@@ -138,6 +138,7 @@ let browser;
 let service;
 let assistant;
 const receipts = [];
+const documents = [];
 let resultDeliveryAttempts = 0;
 const errors = [];
 const checks = [];
@@ -362,6 +363,15 @@ try {
           loadAdapter: async (adapterChannel) => {
             assert.equal(adapterChannel, channel);
             return {
+              sendMedia: async (context) => {
+                documents.push({
+                  path: context.mediaUrl,
+                  data: readFileSync(context.mediaUrl, 'utf8'),
+                  to: context.to,
+                });
+                assert.equal(context.forceDocument, true);
+                return { messageId: `CSV${documents.length}` };
+              },
               sendText: async (context) => {
                 if (/^(On it|I already have)/.test(context.text)) {
                   acknowledgements.push({ text: context.text, accountId: context.accountId, to: context.to });
@@ -490,6 +500,36 @@ try {
     );
     checks.push(
       'prefix-free replies to persisted result and acknowledgement route to same native conversation; duplicate accepted once; unknown replies fall through'
+    );
+  }
+
+  if (process.argv.includes('--tables')) {
+    assert.equal(whatsapp, true);
+    const before = receipts.length;
+    const tableEvent = {
+      ...event,
+      ctx: {
+        ...event.ctx,
+        media: [],
+        MessageSid: 'TABLE01',
+        BodyForCommands:
+          'Brain, Return only a Markdown table with columns Item and State and exactly nine data rows Item1 through Item9, each with State Ready. No prose or code fence.',
+      },
+    };
+    assert.equal((await ingress(tableEvent, context)).handled, true);
+    await until(() => documents.length === 1 && receipts.length === before + 1, 120000);
+    assert.match(receipts.at(-1).text, /9 rows/);
+    assert.match(receipts.at(-1).text, /\*\*Item: Item1\*\*/);
+    assert.equal(documents[0].to, sender);
+    assert.equal(documents[0].data.split('\r\n').filter(Boolean).length, 10);
+    assert.ok(!existsSync(documents[0].path));
+    const completed = (await api(`/assistants/${assistant.id}/requests`)).requests.find(
+      (r) => r.text === tableEvent.ctx.BodyForCommands.replace(/^Brain, /, '')
+    );
+    assert.equal(completed.status, 'completed');
+    assert.match(completed.result.text, /\|.*Item.*\|.*State.*\|/);
+    checks.push(
+      'native table preserved in Codeman; WhatsApp receives readable row preview and full CSV through document adapter with private-file cleanup'
     );
   }
 
