@@ -59,7 +59,7 @@ export const telegramDeliveryRetryDelay = deliveryRetryDelay; // Preserve existi
 const channelOf = (destination) => destination?.channel ?? 'telegram';
 const phone = /^\+[1-9][0-9]{6,14}$/;
 const account = /^[A-Za-z0-9_-]{1,100}$/;
-function validMessageId(channel, id) {
+export function validMessageId(channel, id) {
   return (
     typeof id === 'string' &&
     (channel === 'telegram' ? /^[1-9][0-9]*$/.test(id) : channel === 'whatsapp' && /^[A-Za-z0-9_-]{1,128}$/.test(id))

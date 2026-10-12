@@ -263,3 +263,20 @@ test('an undelivered clarification never turns a bare Brain ping into execution 
   assert.equal(ping.route, 'brain');
   assert.equal(ping.original, undefined);
 });
+
+test('missing platform receipts never mark an acknowledgement or clarification as visible', async (t) => {
+  const f = fixture(t),
+    r = f.make(),
+    start = { ...d, messageId: 'START' };
+  await r.decide(event('Brain, find a meeting'), start, { explicit: true });
+  r.accepted(start, 'Find a meeting', meeting);
+  r.acknowledged(start, undefined);
+  assert.equal(r.chat(d).exchanges[0].visibleAt, undefined);
+  r.acknowledged(start, 'ACK1');
+  f.set({ route: 'clarify', parentId: null, answerQuestion: false });
+  const ambiguous = { ...d, messageId: 'AMBIG' };
+  await r.decide(event('move it'), ambiguous);
+  r.clarified(ambiguous, '');
+  const ping = await r.decide(event('Brain'), { ...d, messageId: 'PING' }, { explicit: true });
+  assert.equal(ping.original, undefined);
+});

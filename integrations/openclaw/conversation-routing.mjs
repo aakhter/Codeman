@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { inboundMedia } from './media.mjs';
+import { validMessageId } from './connector.mjs';
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const DAY = 86400000;
 const routes = new Set(['brain', 'openclaw', 'clarify']);
@@ -159,6 +160,7 @@ export class ConversationRouter {
     this.persist();
   }
   acknowledged(destination, receipt) {
+    if (!validMessageId(destination.channel ?? 'telegram', receipt)) return;
     const c = this.state.chats.find((c) => c.scope === routingScope(destination));
     const decision = this.state.decisions.find((d) => d.key === keyOf(destination));
     const originId = decision?.original?.destination.messageId ?? destination.messageId;
@@ -170,6 +172,7 @@ export class ConversationRouter {
     this.persist();
   }
   clarified(destination, receipt) {
+    if (!validMessageId(destination.channel ?? 'telegram', receipt)) return;
     const decision = this.state.decisions.find((d) => d.key === keyOf(destination) && d.route === 'clarify');
     if (!decision) return;
     decision.clarificationReceipts = [...new Set([...(decision.clarificationReceipts ?? []), receipt])].slice(-5);
