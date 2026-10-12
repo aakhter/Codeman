@@ -127,6 +127,7 @@ test('clarification selection preserves original multiline text, scope and origi
   const original = 'move it\r\n\r\nto Tuesday\n';
   const originalD = { ...d, messageId: 'AMBIG' };
   assert.equal((await r.decide(event(original), originalD)).route, 'clarify');
+  r.clarified(originalD, 'ASK1');
   r = f.make();
   const selected = await r.decide(event('Brain'), { ...d, messageId: 'SELECT' }, { explicit: true });
   assert.equal(selected.route, 'brain');
@@ -142,6 +143,7 @@ test('OpenClaw selection resolves original message and old history expires witho
   await offer(r);
   f.set({ route: 'clarify', parentId: null, answerQuestion: false });
   await r.decide(event('do that'), { ...d, messageId: 'AMBIG' });
+  r.clarified({ ...d, messageId: 'AMBIG' }, 'ASK2');
   const x = await r.decide(event('OpenClaw'), { ...d, messageId: 'CHOICE' });
   assert.equal(x.route, 'openclaw');
   assert.equal(x.original.event.content, 'do that');
@@ -202,6 +204,7 @@ test('a later topic cancels an old clarification and late Brain acceptance canno
   await offer(r);
   f.set({ route: 'clarify', parentId: null, answerQuestion: false });
   await r.decide(event('do that'), { ...d, messageId: 'AMBIG' });
+  r.clarified({ ...d, messageId: 'AMBIG' }, 'ASK2');
   await r.decide(event('new topic: server health'), { ...d, messageId: 'TOPIC' });
   const x = await r.decide(event('Brain'), { ...d, messageId: 'BARE' }, { explicit: true });
   assert.equal(x.route, 'brain');
@@ -233,4 +236,30 @@ test('yes to a routing clarification is not a new Brain task; quoted selections 
   assert.equal(choice.route, 'brain');
   assert.equal(choice.original.destination.messageId, 'AMBIG');
   assert.equal(choice.original.event.content, 'move it to Tuesday');
+});
+
+test('visible acknowledgements allow follow-ups while a task is running, without overwriting results', async (t) => {
+  const f = fixture(t),
+    r = f.make();
+  const dest = { ...d, messageId: 'START' };
+  await r.decide(event('Brain, find a meeting'), dest, { explicit: true });
+  r.accepted(dest, 'Find a meeting with Craig', meeting);
+  r.acknowledged(dest, 'ACK1');
+  assert.equal(r.chat(d).exchanges[0].visibleAt > 0, true);
+  const x = await r.decide(event('also check Tuesday'), { ...d, messageId: 'FOLLOWUP' });
+  assert.equal(x.route, 'brain');
+  assert.match(x.context.answer, /working on it/);
+  r.delivered(dest, meeting, 'Tuesday is free', 'RESULT1');
+  r.acknowledged(dest, 'ACK_DUPLICATE');
+  assert.equal(r.chat(d).exchanges[0].answer, 'Tuesday is free');
+});
+test('an undelivered clarification never turns a bare Brain ping into execution of an old task', async (t) => {
+  const f = fixture(t),
+    r = f.make();
+  await offer(r);
+  f.set({ route: 'clarify', parentId: null, answerQuestion: false });
+  await r.decide(event('move it'), { ...d, messageId: 'FAILED_ASK' });
+  const ping = await r.decide(event('Brain'), { ...d, messageId: 'PING' }, { explicit: true });
+  assert.equal(ping.route, 'brain');
+  assert.equal(ping.original, undefined);
 });

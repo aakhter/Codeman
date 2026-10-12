@@ -610,7 +610,8 @@ export class Connector {
     }
     const originalText = text;
     const inputHash = mediaIdentity(text, media);
-    const control = !media.length && /^(status|result|cancel)(?: +([a-f0-9]{64}))?$/i.exec(text);
+    const control =
+      !ctx.semanticContinuation && !media.length && /^(status|result|cancel)(?: +([a-f0-9]{64}))?$/i.exec(text);
     if (control) {
       control[1] = control[1].toLowerCase();
       control[2] ??= [...this.outbox.records].reverse().find((r) => this.authorizedRecord(r, destination))?.key;
@@ -675,7 +676,7 @@ export class Connector {
         },
       };
     }
-    if (!media.length && /^(status|result|cancel)(?:\s|$)/.test(text))
+    if (!ctx.semanticContinuation && !media.length && /^(status|result|cancel)(?:\s|$)/.test(text))
       return {
         handled: true,
         reply: { text: 'Use brain status, brain result, or brain cancel for your latest request.' },

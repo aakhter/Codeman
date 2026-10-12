@@ -160,6 +160,7 @@ export default {
             contextRouted: brainRequestText(routedMessage.content) === undefined,
             ...(decision.questionReceipt ? { replyToMessageId: decision.questionReceipt } : {}),
             routingContext: decision.context,
+            semanticContinuation: decision.semantic === true,
           };
         } catch {
           decision = { route: 'clarify', unavailable: true };
@@ -187,6 +188,7 @@ export default {
           for (const part of result.reply.parts ?? [result.reply.text]) {
             const receipt = await deliver(destination, part);
             if (decision?.route === 'clarify') router?.clarified(destination, String(receipt?.messageId));
+            else if (decision?.route === 'brain') router?.acknowledged(destination, String(receipt?.messageId));
           }
           queuedFinal = true;
         } catch {

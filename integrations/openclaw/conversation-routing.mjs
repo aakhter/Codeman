@@ -158,6 +158,17 @@ export class ConversationRouter {
     e.visibleAt = this.now();
     this.persist();
   }
+  acknowledged(destination, receipt) {
+    const c = this.state.chats.find((c) => c.scope === routingScope(destination));
+    const decision = this.state.decisions.find((d) => d.key === keyOf(destination));
+    const originId = decision?.original?.destination.messageId ?? destination.messageId;
+    const e = c?.exchanges.find((e) => e.owner === 'brain' && e.messageId === originId);
+    if (!e || e.visibleAt) return;
+    e.answer = 'Brain accepted this request and is working on it.';
+    e.visibleAt = this.now();
+    e.receipt = receipt;
+    this.persist();
+  }
   clarified(destination, receipt) {
     const decision = this.state.decisions.find((d) => d.key === keyOf(destination) && d.route === 'clarify');
     if (!decision) return;
@@ -223,7 +234,11 @@ export class ConversationRouter {
     );
     const pending =
       quotedClarification ??
-      (latest?.route === 'clarify' && latest.original && !latest.resolved && latest.at >= this.now() - DAY
+      (latest?.route === 'clarify' &&
+      latest.original &&
+      !latest.resolved &&
+      latest.clarificationReceipts?.length &&
+      latest.at >= this.now() - DAY
         ? latest
         : undefined);
     const choice = (event.content ?? '').trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '');
@@ -278,6 +293,7 @@ export class ConversationRouter {
           else {
             decision.route = result.route;
             decision.parentId = result.route === 'brain' ? result.parentId : null;
+            decision.semantic = result.route === 'brain';
           }
           if (decision.route === 'brain') {
             const questions = pendingQuestions.filter((q) => q.parentId === decision.parentId);

@@ -513,5 +513,5 @@ Verification:
 - `node --test integrations/openclaw/connector.test.mjs integrations/openclaw/conversation-routing.test.mjs`
 - `node scripts/smoke-openclaw-assistant.mjs --whatsapp --context-routing` tests the
   real native assistant with an isolated SDK adapter and deterministic classifier.
-- `openclaw gateway call codeman-assistant.routingCheck --json` tests the installed model's routing decisions
+- `openclaw gateway call codeman-assistant.routingCheck --json --timeout 45000` tests the installed model's routing decisions
   using harmless meeting/server-health fixtures; it sends no messages or tasks.

@@ -1596,3 +1596,32 @@ test('selected conversation context stays separate from exact original message b
   assert.doesNotMatch(prompt, /[\r\n]/);
   assert.equal(stageMedia({ ...f, text, media: [], conversationContext: context }), prompt);
 });
+
+test('semantic cancellation follow-up stays user text instead of becoming an outbox cancel command', async (t) => {
+  const f = mediaFixture(t);
+  const h = harness(t, {
+    fetchImpl: async () =>
+      Response.json({
+        success: true,
+        data: {
+          id: config.assistantId,
+          enabled: true,
+          capabilities: { requestExecution: true },
+          binding: { workingDir: f.workingDir },
+        },
+      }),
+  });
+  const c = h.make();
+  const result = await c.inbound(
+    { ...event, content: 'cancel that meeting' },
+    {
+      ...ctx,
+      contextRouted: true,
+      semanticContinuation: true,
+      routingContext: { exchangeId: 'a'.repeat(64), user: 'Find a meeting', answer: 'Tuesday is free' },
+    }
+  );
+  assert.match(result.reply.text, /On it/);
+  const original = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(c.outbox.records[0].text)[1]);
+  assert.equal(readFileSync(original, 'utf8'), 'cancel that meeting');
+});
