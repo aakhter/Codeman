@@ -596,6 +596,9 @@ describe('file-preview overlay spreadsheet wiring', () => {
       CodemanBase: { base: '', url: (p: string) => p },
       fetch: fetchMock,
       setTimeout,
+      // Downstream file preview polls an open file for changes (panels-ui.js).
+      setInterval: () => 0,
+      clearInterval: () => {},
       clearTimeout,
       confirm: () => true,
       document,
@@ -625,7 +628,8 @@ describe('file-preview overlay spreadsheet wiring', () => {
     expect(open).toHaveBeenCalledWith(
       expect.objectContaining({ container: body, url: '/api/sessions/s1/file-raw?path=book.xlsx', size: 8192 })
     );
-    expect(document.getElementById('filePreviewFooter')?.textContent).toContain('xlsx');
+    // Downstream labels the footer "Spreadsheet" (upstream shows the extension).
+    expect(document.getElementById('filePreviewFooter')?.textContent).toContain('Spreadsheet');
 
     app.closeFilePreview();
     expect(handles[0].dispose).toHaveBeenCalledTimes(1);
@@ -648,9 +652,15 @@ describe('file-preview overlay spreadsheet wiring', () => {
   });
 
   it('renders a registered xlsx attachment from its by-id raw route', async () => {
-    const { app, open, fetchMock } = loadOverlay({});
+    // Downstream renders from the attachment's metadata (its own preview path), so
+    // the mock answers like the attachment route does for an xlsx.
+    const { app, open } = loadOverlay({
+      type: 'spreadsheet',
+      size: 1,
+      extension: 'xlsx',
+      url: '/api/sessions/s1/attachments/att-1/raw',
+    });
     await app.openFilePreview('book.xlsx', 's1', 'att-1');
-    expect(fetchMock).not.toHaveBeenCalled();
     expect(open).toHaveBeenCalledWith(expect.objectContaining({ url: '/api/sessions/s1/attachments/att-1/raw' }));
   });
 

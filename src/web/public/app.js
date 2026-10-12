@@ -5747,8 +5747,15 @@ class CodemanApp {
   _onWsReady(sessionId, options = {}) {
     const list = this._pendingDeliveries.get(sessionId);
     if (!list || list.length === 0) return;
+    // A second terminal's own socket (split pane, tile) replays its queue as soon as
+    // it opens: every input frame activates that viewer server-side on arrival, so
+    // the primary pane's activation handshake does not apply to it.
+    const extraSocketReady =
+      this._wsSessionId !== sessionId && this._extraInputSockets?.get(sessionId)?.ws?.readyState === WebSocket.OPEN;
     const activationReady =
-      options.activationReady === true || this._prepareFreshSocketInputReplay(sessionId, this._ws);
+      options.activationReady === true ||
+      extraSocketReady ||
+      this._prepareFreshSocketInputReplay(sessionId, this._ws);
     if (!activationReady) return;
     if (list) for (const r of list) r.sentAt = 0; // fresh socket ⇒ re-send all
     this._drainSession(sessionId);

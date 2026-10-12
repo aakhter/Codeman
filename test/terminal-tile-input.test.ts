@@ -217,7 +217,9 @@ describe('TerminalTile input through the exactly-once queue', () => {
     ]);
   });
 
-  it('keeps queuing after the socket closes (HTTP fallback), instead of dropping keystrokes', async () => {
+  it('keeps queuing after the socket closes, instead of dropping keystrokes (no HTTP drain)', async () => {
+    // Downstream: no HTTP fallback (viewer ownership); the keystroke stays durable
+    // and goes out over the tile's socket once it reopens.
     const app = makeApp();
     const { ws, term } = await connectTile(app);
     ws.open();
@@ -232,8 +234,9 @@ describe('TerminalTile input through the exactly-once queue', () => {
     term.type('z');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(posts.map((p) => [p.input, p.seq])).toEqual([['z', 1]]);
+    expect(posts).toEqual([]);
     expect(ws.inputFrames()).toEqual([]);
+    expect(app._pendingDeliveries.size).toBeGreaterThan(0);
   });
 });
 

@@ -477,36 +477,17 @@ describe('home screens: one order, one numbering', () => {
   });
 
   it('Alt+digit resolves through the live-session projection in app.js', () => {
-    // Static guard for the handler half of the invariant above: the digit branch
-    // must never index sessionOrder directly, because a delete that raced the
-    // order sync leaves a dead id in it and every key to its right then names
-    // the wrong tab. It resolves through the tab-layout projection instead —
-    // which is BUILT from live sessions and open web tabs (COD-306), so the
-    // filtering is structural rather than a filter() at the call site, and the
-    // web-tab continuation past the last session comes along with it.
+    // Static guard for the handler half of the invariant above: the digit
+    // branch must filter sessionOrder against live sessions before indexing,
+    // for sessions AND for the web-tab continuation.
     const appJs = readFileSync(resolve(PUBLIC, 'app.js'), 'utf8');
     const start = appJs.indexOf('^Digit([1-9])$');
     expect(start).toBeGreaterThan(-1);
     const branch = appJs.slice(start, start + 1200);
-    expect(branch).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
+    expect(branch).toContain('this.sessionOrder.filter((id) => this.sessions.has(id))');
+    expect(branch).toContain('idx < live.length');
+    expect(branch).toContain('idx - live.length');
     expect(branch).not.toContain('this.sessionOrder[idx]');
-
-    const activate = appJs.slice(appJs.indexOf('_activateVisibleTabNumber(number) {'));
-    // The refs argument was extracted into _tabAltRefs() (which prefers an explicit
-    // altRefs ordering and falls back to visibleRefs). Still the same projection, one
-    // hop further out — assert the hop rather than the old inlined expression, and pin
-    // that the accessor really is projection-derived so this cannot drift into a
-    // non-projection source (COD-385).
-    expect(activate.slice(0, 400)).toContain('refAtAltNumber(this._tabAltRefs(projection), number)');
-    const altRefs = appJs.slice(appJs.indexOf('_tabAltRefs(projection) {'));
-    expect(altRefs.slice(0, 200)).toContain('projection?.altRefs');
-    expect(altRefs.slice(0, 200)).toContain('projection?.visibleRefs');
-    // Both tab kinds are reachable by number, not just sessions.
-    expect(activate.slice(0, 400)).toMatch(/kind === 'session'[\s\S]{0,200}kind === 'webview'/);
-
-    const project = appJs.slice(appJs.indexOf('_projectTabLayout() {'));
-    expect(project.slice(0, 600)).toContain('liveSessionIds: [...this.sessions.keys()]');
-    expect(project.slice(0, 600)).toContain('.filter((id) => this.webviews?.has(id))');
   });
 });
 

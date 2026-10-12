@@ -127,7 +127,9 @@ describe('a registered second socket joins the exactly-once queue', () => {
     expect(primaryFrames.map((f) => f.d)).toEqual(['a']);
   });
 
-  it('ignores a registered socket that is not OPEN (falls back to POST)', async () => {
+  it('ignores a registered socket that is not OPEN and keeps the input queued (no HTTP drain)', async () => {
+    // Downstream: browser input never bypasses viewer ownership through the HTTP
+    // API, so with no OPEN socket the record stays durable until one reopens.
     const app = makeApp();
     const posts: Array<{ input: string; seq: number }> = [];
     global.fetch = vi.fn(async (_url, init) => {
@@ -142,7 +144,10 @@ describe('a registered second socket joins the exactly-once queue', () => {
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(posts.map((p) => [p.input, p.seq])).toEqual([['z', 1]]);
+    expect(posts).toEqual([]);
+    expect(app._pendingDeliveries.get('other')?.map((r: { data: string; seq: number }) => [r.data, r.seq])).toEqual([
+      ['z', 1],
+    ]);
   });
 
   it('routes ephemeral input over the registered socket too', () => {
