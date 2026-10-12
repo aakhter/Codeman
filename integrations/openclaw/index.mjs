@@ -184,7 +184,10 @@ export default {
         // Use the receipt-bearing trusted adapter for every connector reply,
         // including acknowledgements/status. Reply ownership survives restart.
         try {
-          for (const part of result.reply.parts ?? [result.reply.text]) await deliver(destination, part);
+          for (const part of result.reply.parts ?? [result.reply.text]) {
+            const receipt = await deliver(destination, part);
+            if (decision?.route === 'clarify') router?.clarified(destination, String(receipt?.messageId));
+          }
           queuedFinal = true;
         } catch {
           // The request may already be accepted. Never fall back to the model

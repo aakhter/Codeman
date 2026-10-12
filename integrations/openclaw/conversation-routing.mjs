@@ -158,6 +158,12 @@ export class ConversationRouter {
     e.visibleAt = this.now();
     this.persist();
   }
+  clarified(destination, receipt) {
+    const decision = this.state.decisions.find((d) => d.key === keyOf(destination) && d.route === 'clarify');
+    if (!decision) return;
+    decision.clarificationReceipts = [...new Set([...(decision.clarificationReceipts ?? []), receipt])].slice(-5);
+    this.persist();
+  }
   observeOpenClaw(event, ctx) {
     if (!event.success || !event.runId || !ctx.sessionKey) return;
     for (const c of this.state.chats) {
@@ -206,17 +212,36 @@ export class ConversationRouter {
     let decision = { key, inputHash: digest, scope, at: this.now(), route: 'openclaw', parentId: null };
     // A short selection resolves only this chat's latest unconsumed clarification.
     const latest = [...this.state.decisions].reverse().find((d) => d.scope === scope);
+    const quotedClarification = this.state.decisions.find(
+      (d) =>
+        d.scope === scope &&
+        d.route === 'clarify' &&
+        d.original &&
+        !d.resolved &&
+        d.at >= this.now() - DAY &&
+        d.clarificationReceipts?.includes(destination.replyToMessageId)
+    );
     const pending =
-      latest?.route === 'clarify' && latest.original && !latest.resolved && latest.at >= this.now() - DAY
+      quotedClarification ??
+      (latest?.route === 'clarify' && latest.original && !latest.resolved && latest.at >= this.now() - DAY
         ? latest
-        : undefined;
-    const selection = /^\/?(brain|openclaw)[.! ]*$/i.exec(event.content ?? '');
+        : undefined);
+    const choice = (event.content ?? '').trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '');
+    const selection = /^\/?(brain|openclaw)[.! ]*$/i.exec(choice);
     if (pending && selection) {
       decision.route = selection[1].toLowerCase();
       decision.original = pending.original;
       decision.parentId = pending.parentId;
       pending.resolved = true;
       decision.context = pending.context;
+    } else if (
+      pending &&
+      !explicit &&
+      (quotedClarification ||
+        (!quoted && /^(yes|no|ok(?:ay)?|sure|please|go ahead|do it|continue)[.! ]*$/i.test(choice)))
+    ) {
+      decision.route = 'clarify';
+      decision.original = pending.original;
     } else if (explicit || quoted) {
       decision.route = 'brain';
       decision.parentId = quoted ? quoteParent : null;
@@ -267,7 +292,7 @@ export class ConversationRouter {
     }
     c = this.chat(destination);
     if (decision.route === 'clarify') {
-      decision.original = {
+      decision.original ??= {
         event: {
           content: event.content,
           channel: event.channel,

@@ -211,3 +211,26 @@ test('a later topic cancels an old clarification and late Brain acceptance canno
   r.accepted({ ...d, messageId: 'BARE' }, 'a preflight that finished late', job);
   assert.equal(r.chat(d).foregroundId, id);
 });
+
+test('yes to a routing clarification is not a new Brain task; quoted selections resolve the exact original', async (t) => {
+  const f = fixture(t),
+    r = f.make();
+  await offer(r);
+  f.set({ route: 'clarify', parentId: null, answerQuestion: false });
+  const ambiguous = { ...d, messageId: 'AMBIG' };
+  await r.decide(event('move it to Tuesday'), ambiguous);
+  r.clarified(ambiguous, 'CLARIFY1');
+  const yes = { ...d, messageId: 'YES', replyToMessageId: 'CLARIFY1' };
+  const again = await r.decide(event('yes'), yes, { quoted: true });
+  assert.equal(again.route, 'clarify');
+  assert.equal(again.original.event.content, 'move it to Tuesday');
+  r.clarified(yes, 'CLARIFY2');
+  const choice = await r.decide(
+    event('“Brain”'),
+    { ...d, messageId: 'CHOICE', replyToMessageId: 'CLARIFY2' },
+    { quoted: true }
+  );
+  assert.equal(choice.route, 'brain');
+  assert.equal(choice.original.destination.messageId, 'AMBIG');
+  assert.equal(choice.original.event.content, 'move it to Tuesday');
+});
