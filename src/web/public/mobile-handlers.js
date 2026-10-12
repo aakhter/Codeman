@@ -584,7 +584,7 @@ const KeyboardHandler = {
           toolbar && toolbar.style.display !== 'none'
             ? toolbar?.offsetHeight || toolbar?.getBoundingClientRect?.().height || 40
             : 0;
-        const accessoryHeight = accessoryBar?.classList.contains('visible')
+        const accessoryHeight = accessoryBar?.classList?.contains('visible')
           ? accessoryBar.offsetHeight || accessoryBar.getBoundingClientRect?.().height || 44
           : 0;
         main.style.paddingBottom = `${Math.ceil(toolbarHeight + accessoryHeight + cjkInputHeight)}px`;

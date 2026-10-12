@@ -126,7 +126,8 @@ document.addEventListener('visibilitychange', () => {
 let _rafHeartbeatCount = 0;
 let _rafHeartbeatLast = performance.now();
 const _rafHeartbeat = () => { _rafHeartbeatCount++; requestAnimationFrame(_rafHeartbeat); };
-requestAnimationFrame(_rafHeartbeat);
+// Guarded: test harnesses load app.js into a DOM that has no animation frames.
+if (typeof requestAnimationFrame === 'function') requestAnimationFrame(_rafHeartbeat);
 
 // Periodic state snapshot — runs in setInterval so it fires even when rAF is
 // starved or SSE handlers stop firing. Only logs when something looks wrong,
@@ -478,6 +479,7 @@ const DEFAULT_SHORTCUTS = [
     label: 'Show Shortcuts',
     bindings: [
       { modifiers: ['ctrl'], key: '?', code: 'Slash' },
+      { modifiers: ['ctrl', 'shift'], key: '?' },
       { modifiers: ['alt'], key: '?', code: 'Slash' },
     ],
     action: 'showShortcutOverlay',
@@ -549,6 +551,13 @@ const DEFAULT_SHORTCUTS = [
     label: 'Voice Input',
     bindings: [{ modifiers: ['ctrl', 'shift'], key: 'V' }],
     action: 'toggleVoiceInput',
+  },
+  {
+    id: 'restore-terminal-size',
+    group: 'Terminal',
+    label: 'Restore Terminal Size',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'R' }],
+    action: 'restoreTerminalSize',
   },
   {
     id: 'move-tab-left',
@@ -733,7 +742,24 @@ const DEFAULT_SHORTCUTS = [
 
 // Smart copy is dispatched by terminal-ui.js so Ctrl+C can still reach the PTY
 // when there is no selection. Keep it out of the generic document shortcut loop.
-const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set(['copyTerminalSelection']);
+// Registry actions this document-level loop must NOT run: smart copy (terminal-ui.js)
+// and the tile-grid chords, which tile-grid.js's tileShortcutFor()/runTileShortcut()
+// dispatch only where they apply (setting on, grid open), so outside the grid the
+// key still reaches the terminal.
+const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set([
+  'copyTerminalSelection',
+  'focusTileDown',
+  'focusTileLeft',
+  'focusTileRight',
+  'focusTileUp',
+  'moveTileDown',
+  'moveTileLeft',
+  'moveTileRight',
+  'moveTileUp',
+  'removeTile',
+  'toggleTileGrid',
+  'zoomTile',
+]);
 
 // ═══════════════════════════════════════════════════════════════
 // CodemanApp Class — constructor and global state
@@ -1668,10 +1694,16 @@ class CodemanApp {
       if (!groups[group]) groups[group] = [];
       groups[group].push(shortcut);
     }
-    const formatBindings = (shortcut) => {
-      const bindings = shortcut.displayBindings || shortcut.bindings || [];
-      return bindings
-        .map((binding) => `<kbd>${escapeHtml(this.formatShortcutBinding(binding))}</kbd>`)
+    const formatBindings = (s) => {
+      // An action with no key (Close Session by default) is still listed, so the
+      // overlay says so instead of showing an empty key column.
+      // Key names, never translated: "Home" is also a dictionary word (the Home
+      // button), so without the skip zh-CN showed the key as 主页.
+      if (s.displayBindings) return s.displayBindings.map((b) => `<kbd data-i18n-skip>${escapeHtml(b)}</kbd>`).join(' / ');
+      if (!s.bindings) return '';
+      if (s.bindings.length === 0) return '<span class="shortcut-overlay-unbound">not bound</span>';
+      return s.bindings
+        .map((binding) => `<kbd data-i18n-skip>${escapeHtml(this.formatShortcutBinding(binding))}</kbd>`)
         .join(' / ');
     };
     list.innerHTML = Object.entries(groups)

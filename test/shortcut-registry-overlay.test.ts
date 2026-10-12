@@ -108,14 +108,13 @@ describe('shortcut registry and overlay', () => {
     );
   });
 
-  it('keeps shortcutOverrides out of the settings PUT (the .strict() schema would 400 the whole save)', async () => {
-    // Overrides are per-device and live only in the localStorage blob. Before this
-    // strip, any device with an override (even an empty {} left by Reset) sent the
-    // key on every App Settings save, and the server refused the whole PUT, so no
-    // synced setting reached it again.
-    expect(settingsSource).toContain('shortcutOverrides: _sco,');
+  it('sends shortcutOverrides with the settings PUT, and the schema accepts them (downstream COD-242)', async () => {
+    // Downstream persists shortcut overrides server-side so they follow the user
+    // across devices (COD-242), so the save must NOT strip them (upstream does,
+    // because its .strict() schema has no such key) and the schema must take them.
+    expect(settingsSource).not.toContain('shortcutOverrides: _sco,');
     const { SettingsUpdateSchema } = await import('../src/web/schemas.js');
-    expect(SettingsUpdateSchema.safeParse({ shortcutOverrides: {} }).success).toBe(false);
+    expect(SettingsUpdateSchema.safeParse({ shortcutOverrides: {} }).success).toBe(true);
   });
 
   it('keeps the full help modal reachable now that Ctrl+? opens the registry overlay', () => {

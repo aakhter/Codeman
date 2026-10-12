@@ -48,6 +48,8 @@ function loadApp() {
   app.terminal = { clear: vi.fn(), cols: 120, rows: 40 };
   app.showToast = vi.fn();
   app.sendResize = vi.fn(async () => true);
+  // Downstream: Restore transfers viewer sizing ownership first (terminal-viewer-activity.js).
+  app._terminalViewerActivity = { activate: vi.fn(), hasPending: () => false };
   app.getTerminalDimensions = () => ({ cols: 120, rows: 40 });
   return app;
 }
@@ -162,7 +164,7 @@ describe('terminal shortcuts follow the focused pane', () => {
 
     await app.restoreTerminalSize();
 
-    expect(app.sendResize).toHaveBeenCalledWith('session-a', { force: true });
+    expect(app.sendResize).toHaveBeenCalledWith('session-a', expect.objectContaining({ force: true }));
   });
 });
 

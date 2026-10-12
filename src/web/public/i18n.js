@@ -1006,6 +1006,7 @@
     'Tmux sessions keep running in background': 'Tmux 会话继续在后台运行',
     'Refresh tmux sessions': '刷新 Tmux 会话',
     'Restore Terminal Size': '恢复终端大小',
+    'Rename Tab': '重命名标签',
     'Clear Terminal': '清空终端',
     'Stop current run': '停止当前运行',
     'Stop respawn': '停止重生',

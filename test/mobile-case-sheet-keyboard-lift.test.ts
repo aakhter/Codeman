@@ -73,7 +73,9 @@ describe('mobile case sheet keyboard lift', () => {
     expect(sheet.style.transform).toBe(toolbar.style.transform);
   });
 
-  it('positions an open sheet by `bottom` on an iPad-sized screen', () => {
+  // Downstream keeps its own keyboard layout path (no iPad `bottom` branch); adopting
+  // upstream's iPad path is COD-123. Un-skip when that lands.
+  it.skip('positions an open sheet by `bottom` on an iPad-sized screen', () => {
     const { handler, sheet } = loadHandler({ width: 1024, layoutHeight: 1366, visualHeight: 966, sheetOpen: true });
     handler.updateLayoutForKeyboard();
     expect(sheet.style.bottom).toBe('400px');

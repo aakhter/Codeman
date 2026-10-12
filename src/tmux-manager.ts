@@ -1183,6 +1183,17 @@ function buildClaudePermissionFlags(claudeMode?: ClaudeMode, allowedTools?: stri
  * Build the spawn command for any session mode.
  * Shared by createSession() and respawnPane() to avoid duplication.
  */
+/**
+ * Build the codex CLI command. Kept as a named wrapper because callers (and tests)
+ * reach for it directly; the command itself is registry data, like every other
+ * CLI's. Falls back to the bare binary when codex is disabled or removed.
+ */
+export function buildCodexCommand(config?: CodexConfig): string {
+  const entry = getCli('codex');
+  if (!entry) return 'codex';
+  return buildSpawnCommandFromRegistry(entry, { mode: 'codex', sessionId: '', codexConfig: config }) ?? 'codex';
+}
+
 export function buildSpawnCommand(options: {
   mode: SessionMode;
   sessionId: string;

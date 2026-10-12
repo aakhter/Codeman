@@ -5387,6 +5387,14 @@ Object.assign(CodemanApp.prototype, {
   openFilePreviewInNewTab() {
     const url = this.filePreviewState?.externalPreviewUrl;
     if (!url) return;
+    // A native wrapper (window.CodemanHost) opens it in a window of its own; a host
+    // that refuses must not fall through to window.open.
+    const hosted = this.openInHostWindow?.(url) ?? null;
+    if (hosted !== null) {
+      if (hosted) this.closeFilePreview();
+      else this.showToast('Could not open a new window for this preview', 'error');
+      return;
+    }
     const opened = window.open(url, '_blank', 'noopener');
     if (opened) {
       try {
