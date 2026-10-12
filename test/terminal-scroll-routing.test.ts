@@ -25,6 +25,8 @@ function loadTerminalUiHarness() {
   const logs: string[] = [];
   // Mutable so a test can move time (gesture gaps); defaults to a frozen clock.
   const clock = { now: () => 1_000 };
+  // terminal-ui.js hangs CodemanTerminalInput off window; tests read it there.
+  const windowRef: Record<string, any> = {};
   const context = vm.createContext({
     window: windowRef,
     CodemanApp,
@@ -45,12 +47,12 @@ function loadTerminalUiHarness() {
 
   const code = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
   vm.runInContext(code, context, { filename: 'terminal-ui.js' });
-  return { app: new (CodemanApp as any)(), logs, clock };
+  return { app: new (CodemanApp as any)(), logs, clock, windowRef };
 }
 
-/** A Claude session whose local buffer holds exactly one screen (baseY 0). */
-function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number; cliMouseTracking?: boolean } = {}) {
-  const { app, logs, clock } = loadTerminalUiHarness();
+/** A session (claude by default) whose local buffer holds exactly one screen (baseY 0). */
+function hollowApp(overrides: { mode?: string; cliVersion?: string; rows?: number; cliMouseTracking?: boolean } = {}) {
+  const { app, logs, clock, windowRef } = loadTerminalUiHarness();
   const sent: Array<{ id: string; data: string }> = [];
   app.activeSessionId = 'sess-1';
   app.sessions = new Map([
@@ -70,7 +72,7 @@ function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number; cliMou
     modes: { mouseTrackingMode: 'none' },
     buffer: { active: { type: 'normal', viewportY: 0, baseY: 0, length: 36 } },
   };
-  return { app, sent, logs, clock };
+  return { app, sent, logs, clock, windowRef };
 }
 
 describe('full-history re-pull downgrade guard (issue #205 round 2)', () => {
@@ -158,7 +160,7 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   });
 
   it('answers the first event of a gesture at once and owes the travel back (COD-470)', () => {
-    const { app, sent } = hollowClaudeApp();
+    const { app, sent } = hollowApp();
 
     // A trackpad flick is far less than half a screen (18 rows here). It used to
     // send nothing at all, which made a remote codex tab look dead.
@@ -184,7 +186,7 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   });
 
   it('starts a new gesture after a pause or a direction change (COD-470)', () => {
-    const { app, sent, clock } = hollowClaudeApp();
+    const { app, sent, clock } = hollowApp();
     let now = 1_000;
     clock.now = () => now;
 
@@ -252,7 +254,7 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
   });
 
   it('pages a Codex transcript only while its local scrollback is empty', () => {
-    const { app, sent } = hollowClaudeApp();
+    const { app, sent } = hollowApp();
     app.sessions = new Map([['sess-1', { mode: 'codex' }]]);
 
     expect(app._maybePageCliTranscript({ shiftKey: false }, -18)).toBe(true);
@@ -317,21 +319,12 @@ describe('the paging gates asked for another pane (a TerminalTile)', () => {
     expect(pageKeysForTravel(0, -1000, 36).keys).toBe('\x1b[5~'.repeat(3));
     expect(pageKeysForTravel(0, 40, 36)).toEqual({ pending: 4, keys: '\x1b[6~'.repeat(2) });
 
-    // The primary pane's own methods agree with them.
+    // The primary pane's wheel math agrees with them. Its PAGING deliberately does
+    // not: downstream COD-470 pre-pays the first page of a gesture (pinned by the
+    // COD-470 tests above), which the tile's pure pageKeysForTravel does not.
     const ev = { deltaY: -250, deltaMode: 2 };
     expect(app._wheelScrollLinesFloat(ev)).toBe(wheelDeltaLines(ev, 36));
-    let pending = 0;
-    let expected = '';
-    for (const lines of [-10, -10, 30, -1000, 7]) {
-      const step = pageKeysForTravel(pending, lines, 36);
-      pending = step.pending;
-      expected += step.keys;
-      app._maybePageCliTranscript({ shiftKey: false }, lines);
-    }
-    app._flushWheelSgrQueue();
-    expect(app._pageKeyPending).toBe(pending);
-    expect(expected).not.toBe('');
-    expect(sent).toEqual([{ id: 'sess-1', data: expected }]);
+    expect(sent).toEqual([]);
   });
 
   it("_localScrollbackIsHollow reads the target's session, buffer and rows, never the active ones", () => {
@@ -350,7 +343,10 @@ describe('the paging gates asked for another pane (a TerminalTile)', () => {
     tileBuffer.type = 'alternate';
     expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 0 })).toBe(false);
     tileBuffer.type = 'normal';
+    // Downstream COD-470: a codex pane with no local history pages its CLI too.
     app.sessions.set('tile-1', { mode: 'codex' });
+    expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 0 })).toBe(true);
+    app.sessions.set('tile-1', { mode: 'gemini' });
     expect(app._localScrollbackIsHollow({ sessionId: 'tile-1', terminal: tileTerminal, localRows: 0 })).toBe(false);
   });
 

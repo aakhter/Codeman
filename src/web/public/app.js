@@ -425,7 +425,7 @@ function paneExitAriaLabel(name, label) {
 // the render loop so it can be exercised directly: this is the only path a
 // session going live-to-exited ever takes, since that transition adds and
 // removes no tab and so never reaches the full rebuild.
-function applyPaneExitBadge(tab, paneExit) {
+function applyPaneExitBadge(tab, paneExit, activityPhrase) {
   const label = paneExitLabel(paneExit);
   const existing = tab.querySelector('.tab-exited-badge');
   // Quiets the status dot too. That dot reports `status`, which stays `idle` or
@@ -439,7 +439,10 @@ function applyPaneExitBadge(tab, paneExit) {
   // and writing English back on every pass would have it translate again.
   const name = tab.querySelector('.tab-name')?.dataset?.fullName;
   if (name) {
-    const aria = paneExitAriaLabel(name, label);
+    // The effective agent activity (waiting on / checking background agents) rides
+    // the accessible name too, so a state change that rebuilds nothing is still heard.
+    const base = paneExitAriaLabel(name, label);
+    const aria = activityPhrase ? `${base}, ${activityPhrase}` : base;
     if (tab.dataset.ariaSource !== aria) {
       tab.dataset.ariaSource = aria;
       tab.setAttribute('aria-label', aria);
@@ -2913,7 +2916,7 @@ class CodemanApp {
     this.renderSessionTabs();
     // COD-97: re-render the Monitor so the closed session's row disappears
     // immediately, instead of relying solely on a MUX_KILLED event that may race.
-    this.renderMuxSessions();
+    this.renderMuxSessions?.();
     this.renderRalphStatePanel();  // Update ralph panel after session deleted
     this.renderProjectInsightsPanel();  // Update project insights panel after session deleted
     // Stop stats polling when no sessions remain
@@ -9228,7 +9231,7 @@ class CodemanApp {
         // The exited-agent badge (Ark0N/Codeman#446). A session going from live
         // to exited changes no tab count, so the full rebuild below never runs
         // for it and this is the only path that ever draws the badge.
-        applyPaneExitBadge(tab, session.paneExit);
+        applyPaneExitBadge(tab, session.paneExit, activity.ariaPhrase);
 
         // Rich sidebar meta ("created 3d ago · working 12m" + pill). The stamps
         // themselves move on _tickSidebarRichTimes(); this is here for the parts
@@ -9686,7 +9689,8 @@ class CodemanApp {
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
 
-      rowHtml.set(id, `<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}${this._tileGrid?.has(id) ? ' in-tiles' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}, ${escapeHtml(activity.ariaPhrase)}" data-aria-source="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+      const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}, ${activity.ariaPhrase}`;
+      rowHtml.set(id, `<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}${this._tileGrid?.has(id) ? ' in-tiles' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" data-activity-status="${escapeHtml(status)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(tabAria)}" data-aria-source="${escapeHtml(tabAria)}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>

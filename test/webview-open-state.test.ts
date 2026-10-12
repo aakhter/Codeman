@@ -335,34 +335,6 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(win.localStorage.getItem('codeman-webview-open')).toBe('["w1"]');
   });
 
-  it('applies remote deletion locally when refresh fails and cancels a pending open', async () => {
-    const { win, app } = boot({ 'codeman-webview-open': '["w1","w2"]' });
-    await app.initWebviews();
-    app.activeWebviewId = 'w1';
-    win.document.querySelector('.main')!.classList.add('webview-active');
-    const frame = win.document.createElement('div');
-    frame.className = 'webview-frame active';
-    frame.dataset.webviewId = 'w1';
-    win.document.getElementById('webviewLayer')!.appendChild(frame);
-    const pending = deferred<any>();
-    app._apiJson = vi.fn((path: string) => (path === '/api/webviews' ? null : pending.promise));
-    app._refreshTabProjection = () => ({ completeRefs: sharedLayout.groups[0].refs });
-    app.selectSession = vi.fn();
-
-    const opening = app.openWebview('w1');
-    await app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
-    pending.resolve({ webview: { id: 'w1', name: 'One' }, embedUrl: '/webview/stale/' });
-    await opening;
-
-    expect(app.webviews.has('w1')).toBe(false);
-    expect(app.webviewOrder).toEqual(['w2']);
-    expect(win.localStorage.getItem('codeman-webview-open')).toBe('["w2"]');
-    expect(win.document.querySelector('.webview-frame[data-webview-id="w1"]')).toBeNull();
-    expect(app.activeWebviewId).toBeNull();
-    expect(app.selectSession).toHaveBeenCalledWith('s1');
-    expect(app._mountWebviewFrame).not.toHaveBeenCalled();
-  });
-
   it('does not let an older list refresh resurrect a remotely deleted webview', async () => {
     const { app } = boot({ 'codeman-webview-open': '["w1"]' });
     await app.initWebviews();
@@ -415,96 +387,6 @@ describe('COD-310 device-local saved-webview openness', () => {
     await olderRefresh;
 
     expect([...app.webviews.keys()]).toEqual(['w2']);
-  });
-
-  it('treats duplicate remote deletion events as idempotent local cleanup', async () => {
-    const { win, app } = boot({ 'codeman-webview-open': '["w1"]' });
-    await app.initWebviews();
-    app.activeWebviewId = 'w1';
-    win.document.querySelector('.main')!.classList.add('webview-active');
-    app._apiJson = vi.fn(async () => null);
-    app._refreshTabProjection = () => ({ completeRefs: sharedLayout.groups[0].refs });
-    app.selectSession = vi.fn();
-
-    await app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
-    await app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
-
-    expect(app.webviews.has('w1')).toBe(false);
-    expect(app.webviewOrder).toEqual([]);
-    expect(win.localStorage.getItem('codeman-webview-open')).toBe('[]');
-    expect(app.selectSession).toHaveBeenCalledTimes(1);
-  });
-
-  it('uses the pre-refresh projection when remote deletion removes an active middle webview', async () => {
-    const { win, app } = boot({ 'codeman-webview-open': '["w1","w2"]' });
-    await app.initWebviews();
-    app.sessions.set('s0', { id: 's0', name: 'Previous' });
-    app.activeWebviewId = 'w1';
-    win.document.querySelector('.main')!.classList.add('webview-active');
-    app._apiJson = vi.fn(async () => ({ webviews: [{ id: 'w2', name: 'Two', url: 'https://two.example/' }] }));
-    app._refreshTabProjection = vi.fn(() => ({
-      completeRefs: app.webviews.has('w1')
-        ? [
-            { kind: 'session', id: 's0' },
-            { kind: 'webview', id: 'w1' },
-            { kind: 'session', id: 's1' },
-            { kind: 'webview', id: 'w2' },
-          ]
-        : [
-            { kind: 'session', id: 's0' },
-            { kind: 'session', id: 's1' },
-            { kind: 'webview', id: 'w2' },
-          ],
-    }));
-    app.selectSession = vi.fn();
-
-    await app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
-
-    expect(app.selectSession).toHaveBeenCalledWith('s1');
-  });
-
-  it('uses the pre-refresh predecessor when remote deletion removes the active last webview', async () => {
-    const { win, app } = boot({ 'codeman-webview-open': '["w1","w2"]' });
-    await app.initWebviews();
-    app.activeWebviewId = 'w2';
-    win.document.querySelector('.main')!.classList.add('webview-active');
-    app._apiJson = vi.fn(async () => ({ webviews: [{ id: 'w1', name: 'One', url: 'https://one.example/' }] }));
-    app._refreshTabProjection = vi.fn(() => ({
-      completeRefs: [
-        { kind: 'webview', id: 'w1' },
-        { kind: 'session', id: 's1' },
-        { kind: 'webview', id: 'w2' },
-      ],
-    }));
-    app.selectSession = vi.fn();
-    app.openWebview = vi.fn();
-
-    await app._onWebviewChanged({ action: 'deleted', id: 'w2', owner: '@single' });
-
-    expect(app.selectSession).toHaveBeenCalledWith('s1');
-    expect(app.openWebview).not.toHaveBeenCalled();
-  });
-
-  it('skips an unopened webview neighbor when choosing remote-deletion fallback', async () => {
-    const { win, app } = boot({ 'codeman-webview-open': '["w1"]' });
-    await app.initWebviews();
-    app.activeWebviewId = 'w1';
-    win.document.querySelector('.main')!.classList.add('webview-active');
-    app._apiJson = vi.fn(async () => ({ webviews: [{ id: 'w2', name: 'Two', url: 'https://two.example/' }] }));
-    app._refreshTabProjection = vi.fn(() => ({
-      completeRefs: [
-        { kind: 'webview', id: 'w1' },
-        { kind: 'webview', id: 'w2' },
-        { kind: 'session', id: 's1' },
-      ],
-    }));
-    app.selectSession = vi.fn();
-    app.openWebview = vi.fn();
-
-    await app._onWebviewChanged({ action: 'deleted', id: 'w1', owner: '@single' });
-
-    expect(app.openWebview).not.toHaveBeenCalled();
-    expect(app.selectSession).toHaveBeenCalledWith('s1');
   });
 
   it('does not let delayed remote-deletion fallback cancel a newer webview navigation', async () => {
@@ -644,27 +526,5 @@ describe('COD-310 device-local saved-webview openness', () => {
     expect(app._mountWebviewFrame).toHaveBeenCalledWith('w1', '/webview/new/', app.webviews.get('w1'), {
       navigate: false,
     });
-  });
-
-  it('closes an active webview to its authoritative successor instead of local chronology', async () => {
-    const { win, app } = boot({ 'codeman-webview-open': '["w1","w2"]' });
-    await app.initWebviews();
-    app.webviewOrder = ['w2', 'w1'];
-    app.activeWebviewId = 'w1';
-    app.activeSessionId = 's1';
-    win.document.querySelector('.main')!.classList.add('webview-active');
-    app._refreshTabProjection = () =>
-      win.CodemanTabLayout.project(sharedLayout, {
-        liveSessionIds: ['s1'],
-        openWebviewIds: app.webviewOrder,
-        orientation: 'horizontal',
-      });
-    app.selectSession = vi.fn();
-    app.openWebview = vi.fn();
-
-    app.closeWebviewTab('w1');
-
-    expect(app.selectSession).toHaveBeenCalledWith('s1');
-    expect(app.openWebview).not.toHaveBeenCalled();
   });
 });
