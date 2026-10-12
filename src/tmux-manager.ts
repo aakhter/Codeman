@@ -4515,8 +4515,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         // Codex's heuristic paste buffer can retain a >1KiB literal burst even
         // after a long delay. Explicit bracketed-paste boundaries deliver one
         // complete paste event, so the separate Enter submits the whole prompt.
-        // Only Codex long prompts use this terminal protocol; no Enter retries.
-        const codexPaste = session.mode === 'codex' && textPart.length > 100;
+        // Every Codex prompt uses this protocol, including short replies (COD-513).
+        const codexPaste = session.mode === 'codex';
         const deliveredText = codexPaste ? `\x1b[200~${textPart}\x1b[201~` : textPart;
         await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" -l -- ${shellescape(deliveredText)}`, {
           timeout: EXEC_TIMEOUT_MS,

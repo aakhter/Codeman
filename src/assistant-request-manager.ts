@@ -24,6 +24,7 @@ export interface AssistantExecutionSession extends AssistantSession {
   isCheckpointActive: boolean;
   setAssistantInputGuard(guard: (permit?: string) => boolean): void;
   cancelAssistantSubmitVerification(): void;
+  verifyAssistantSubmission?(text: string, permit: string, beforeEnter: () => Promise<boolean>): void;
   writeViaMux(data: string, options: { assistantPermit: string }): Promise<boolean>;
 }
 const active = (r: AssistantRequest) => ['dispatching', 'running', 'awaiting_approval'].includes(r.status);
@@ -618,6 +619,36 @@ export class AssistantRequestManager {
     try {
       // Never fall back or resend if this write fails: it may already have typed part of the prompt.
       const sent = await live.writeViaMux(`${r.text}\r`, { assistantPermit: this.handoffs.get(a.id)!.permit });
+      if (sent && assistantBindingMode(r.binding) === 'codex') {
+        const permit = this.handoffs.get(a.id)?.permit;
+        if (permit)
+          live.verifyAssistantSubmission?.(r.text, permit, async () => {
+            if (!(await this.grantValid(r))) return false;
+            if ((await this.transcriptIdentity(r)) !== transcript.path) return false;
+            const info = await stat(transcript.path);
+            const current = this.store.get(r.id);
+            const latest = this.assistants.get(a.id);
+            return Boolean(
+              !this.stopped &&
+              current?.status === 'dispatching' &&
+              Date.now() < current.deadline &&
+              latest?.enabled &&
+              latest.revision === a.revision &&
+              latest.binding?.generation === r.binding.generation &&
+              this.handoffs.get(a.id)?.permit === permit &&
+              this.session(live.id) === live &&
+              live.pid === this.handoffs.get(a.id)?.pid &&
+              live.status === 'idle' &&
+              !live.isCheckpointActive &&
+              !this.automationBusy(live.id) &&
+              !this.takingControl.has(a.id) &&
+              live.assistantPendingWrites === 0 &&
+              info.size === transcript.offset &&
+              String(info.ino) === transcript.inode &&
+              String(info.dev) === transcript.device
+            );
+          });
+      }
       if (!sent && active(this.store.get(r.id)!))
         this.change(intent, {
           status: 'outcome_unknown',
@@ -687,6 +718,7 @@ export class AssistantRequestManager {
   }
   async stop(): Promise<void> {
     this.stopped = true;
+    for (const handoff of this.handoffs.values()) handoff.session.cancelAssistantSubmitVerification();
     clearInterval(this.timer);
     await this.pumping;
     while (this.answering.size) await new Promise((resolve) => setTimeout(resolve, 50));

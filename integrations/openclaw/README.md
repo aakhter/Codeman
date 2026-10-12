@@ -86,7 +86,7 @@ and native events before upgrading either application.
 
 ## Commands
 
-- `brain <single-line text>` sends a request; Brain acknowledges briefly and replies when finished.
+- `brain <text>` sends a request; Brain acknowledges briefly and replies when finished.
 - `brain status` checks your latest request.
 - `brain result` retrieves your latest completed answer.
 - `brain cancel` cancels your latest unsent or queued request.
@@ -458,3 +458,18 @@ before this fix are not automatically replayed; send a new message after updatin
 
 Run `node scripts/smoke-openclaw-assistant.mjs --whatsapp --multiline` for an
 isolated native readback with exact saved-byte assertions and temporary attachments.
+
+
+## Short Codex reply submission recovery (COD-513)
+
+All automated Codex prompts use explicit paste boundaries, including short replies.
+For a newly dispatched assistant request, Codeman checks the full composer on a
+bounded schedule for up to 60 seconds. It presses only Enter while the exact
+request remains unsubmitted, its native transcript has not changed, and the same
+live binding, input permit and credential remain valid. Changed text, a dialog,
+native activity, automation, shutdown or revoked ownership stops recovery. It
+never retypes the message and does not rearm old delivery intents after restart.
+
+Run `node scripts/smoke-openclaw-assistant.mjs --whatsapp --submit-retry` to
+withhold the first Enter in an isolated native session and verify one completed
+request and one returned result through the channel adapter.

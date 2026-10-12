@@ -415,3 +415,76 @@ describe('native projection and API ownership', () => {
     await s.stop(false);
   });
 });
+
+describe('assistant native submission recovery eligibility', () => {
+  it('arms only a newly dispatched request and stops on transcript activity or revoked ownership', async () => {
+    const verifier = vi.fn();
+    live.verifyAssistantSubmission = verifier;
+    const a = await ready();
+    const r = manager.submit(a, 'short reply', 'short-reply-retry-1234');
+    await manager.tick();
+    expect(verifier).toHaveBeenCalledTimes(1);
+    const [text, permit, check] = verifier.mock.calls[0];
+    expect(text).toBe('short reply');
+    expect(allowed(permit)).toBe(true);
+    expect(await check()).toBe(true);
+    validGrant = false;
+    expect(await check()).toBe(false);
+    validGrant = true;
+    live.status = 'running';
+    expect(await check()).toBe(false);
+    live.status = 'idle';
+    automation = true;
+    expect(await check()).toBe(false);
+    automation = false;
+    appendFileSync(file, row({ type: 'task_started', turn_id: randomUUID() }));
+    expect(await check()).toBe(false);
+    expect(writes).toEqual(['short reply\r']);
+    expect(ledger.get(r.id)!.status).toBe('dispatching');
+  });
+  it('cancels recovery at shutdown and never rearms old intents after restart', async () => {
+    const verifier = vi.fn();
+    live.verifyAssistantSubmission = verifier;
+    const cancel = vi.fn();
+    live.cancelAssistantSubmitVerification = cancel;
+    const a = await ready();
+    manager.submit(a, 'short reply', 'short-reply-restart-1234');
+    await manager.tick();
+    const check = verifier.mock.calls[0][2];
+    await manager.stop();
+    expect(cancel).toHaveBeenCalled();
+    expect(await check()).toBe(false);
+    restart();
+    await manager.tick();
+    expect(verifier).toHaveBeenCalledTimes(1);
+    expect(writes).toEqual(['short reply\r']);
+  });
+  it('Session retry uses only Enter and the exact current assistant permit', async () => {
+    vi.useFakeTimers();
+    const s = new Session({ id: 'submit-retry-test', workingDir: root, mode: 'codex' });
+    try {
+      let screen = '› short reply\n';
+      let valid = true;
+      s.setAssistantInputGuard((permit) => valid && permit === 'owned');
+      const sendInput = vi.fn(async (_id: string, data: string) => {
+        expect(data).toBe('\r');
+        screen = '›\n';
+        return true;
+      });
+      const internals = s as unknown as { _mux: unknown; _muxSession: unknown };
+      internals._mux = { capturePaneText: () => screen, sendInput };
+      internals._muxSession = { muxName: 'isolated-test' };
+      s.verifyAssistantSubmission('short reply', 'owned', async () => true);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(sendInput).toHaveBeenCalledTimes(1);
+      screen = '› short reply\n';
+      valid = false;
+      s.verifyAssistantSubmission('short reply', 'owned', async () => true);
+      await vi.advanceTimersByTimeAsync(65000);
+      expect(sendInput).toHaveBeenCalledTimes(1);
+    } finally {
+      s.cancelAssistantSubmitVerification();
+      vi.useRealTimers();
+    }
+  });
+});

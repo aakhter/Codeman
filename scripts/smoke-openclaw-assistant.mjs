@@ -80,9 +80,23 @@ const port = await new Promise((resolvePort) => {
 });
 const base = `http://127.0.0.1:${port}`;
 const launcher = join(root, 'server.mjs');
+const submitRetryFault = process.argv.includes('--submit-retry')
+  ? `const { TmuxManager } = await import(${JSON.stringify(pathToFileURL(resolve('src/tmux-manager.ts')).href)});
+const originalSendInput = TmuxManager.prototype.sendInput;
+let withheld = false;
+TmuxManager.prototype.sendInput = async function(id, input) {
+  if (!withheld && input.startsWith('Reply with exactly ACK_FOLLOWUP_OK.') && input.endsWith('\\r')) {
+    withheld = true;
+    console.log('COD513_CANARY_WITHHELD_ENTER');
+    return originalSendInput.call(this, id, input.slice(0, -1));
+  }
+  return originalSendInput.call(this, id, input);
+};\n`
+  : '';
+
 writeFileSync(
   launcher,
-  `const { startWebServer } = await import(${JSON.stringify(pathToFileURL(resolve('src/web/server.ts')).href)});\nconst server = await startWebServer(${port},false,true,'127.0.0.1');\nprocess.on('SIGTERM',async()=>{await server.stop();process.exit(0);});\n`,
+  `${submitRetryFault}const { startWebServer } = await import(${JSON.stringify(pathToFileURL(resolve('src/web/server.ts')).href)});\nconst server = await startWebServer(${port},false,true,'127.0.0.1');\nprocess.on('SIGTERM',async()=>{await server.stop();process.exit(0);});\n`,
   { mode: 0o600 }
 );
 const env = {
@@ -470,7 +484,7 @@ try {
     );
   }
 
-  if (process.argv.includes('--reply')) {
+  if (process.argv.includes('--reply') || process.argv.includes('--submit-retry')) {
     await service.stop();
     await service.start(serviceContext);
     const replyEvent = {
@@ -506,6 +520,15 @@ try {
     assert.equal((await ingress(ackReply, context)).handled, true);
     await until(() => receipts.length === 3, 120000);
     assert.equal(receipts[2].text.trim(), 'ACK_FOLLOWUP_OK');
+    if (process.argv.includes('--submit-retry')) {
+      assert.match(logs, /COD513_CANARY_WITHHELD_ENTER/);
+      assert.match(logs, /assistant prompt still in the composer/);
+      const all = (await api(`/assistants/${assistant.id}/requests`)).requests;
+      const shortRequests = all.filter(r => r.text === ackReply.ctx.BodyForCommands);
+      assert.equal(shortRequests.length, 1);
+      assert.equal(shortRequests[0].status, 'completed');
+      checks.push('withheld first Enter for short reply; bounded Enter-only recovery accepts one native task and delivers one result');
+    }
     assert.equal(
       (await ingress({ ...replyEvent, ctx: { ...replyEvent.ctx, MessageSid: '459', ReplyToId: '999999' } }, context))
         .handled,
