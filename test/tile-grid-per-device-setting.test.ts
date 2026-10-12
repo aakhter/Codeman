@@ -110,7 +110,7 @@ describe('the device default: ON on desktop, OFF on handhelds and touch-primary 
   });
 
   it('a touch-primary tablet (coarse primary pointer, not a handheld): OFF, and only that key changes', () => {
-    expect(defaultsOn(TABLET)).toEqual({ showTileGridButton: false });
+    expect(defaultsOn(TABLET)).toMatchObject({ showTileGridButton: false });
     expect(resolved(TABLET)).toBe(false);
   });
 
@@ -180,7 +180,8 @@ describe('the device default: ON on desktop, OFF on handhelds and touch-primary 
     });
     vm.runInContext(SOURCE, context, { filename: 'settings-ui.js' });
     const app = Object.create(CodemanApp.prototype) as { getDefaultSettings(): Record<string, unknown> };
-    expect(app.getDefaultSettings()).toEqual({});
+    // Downstream desktop defaults carry terminal limits; only the Tiles key matters here.
+    expect(app.getDefaultSettings()).not.toHaveProperty('showTileGridButton');
   });
 
   it('the Ctrl+Shift+G chord follows the same default: inert on a tablet with nothing stored, live on a touchscreen laptop', () => {

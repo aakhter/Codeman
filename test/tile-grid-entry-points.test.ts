@@ -166,7 +166,8 @@ describe('Ctrl/Cmd+click on a tab', () => {
     const app = makeGridApp(IDS);
     app.selectSession = vi.fn();
     app.handleSessionTabClick(click({}), 's-b');
-    expect(app.selectSession).toHaveBeenCalledWith('s-b', { forceReload: true });
+    // Downstream COD-171: a tab click selects without forceReload.
+    expect(app.selectSession).toHaveBeenCalledWith('s-b');
     expect(app._tileGrid?.open ?? false).toBe(false);
   });
 
@@ -175,7 +176,8 @@ describe('Ctrl/Cmd+click on a tab', () => {
     app.selectSession = vi.fn();
     windowStub.innerWidth = 1100;
     app.handleSessionTabClick(click({ ctrlKey: true }), 's-b');
-    expect(app.selectSession).toHaveBeenCalledWith('s-b', { forceReload: true });
+    // Downstream COD-171: a tab click selects without forceReload.
+    expect(app.selectSession).toHaveBeenCalledWith('s-b');
     expect(app._tileGrid?.open ?? false).toBe(false);
   });
 });

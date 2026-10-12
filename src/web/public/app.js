@@ -6657,6 +6657,7 @@ class CodemanApp {
     const previousActiveId = this.activeSessionId;
     if (this.sessionOrder.length === 0) {
       this.activeSessionId = null;
+      this.updateFileBrowserHeaderButton?.();
     } else {
       // Priority: current active > localStorage > first session
       let restoreId = previousActiveId;
@@ -8875,6 +8876,8 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
 
   renderSessionTabs({ immediate = false } = {}) {
+    // COD-235: the Files header button follows the active session on every tab render.
+    this.updateFileBrowserHeaderButton?.();
     // Don't re-render while user is typing in the inline rename input
     if (this._inlineRenameActive) return;
     if (immediate) {
