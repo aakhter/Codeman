@@ -109,6 +109,12 @@ type Row = {
 type RailApp = {
   isTabRailSorted: () => boolean;
   _tabRailSortOrder: (ids: string[]) => Map<string, number> | null;
+  tabLayout?: {
+    groups: { id: string; refs: { kind: string; id: string; focus?: true }[] }[];
+    ungrouped: { kind: string; id: string; focus?: true }[];
+  } | null;
+  activeSessionId?: string;
+  sessions: Map<string, Row>;
 };
 
 /**
@@ -135,6 +141,46 @@ const NOW = 1_700_000_000_000;
 const minsAgo = (m: number) => NOW - m * 60_000;
 
 describe('vertical tab rail row order', () => {
+  it('COD-494: keeps named groups and Focus in saved order across selection and activity, sorting only Ungrouped', () => {
+    const app = makeApp([
+      { id: 'a', status: 'idle', lastActivityAt: minsAgo(1) },
+      { id: 'c', status: 'idle', lastActivityAt: minsAgo(3) },
+      { id: 'starred', status: 'idle', lastActivityAt: minsAgo(4) },
+      { id: 'quiet', status: 'idle', lastActivityAt: minsAgo(2) },
+      { id: 'blocked', status: 'idle', lastActivityAt: minsAgo(9), hooks: ['permission_prompt'] },
+    ]);
+    app.tabLayout = {
+      groups: [
+        {
+          id: 'g',
+          refs: [
+            { kind: 'session', id: 'a' },
+            { kind: 'webview', id: 'dashboard' },
+            { kind: 'session', id: 'c' },
+          ],
+        },
+      ],
+      ungrouped: [
+        { kind: 'session', id: 'starred', focus: true },
+        { kind: 'session', id: 'quiet' },
+        { kind: 'session', id: 'blocked' },
+      ],
+    };
+    const saved = JSON.stringify(app.tabLayout);
+    const ids = ['a', 'c', 'starred', 'quiet', 'blocked'];
+    // Grouped and Focus rows carry no sort position at all: they paint in
+    // their saved order. Ungrouped ranks as before.
+    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
+    app.activeSessionId = 'c';
+    app.sessions.get('c')!.lastActivityAt = NOW;
+    app.sessions.get('c')!.status = 'busy';
+    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
+    expect(JSON.stringify(app.tabLayout)).toBe(saved);
+    // Without a layout (the flat rail) every row is ranked, as before.
+    app.tabLayout = null;
+    expect(Object.keys(positions(app, ids)!).sort()).toEqual(['a', 'blocked', 'c', 'quiet', 'starred']);
+  });
+
   it('puts a blocked session first, longest-blocked ahead of the newest block', () => {
     const ids = ['fresh-block', 'old-block', 'quiet'];
     const app = makeApp([
@@ -203,14 +249,16 @@ describe('vertical tab rail row order', () => {
   });
 
   it('keeps the Alt+N badge on the tab index while the cards are sorted', () => {
-    // `_tabIdx` counts the loop over sessionOrder, and only `style="order:…"`
-    // moves the card — so the badge names a shortcut, not a row position.
-    // `listOrder` is the rail sort's map, or the state grouping's when that is
-    // on (test/tab-triage.test.ts); either way it only sets the inline order.
+    // The badge is the row's Alt+N slot (`_tabAltRefs`: Focus first, then the
+    // loop over sessionOrder), and only `style="order:…"` moves the card — so
+    // the badge names a shortcut, not a row position. `listOrder` is the rail
+    // sort's map, or the state grouping's when that is on
+    // (test/tab-triage.test.ts); either way it only sets the inline order.
     expect(appJs).toContain('const liveIds = tabOrder.filter((id) => this.sessions.has(id));');
     expect(appJs).toContain('const railSortOrder = this._tabRailSortOrder(liveIds);');
     expect(appJs).toContain('` style="order:${listOrder.get(id)}"`');
-    expect(appJs).toMatch(/_tabIdx < 9 \? '<span class="tab-number">' \+ \(_tabIdx \+ 1\)/);
+    expect(appJs).toContain('const altSlot = altSlots.get(`session:${id}`) ?? _tabIdx;');
+    expect(appJs).toMatch(/altSlot < 9 \? '<span class="tab-number">' \+ \(altSlot \+ 1\)/);
     // The loop itself still walks the user's order, which is what makes the
     // badge, drag-and-drop and the arrow-key walk agree with each other.
     expect(appJs).toContain('const tabOrder = this.sessionOrder;');

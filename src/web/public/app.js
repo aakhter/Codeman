@@ -442,7 +442,10 @@ function applyPaneExitBadge(tab, paneExit, activityPhrase) {
   if (name) {
     // The effective agent activity (waiting on / checking background agents) rides
     // the accessible name too, so a state change that rebuilds nothing is still heard.
-    const base = paneExitAriaLabel(name, label);
+    // A child session's placement (COD-510) is part of the name the full render
+    // set; keep it when only the activity or the exit changes.
+    const placement = tab.dataset.placementDescription;
+    const base = paneExitAriaLabel(name, label) + (placement ? `, ${placement}` : '');
     const aria = activityPhrase ? `${base}, ${activityPhrase}` : base;
     if (tab.dataset.ariaSource !== aria) {
       tab.dataset.ariaSource = aria;
@@ -801,6 +804,9 @@ class CodemanApp {
     this.tabLayout = null;
     this.collapsedTabGroupIds = new Set(); // per-device, localStorage-backed
     this._hiddenTabGroupByRef = new Map(); // 'session:<id>' -> collapsed group id
+    // COD-512: until the first layout read settles, the vertical rail is not
+    // painted, so a reload never flashes the flat order before the groups.
+    this._tabLayoutFirstPaintPending = true;
     this._lastTabGroupStructureKey = null;
     this._tabRailSearch = ''; // rail search box text: in memory only, never persisted
     this.cases = [];
@@ -1820,23 +1826,16 @@ class CodemanApp {
         const digitMatch = code.match(/^Digit([1-9])$/);
         if (digitMatch) {
           const idx = parseInt(digitMatch[1], 10) - 1;
-          // Sessions occupy 1..N and web tabs continue from N+1, matching the
-          // numbers actually painted on the tabs. Resolve through the same
-          // live-session projection the render paints: sessionOrder can
-          // transiently hold a dead id (delete raced against the order sync),
-          // and raw indexing then names the wrong tab for every key to its
-          // right, web tabs included.
-          const live = this.sessionOrder.filter((id) => this.sessions.has(id));
-          if (idx < live.length) {
+          // Focus rows first (COD-509), then sessions, then web tabs: the
+          // numbers actually painted on the tabs. Resolved through the live
+          // projection the render paints: sessionOrder can transiently hold a
+          // dead id (delete raced against the order sync), and raw indexing
+          // then names the wrong tab for every key to its right.
+          const target = this._tabAltRefs()[idx];
+          if (target) {
             e.preventDefault();
-            this.selectSession(live[idx]);
-          } else {
-            const webIdx = idx - live.length;
-            const webId = (this.webviewOrder || [])[webIdx];
-            if (webId) {
-              e.preventDefault();
-              this.openWebview(webId);
-            }
+            if (target.kind === 'session') this.selectSession(target.id);
+            else this.openWebview(target.id);
           }
           return;
         }
@@ -6731,7 +6730,31 @@ class CodemanApp {
   }
 
   _loadTabLayout() {
-    return this._ensureTabLayoutCoordinator()?.load() ?? Promise.resolve(false);
+    const coordinator = this._ensureTabLayoutCoordinator();
+    if (!coordinator) {
+      this._releaseTabLayoutFirstPaint();
+      return Promise.resolve(false);
+    }
+    // A read that hangs must not leave the rail blank: paint whatever is known.
+    if (this._tabLayoutFirstPaintPending && !this._tabLayoutFirstPaintTimer) {
+      this._tabLayoutFirstPaintTimer = setTimeout(() => this._releaseTabLayoutFirstPaint(), 2500);
+    }
+    return coordinator.load();
+  }
+
+  /** True while the first-paint hold applies (vertical rail, first read in flight). */
+  _tabLayoutFirstPaintHeld() {
+    return this._tabLayoutFirstPaintPending && !!this._tabLayoutCoordinator && this._tabOrientation() === 'vertical';
+  }
+
+  _releaseTabLayoutFirstPaint({ render = true } = {}) {
+    if (this._tabLayoutFirstPaintTimer) clearTimeout(this._tabLayoutFirstPaintTimer);
+    this._tabLayoutFirstPaintTimer = null;
+    if (!this._tabLayoutFirstPaintPending) return false;
+    const wasHeld = this._tabLayoutFirstPaintHeld();
+    this._tabLayoutFirstPaintPending = false;
+    if (wasHeld && render) this._fullRenderSessionTabs();
+    return wasHeld;
   }
 
   _onTabLayoutChanged(data) {
@@ -6783,6 +6806,8 @@ class CodemanApp {
       this._tabLayoutEditor = null;
     }
     this.tabLayout = next;
+    // The first read settled (a fallback included): the rail may paint now.
+    const released = this._releaseTabLayoutFirstPaint({ render: false });
     const storage = this._getTabCollapseStorage();
     const collapsed = storage && next
       ? window.CodemanTabLayout.loadCollapsedGroupIds(storage, next.groups.map((group) => group.id))
@@ -6793,7 +6818,7 @@ class CodemanApp {
     // tab create/delete and order PUT, and most of those move nothing on this
     // rail (always so on the flat rail, which is every owner without groups).
     // Rebuild only when what the rail would draw actually changed.
-    if (this._isTabGroupStructureStale()) this._fullRenderSessionTabs();
+    if (released || this._isTabGroupStructureStale()) this._fullRenderSessionTabs();
     // Edits left unsaved by the previous page (see _persistPendingTabLayoutEdits).
     if (next && !this._tabLayoutRestoreChecked) {
       this._tabLayoutRestoreChecked = true;
@@ -6822,13 +6847,118 @@ class CodemanApp {
       // every group open. The stored per-device collapse state is untouched and
       // applies again as soon as the search is cleared.
       collapsedGroupIds: this._tabRailSearchActive() ? [] : [...this.collapsedTabGroupIds],
+      focusCollapsed: !this._tabRailSearchActive() && this._focusGroupCollapsed(),
       activeSessionId: this.activeSessionId,
       activeWebviewId: this.activeWebviewId,
     });
   }
 
   _tabGroupStructureKey(projection) {
-    return window.CodemanTabLayout?.structureKey(this.tabLayout, projection, [...this.collapsedTabGroupIds]) ?? null;
+    const key = window.CodemanTabLayout?.structureKey(this.tabLayout, projection, [...this.collapsedTabGroupIds]) ?? null;
+    // Placement badges and Focus stars are drawn by the full render only, so a
+    // change to either is structural even when no row moved.
+    return key === null ? null : `${key}|${JSON.stringify(this._tabPlacements())}`;
+  }
+
+  _focusGroupCollapsed() {
+    if (this._focusCollapsed === undefined) {
+      const storage = this._getTabCollapseStorage();
+      this._focusCollapsed = storage ? window.CodemanTabLayout.loadFocusCollapsed(storage) : false;
+    }
+    return this._focusCollapsed;
+  }
+
+  /** Per-device Focus collapse (COD-509): the twin of a group's collapse. */
+  toggleFocusGroupCollapsed(forceCollapsed) {
+    if (this._tabRailSearchActive()) return false;
+    const shouldCollapse = forceCollapsed === undefined ? !this._focusGroupCollapsed() : forceCollapsed === true;
+    const storage = this._getTabCollapseStorage();
+    if (!storage || !window.CodemanTabLayout.saveFocusCollapsed(storage, shouldCollapse)) this._tabCollapseStorageFailed = true;
+    this._focusCollapsed = shouldCollapse;
+    this._fullRenderSessionTabs();
+    return true;
+  }
+
+  /** `{ '<kind>:<id>': { state, parentId, canFollow } }` for every child session. */
+  _tabPlacements() {
+    if (!this.tabLayout || !window.CodemanTabLayout?.describePlacements) return {};
+    const parents = this._tabLayoutParents();
+    const key = JSON.stringify(parents);
+    if (this._tabPlacementCache?.layout !== this.tabLayout || this._tabPlacementCache.parents !== key) {
+      this._tabPlacementCache = {
+        layout: this.tabLayout,
+        parents: key,
+        placements: window.CodemanTabLayout.describePlacements(this.tabLayout, parents),
+      };
+    }
+    return this._tabPlacementCache.placements;
+  }
+
+  _tabPlacementPresentation(ref) {
+    const placement = this._tabPlacements()[`${ref.kind}:${ref.id}`];
+    if (!placement) return null;
+    const parent = this.sessions.get(placement.parentId);
+    const parentName = parent ? this.getSessionName(parent) : placement.parentId;
+    switch (placement.state) {
+      case 'inherited':
+        return { ...placement, short: 'Follows parent', description: `Follows parent ${parentName}` };
+      case 'manual':
+        return { ...placement, short: 'Manual', description: `Placed manually; can follow ${parentName}` };
+      case 'cycle':
+        return { ...placement, short: 'Parent cycle', description: 'Parent cycle; placed independently' };
+      default:
+        return { ...placement, short: 'Parent unavailable', description: 'Parent unavailable; placed independently' };
+    }
+  }
+
+  _tabStoredRef(ref) {
+    const location = this._tabRefLocation(ref);
+    return location ? location.refs[location.index] : null;
+  }
+
+  _tabRefFocused(ref) {
+    return this._tabStoredRef(ref)?.focus === true;
+  }
+
+  setTabRefFocus(ref, focused) {
+    return this.editTabLayout({ type: 'setFocus', ref, focused }, `${ref.kind}:${ref.id}`);
+  }
+
+  /**
+   * Destination index in the stored Focus order for a one-step move, or null.
+   * Steps over focused refs this browser cannot draw (a web tab closed here, a
+   * session that is gone), so a move always passes a VISIBLE neighbour.
+   */
+  _focusMoveTarget(ref, delta) {
+    if ((delta !== 1 && delta !== -1) || !this.tabLayout) return null;
+    const order = window.CodemanTabLayout.orderedFocusRefs(this.tabLayout);
+    const keyOf = (entry) => `${entry.kind}:${entry.id}`;
+    const from = order.findIndex((entry) => keyOf(entry) === keyOf(ref));
+    if (from < 0) return null;
+    const visible = new Set((this._projectTabGroups()?.focusRefs || []).map(keyOf));
+    for (let index = from + delta; index >= 0 && index < order.length; index += delta) {
+      if (visible.has(keyOf(order[index]))) return index;
+    }
+    return null;
+  }
+
+  moveFocusRefBy(ref, delta) {
+    const index = this._focusMoveTarget(ref, delta);
+    if (index === null) return false;
+    return this.editTabLayout({ type: 'moveFocus', ref, index }, `${ref.kind}:${ref.id}`);
+  }
+
+  /**
+   * Alt+1..9 targets, in the numbers the rail paints: Focus first (COD-509),
+   * then the flat strip's order (sessions, then open web tabs).
+   */
+  _tabAltRefs(projection = this._projectTabGroups()) {
+    const live = this.sessionOrder.filter((id) => this.sessions.has(id));
+    const open = (this.webviewOrder || []).filter((id) => this.webviews?.has(id));
+    if (!window.CodemanTabLayout?.altRefs) {
+      return [...live.map((id) => ({ kind: 'session', id })), ...open.map((id) => ({ kind: 'webview', id }))];
+    }
+    return window.CodemanTabLayout.altRefs(projection, live, open);
   }
 
   _isTabGroupStructureStale(projection = this._projectTabGroups()) {
@@ -6839,6 +6969,7 @@ class CodemanApp {
     // Every group is drawn open while the rail search runs; a toggle then would
     // change what the user sees only after the search is cleared.
     if (this._tabRailSearchActive()) return false;
+    if (groupId === window.CodemanTabLayout?.FOCUS_SECTION_ID) return this.toggleFocusGroupCollapsed(forceCollapsed);
     if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
     const next = new Set(this.collapsedTabGroupIds);
     const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
@@ -6923,7 +7054,12 @@ class CodemanApp {
       this._tabRefocusAfterEdit = true;
     }
     try {
-      this._ensureTabLayoutEditor().enqueue(operation);
+      const editor = this._ensureTabLayoutEditor();
+      // A drop can be two edits ("leave Focus, then move"). Validate the whole
+      // list on the held layout first, so a bad second step queues neither.
+      const operations = Array.isArray(operation) ? operation : [operation];
+      operations.reduce((layout, next) => window.CodemanTabLayout.applyOperation(layout, next), editor.getLayout());
+      for (const next of operations) editor.enqueue(next);
       return true;
     } catch (error) {
       this._tabRefocusAfterEdit = false;
@@ -6996,9 +7132,33 @@ class CodemanApp {
     if (!location) return [];
     const actions = [];
     const grouped = this.tabLayout.groups.length > 0;
-    // Up/down follow the STORED order, which is what the rail paints unless a
-    // sort is on (then the sort decides and there is nothing to reorder).
-    if (grouped && !this.isTabRailSorted()) {
+    const focused = location.refs[location.index]?.focus === true;
+    // Where a child session sits and why (COD-510): a read-only summary, plus
+    // the way back to its parent once it was moved by hand.
+    const placement = ref.kind === 'session' ? this._tabPlacementPresentation(ref) : null;
+    if (placement) {
+      actions.push({ label: placement.description, disabled: true });
+      if (placement.canFollow) {
+        actions.push({
+          label: 'Follow parent again',
+          run: () =>
+            this.editTabLayout(
+              { type: 'followParent', ref, parents: this._tabLayoutParents() },
+              `${ref.kind}:${ref.id}`
+            ),
+        });
+      }
+    }
+    actions.push({ label: focused ? 'Remove from Focus' : 'Add to Focus', run: () => this.setTabRefFocus(ref, !focused) });
+    if (focused) {
+      // A Focus row is drawn in Focus, so up/down reorder Focus, not its group.
+      if (this._focusMoveTarget(ref, -1) !== null) actions.push({ label: 'Move up in Focus', run: () => this.moveFocusRefBy(ref, -1) });
+      if (this._focusMoveTarget(ref, 1) !== null) actions.push({ label: 'Move down in Focus', run: () => this.moveFocusRefBy(ref, 1) });
+    }
+    // Up/down follow the STORED order, which is what the rail paints: a named
+    // group keeps it even under the activity sort (COD-494); Ungrouped is
+    // ranked by the sort then, and has nothing to reorder.
+    if (grouped && !focused && (location.groupId !== null || !this.isTabRailSorted())) {
       // The sessions that follow this one move with it, so "down" means past
       // the first row that is not part of that block.
       const moving = new Set(window.CodemanTabLayout.movingRefKeys(this.tabLayout, ref, this._tabLayoutParents()));
@@ -7048,6 +7208,28 @@ class CodemanApp {
     return !max || (this.tabLayout?.groups?.length || 0) < max;
   }
 
+  /**
+   * Start a session straight into a group (COD-512): the run carries
+   * `tabGroupId`, and the server files the new session there when it
+   * registers it with the layout, so it never flashes in Ungrouped first.
+   */
+  async createSessionInTabGroup(groupId) {
+    if (this._runInFlight) {
+      this.showToast?.('A session is already starting.', 'info');
+      return false;
+    }
+    if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
+    // The new row must be visible where it lands.
+    this.toggleTabGroupCollapsed(groupId, false);
+    try {
+      await this.run({ tabGroupId: groupId });
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not start session.', 'error');
+      return false;
+    }
+  }
+
   openTabGroupMenu(event, groupId) {
     const groups = this.tabLayout?.groups || [];
     const index = groups.findIndex((group) => group.id === groupId);
@@ -7055,6 +7237,7 @@ class CodemanApp {
     return this._openTabLayoutMenu(event, `group:${groupId}`, 'Group actions', [
       ...(this.canOpenTileGrid?.() ? [{ label: 'Open group as tiles', run: () => this.openGroupAsTiles(groupId) }] : []),
       { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
+      { label: 'New session in group', run: () => this.createSessionInTabGroup(groupId) },
       ...(this._canCreateTabGroup() ? [{ label: 'New group', run: () => this.createTabGroup({ index: index + 1 }) }] : []),
       ...(index > 0 ? [{ label: 'Move group up', run: () => this.moveTabGroup(groupId, -1) }] : []),
       ...(index < groups.length - 1 ? [{ label: 'Move group down', run: () => this.moveTabGroup(groupId, 1) }] : []),
@@ -7260,9 +7443,10 @@ class CodemanApp {
     const row = hit.closest('.session-tab');
     const section = hit.closest('.tab-layout-group');
     const sectionGroup = section ? section.dataset.tabGroupId || null : undefined;
-    // A sorted rail paints its own order, so a row can only be dropped INTO a
-    // group, never between two rows.
-    if (row && section && !this.isTabRailSorted()) {
+    // A sorted rail paints its own order in Ungrouped, so a row there can only
+    // be dropped INTO the section; named groups and Focus keep their saved
+    // order (COD-494) and take between-row drops.
+    if (row && section && (sectionGroup !== null || !this.isTabRailSorted())) {
       const ref = row.dataset.webviewId ? { kind: 'webview', id: row.dataset.webviewId } : { kind: 'session', id: row.dataset.id };
       const rect = row.getBoundingClientRect();
       return { type: 'ref', ref, groupId: sectionGroup, placement: y >= rect.top + rect.height / 2 ? 'after' : 'before', element: row };
@@ -7490,6 +7674,19 @@ class CodemanApp {
       this.toggleTabGroupCollapsed(groupId, collapse);
     };
 
+    // Alt+Up/Down on a Focus row reorders Focus (COD-509), the keyboard twin
+    // of dragging it.
+    if (e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !groupId) {
+      const ref = current.dataset.webviewId
+        ? { kind: 'webview', id: current.dataset.webviewId }
+        : current.dataset.id
+          ? { kind: 'session', id: current.dataset.id }
+          : null;
+      if (!ref || !this._tabRefFocused(ref)) return;
+      e.preventDefault();
+      this.moveFocusRefBy(ref, e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
     switch (e.key) {
       case 'ArrowDown':
       case 'ArrowUp': {
@@ -7898,11 +8095,23 @@ class CodemanApp {
    * @param {Array<string>} ids live session ids, in tab order
    * @returns {Map<string, number>|null}
    */
+  /**
+   * True for a row the user ordered by hand: one stored in a named group, or in
+   * Focus. The activity sort leaves those in their saved order (COD-494) and
+   * ranks only Ungrouped, so selecting a grouped session never moves it.
+   */
+  _isSavedOrderTabRef(ref) {
+    const location = this._tabRefLocation(ref);
+    if (!location) return false;
+    return location.groupId !== null || location.refs[location.index]?.focus === true;
+  }
+
   _tabRailSortOrder(ids) {
     if (!this.isTabRailSorted()) return null;
     if (!window.CodemanSessionOrder || typeof this._mobileOverviewState !== 'function') return null;
     const rows = [];
     for (let i = 0; i < ids.length; i++) {
+      if (this._isSavedOrderTabRef({ kind: 'session', id: ids[i] })) continue;
       const session = this.sessions.get(ids[i]);
       if (!session) continue;
       rows.push({
@@ -9131,7 +9340,7 @@ class CodemanApp {
     // debounced just BEFORE the rename opened still fires ~100ms later and lands
     // here directly. finishRename() re-renders on both commit and cancel, so a
     // render dropped here is picked back up when the rename settles.
-    if (this._inlineRenameActive) return;
+    if (this._inlineRenameActive || this._tabLayoutFirstPaintHeld()) return;
     const container = this.$('sessionTabs');
     const existingTabs = container.querySelectorAll('.session-tab[data-id]');
     const existingIds = new Set([...existingTabs].map(t => t.dataset.id));
@@ -9254,7 +9463,7 @@ class CodemanApp {
 
         // Inject tab-number badge if missing (added after initial render)
         if (!tab.querySelector('.tab-number')) {
-          const idx = this.sessionOrder.indexOf(id);
+          const idx = this._tabAltRefs().findIndex((ref) => ref.kind === 'session' && ref.id === id);
           if (idx >= 0 && idx < 9) {
             const numSpan = document.createElement('span');
             numSpan.className = 'tab-number';
@@ -9585,7 +9794,7 @@ class CodemanApp {
 
   _fullRenderSessionTabs() {
     this.closeTabRailActionMenu?.();
-    if (this._inlineRenameActive) return;
+    if (this._inlineRenameActive || this._tabLayoutFirstPaintHeld()) return;
     // The group menu's trigger is about to be replaced.
     this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
@@ -9647,6 +9856,8 @@ class CodemanApp {
     // one band of values per state. Null in the grouped rail and with grouping
     // off, and the rows then carry exactly the inline order they did before.
     const groupProjection = this._projectTabGroups();
+    // Alt+N slot per row: Focus first, then the flat strip's order.
+    const altSlots = new Map(this._tabAltRefs(groupProjection).map((ref, index) => [`${ref.kind}:${ref.id}`, index]));
     const triage = this._tabTriageLayout(liveIds, groupProjection, railSortOrder);
     const listOrder = triage ? triage.order : railSortOrder;
     // Clustered by case: rows are wrapped in one box per case below, and a tab
@@ -9661,6 +9872,7 @@ class CodemanApp {
       const session = this.sessions.get(id);
       if (!session) continue; // Skip if session was removed
       const railOrderStyle = listOrder?.has(id) ? ` style="order:${listOrder.get(id)}"` : '';
+      const altSlot = altSlots.get(`session:${id}`) ?? _tabIdx;
 
       // See the note in the incremental path: a web tab owns the active highlight
       // while one is open, even though activeSessionId stays set.
@@ -9731,15 +9943,27 @@ class CodemanApp {
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
 
-      const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}, ${activity.ariaPhrase}`;
-      rowHtml.set(id, `<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}${this._tileGrid?.has(id) ? ' in-tiles' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" data-activity-status="${escapeHtml(status)}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(tabAria)}" data-aria-source="${escapeHtml(tabAria)}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
-          ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
+      // COD-510: a child session says where it sits relative to its parent, in
+      // the badge, the tooltip and its accessible name. Grouped rail only.
+      const placement = groupProjection ? this._tabPlacementPresentation({ kind: 'session', id }) : null;
+      const placementBadge = placement
+        ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" aria-hidden="true">${escapeHtml(placement.short)}</span>`
+        : '';
+      const focusMarker = groupProjection && this._tabRefFocused({ kind: 'session', id })
+        ? '<span class="tab-focus-marker" aria-hidden="true">&#x2605;</span>'
+        : '';
+      const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}${placement ? `, ${placement.description}` : ''}, ${activity.ariaPhrase}`;
+      const rowTooltip = placement ? (tabTooltip ? `${tabTooltip}\n${placement.description}` : placement.description) : tabTooltip;
+      rowHtml.set(id, `<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}${this._tileGrid?.has(id) ? ' in-tiles' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" data-activity-status="${escapeHtml(status)}"${placement ? ` data-placement-description="${escapeHtml(placement.description)}"` : ''} ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(tabAria)}" data-aria-source="${escapeHtml(tabAria)}" ${rowTooltip ? `title="${escapeHtml(rowTooltip)}"` : ''}>
+          ${altSlot < 9 ? '<span class="tab-number">' + (altSlot + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
               ${tabModeHtml}
+              ${focusMarker}
               <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
+              ${placementBadge}
               ${paneExitBadge ? `<span class="tab-exited-badge" data-label="${escapeHtml(paneExitBadge)}" aria-hidden="true">${escapeHtml(paneExitBadge)}</span>` : ''}
               ${inlineSessionActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
@@ -9764,7 +9988,7 @@ class CodemanApp {
       // Grouped vertical rail. Web tabs keep their flat-strip Alt+N slot (after
       // every session), wherever their group puts them.
       const webviewSlots = new Map(
-        (this.webviewOrder || []).filter((wid) => this.webviews?.has(wid)).map((wid, i) => [wid, _tabIdx + i])
+        (this.webviewOrder || []).filter((wid) => this.webviews?.has(wid)).map((wid) => [wid, altSlots.get(`webview:${wid}`) ?? Infinity])
       );
       parts.push(
         window.CodemanTabLayout.renderProjection(

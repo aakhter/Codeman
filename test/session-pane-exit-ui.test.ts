@@ -132,8 +132,11 @@ describe('the exited-agent badge in a tab', () => {
   });
 
   it('builds the full render path accessible name from the same helper', () => {
-    // Downstream: the effective agent activity rides the same name (see tabAria).
-    expect(appJs).toContain('const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}, ${activity.ariaPhrase}`;');
+    // Downstream: the effective agent activity, and a child session's placement
+    // (COD-510), ride the same name (see tabAria).
+    expect(appJs).toContain(
+      "const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}${placement ? `, ${placement.description}` : ''}, ${activity.ariaPhrase}`;"
+    );
     expect(appJs).toContain('aria-label="${escapeHtml(tabAria)}" data-aria-source="${escapeHtml(tabAria)}"');
     expect(appJs).toContain(
       '<span class="tab-exited-badge" data-label="${escapeHtml(paneExitBadge)}" aria-hidden="true">'

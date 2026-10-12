@@ -463,6 +463,7 @@ Object.assign(CodemanApp.prototype, {
           <span class="tab-web-icon" aria-hidden="true">${icon || this._webviewGlobeIcon()}</span>
           <span class="tab-info">
             <span class="tab-name-row">
+              ${this._tabOrientation?.() === 'vertical' && this._tabRefFocused?.({ kind: 'webview', id }) ? '<span class="tab-focus-marker" aria-hidden="true">&#x2605;</span>' : ''}
               <span class="tab-name">${escapeHtml(webview.name)}</span>
             </span>
           </span>

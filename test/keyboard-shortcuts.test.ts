@@ -16,10 +16,11 @@ describe('keyboard shortcuts', () => {
     expect(appSource).not.toMatch(/e\.key\.match\(\/\^Digit/);
 
     // The matched digit is converted to an index once and resolved through the
-    // live-session list (upstream's rail; the Focus-aware COD-306 projection was
-    // dropped in the v1.41.0 sync, see COD-509).
+    // Focus-aware Alt+N order (COD-509): Focus rows, then live sessions, then
+    // open web tabs.
     expect(appSource).toContain('const idx = parseInt(digitMatch[1], 10) - 1;');
-    expect(appSource).toContain('this.selectSession(live[idx]);');
+    expect(appSource).toContain('const target = this._tabAltRefs()[idx];');
+    expect(appSource).toContain("if (target.kind === 'session') this.selectSession(target.id);");
     void tabLayoutSource;
   });
 

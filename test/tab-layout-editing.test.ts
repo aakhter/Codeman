@@ -144,7 +144,10 @@ describe('drop -> operation', () => {
     const onUngrouped = h.dropOperation(base(), { type: 'ref', ref: s('a') }, { type: 'ungrouped' }, {});
     expect(onUngrouped).toMatchObject({ groupId: null });
     expect(onUngrouped).not.toHaveProperty('index');
-    const crowded = { ...base(), groups: [{ ...base().groups[0], refs: [...base().groups[0].refs, s('late')] }, base().groups[1]] };
+    const crowded = {
+      ...base(),
+      groups: [{ ...base().groups[0], refs: [...base().groups[0].refs, s('late')] }, base().groups[1]],
+    };
     const replayed = h.applyOperation(crowded, onHeader);
     expect(replayed.groups[0].refs.at(-1)).toEqual(w('web'));
   });
@@ -578,13 +581,14 @@ describe('row actions in the vertical rail', () => {
     installFetch();
     const flat = makeApp({ ...serverLayout(), groups: [], ungrouped: [s('s1'), s('s2'), s('s3')] });
     flat.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s1') }, 's1');
-    expect(menuLabels()).toEqual(['Session options', 'Move to new group', 'Close session']);
+    expect(menuLabels()).toEqual(['Session options', 'Add to Focus', 'Move to new group', 'Close session']);
     flat.closeTabRailActionMenu();
 
     const app = makeApp();
     app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s2') }, 's2');
     expect(menuLabels()).toEqual([
       'Session options',
+      'Add to Focus',
       'Move down',
       'Move to "Later"',
       'Move to Ungrouped',
@@ -611,6 +615,7 @@ describe('row actions in the vertical rail', () => {
     app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s2') }, 's2');
     expect(menuLabels()).toEqual([
       'Session options',
+      'Add to Focus',
       'Move to "ungrouped"',
       'Move to Ungrouped',
       'Move to new group',
@@ -687,6 +692,7 @@ describe('web tab rows', () => {
     key(web, 'F10', { shiftKey: true });
     expect(menuLabels()).toEqual([
       'Web tab settings',
+      'Add to Focus',
       'Move up',
       'Move to "Later"',
       'Move to Ungrouped',
@@ -729,7 +735,7 @@ describe('group cap', () => {
     app.closeTabRailActionMenu();
     header('g0').focus();
     key(header('g0'), 'F10', { shiftKey: true });
-    expect(menuLabels()).toEqual(['Rename group', 'Move group down', 'Delete group']);
+    expect(menuLabels()).toEqual(['Rename group', 'New session in group', 'Move group down', 'Delete group']);
     app.closeTabGroupMenu();
   });
 });
@@ -741,7 +747,13 @@ describe('group menu', () => {
     win.confirm = vi.fn(() => true);
     header('gx').focus();
     key(header('gx'), 'F10', { shiftKey: true });
-    expect(menuLabels()).toEqual(['Rename group', 'New group', 'Move group down', 'Delete group']);
+    expect(menuLabels()).toEqual([
+      'Rename group',
+      'New session in group',
+      'New group',
+      'Move group down',
+      'Delete group',
+    ]);
     expect(document.activeElement?.textContent).toBe('Rename group');
     clickMenu('Move group down');
     await flush();
@@ -749,7 +761,13 @@ describe('group menu', () => {
     expect(document.activeElement).toBe(header('gx'));
 
     key(header('gx'), 'ContextMenu');
-    expect(menuLabels()).toEqual(['Rename group', 'New group', 'Move group up', 'Delete group']);
+    expect(menuLabels()).toEqual([
+      'Rename group',
+      'New session in group',
+      'New group',
+      'Move group up',
+      'Delete group',
+    ]);
     clickMenu('Delete group');
     expect(win.confirm).toHaveBeenCalledWith('Delete group "<Core & Ops>"? Its tabs move to Ungrouped.');
     await flush();
@@ -772,7 +790,7 @@ describe('group menu', () => {
     expect(app.tabLayout.groups).toHaveLength(2);
   });
 
-  it("closing the row menu (as session:deleted does) leaves an open group menu and its listeners alone", () => {
+  it('closing the row menu (as session:deleted does) leaves an open group menu and its listeners alone', () => {
     installFetch();
     const app = makeApp();
     header('gx').focus();
@@ -969,7 +987,7 @@ describe('server echoes and reloads', () => {
     expect(gets).toHaveLength(1);
   });
 
-  it('replays only its own owner\'s recent copy of unsaved edits', async () => {
+  it("replays only its own owner's recent copy of unsaved edits", async () => {
     const copy = (extra: Record<string, unknown>) =>
       win.sessionStorage.setItem(
         'codeman:tab-layout-pending',
@@ -1076,7 +1094,9 @@ describe('server echoes and reloads', () => {
 
   it('keeps the group menu glyph visible where there is no hover (touch tablets)', () => {
     const css = read('styles.css');
-    const block = css.match(/@media \(hover: none\) \{\s*html\[data-tab-orientation='vertical'\] \.tab-rail \.tab-layout-group-menu \{([^}]*)\}/);
+    const block = css.match(
+      /@media \(hover: none\) \{\s*html\[data-tab-orientation='vertical'\] \.tab-rail \.tab-layout-group-menu \{([^}]*)\}/
+    );
     expect(block?.[1]).toMatch(/opacity:\s*1/);
   });
 

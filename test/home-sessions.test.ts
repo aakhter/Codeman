@@ -478,16 +478,20 @@ describe('home screens: one order, one numbering', () => {
 
   it('Alt+digit resolves through the live-session projection in app.js', () => {
     // Static guard for the handler half of the invariant above: the digit
-    // branch must filter sessionOrder against live sessions before indexing,
-    // for sessions AND for the web-tab continuation.
+    // branch indexes the Alt+N order (`_tabAltRefs`, COD-509), which filters
+    // sessionOrder against live sessions before indexing, for sessions AND for
+    // the web-tab continuation.
     const appJs = readFileSync(resolve(PUBLIC, 'app.js'), 'utf8');
     const start = appJs.indexOf('^Digit([1-9])$');
     expect(start).toBeGreaterThan(-1);
     const branch = appJs.slice(start, start + 1200);
-    expect(branch).toContain('this.sessionOrder.filter((id) => this.sessions.has(id))');
-    expect(branch).toContain('idx < live.length');
-    expect(branch).toContain('idx - live.length');
+    expect(branch).toContain('this._tabAltRefs()[idx]');
     expect(branch).not.toContain('this.sessionOrder[idx]');
+    const altStart = appJs.indexOf('  _tabAltRefs(projection');
+    expect(altStart).toBeGreaterThan(-1);
+    const alt = appJs.slice(altStart, altStart + 800);
+    expect(alt).toContain('this.sessionOrder.filter((id) => this.sessions.has(id))');
+    expect(alt).toContain('(this.webviewOrder || []).filter((id) => this.webviews?.has(id))');
   });
 });
 

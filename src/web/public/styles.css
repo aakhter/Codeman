@@ -874,6 +874,40 @@ html[data-tab-orientation='vertical'] .tab-layout-focus-header {
   color: var(--text);
 }
 
+html[data-tab-orientation='vertical'] .tab-layout-focus-star {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+/* COD-510: where a child session sits relative to its parent. */
+.session-tab .tab-placement-state {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+}
+
+.session-tab .tab-placement-state--manual {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.session-tab .tab-placement-state--dangling,
+.session-tab .tab-placement-state--cycle {
+  color: var(--warning, #f59e0b);
+  background: color-mix(in srgb, var(--warning, #f59e0b) 14%, transparent);
+}
+
 html[data-tab-orientation='vertical'] .tab-focus-shortcut {
   opacity: 0.88;
   border-color: color-mix(in srgb, var(--accent) 24%, transparent);
@@ -1096,6 +1130,7 @@ html[data-tab-orientation='vertical'].tab-rail-compact
     .tab-mode,
     .tab-detached-badge,
     .tab-focus-marker,
+    .tab-placement-state,
     .tab-badge,
     .tab-subagent-badge,
     .tab-ultracode-badge,
