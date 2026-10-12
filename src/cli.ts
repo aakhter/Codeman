@@ -16,15 +16,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { dataPath } from './config/instance.js';
+import { readCodemanCredentials } from './codeman-credentials.js';
 import { casePath } from './config/cases-dir.js';
 import { assertValidBasePath } from './config/base-path.js';
 import { installAgentSkillInto, removeAgentSkillFrom, type AgentSkillApplyResult } from './hooks-config.js';
+import { registerAgentCommands } from './cli-agent.js';
 import { getSessionManager } from './session-manager.js';
 import { getTaskQueue } from './task-queue.js';
 import { getRalphLoop } from './ralph-loop.js';
 import { getStore } from './state-store.js';
 import { getErrorMessage } from './types.js';
-import { isSupportedAttachmentExtension } from './attachment-registry.js';
+import { DOCUMENT_ATTACHMENT_EXTENSIONS, isSupportedAttachmentExtension } from './attachment-registry.js';
 import { daemonStatus, startDaemon, stopDaemon, type WebLaunchOptions } from './daemon-control.js';
 import { installService, serviceStatus, uninstallService } from './service-installer.js';
 import { isLoopbackBindHost, isUnauthenticatedNetworkAcknowledged } from './web/network-auth-policy.js';
@@ -207,9 +209,7 @@ export async function enrichMuxActivityForOutput(
 }
 
 async function postAttachment(apiUrl: string, sessionId: string, filePath: string): Promise<boolean> {
-  const envFile = readCodemanEnv();
-  const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
-  const password = process.env.CODEMAN_PASSWORD || envFile.CODEMAN_PASSWORD;
+  const { username, password } = readCodemanCredentials();
   const url = new URL(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, apiUrl);
   const body = JSON.stringify({ path: filePath });
   const transport = url.protocol === 'https:' ? https : http;
@@ -449,6 +449,10 @@ skillCmd
     }
   });
 
+// ============ Agent Commands (session-to-session, any CLI mode) ============
+
+registerAgentCommands(program);
+
 // ============ Session Commands ============
 
 const sessionCmd = program.command('session').alias('s').description('Manage Claude sessions');
@@ -640,14 +644,18 @@ program
   .action(async (filePath, options) => {
     const extension = String(filePath).split('.').pop()?.toLowerCase() || '';
     if (!isAbsolute(filePath) || !isSupportedAttachmentExtension(extension)) {
-      console.error(chalk.red('✗ attach requires an absolute path to a png, pdf, docx, pptx, md, or txt file'));
+      console.error(
+        palette.err(
+          `✗ attach requires an absolute path to an image (png, jpg, gif, webp), document (${DOCUMENT_ATTACHMENT_EXTENSIONS.join(', ')}), audio, video, md, txt or other text file`
+        )
+      );
       process.exit(1);
     }
 
     const sessionId = options.session || process.env.CODEMAN_SESSION_ID;
     const apiUrl = options.url || process.env.CODEMAN_API_URL || 'https://127.0.0.1:3000';
     if (sessionId && (await postAttachment(apiUrl, sessionId, filePath))) {
-      console.log(chalk.green('✓ Attachment card requested'));
+      console.log(palette.ok('✓ Attachment card requested'));
       return;
     }
 
@@ -1369,9 +1377,7 @@ function probeWebServerAt(base: string): Promise<WebServerProbe | null> {
   } catch {
     return Promise.resolve(null);
   }
-  const envFile = readCodemanEnv();
-  const username = process.env.CODEMAN_USERNAME || envFile.CODEMAN_USERNAME || 'admin';
-  const password = process.env.CODEMAN_PASSWORD || envFile.CODEMAN_PASSWORD;
+  const { username, password } = readCodemanCredentials();
   const transport = url.protocol === 'https:' ? https : http;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (password) {

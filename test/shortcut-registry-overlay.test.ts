@@ -108,6 +108,15 @@ describe('shortcut registry and overlay', () => {
     );
   });
 
+  it('sends shortcutOverrides with the settings PUT, and the schema accepts them (downstream COD-242)', async () => {
+    // Downstream persists shortcut overrides server-side so they follow the user
+    // across devices (COD-242), so the save must NOT strip them (upstream does,
+    // because its .strict() schema has no such key) and the schema must take them.
+    expect(settingsSource).not.toContain('shortcutOverrides: _sco,');
+    const { SettingsUpdateSchema } = await import('../src/web/schemas.js');
+    expect(SettingsUpdateSchema.safeParse({ shortcutOverrides: {} }).success).toBe(true);
+  });
+
   it('keeps the full help modal reachable now that Ctrl+? opens the registry overlay', () => {
     // The legacy #helpModal (full shortcut reference) lost its only opener when
     // Ctrl+? was rerouted to the overlay; the overlay footer must link to it.

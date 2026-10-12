@@ -148,7 +148,10 @@ describe('response viewer behavior', () => {
     const click = new MouseEvent('click', { bubbles: true, cancelable: true });
     body.querySelector('a')?.dispatchEvent(click);
 
-    expect(click.defaultPrevented).toBe(false);
+    // An in-document `#fragment` link is handled in place (upstream #563: scrolled to,
+    // never followed, since `<base href>` would navigate the app away); the others keep
+    // the browser default. None of them reaches the file preview.
+    expect(click.defaultPrevented).toBe(href.startsWith('#'));
     expect(app.openFilePreview).not.toHaveBeenCalled();
   });
 

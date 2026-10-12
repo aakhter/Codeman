@@ -126,7 +126,8 @@ document.addEventListener('visibilitychange', () => {
 let _rafHeartbeatCount = 0;
 let _rafHeartbeatLast = performance.now();
 const _rafHeartbeat = () => { _rafHeartbeatCount++; requestAnimationFrame(_rafHeartbeat); };
-requestAnimationFrame(_rafHeartbeat);
+// Guarded: test harnesses load app.js into a DOM that has no animation frames.
+if (typeof requestAnimationFrame === 'function') requestAnimationFrame(_rafHeartbeat);
 
 // Periodic state snapshot — runs in setInterval so it fires even when rAF is
 // starved or SSE handlers stop firing. Only logs when something looks wrong,
@@ -425,7 +426,7 @@ function paneExitAriaLabel(name, label) {
 // the render loop so it can be exercised directly: this is the only path a
 // session going live-to-exited ever takes, since that transition adds and
 // removes no tab and so never reaches the full rebuild.
-function applyPaneExitBadge(tab, paneExit) {
+function applyPaneExitBadge(tab, paneExit, activityPhrase) {
   const label = paneExitLabel(paneExit);
   const existing = tab.querySelector('.tab-exited-badge');
   // Quiets the status dot too. That dot reports `status`, which stays `idle` or
@@ -434,8 +435,23 @@ function applyPaneExitBadge(tab, paneExit) {
   tab.classList.toggle('tab-agent-exited', !!label);
   // The tab's aria-label overrides its contents for the accessible name, and the
   // badge is aria-hidden like its siblings, so the exit has to ride the label.
+  // Compared with the last English label set (data-aria-source, seeded by the
+  // full render too), never the attribute: in zh-CN the translator rewrites it,
+  // and writing English back on every pass would have it translate again.
   const name = tab.querySelector('.tab-name')?.dataset?.fullName;
-  if (name) tab.setAttribute('aria-label', paneExitAriaLabel(name, label));
+  if (name) {
+    // The effective agent activity (waiting on / checking background agents) rides
+    // the accessible name too, so a state change that rebuilds nothing is still heard.
+    // A child session's placement (COD-510) is part of the name the full render
+    // set; keep it when only the activity or the exit changes.
+    const placement = tab.dataset.placementDescription;
+    const base = paneExitAriaLabel(name, label) + (placement ? `, ${placement}` : '');
+    const aria = activityPhrase ? `${base}, ${activityPhrase}` : base;
+    if (tab.dataset.ariaSource !== aria) {
+      tab.dataset.ariaSource = aria;
+      tab.setAttribute('aria-label', aria);
+    }
+  }
   if (!label) {
     existing?.remove();
     return;
@@ -444,16 +460,19 @@ function applyPaneExitBadge(tab, paneExit) {
     const badge = document.createElement('span');
     badge.className = 'tab-exited-badge';
     badge.setAttribute('aria-hidden', 'true');
-    // Generated status text, like the status pills: it carries data-i18n-skip
-    // rather than a dictionary entry. Without it the translator would rewrite
-    // the badge and the next render pass would rewrite it back, because the
-    // comparison below is against the English string.
-    badge.setAttribute('data-i18n-skip', '');
+    // Translated like any other text (i18n.js has "exited" and its exit-code
+    // forms). The comparison below is with the last English label (data-label),
+    // never the DOM, which holds the translation in zh-CN: a DOM compare would
+    // write the English back on every pass for the translator to redo.
+    badge.dataset.label = label;
     badge.textContent = label;
     tab.querySelector('.tab-name')?.insertAdjacentElement('afterend', badge);
     return;
   }
-  if (existing.textContent !== label) existing.textContent = label;
+  if (existing.dataset.label !== label) {
+    existing.dataset.label = label;
+    existing.textContent = label;
+  }
 }
 
 const DEFAULT_SHORTCUTS = [
@@ -463,6 +482,7 @@ const DEFAULT_SHORTCUTS = [
     label: 'Show Shortcuts',
     bindings: [
       { modifiers: ['ctrl'], key: '?', code: 'Slash' },
+      { modifiers: ['ctrl', 'shift'], key: '?' },
       { modifiers: ['alt'], key: '?', code: 'Slash' },
     ],
     action: 'showShortcutOverlay',
@@ -471,7 +491,14 @@ const DEFAULT_SHORTCUTS = [
     id: 'close-session',
     group: 'Session',
     label: 'Close Session',
-    bindings: [{ modifiers: ['ctrl'], key: 'w' }],
+    // ⚠️ No default key. This used to be Ctrl+W, which is "delete the previous
+    // word" in every shell, readline prompt and agent CLI, so muscle memory
+    // killed the session (tmux and the CLI, with no confirm) mid-sentence, and
+    // with the split open it was not even the pane being typed in. Ctrl+W now
+    // reaches the terminal like any other key. Closing stays on the tab's close
+    // control and menu (with their confirm), and anyone who wants a key binds
+    // one in App Settings → Shortcuts.
+    bindings: [],
     action: 'killActiveSession',
   },
   {
@@ -529,6 +556,13 @@ const DEFAULT_SHORTCUTS = [
     action: 'toggleVoiceInput',
   },
   {
+    id: 'restore-terminal-size',
+    group: 'Terminal',
+    label: 'Restore Terminal Size',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'R' }],
+    action: 'restoreTerminalSize',
+  },
+  {
     id: 'move-tab-left',
     group: 'Tabs',
     label: 'Move Active Tab Left',
@@ -563,6 +597,106 @@ const DEFAULT_SHORTCUTS = [
     // the brackets, and the registry claims Alt for KeyK and Slash only.
     bindings: [{ modifiers: ['alt'], key: 'b', code: 'KeyB' }],
     action: 'toggleSessionSidebar',
+  },
+  // Tile grid (tile-grid.js). Dispatched by tileShortcutFor()/runTileShortcut()
+  // and deliberately absent from SHORTCUT_ACTIONS: each applies only in some
+  // states (the focus chords only while the grid is open), and outside them the
+  // chord must reach the terminal untouched. Every xterm key handler swallows a
+  // chord that applies, so it never reaches a PTY. Defaults: Ctrl+Shift+G makes
+  // xterm emit nothing (a shifted Ctrl letter) and overrides only the browser's
+  // find-previous; Alt+Shift+Arrows are bound by no CLI Codeman runs. The
+  // arrow chords (focus, move) never apply in a text field, where shifted
+  // arrows select (tileShortcutFor).
+  {
+    id: 'toggle-tile-grid',
+    group: 'Tiles',
+    label: 'Toggle Tile Grid',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'G', code: 'KeyG' }],
+    action: 'toggleTileGrid',
+  },
+  {
+    id: 'focus-tile-left',
+    group: 'Tiles',
+    label: 'Focus Tile Left',
+    bindings: [{ modifiers: ['alt', 'shift'], key: 'ArrowLeft' }],
+    action: 'focusTileLeft',
+  },
+  {
+    id: 'focus-tile-right',
+    group: 'Tiles',
+    label: 'Focus Tile Right',
+    bindings: [{ modifiers: ['alt', 'shift'], key: 'ArrowRight' }],
+    action: 'focusTileRight',
+  },
+  {
+    id: 'focus-tile-up',
+    group: 'Tiles',
+    label: 'Focus Tile Up',
+    bindings: [{ modifiers: ['alt', 'shift'], key: 'ArrowUp' }],
+    action: 'focusTileUp',
+  },
+  {
+    id: 'focus-tile-down',
+    group: 'Tiles',
+    label: 'Focus Tile Down',
+    bindings: [{ modifiers: ['alt', 'shift'], key: 'ArrowDown' }],
+    action: 'focusTileDown',
+  },
+  // Move the focused tile: it trades places with the neighbour the focus
+  // chords would pick. Ctrl+Shift+Arrows because every other two-modifier
+  // arrow chord is taken: Ctrl+Alt+Arrows switch workspaces (GNOME, Xfce, and
+  // rotate the screen on some Windows graphics drivers), Ctrl+Alt+Shift+Arrows
+  // move a window to another workspace (GNOME, Cinnamon, Xfce), Super chords
+  // belong to the desktop, Alt+Arrows are the browser's back and forward, and
+  // Alt+Shift+Arrows focus tiles. No browser, GNOME, KDE or macOS default and
+  // no Claude Code default uses Ctrl+Shift+Arrows (it parallels Ctrl+Shift+{ }
+  // for moving tabs); what it costs is word selection, so the chords skip a
+  // text field (tileShortcutFor) and give up only a terminal editor's
+  // word selection (nano, micro, emacs) inside a tile while the grid is open.
+  {
+    id: 'move-tile-left',
+    group: 'Tiles',
+    label: 'Move Tile Left',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'ArrowLeft' }],
+    action: 'moveTileLeft',
+  },
+  {
+    id: 'move-tile-right',
+    group: 'Tiles',
+    label: 'Move Tile Right',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'ArrowRight' }],
+    action: 'moveTileRight',
+  },
+  {
+    id: 'move-tile-up',
+    group: 'Tiles',
+    label: 'Move Tile Up',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'ArrowUp' }],
+    action: 'moveTileUp',
+  },
+  {
+    id: 'move-tile-down',
+    group: 'Tiles',
+    label: 'Move Tile Down',
+    bindings: [{ modifiers: ['ctrl', 'shift'], key: 'ArrowDown' }],
+    action: 'moveTileDown',
+  },
+  {
+    id: 'zoom-tile',
+    group: 'Tiles',
+    label: 'Zoom Focused Tile',
+    // Toggles. Alt+Shift+Enter would otherwise reach the CLI as ESC CR (Alt+Enter
+    // is a newline in Claude Code); it is swallowed only while the grid is open.
+    bindings: [{ modifiers: ['alt', 'shift'], key: 'Enter' }],
+    action: 'zoomTile',
+  },
+  {
+    id: 'remove-tile',
+    group: 'Tiles',
+    label: 'Remove Focused Tile',
+    // Unbound by default; the session keeps running either way.
+    bindings: [],
+    action: 'removeTile',
   },
   {
     id: 'previous-next-session',
@@ -611,7 +745,24 @@ const DEFAULT_SHORTCUTS = [
 
 // Smart copy is dispatched by terminal-ui.js so Ctrl+C can still reach the PTY
 // when there is no selection. Keep it out of the generic document shortcut loop.
-const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set(['copyTerminalSelection']);
+// Registry actions this document-level loop must NOT run: smart copy (terminal-ui.js)
+// and the tile-grid chords, which tile-grid.js's tileShortcutFor()/runTileShortcut()
+// dispatch only where they apply (setting on, grid open), so outside the grid the
+// key still reaches the terminal.
+const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set([
+  'copyTerminalSelection',
+  'focusTileDown',
+  'focusTileLeft',
+  'focusTileRight',
+  'focusTileUp',
+  'moveTileDown',
+  'moveTileLeft',
+  'moveTileRight',
+  'moveTileUp',
+  'removeTile',
+  'toggleTileGrid',
+  'zoomTile',
+]);
 
 // ═══════════════════════════════════════════════════════════════
 // CodemanApp Class — constructor and global state
@@ -633,33 +784,31 @@ const SIDEBAR_RICH_CLOCK_MS = 20000;
  */
 const URL_SESSION_WAIT_MS = 30000;
 
+/**
+ * How old the sessionStorage copy of unsaved tab-group edits may be when the
+ * next page replays it (see _restorePendingTabLayoutEdits). A reload takes
+ * seconds; an older copy is from a tab that sat closed or a different visit.
+ */
+const TAB_LAYOUT_PENDING_MAX_AGE_MS = 60000;
+
 class CodemanApp {
   constructor() {
     this.sessions = new Map();
     this._shortIdCache = new Map(); // Cache session ID .slice(0, 8) results
     this.sessionOrder = []; // Track tab order for drag-and-drop reordering
+    this.draggedTabId = null; // Currently dragged tab session ID
+    // Owner tab layout: read via GET /api/tab-layout and edited from the vertical
+    // rail via PUT /api/tab-layout (editTabLayout). It decides how the rail GROUPS
+    // rows; the server projects it onto the session order, so sessionOrder above
+    // stays the tab order.
     this.tabLayout = null;
-    this.tabLayoutVersion = null;
-    this.tabLayoutReadOnly = true;
-    this.collapsedTabGroupIds = new Set();
-    this.focusTabGroupCollapsed = false;
-    this._tabRailSessionSearch = '';
-    this._tabCollapseStorageFailed = false;
-    this._visibleTabRefs = [];
-    this._tabLayoutManaged = true;
+    this.collapsedTabGroupIds = new Set(); // per-device, localStorage-backed
+    this._hiddenTabGroupByRef = new Map(); // 'session:<id>' -> collapsed group id
+    // COD-512: until the first layout read settles, the vertical rail is not
+    // painted, so a reload never flashes the flat order before the groups.
     this._tabLayoutFirstPaintPending = true;
-    this._tabLayoutCoordinator = null;
-    this._tabLayoutEditCoordinator = null;
-    this._tabLayoutSsePending = false;
-    this._deferredCreatedSessionIds = new Set();
-    this._tabPlacementStates = new Map();
-    this._tabPendingFollowRefs = new Set();
-    this._tabLayoutPagehideHandler = null;
-    this._lastTabStructureKey = null;
-    this._tabFocusIdentity = null;
-    this._tabPointerDrag = null;
-    this._tabPointerHandlersBound = false;
-    this._legacySessionOrder = [];
+    this._lastTabGroupStructureKey = null;
+    this._tabRailSearch = ''; // rail search box text: in memory only, never persisted
     this.cases = [];
     this.currentRun = null;
     this.totalTokens = 0;
@@ -956,6 +1105,13 @@ class CodemanApp {
     // Last rendered connection-indicator tuple; the hot input path skips DOM
     // writes when the freshly computed descriptor is identical (COD-136).
     this._lastIndicatorDescriptor = null;
+    this._lastIndicatorLanguage = null; // the UI language it was rendered in
+    this._postDraining = new Set(); // sessionIds with an in-flight POST drainer
+    // Terminal sockets OTHER than the primary one (`this._ws`), keyed by the
+    // session they are bound to: the split pane's second terminal registers its
+    // socket here so its input rides the same exactly-once queue. Values are
+    // `{ ws, lastRecvAt }` handles owned by that terminal (see _inputSocketFor).
+    this._extraInputSockets = new Map();
     this._persistReliableTimer = null;
     this._reliableAckTimeoutMs = 4000; // unacked WS frame older than this ⇒ socket likely dead
     this._reliableMaxBytes = 256 * 1024; // cap on the persisted backlog
@@ -964,6 +1120,8 @@ class CodemanApp {
     // Flush the durable queue synchronously when the page is hidden/closed —
     // debounced persistence may have a pending write we mustn't lose on reload.
     window.addEventListener('pagehide', () => this._persistReliableNow());
+    // Tab group edits not yet confirmed by the server survive a reload.
+    window.addEventListener('pagehide', () => this._persistPendingTabLayoutEdits());
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') this._persistReliableNow();
       // A background tab's timers are throttled, so the 5s watchdog may not
@@ -1160,6 +1318,8 @@ class CodemanApp {
         this._selectUrlSession();
       });
     }
+    // mobile.css keeps the pop-out icon off phones unless a host can open windows.
+    document.documentElement.classList.toggle('host-windows', this.hasHostWindows());
     // Initialize mobile handlers
     KeyboardHandler.init();
     SwipeHandler.init();
@@ -1369,6 +1529,11 @@ class CodemanApp {
     try {
       this._webglLongTaskObserver = new PerformanceObserver((list) => {
         if (!this._webglAddon) return;
+        // ⚠️ The observer sees EVERY long task on the page. While the tile grid
+        // owns the terminal the main terminal is parked and draws nothing; the
+        // long tasks are tile renders and replays (DOM renderers), and counting
+        // them would write the sticky 7-day WebGL disable for no WebGL reason.
+        if (this._tilesOwnTerminal?.()) return;
         const now = performance.now();
         if (now - installedAt < WEBGL_FALLBACK.GRACE_MS) return;
         if (evaluateWebGLLongTaskTrip(recent, list.getEntries(), now)) {
@@ -1535,10 +1700,16 @@ class CodemanApp {
       if (!groups[group]) groups[group] = [];
       groups[group].push(shortcut);
     }
-    const formatBindings = (shortcut) => {
-      const bindings = shortcut.displayBindings || shortcut.bindings || [];
-      return bindings
-        .map((binding) => `<kbd>${escapeHtml(this.formatShortcutBinding(binding))}</kbd>`)
+    const formatBindings = (s) => {
+      // An action with no key (Close Session by default) is still listed, so the
+      // overlay says so instead of showing an empty key column.
+      // Key names, never translated: "Home" is also a dictionary word (the Home
+      // button), so without the skip zh-CN showed the key as 主页.
+      if (s.displayBindings) return s.displayBindings.map((b) => `<kbd data-i18n-skip>${escapeHtml(b)}</kbd>`).join(' / ');
+      if (!s.bindings) return '';
+      if (s.bindings.length === 0) return '<span class="shortcut-overlay-unbound">not bound</span>';
+      return s.bindings
+        .map((binding) => `<kbd data-i18n-skip>${escapeHtml(this.formatShortcutBinding(binding))}</kbd>`)
         .join(' / ');
     };
     list.innerHTML = Object.entries(groups)
@@ -1599,8 +1770,27 @@ class CodemanApp {
 
       // Escape - let the active group menu consume the key before closing unrelated UI.
       if (e.key === 'Escape') {
-        if (this._tabGroupMenu?.isConnected && this._tabGroupMenuKeydown) {
+        // An open group menu (or a grouped-rail drag) owns this Escape: close
+        // just that, not every panel behind it.
+        if (this._tabGroupMenu && this._tabGroupMenuKeydown) {
           this._tabGroupMenuKeydown(e);
+          return;
+        }
+        if (this._tabLayoutDrag?.active && this._tabLayoutDragKeydown) {
+          this._tabLayoutDragKeydown(e);
+          return;
+        }
+        // So does the Tiles count menu: it closes alone and gives the keyboard
+        // back to the Tiles button (tile-grid.js).
+        if (this._tileCountMenu) {
+          this.closeTileCountMenu({ refocus: true });
+          return;
+        }
+        // And so does the rail's search box while it holds text: that Escape
+        // clears the search and nothing else. This listener runs in the capture
+        // phase, before the box's own onkeydown, so the box cannot claim it there.
+        if (e.target?.id === 'tabRailSearch' && this._tabRailSearch) {
+          this.handleTabRailSearchKeydown(e);
           return;
         }
         // The View Response overlay is a top-level layer: close it first and
@@ -1635,7 +1825,18 @@ class CodemanApp {
         const code = e.code || '';
         const digitMatch = code.match(/^Digit([1-9])$/);
         if (digitMatch) {
-          if (this._activateVisibleTabNumber(parseInt(digitMatch[1], 10))) e.preventDefault();
+          const idx = parseInt(digitMatch[1], 10) - 1;
+          // Focus rows first (COD-509), then sessions, then web tabs: the
+          // numbers actually painted on the tabs. Resolved through the live
+          // projection the render paints: sessionOrder can transiently hold a
+          // dead id (delete raced against the order sync), and raw indexing
+          // then names the wrong tab for every key to its right.
+          const target = this._tabAltRefs()[idx];
+          if (target) {
+            e.preventDefault();
+            if (target.kind === 'session') this.selectSession(target.id);
+            else this.openWebview(target.id);
+          }
           return;
         }
         if (e.code === 'BracketLeft') {
@@ -1650,6 +1851,20 @@ class CodemanApp {
         }
       }
 
+      // Tile grid chords: only where they apply (tile-grid.js tileShortcutFor),
+      // so outside the grid Alt+Shift+Arrows still reach the terminal.
+      const tileShortcut = this.tileShortcutFor?.(e);
+      if (tileShortcut) {
+        e.preventDefault();
+        this.runTileShortcut(tileShortcut);
+        return;
+      }
+
+      // Match against the shortcut registry so user rebinds and per-shortcut
+      // disables (App Settings → Shortcuts) take effect. Every dispatchable
+      // binding requires Ctrl/Cmd/Alt (capture enforces the same), so plain
+      // typing exits early without touching the registry.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
       for (const shortcut of this.getShortcutRegistry()) {
         // Smart copy (#211) is dispatched by shouldCopyTerminalSelectionFromShortcut()
         // in terminal-ui.js, never from here: this loop preventDefaults on every
@@ -1693,17 +1908,30 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
 
   /**
+   * The session id the SSE filter names for `sessionId`: itself, or while the
+   * tile grid owns the terminal the grid's fixed filter (TILE_GRID_SSE_FILTER,
+   * constants.js), which no session matches. Both places that set the filter
+   * ask here: the live re-subscribe below and the connect URL (connectSSE),
+   * which an SSE reconnect rebuilds with the grid still open.
+   */
+  _sseFilterSessionId(sessionId) {
+    if (this._tilesOwnTerminal?.()) return window.CodemanTileGrid?.TILE_GRID_SSE_FILTER || sessionId;
+    return sessionId;
+  }
+
+  /**
    * POST a live subscription update so the server filters terminal events
-   * to the given session(s) for this client. Fire-and-forget — failures
+   * to the given session(s) for this client. Fire-and-forget: failures
    * are non-fatal because we'll still get every event we don't want
    * (just at higher cost), and the next reconnect carries the filter via
    * the SSE query string.
    */
   _updateSseSubscription(sessionId) {
     try {
+      const filterId = this._sseFilterSessionId(sessionId);
       const body = JSON.stringify({
         clientId: this._clientId,
-        sessions: sessionId ? [sessionId] : null,
+        sessions: filterId ? [filterId] : null,
       });
       fetch('/api/events/subscribe', {
         method: 'POST',
@@ -1768,7 +1996,9 @@ class CodemanApp {
       return false;
     }
     this._retireUrlSession();
-    this.selectSession(id, { auto: true });
+    // Following a link is navigation: a tiled id focuses its tile, any other
+    // leaves the tile grid for the single view (the grid is remembered).
+    this.selectSession(id, { auto: true, leaveTiles: true });
     return true;
   }
 
@@ -1822,6 +2052,24 @@ class CodemanApp {
     // false only when we owned a now-closed window (re-dock + fall through to
     // genuinely re-open below).
     if (this.detachedSessions.has(id) && this._raiseDetached(id)) return;
+    // A native wrapper (an Android WebView app) has no browser pop-ups, but can
+    // open the solo URL in a window of its own, beside this one on a foldable or
+    // a split screen. There is no WindowProxy to poll, so the tab is tracked the
+    // way a dashboard reload tracks it: the solo window's channel announcements
+    // plus the roll-call liveness check. Without a channel there is no roll-call
+    // either, so a hosted tab could never re-dock: refuse before asking the host.
+    const hosted = this.hasHostWindows() && !this.windowChannel
+      ? false
+      : this.openInHostWindow(CodemanBase.url('/session/' + encodeURIComponent(id)));
+    if (hosted !== null) {
+      if (!hosted) {
+        this.showToast?.('Could not open a new window for this session', 'error');
+        return;
+      }
+      this._markDetached(id, true);
+      this._postWindowMessage({ type: 'detached', id });
+      return;
+    }
     const features = 'width=960,height=680,menubar=no,toolbar=no,location=no,status=no';
     let win = null;
     try { win = window.open(CodemanBase.url('/session/' + encodeURIComponent(id)), 'codeman-session-' + id, features); } catch {}
@@ -1834,6 +2082,44 @@ class CodemanApp {
     this._watchDetachedWindow(id, win);
     this._postWindowMessage({ type: 'detached', id });
     try { win.focus(); } catch {}
+  }
+
+  /**
+   * The embedding app's window opener, when there is one. A native wrapper
+   * exposes `window.CodemanHost.openWindow(absoluteUrl)` (anything but false
+   * counts as opened) to say it can put a page in a window of its own; browsers
+   * never define it.
+   * @returns {boolean} whether a host window opener is present
+   */
+  hasHostWindows() {
+    try {
+      return typeof window !== 'undefined' && typeof window.CodemanHost?.openWindow === 'function';
+    } catch { return false; }
+  }
+
+  /**
+   * The tab pop-out setting, defaulting ON under a host that opens windows.
+   * The one resolver for the tab icon, App Settings and the tab action menu.
+   * @param {object} settings stored per-device App Settings
+   * @param {object} [defaults] the device's default settings
+   * @returns {boolean} whether the pop-out control shows
+   */
+  tabDetachButtonEnabled(settings, defaults = {}) {
+    return settings?.showTabDetachButton ?? (this.hasHostWindows() || (defaults?.showTabDetachButton ?? false));
+  }
+
+  /**
+   * Open an http(s) URL in a host window, usually Codeman's own origin (a saved
+   * web tab passes its own).
+   * @param {string} url absolute or base-relative URL
+   * @returns {boolean|null} null when there is no host (use window.open),
+   *   otherwise whether the host opened a window
+   */
+  openInHostWindow(url) {
+    if (!this.hasHostWindows()) return null;
+    try {
+      return window.CodemanHost.openWindow(new URL(url, location.href).href) !== false;
+    } catch { return false; }
   }
 
   /** Raise the popup for an already-detached session. Returns true if the raise
@@ -1907,6 +2193,12 @@ class CodemanApp {
    *  Full re-renders re-apply the class from this.detachedSessions. */
   _markDetached(id, on) {
     if (on) this.detachedSessions.add(id); else this.detachedSessions.delete(id);
+    // A popped-out session's window owns its PTY size now, so it leaves the
+    // tile grid (one place per session in this browser tab). `gone`: it left by
+    // itself, not by a tile the user removed, so the grid's count stays and the
+    // ranking fills that cell the next time the grid opens, as when it pops out
+    // with the grid closed.
+    if (on && this._tileGrid?.has(id)) this.removeTile(id, { gone: true });
     const container = this.$('sessionTabs');
     if (!container) return;
     for (const tab of container.querySelectorAll(
@@ -1966,8 +2258,12 @@ class CodemanApp {
       // Roll-call has no id (broadcast to all) — answer before the id filter.
       if (msg.type === 'roll-call') { this._postWindowMessage({ type: 'detached', id: this.soloSessionId }); return; }
       if (msg.id !== this.soloSessionId) return;
-      if (msg.type === 'close-request') { try { window.close(); } catch {} }
-      else if (msg.type === 'focus-request') { try { window.focus(); } catch {} }
+      // A host window ignores window.close()/focus() from script it did not
+      // open by window.open, so ask the host when it offers the call.
+      if (msg.type === 'close-request') { this._closeSoloWindow(); }
+      else if (msg.type === 'focus-request') {
+        try { if (typeof window.CodemanHost?.focusWindow === 'function') window.CodemanHost.focusWindow(); else window.focus(); } catch {}
+      }
       return;
     }
     // Dashboard side.
@@ -2019,6 +2315,14 @@ class CodemanApp {
     }, 1200);
   }
 
+  /** Solo window: close itself (the re-dock button and a dashboard close-request). */
+  _closeSoloWindow() {
+    try {
+      if (typeof window.CodemanHost?.closeWindow === 'function') window.CodemanHost.closeWindow();
+      else window.close();
+    } catch {}
+  }
+
   /** Solo window: select the target session and apply minimal single-session
    *  chrome. Called from handleInit once the session list has loaded. */
   _applySoloMode() {
@@ -2050,7 +2354,7 @@ class CodemanApp {
     el.className = 'solo-gone-overlay';
     el.innerHTML = '<h2>Session unavailable</h2>'
       + '<p>This session has ended or is no longer available.</p>'
-      + '<button class="btn-primary" onclick="window.close()">Close window</button>';
+      + '<button class="btn-primary" onclick="app._closeSoloWindow()">Close window</button>';
     document.body.appendChild(el);
     document.title = (window.codemanT?.('Session ended') || 'Session ended')
       + ' — ' + (window.CodemanI18n?.displayName || 'Codeman');
@@ -2100,7 +2404,8 @@ class CodemanApp {
     // session we're rendering. Lifecycle/metadata events are sent globally
     // regardless of filter (server side).
     const _sseParams = new URLSearchParams({ clientId: this._clientId });
-    if (this.activeSessionId) _sseParams.set('sessions', this.activeSessionId);
+    const _sseFilterId = this._sseFilterSessionId(this.activeSessionId);
+    if (_sseFilterId) _sseParams.set('sessions', _sseFilterId);
     const eventSource = new EventSource(CodemanBase.url(`/api/events?${_sseParams.toString()}`));
     this.eventSource = eventSource;
 
@@ -2564,15 +2869,12 @@ class CodemanApp {
   }
 
   _onSessionCreated(data) {
+    // A session this tab is closing stays closed until the server answers.
+    if (this._closingSessions?.has(data.id)) return;
     this._applySessionActivityEvent(data, 'created', false);
     this.updateAttachmentHistoryCountFromSession?.(data);
-    const visibilityDeferred =
-      this._tabLayoutEditCoordinator?.hasPending() &&
-      this.tabLayout &&
-      !this._refLocation({ kind: 'session', id: data.id });
-    if (visibilityDeferred) (this._deferredCreatedSessionIds ??= new Set()).add(data.id);
     // Add new session to end of tab order
-    if (!visibilityDeferred && !this._tabLayoutFirstPaintPending && !this.sessionOrder.includes(data.id)) {
+    if (!this.sessionOrder.includes(data.id)) {
       this.sessionOrder.push(data.id);
       this.saveSessionOrder();
     }
@@ -2594,6 +2896,9 @@ class CodemanApp {
 
   _onSessionUpdated(data) {
     const incoming = data.session || data;
+    // A session this tab is closing stays closed until the server answers
+    // (closeSession() puts it back if the delete is refused).
+    if (this._closingSessions?.has(incoming.id)) return;
     const oldSession = this.sessions.get(incoming.id);
     const claudeSessionIdJustSet = incoming.claudeSessionId && (!oldSession || !oldSession.claudeSessionId);
     const session = this._applySessionActivityEvent(incoming, 'updated');
@@ -2642,7 +2947,7 @@ class CodemanApp {
     this.renderSessionTabs();
     // COD-97: re-render the Monitor so the closed session's row disappears
     // immediately, instead of relying solely on a MUX_KILLED event that may race.
-    this.renderMuxSessions();
+    this.renderMuxSessions?.();
     this.renderRalphStatePanel();  // Update ralph panel after session deleted
     this.renderProjectInsightsPanel();  // Update project insights panel after session deleted
     // Stop stats polling when no sessions remain
@@ -2715,6 +3020,10 @@ class CodemanApp {
     // Terminal output invalidates any older waiting/checking projection even
     // when this tab is not active and therefore has no renderer work below.
     this._applySessionActivityEvent(data, 'output');
+    // Tile grid open: the main terminal is parked and its socket closed, so the
+    // SSE fallback would write the focused tile's output into a hidden xterm.
+    // The tiles carry their own output over their own sockets.
+    if (this._tilesOwnTerminal?.()) return;
     if (data.id === this.activeSessionId) {
       // COD-187: while frozen in the history view, live output is dropped —
       // the exit-time frame refetch shows the final state. Flag it so the
@@ -2774,6 +3083,8 @@ class CodemanApp {
    */
   _scheduleDroppedOutputRecovery(sessionId, attempt = 0, queuedBytes) {
     if (!sessionId || this._clientDropRecoveryTimer) return;
+    // Nothing of the main terminal's to recover while the tile grid owns it.
+    if (this._tilesOwnTerminal?.()) return;
     // Behind the debounce guard: one line per window, not per dropped frame.
     if (Number.isFinite(queuedBytes)) _crashDiag.log(`TERMINAL DROP: ${(queuedBytes / 1024).toFixed(0)}KB queued`);
     this._clientDropRecoveryTimer = setTimeout(async () => {
@@ -3181,6 +3492,23 @@ class CodemanApp {
         if (filePath && this._isExternalPreviewPath(filePath, sid)) {
           this.openExternalPathPreview(filePath, sid)?.catch?.((err) => console.error('External path preview failed:', err));
         } else if (filePath) this.openFilePreview(filePath, pathLink.dataset.sessionId || this.activeSessionId);
+        return;
+      }
+
+      // An in-document link (`[Install](#installation)`). The browser must not follow it: with
+      // `<base href="/">` a bare fragment points at the dashboard's root and would navigate the
+      // app away. Resolve it inside this rendered document and scroll there (constants.js).
+      // A fragment that matches nothing is simply ignored, never a navigation.
+      const fragmentLink = ev.target.closest('a[href^="#"]');
+      if (fragmentLink && body.contains(fragmentLink)) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const root = fragmentLink.closest('.rv-text') || body;
+        const target = window.CodemanMarkdownAnchors?.find(root, fragmentLink.getAttribute('href'));
+        if (target) {
+          const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+          target.scrollIntoView({ block: 'start', behavior: calm ? 'auto' : 'smooth' });
+        }
         return;
       }
 
@@ -3979,6 +4307,10 @@ class CodemanApp {
   async _onSessionNeedsRefresh(event = {}) {
     // Server sends this after SSE backpressure clears — terminal data was dropped,
     // so reload the buffer to recover from any display corruption.
+    // Tile grid open: the main terminal is parked, so this would fetch a capture
+    // for a hidden xterm. Each tile refreshes itself through the grid's queue.
+    // `false`, never undefined: the drop recovery reads the result.
+    if (this._tilesOwnTerminal?.()) return false;
     const sessionId = this.activeSessionId;
     if (event?.id && event.id !== sessionId) return false;
     if (!sessionId || !this.terminal) return false;
@@ -4428,6 +4760,8 @@ class CodemanApp {
   }
 
   async _onSessionClearTerminal(data) {
+    // The tiles get the clear over their own sockets; the parked main terminal must not refetch.
+    if (this._tilesOwnTerminal?.()) return;
     if (data.id === this.activeSessionId) {
       // COD-187: mirror tabs repaint from the frame capture instead of a
       // history replay (in history view, exit refetches).
@@ -4482,14 +4816,15 @@ class CodemanApp {
   _onSessionCompletion(data) {
     this.totalCost += data.cost || 0;
     this.updateCost();
-    if (data.id === this.activeSessionId) {
+    // Not into the parked main terminal while the tile grid owns the screen.
+    if (data.id === this.activeSessionId && !this._tilesOwnTerminal?.()) {
       this.terminal.writeln('');
       this.terminal.writeln(`\x1b[1;32m Done (Cost: $${(data.cost || 0).toFixed(4)})\x1b[0m`);
     }
   }
 
   _onSessionError(data) {
-    if (data.id === this.activeSessionId) {
+    if (data.id === this.activeSessionId && !this._tilesOwnTerminal?.()) {
       this.terminal.writeln(`\x1b[1;31m Error: ${data.error}\x1b[0m`);
     }
     this._notifySession(data.id, 'critical', 'session-error', 'Session Error', data.error || 'Unknown error');
@@ -4645,14 +4980,20 @@ class CodemanApp {
     // broken feature rather than as an idle window (reported 2026-09-01). A
     // missing CODEX bucket means the opposite — that plan has no such limit —
     // so those stay omitted rather than showing a dash forever.
+    // Every window also carries a ring (the Compact header style) and a meter
+    // (Tiles). styles.css hides both in the classic style, so the chip there
+    // reads exactly as before. `fill` is clamped for the two graphics only; the
+    // label keeps the real number.
     const seg = (label, p, idle) => {
       if (p === null) {
         if (!idle) return '';
-        return `<span class="pu-win pu-win-idle"><span class="pu-label">${label}</span><span class="pu-val">—</span></span>`;
+        return `<span class="pu-win pu-win-idle"><span class="pu-ring" style="--pu:0"></span><span class="pu-label">${label}</span><span class="pu-val">—</span><span class="pu-meter"><i style="width:0%"></i></span></span>`;
       }
       const n = Math.round(Number(p));
       if (!Number.isFinite(n)) return '';
-      return `<span class="pu-win"><span class="pu-label">${label}</span><span class="pu-val ${colorClass(n)}">${n}%</span></span>`;
+      const fill = Math.min(100, Math.max(0, n));
+      const cls = colorClass(n);
+      return `<span class="pu-win"><span class="pu-ring ${cls}" style="--pu:${fill}"></span><span class="pu-label">${label}</span><span class="pu-val ${cls}">${n}%</span><span class="pu-meter ${cls}"><i style="width:${fill}%"></i></span></span>`;
     };
     // The provider label only earns its space when there is more than one
     // provider to tell apart: a machine with Claude alone shows bare windows.
@@ -4969,7 +5310,7 @@ class CodemanApp {
         } else if (msg.t === 'ia') {
           // Input ACK — the server applied (or deduped) this seq; drop it from
           // the durable queue so it can never be re-delivered/lost.
-          this._onWsInputAck(msg.seq, msg);
+          this._onWsInputAck(msg.seq, msg, sessionId);
         } else if (msg.t === 'zc') {
           // Resize confirm — the geometry the PTY actually holds, which is not
           // always the one this client asked for (issue #464).
@@ -5187,6 +5528,49 @@ class CodemanApp {
   }
 
   /**
+   * The OPEN terminal socket bound to `sessionId`, or null: the primary socket
+   * first, then one registered by a second terminal (the split pane). The
+   * delivery layer below asks this instead of reading `this._ws` directly, so a
+   * second terminal's input gets the same exactly-once queue, ACKs and
+   * half-open detection as the primary's.
+   *
+   * Returns `{ ws, lastRecvAt }`: `lastRecvAt` is the socket's last received
+   * frame, which `_redeliverSweep` reads to tell a dead socket from a slow ACK.
+   */
+  _inputSocketFor(sessionId) {
+    if (!sessionId) return null;
+    if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
+      return { ws: this._ws, lastRecvAt: this._wsLastRecvAt };
+    }
+    const handle = this._extraInputSockets?.get(sessionId);
+    if (handle && handle.ws && handle.ws.readyState === WebSocket.OPEN) return handle;
+    return null;
+  }
+
+  /**
+   * Register a second terminal's socket for `sessionId` (call from its onopen).
+   * `handle` is `{ ws, lastRecvAt }`, owned by the caller, which must bump
+   * `handle.lastRecvAt` on every received frame. Stamped here so a socket that
+   * just opened does not look silent to the redelivery sweep, which would
+   * otherwise force-close it as half-open on the first stale record.
+   */
+  _registerInputSocket(sessionId, handle) {
+    if (!sessionId || !handle) return;
+    handle.lastRecvAt = Date.now();
+    if (!this._extraInputSockets) this._extraInputSockets = new Map();
+    this._extraInputSockets.set(sessionId, handle);
+  }
+
+  /**
+   * Drop a registration, but only the one `handle` made: a replacement socket
+   * registers its own handle before the old one's close lands, and that late
+   * close must not unregister the socket that replaced it.
+   */
+  _unregisterInputSocket(sessionId, handle) {
+    if (this._extraInputSockets?.get(sessionId) === handle) this._extraInputSockets.delete(sessionId);
+  }
+
+  /**
    * Fire-and-forget input for EPHEMERAL, loss-tolerant streams (e.g. wheel-scroll
    * reports). Unlike _sendInputAsync, this never enters the durable seq/ACK queue,
    * so it isn't persisted, retried, or counted in the pending-bytes connection
@@ -5197,9 +5581,10 @@ class CodemanApp {
    */
   _sendInputEphemeral(sessionId, input) {
     if (!sessionId || !input) return;
-    if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
+    const sock = this._inputSocketFor(sessionId);
+    if (sock) {
       try {
-        this._ws.send(JSON.stringify({ t: 'i', d: input }));
+        sock.ws.send(JSON.stringify({ t: 'i', d: input }));
         return;
       } catch {
         // socket died mid-send — fall through to a best-effort POST
@@ -5260,11 +5645,12 @@ class CodemanApp {
     // over the single ordered stream. They stay pending until the server ACKs
     // them ({t:'ia'}); a frame swallowed by a half-open socket is re-sent after
     // the sweep force-reconnects (which resets sentAt=0 in _onWsReady).
-    if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
+    const sock = this._inputSocketFor(sessionId);
+    if (sock) {
       for (const rec of list) {
         if (rec.sentAt !== 0) continue;
         try {
-          this._ws.send(JSON.stringify({ t: 'i', d: rec.data, seq: rec.seq, cid: this._clientId }));
+          sock.ws.send(JSON.stringify({ t: 'i', d: rec.data, seq: rec.seq, cid: this._clientId }));
           rec.sentAt = Date.now();
           rec.tries++;
         } catch {
@@ -5326,8 +5712,10 @@ class CodemanApp {
    * called a duplicate is the mechanism working as designed — the original did
    * land — and re-sending it would type the same thing twice.
    */
-  _onWsInputAck(seq, msg) {
-    const sessionId = this._wsSessionId;
+  _onWsInputAck(seq, msg, sessionId = this._wsSessionId) {
+    // `sessionId` is the session of the socket the ACK arrived on: `{t:'ia'}`
+    // frames carry none, and with a second terminal's socket in play
+    // `this._wsSessionId` is no longer the only candidate.
     if (!sessionId || !Number.isInteger(seq)) return;
     if (msg && msg.err) {
       // Refused for good (e.g. over the size limit): retrying cannot help.
@@ -5358,8 +5746,15 @@ class CodemanApp {
   _onWsReady(sessionId, options = {}) {
     const list = this._pendingDeliveries.get(sessionId);
     if (!list || list.length === 0) return;
+    // A second terminal's own socket (split pane, tile) replays its queue as soon as
+    // it opens: every input frame activates that viewer server-side on arrival, so
+    // the primary pane's activation handshake does not apply to it.
+    const extraSocketReady =
+      this._wsSessionId !== sessionId && this._extraInputSockets?.get(sessionId)?.ws?.readyState === WebSocket.OPEN;
     const activationReady =
-      options.activationReady === true || this._prepareFreshSocketInputReplay(sessionId, this._ws);
+      options.activationReady === true ||
+      extraSocketReady ||
+      this._prepareFreshSocketInputReplay(sessionId, this._ws);
     if (!activationReady) return;
     if (list) for (const r of list) r.sentAt = 0; // fresh socket ⇒ re-send all
     this._drainSession(sessionId);
@@ -5376,19 +5771,20 @@ class CodemanApp {
     for (const sessionId of [...this._pendingDeliveries.keys()]) {
       const list = this._pendingDeliveries.get(sessionId);
       if (!list || list.length === 0) continue;
-      const isActiveWs =
-        this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId;
-      if (isActiveWs) {
+      const sock = this._inputSocketFor(sessionId);
+      if (sock) {
         const oldest = list[0];
         // Only tear the socket down when the oldest unacked frame is stale AND the
         // socket has been silent for the timeout: a connection still delivering
         // output/ACKs is alive (the ACK is just behind), so force-closing it would
         // cause needless WS↔HTTP flapping. A truly half-open socket goes quiet.
+        // Silence is measured on THIS socket: the primary's last frame says
+        // nothing about a second terminal's connection, and the reverse.
         const stale = oldest && oldest.sentAt && Date.now() - oldest.sentAt > this._reliableAckTimeoutMs;
-        const silent = Date.now() - this._wsLastRecvAt > this._reliableAckTimeoutMs;
+        const silent = Date.now() - (sock.lastRecvAt || 0) > this._reliableAckTimeoutMs;
         if (stale && silent) {
           try {
-            this._ws.close(); // half-open: never recovers on its own — force reconnect
+            sock.ws.close(); // half-open: never recovers on its own — force reconnect
           } catch {
             /* ignore */
           }
@@ -5544,10 +5940,13 @@ class CodemanApp {
       };
     }
 
-    // With an active terminal, show its WebSocket delivery state.
+    // With an active terminal, show its transport (WebSocket vs HTTP fallback).
+    // While the tile grid owns the terminal the main socket is parked on
+    // purpose, so the state comes from the tiles' sockets: all open is
+    // connected, any still coming back is reconnecting.
     if (this.activeSessionId) {
       let cls, label, detail;
-      switch (this._wsState) {
+      switch (this._tilesOwnTerminal?.() ? this._tileGridSocketState() : this._wsState) {
         case 'connected':
           cls = 'connected'; label = 'WS'; detail = 'Terminal connected over WebSocket';
           break;
@@ -5599,6 +5998,51 @@ class CodemanApp {
     };
   }
 
+  /**
+   * The two words the Tiles header style shows for the connection indicator
+   * (label over value), derived from the descriptor rather than added to it,
+   * so the descriptor and its pinned strings stay exactly what they were. The
+   * classic text line (queued bytes and all) stays in the DOM and the full
+   * detail stays in the tooltip.
+   * @param {{dotClass: string, text: string}} desc
+   * @returns {{label: string, value: string, state: string}}
+   */
+  _connectionTileWords(desc) {
+    const state = (desc.dotClass || '').replace('connection-dot', '').trim();
+    const text = desc.text || '';
+    switch (state) {
+      case 'connected':
+        return { label: 'WS', value: 'live', state };
+      case 'fallback':
+        return { label: 'HTTP', value: 'fallback', state };
+      case 'offline':
+        return { label: 'NET', value: 'offline', state };
+      case 'draining':
+        return { label: 'SEND', value: 'queued', state };
+      case 'reconnecting':
+        // The same dot covers the terminal WebSocket and, with no session
+        // open, the SSE event stream; the classic text already tells them apart.
+        return { label: text.startsWith('WS') ? 'WS' : 'SSE', value: 'retry', state };
+      default:
+        return { label: '', value: '', state };
+    }
+  }
+
+  /**
+   * The tile's value word as shown: i18n.js's scoped 'Connection tile: <word>'
+   * entry in Chinese, the English word otherwise. Never a bare-word key: those
+   * would also translate other text ("retry" is the orchestrator's Retry button),
+   * which is why the value span carries data-i18n-skip.
+   * @param {string} value
+   * @returns {string}
+   */
+  _connectionTileValueText(value) {
+    if (!value) return '';
+    const key = `Connection tile: ${value}`;
+    const translated = typeof window.codemanT === 'function' ? window.codemanT(key) : key;
+    return translated && translated !== key ? translated : value;
+  }
+
   _updateConnectionIndicator() {
     const indicator = this.$('connectionIndicator');
     const dot = this.$('connectionDot');
@@ -5610,8 +6054,12 @@ class CodemanApp {
     // writes when nothing changed (COD-136) — the compute above is DOM-free.
     const next = this._computeConnectionDescriptor();
     const prev = this._lastIndicatorDescriptor;
+    // The tile's value word is written in the UI language, so a language
+    // switch counts as a change too.
+    const language = window.CodemanI18n?.language || 'en';
     if (
       prev &&
+      language === this._lastIndicatorLanguage &&
       prev.display === next.display &&
       prev.dotClass === next.dotClass &&
       prev.text === next.text &&
@@ -5620,12 +6068,21 @@ class CodemanApp {
       return;
     }
     this._lastIndicatorDescriptor = next;
+    this._lastIndicatorLanguage = language;
 
     indicator.style.display = next.display;
     if (next.display !== 'none') {
       dot.className = next.dotClass;
       text.textContent = next.text;
       indicator.title = next.title;
+      const tileLabel = this.$('connectionTileLabel');
+      const tileValue = this.$('connectionTileValue');
+      if (tileLabel && tileValue) {
+        const words = this._connectionTileWords(next);
+        tileLabel.textContent = words.label;
+        tileValue.textContent = this._connectionTileValueText(words.value);
+        tileValue.className = `connection-tile-value ${words.state}`.trim();
+      }
     }
   }
 
@@ -5734,10 +6191,14 @@ class CodemanApp {
     this._lastOfflineUiKey = '';
     this._updateConnectionLossUi();
     this.connectSSE();
-    // Re-arm transiently unavailable terminal transport with the SSE stream.
-    // An authoritative 4004/4009 remains closed: retrying cannot revive a
-    // terminal session the server says no longer exists.
-    if (
+    // The terminal socket does not always come back on its own (planWsReconnect
+    // 'give-up'), so the same button re-arms it. With the tile grid open the
+    // main socket is parked on purpose: re-arm the tiles' sockets instead. An
+    // authoritative 4004/4009 remains closed: retrying cannot revive a terminal
+    // session the server says no longer exists.
+    if (this._tilesOwnTerminal?.()) {
+      for (const { tile } of this._tileGrid.tiles.values()) tile.reconnectNow();
+    } else if (
       this.activeSessionId &&
       this._wsState !== 'connected' &&
       !this._isTerminalSessionGone(this.activeSessionId)
@@ -5878,7 +6339,6 @@ class CodemanApp {
    */
   _resetAllAppState(preserveTerminal = false) {
     this.sessions.clear();
-    this._deferredCreatedSessionIds = new Set();
     this.ralphStates.clear();
     if (!preserveTerminal) {
       this.terminalBuffers.clear();
@@ -5977,11 +6437,15 @@ class CodemanApp {
       }
       this.notificationManager.groupingMap.clear();
     }
-    // Disconnect terminal resize observer (prevents memory leak on reconnect)
-    if (this.terminalResizeObserver) {
-      this.terminalResizeObserver.disconnect();
-      this.terminalResizeObserver = null;
-    }
+    // ⚠️ The terminal resize observer is NOT reset here. initTerminal() owns its
+    // lifecycle (it runs once per page and disconnects any previous observer
+    // before creating one), and this reset runs on EVERY SSE init, page load
+    // included. It used to disconnect the observer "to prevent a leak", which
+    // left the terminal with no observer from the first init on: only a WINDOW
+    // resize ever refit it, so anything that resized just the terminal box
+    // (state rows and lineage room appearing in the header, the tab strip
+    // wrapping) clipped xterm's bottom rows behind the toolbar until a tab
+    // switch or a window resize.
     // Clear any other orphaned timers
     if (this.planLoadingTimer) {
       clearInterval(this.planLoadingTimer);
@@ -6054,19 +6518,6 @@ class CodemanApp {
       Array.isArray(data.sessions) &&
       data.sessions.some((s) => s.id === activeBefore);
 
-    const deferredCreatedSessionOwners = new Map();
-    for (const id of this._deferredCreatedSessionIds || []) {
-      const session = this.sessions.get(id);
-      if (session) deferredCreatedSessionOwners.set(id, this._tabLayoutSessionOwnerIdentity(session));
-    }
-    const currentUser = window.__codemanUser;
-    const currentLayoutOwner =
-      currentUser?.multiUser === true && typeof currentUser.username === 'string' && currentUser.username.length > 0
-        ? currentUser.username
-        : currentUser?.multiUser === false
-          ? '@single'
-          : null;
-
     this._resetAllAppState(keepTerminal);
 
     data.sessions.forEach(s => {
@@ -6080,15 +6531,6 @@ class CodemanApp {
         });
       }
     });
-    this._deferredCreatedSessionIds = new Set(
-      data.sessions
-        .filter((session) => {
-          if (!deferredCreatedSessionOwners.has(session.id)) return false;
-          const owner = this._tabLayoutSessionOwnerIdentity(session);
-          return deferredCreatedSessionOwners.get(session.id) === owner && (!currentLayoutOwner || owner === currentLayoutOwner);
-        })
-        .map((session) => session.id)
-    );
 
     // Server is source of truth for open sessions — don't resurrect stale tabs
     // from localStorage (would show phantom "ended" tabs when a session was closed
@@ -6104,21 +6546,10 @@ class CodemanApp {
 
     // Sync sessionOrder with current sessions (preserve order, add new, remove stale)
     this.syncSessionOrder();
-    this._legacySessionOrder = [...this.sessionOrder];
-    const tabRestoreSnapshot = {
-      selectGeneration: this._selectGeneration,
-      activeSessionId: this.activeSessionId,
-      activeWebviewId: this.activeWebviewId,
-    };
-    // During the first owner-layout read there must be no interval where
-    // compatibility consumers can observe or select the legacy ordering. On a
-    // reconnect, retain the last adopted projection until the fresh read lands.
-    if (this._tabLayoutFirstPaintPending) {
-      this.sessionOrder = [];
-    } else if (this.tabLayout) {
-      this._refreshTabProjection();
-    }
-    const tabLayoutLoad = Promise.resolve(this._loadTabLayout()).catch(() => false);
+
+    // (Re)read the owner tab layout on every init, including SSE reconnects: a
+    // tab:layoutChanged sent while this client was disconnected is never replayed.
+    this._loadTabLayout();
 
     if (data.respawnStatus) {
       this.respawnStatus = data.respawnStatus;
@@ -6200,8 +6631,16 @@ class CodemanApp {
       return;
     }
 
+    // Tile grid open (tile-grid.js): tiles whose sessions are gone are removed,
+    // the live ones are kept as they are and reconnect now, and the main
+    // terminal stays parked. Before the link below, which may leave the grid.
+    const tilesOpen = this._reconcileTileGrid?.() === true;
+
     // A `#session=<id>` link wins over restoring the last active tab.
     if (this._urlSessionId && this.sessions.has(this._urlSessionId)) {
+      // And over a tile grid stored open: it stays remembered, closed, rather
+      // than reappearing unexplained on the next reload.
+      if (!tilesOpen) this._closeStoredTileGrid?.();
       this.activeSessionId = null;
       this._selectUrlSession();
       return;
@@ -6209,36 +6648,51 @@ class CodemanApp {
     // Not listed yet: its wait starts now that the list has loaded, and the
     // last active tab is restored meanwhile.
     if (this._urlSessionId) this._armUrlSessionWait(this._urlSessionId);
+    // The grid holds the focused session: nothing below may reconnect or reload
+    // the parked main terminal (its keepTerminal branch would reopen the main
+    // socket onto a session a tile already shows).
+    if (tilesOpen) return;
 
-    // Restore only after this generation's layout read has completed. A newer
-    // init or an explicit selection takes precedence over this pending restore.
-    void tabLayoutLoad.then(() => {
-      if (gen !== this._initGeneration) return;
-      if (
-        this._selectGeneration !== tabRestoreSnapshot.selectGeneration ||
-        this.activeSessionId !== tabRestoreSnapshot.activeSessionId ||
-        this.activeWebviewId !== tabRestoreSnapshot.activeWebviewId
-      ) return;
-      if (tabRestoreSnapshot.activeWebviewId) return;
-
-      // Priority: current active > localStorage > first projected session.
-      let restoreId = tabRestoreSnapshot.activeSessionId;
+    const previousActiveId = this.activeSessionId;
+    if (this.sessionOrder.length === 0) {
+      this.activeSessionId = null;
+      this.updateFileBrowserHeaderButton?.();
+    } else {
+      // Priority: current active > localStorage > first session
+      let restoreId = previousActiveId;
       if (!restoreId || !this.sessions.has(restoreId)) {
         try { restoreId = localStorage.getItem('codeman-active-session'); } catch {}
       }
-      if (keepTerminal && restoreId === tabRestoreSnapshot.activeSessionId && this.sessions.has(restoreId)) {
-        // Reconnect onto the session already on screen without resetting xterm.
+      if (keepTerminal && restoreId === previousActiveId && this.sessions.has(restoreId)) {
+        // Reconnect onto the session already on screen. renderSessionTabs() ran
+        // above and activeSessionId never changed, so the tab strip is already
+        // correct; only the buffer needs to catch up. The WS has its own
+        // backoff reconnect, but if it is not on this session (dead socket, or
+        // a give-up) nothing else would re-establish it from here.
         if (this._wsSessionId !== restoreId) this._connectWs(restoreId);
         void this._onSessionNeedsRefresh({ id: restoreId });
-        return;
+        // The split pane's second terminal reconnects on its own backoff (up to
+        // 10 s between tries); the server is back now, so skip the wait. A no-op
+        // while its socket is open, stopped for good, or destroyed.
+        this._splitPane?.reconnectNow?.();
+      } else {
+        this.activeSessionId = null;
+        this.updateFileBrowserHeaderButton?.();
+        // A tile grid stored open on this device (tile-grid.js) comes back IN
+        // PLACE of the single-view restore below, so the main terminal never
+        // loads (its first select would pull a whole-history capture only to
+        // be parked a moment later).
+        if (this._restoreTileGrid?.()) return;
+        // `auto`: the app is restoring a session on load, not a human opening
+        // one, so a pending idle alert on that tab stays armed until it is
+        // actually tapped (see the userInitiated note in selectSession).
+        if (restoreId && this.sessions.has(restoreId)) {
+          this.selectSession(restoreId, { auto: true });
+        } else {
+          this.selectSession(this.sessionOrder[0], { auto: true });
+        }
       }
-
-      this.activeSessionId = null;
-      this.updateFileBrowserHeaderButton?.();
-      if (this.sessionOrder.length === 0) return;
-      // An app-made restore must leave a pending idle alert armed.
-      this.selectSession(restoreId && this.sessions.has(restoreId) ? restoreId : this.sessionOrder[0], { auto: true });
-    });
+    }
   }
 
   async loadState() {
@@ -6251,159 +6705,215 @@ class CodemanApp {
     }
   }
 
+
   _ensureTabLayoutCoordinator() {
     if (this._tabLayoutCoordinator) return this._tabLayoutCoordinator;
+    if (!window.CodemanTabLayout) return null;
     this._tabLayoutCoordinator = window.CodemanTabLayout.createLoadCoordinator({
-      fetchLayout: () => this._fetchTabLayout(),
-      applyLayout: (snapshot) => {
-        this._applyTabLayout(snapshot.layout || snapshot, snapshot.placements);
+      fetchLayout: async () => {
+        const data = await this._apiJson('/api/tab-layout');
+        if (!data?.layout) throw new Error('Tab layout unavailable');
+        return data.layout;
       },
-      applyFallback: () => this._applyTabLayoutFallback(),
-      scheduleRetry: (retry) => setTimeout(retry, 2000),
+      applyLayout: (layout) => this._applyTabLayout(layout),
+      applyFallback: () => this._applyTabLayout(null),
+      // 5 s, 10 s, 20 s, 40 s, then stop until the next SSE init or
+      // tab:layoutChanged asks again: an unreachable server must not cost a
+      // fetch every 5 s for as long as the page stays open.
+      retryDelayMs: 5000,
+      maxRetryDelayMs: 60000,
+      maxRetries: 4,
+      scheduleRetry: (retry, delayMs) => setTimeout(retry, delayMs),
       cancelRetry: (timer) => clearTimeout(timer),
     });
-    if (!this._tabLayoutPagehideHandler) {
-      this._tabLayoutPagehideHandler = (event) => {
-        // A persisted pagehide enters BFCache; this same page instance resumes
-        // on Back and must keep its coordinator usable for SSE-driven refetches.
-        if (event.persisted) return;
-        this._persistPendingTabLayoutOperations();
-        this._tabLayoutEditCoordinator?.flushKeepalive();
-        this._tabLayoutCoordinator?.dispose();
-        window.removeEventListener('pagehide', this._tabLayoutPagehideHandler);
-        this._tabLayoutPagehideHandler = null;
-      };
-      window.addEventListener('pagehide', this._tabLayoutPagehideHandler);
-    }
     return this._tabLayoutCoordinator;
   }
 
-  async _fetchTabLayout() {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    try {
-      const data = await this._apiJson('/api/tab-layout', { signal: controller.signal });
-      if (!data?.layout) throw new Error('Tab layout unavailable');
-      return data;
-    } finally {
-      clearTimeout(timeout);
+  _loadTabLayout() {
+    const coordinator = this._ensureTabLayoutCoordinator();
+    if (!coordinator) {
+      this._releaseTabLayoutFirstPaint();
+      return Promise.resolve(false);
     }
+    // A read that hangs must not leave the rail blank: paint whatever is known.
+    if (this._tabLayoutFirstPaintPending && !this._tabLayoutFirstPaintTimer) {
+      this._tabLayoutFirstPaintTimer = setTimeout(() => this._releaseTabLayoutFirstPaint(), 2500);
+    }
+    return coordinator.load();
   }
 
-  _loadTabLayout() {
-    return this._ensureTabLayoutCoordinator().load();
+  /** True while the first-paint hold applies (vertical rail, first read in flight). */
+  _tabLayoutFirstPaintHeld() {
+    return this._tabLayoutFirstPaintPending && !!this._tabLayoutCoordinator && this._tabOrientation() === 'vertical';
+  }
+
+  _releaseTabLayoutFirstPaint({ render = true } = {}) {
+    if (this._tabLayoutFirstPaintTimer) clearTimeout(this._tabLayoutFirstPaintTimer);
+    this._tabLayoutFirstPaintTimer = null;
+    if (!this._tabLayoutFirstPaintPending) return false;
+    const wasHeld = this._tabLayoutFirstPaintHeld();
+    this._tabLayoutFirstPaintPending = false;
+    if (wasHeld && render) this._fullRenderSessionTabs();
+    return wasHeld;
   }
 
   _onTabLayoutChanged(data) {
-    const currentUser = window.__codemanUser;
-    const hasTrustedMultiUserIdentity =
-      currentUser?.multiUser === true &&
-      typeof currentUser.username === 'string' &&
-      currentUser.username.length > 0;
-    if (data?.layout && data.owner && data.owner !== '@single' && !hasTrustedMultiUserIdentity) {
-      if (this._tabLayoutEditCoordinator?.hasPending()) {
-        this._tabLayoutSsePending = true;
-        return;
-      }
-      this._loadTabLayout();
-      return;
-    }
-    if (data?.owner && currentUser?.multiUser && data.owner !== currentUser.username) return;
-    // An optimistic edit owns its request until the PUT settles. Inline events can
-    // be that same write's server echo, so adopting them would replay in-flight intent.
-    if (this._tabLayoutEditCoordinator?.hasPending()) {
-      this._tabLayoutSsePending = true;
-      return;
-    }
-    if (data?.layout) {
-      this._applyTabLayout(data.layout, data.placements);
+    const me = window.__codemanUser;
+    // Another user's layout changed: nothing of ours moved. (The GET is
+    // owner-scoped server-side, so this is a saved request, not a guard.)
+    if (me?.multiUser && typeof data?.owner === 'string' && data.owner !== me.username) return;
+    if (Number.isSafeInteger(data?.version) && this.tabLayout && data.version <= this.tabLayout.version) return;
+    // Our own write is in flight: its response is the newer truth, and a read
+    // racing it could repaint the pre-edit layout. Re-read once it settles.
+    if (this._tabLayoutEditor?.hasPending()) {
+      this._tabLayoutReloadPending = true;
       return;
     }
     this._loadTabLayout();
   }
 
-  _tabLayoutMetadata() {
-    const metadata = [];
-    const currentUser = window.__codemanUser;
-    for (const session of this.sessions.values()) {
-      metadata.push({
-        kind: 'session',
-        id: session.id,
-        ownerValid:
-          !currentUser?.multiUser ||
-          (typeof session.owner === 'string' && session.owner.length > 0 && session.owner === currentUser.username),
-        ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
-      });
+  _applyTabLayout(layout) {
+    let next = null;
+    if (layout) {
+      try {
+        next = window.CodemanTabLayout.normalizeLayout(layout);
+      } catch {
+        next = null;
+      }
     }
-    for (const id of this.webviews?.keys?.() || []) metadata.push({ kind: 'webview', id });
-    return metadata;
+    // An overtaken response is already dropped by the coordinator; this guards a
+    // reordering between the coordinator and an SSE-triggered reload.
+    if (next && this.tabLayout && next.version < this.tabLayout.version) return;
+    const editor = this._tabLayoutEditor;
+    if (editor) {
+      // A failed read says nothing about the layout, and dropping the editor now
+      // would lose the edit outright: a write in flight would never get its 409
+      // rebased. Keep the held layout and the editor; read again once it settles.
+      if (!next && editor.hasPending()) {
+        this._tabLayoutReloadPending = true;
+        return;
+      }
+      if (next && editor.isWriting()) {
+        // The write's own response decides; read again after it.
+        this._tabLayoutReloadPending = true;
+        return;
+      }
+      // Unsaved edits are rebased onto the read (adoptExternal repaints); with
+      // none, the editor is simply rebuilt from the new layout on next use.
+      if (next && editor.hasPending() && editor.adoptExternal(next)) return;
+      if (editor.hasPending()) this.showToast?.('Your tab group edit was not saved.', 'error');
+      editor.dispose();
+      this._tabLayoutEditor = null;
+    }
+    this.tabLayout = next;
+    // The first read settled (a fallback included): the rail may paint now.
+    const released = this._releaseTabLayoutFirstPaint({ render: false });
+    const storage = this._getTabCollapseStorage();
+    const collapsed = storage && next
+      ? window.CodemanTabLayout.loadCollapsedGroupIds(storage, next.groups.map((group) => group.id))
+      : { ids: [], ok: !next };
+    if (!collapsed.ok) this._tabCollapseStorageFailed = true;
+    this.collapsedTabGroupIds = new Set(collapsed.ids);
+    // The server announces a layout change on every session create/close, web
+    // tab create/delete and order PUT, and most of those move nothing on this
+    // rail (always so on the flat rail, which is every owner without groups).
+    // Rebuild only when what the rail would draw actually changed.
+    if (released || this._isTabGroupStructureStale()) this._fullRenderSessionTabs();
+    // Edits left unsaved by the previous page (see _persistPendingTabLayoutEdits).
+    if (next && !this._tabLayoutRestoreChecked) {
+      this._tabLayoutRestoreChecked = true;
+      this._restorePendingTabLayoutEdits();
+    }
   }
 
-  _tabLayoutSessionOwnerIdentity(session) {
-    return typeof session?.owner === 'string' && session.owner.length > 0 ? session.owner : '@single';
+  _getTabCollapseStorage() {
+    if (this._tabCollapseStorageFailed) return null;
+    try {
+      return window.localStorage;
+    } catch {
+      this._tabCollapseStorageFailed = true;
+      return null;
+    }
   }
 
-  _tabRefPlacementState(ref) {
-    if (!this.tabLayout) return null;
-    const key = `${ref.kind}:${ref.id}`;
-    const authoritative = this._tabPlacementStates?.get(key) || null;
-    if (this._tabPendingFollowRefs?.has(key) && authoritative) {
-      return { ...authoritative, state: 'following', canFollow: false };
+  _projectTabGroups() {
+    if (!this.tabLayout || this._tabOrientation() !== 'vertical' || !window.CodemanTabLayout) return null;
+    return window.CodemanTabLayout.project(this.tabLayout, {
+      // sessionOrder, not the sessions Map: rows are built in that order, so a
+      // session the layout has not placed yet lands where the flat strip has it.
+      liveSessionIds: this.sessionOrder.filter((id) => this.sessions.has(id)),
+      openWebviewIds: (this.webviewOrder || []).filter((id) => this.webviews?.has(id)),
+      // A rail search shows matches inside collapsed groups too, so it projects
+      // every group open. The stored per-device collapse state is untouched and
+      // applies again as soon as the search is cleared.
+      collapsedGroupIds: this._tabRailSearchActive() ? [] : [...this.collapsedTabGroupIds],
+      focusCollapsed: !this._tabRailSearchActive() && this._focusGroupCollapsed(),
+      activeSessionId: this.activeSessionId,
+      activeWebviewId: this.activeWebviewId,
+    });
+  }
+
+  _tabGroupStructureKey(projection) {
+    const key = window.CodemanTabLayout?.structureKey(this.tabLayout, projection, [...this.collapsedTabGroupIds]) ?? null;
+    // Placement badges and Focus stars are drawn by the full render only, so a
+    // change to either is structural even when no row moved.
+    return key === null ? null : `${key}|${JSON.stringify(this._tabPlacements())}`;
+  }
+
+  _focusGroupCollapsed() {
+    if (this._focusCollapsed === undefined) {
+      const storage = this._getTabCollapseStorage();
+      this._focusCollapsed = storage ? window.CodemanTabLayout.loadFocusCollapsed(storage) : false;
     }
-    const stored = this._refLocation(ref);
-    const storedRef =
-      stored?.groupId === null
-        ? this.tabLayout.ungrouped[stored.index]
-        : this.tabLayout.groups.find((group) => group.id === stored?.groupId)?.refs[stored?.index];
-    if (storedRef?.placement === 'manual' && authoritative?.state === 'inherited') {
-      return { ...authoritative, state: 'manual', canFollow: true };
+    return this._focusCollapsed;
+  }
+
+  /** Per-device Focus collapse (COD-509): the twin of a group's collapse. */
+  toggleFocusGroupCollapsed(forceCollapsed) {
+    if (this._tabRailSearchActive()) return false;
+    const shouldCollapse = forceCollapsed === undefined ? !this._focusGroupCollapsed() : forceCollapsed === true;
+    const storage = this._getTabCollapseStorage();
+    if (!storage || !window.CodemanTabLayout.saveFocusCollapsed(storage, shouldCollapse)) this._tabCollapseStorageFailed = true;
+    this._focusCollapsed = shouldCollapse;
+    this._fullRenderSessionTabs();
+    return true;
+  }
+
+  /** `{ '<kind>:<id>': { state, parentId, canFollow } }` for every child session. */
+  _tabPlacements() {
+    if (!this.tabLayout || !window.CodemanTabLayout?.describePlacements) return {};
+    const parents = this._tabLayoutParents();
+    const key = JSON.stringify(parents);
+    if (this._tabPlacementCache?.layout !== this.tabLayout || this._tabPlacementCache.parents !== key) {
+      this._tabPlacementCache = {
+        layout: this.tabLayout,
+        parents: key,
+        placements: window.CodemanTabLayout.describePlacements(this.tabLayout, parents),
+      };
     }
-    return authoritative;
+    return this._tabPlacementCache.placements;
   }
 
   _tabPlacementPresentation(ref) {
-    const placement = this._tabRefPlacementState(ref);
+    const placement = this._tabPlacements()[`${ref.kind}:${ref.id}`];
     if (!placement) return null;
     const parent = this.sessions.get(placement.parentId);
     const parentName = parent ? this.getSessionName(parent) : placement.parentId;
-    if (placement.state === 'inherited') {
-      return { ...placement, short: 'Follows parent', description: `Follows parent ${parentName}` };
+    switch (placement.state) {
+      case 'inherited':
+        return { ...placement, short: 'Follows parent', description: `Follows parent ${parentName}` };
+      case 'manual':
+        return { ...placement, short: 'Manual', description: `Placed manually; can follow ${parentName}` };
+      case 'cycle':
+        return { ...placement, short: 'Parent cycle', description: 'Parent cycle; placed independently' };
+      default:
+        return { ...placement, short: 'Parent unavailable', description: 'Parent unavailable; placed independently' };
     }
-    if (placement.state === 'manual') {
-      return { ...placement, short: 'Manual', description: `Placed manually; can follow ${parentName}` };
-    }
-    if (placement.state === 'cycle') {
-      return { ...placement, short: 'Parent cycle', description: 'Parent cycle; placed independently' };
-    }
-    if (placement.state === 'following') {
-      return { ...placement, short: 'Following parent', description: `Following parent ${parentName}…` };
-    }
-    return { ...placement, short: 'Parent unavailable', description: 'Parent unavailable; placed independently' };
-  }
-
-  _tabRefPlacementActions(ref) {
-    const placement = this._tabPlacementPresentation(ref);
-    if (!placement) return [];
-    return [
-      { label: placement.description, disabled: true },
-      ...(placement.canFollow
-        ? [
-            {
-              label: 'Follow parent again',
-              run: () =>
-                this.editTabLayout({ type: 'followParent', ref }, `${ref.kind}:${ref.id}`),
-            },
-          ]
-        : []),
-    ];
   }
 
   _tabStoredRef(ref) {
-    const location = this._refLocation(ref);
-    if (!location) return null;
-    return location.groupId === null
-      ? this.tabLayout.ungrouped[location.index]
-      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs[location.index] || null;
+    const location = this._tabRefLocation(ref);
+    return location ? location.refs[location.index] : null;
   }
 
   _tabRefFocused(ref) {
@@ -6414,775 +6924,52 @@ class CodemanApp {
     return this.editTabLayout({ type: 'setFocus', ref, focused }, `${ref.kind}:${ref.id}`);
   }
 
-  /** Full Focus order, including entries that are not currently renderable. */
-  _focusOrder() {
-    if (!this.tabLayout) return [];
-    try {
-      return window.CodemanTabLayout.focusOrder(this.tabLayout);
-    } catch (_error) {
-      return [];
-    }
-  }
-
   /**
-   * Move one Focus entry past the next visible one in that direction. The index
-   * is absolute in the stored Focus order, so a focused-but-hidden ref between
-   * the two neighbours is stepped over rather than landed on.
+   * Destination index in the stored Focus order for a one-step move, or null.
+   * Steps over focused refs this browser cannot draw (a web tab closed here, a
+   * session that is gone), so a move always passes a VISIBLE neighbour.
    */
-  moveFocusRefBy(ref, delta) {
-    if (this.tabLayoutReadOnly || this._isTabRailSessionSearchActive()) return false;
-    const target = this._focusMoveTarget(ref, delta);
-    if (target === null) return false;
-    return this.editTabLayout({ type: 'moveFocus', ref, index: target }, `${ref.kind}:${ref.id}`);
-  }
-
-  /** Destination index for a Focus move, or null when the entry cannot move. */
   _focusMoveTarget(ref, delta) {
-    if (delta !== 1 && delta !== -1) return null;
-    const order = this._focusOrder();
-    const key = `${ref.kind}:${ref.id}`;
-    const from = order.findIndex((entry) => `${entry.kind}:${entry.id}` === key);
+    if ((delta !== 1 && delta !== -1) || !this.tabLayout) return null;
+    const order = window.CodemanTabLayout.orderedFocusRefs(this.tabLayout);
+    const keyOf = (entry) => `${entry.kind}:${entry.id}`;
+    const from = order.findIndex((entry) => keyOf(entry) === keyOf(ref));
     if (from < 0) return null;
-    const visible = new Set(
-      (this._refreshTabProjection()?.focusRefs || []).map((entry) => `${entry.kind}:${entry.id}`)
-    );
-    if (!visible.has(key)) return null;
+    const visible = new Set((this._projectTabGroups()?.focusRefs || []).map(keyOf));
     for (let index = from + delta; index >= 0 && index < order.length; index += delta) {
-      if (visible.has(`${order[index].kind}:${order[index].id}`)) return index;
+      if (visible.has(keyOf(order[index]))) return index;
     }
     return null;
   }
 
-  _tabRefFocusAction(ref) {
-    const focused = this._tabRefFocused(ref);
-    return {
-      label: focused ? 'Remove from Focus' : 'Add to Focus',
-      run: () => this.setTabRefFocus(ref, !focused),
-    };
+  moveFocusRefBy(ref, delta) {
+    const index = this._focusMoveTarget(ref, delta);
+    if (index === null) return false;
+    return this.editTabLayout({ type: 'moveFocus', ref, index }, `${ref.kind}:${ref.id}`);
   }
 
-  _syncTabPlacementAccessibility(tab, ref, name, tabTooltip) {
-    const placement = this._tabPlacementPresentation(ref);
-    const accessibleName = placement ? `${name} session, ${placement.description}` : `${name} session`;
-    const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
-    if (tab.getAttribute('aria-label') !== accessibleName) tab.setAttribute('aria-label', accessibleName);
-    if (tab.title !== completeTooltip) tab.title = completeTooltip;
-    const badge = tab.querySelector('.tab-placement-state');
-    if (!placement || !badge) return;
-    badge.className = `tab-placement-state tab-placement-state--${placement.state}`;
-    badge.textContent = placement.short;
-    badge.setAttribute('aria-label', placement.description);
-    badge.title = placement.description;
-  }
-
-  _tabLayoutWireOperations(operations) {
-    return (operations || []).map(({ metadata: _metadata, ...operation }) => operation);
-  }
-
-  async _putTabLayout({ baseVersion, layout, operations, recoveryBaseLayout }) {
-    const wireOperations = this._tabLayoutWireOperations(operations);
-    const response = await this._apiPut('/api/tab-layout', {
-      baseVersion,
-      operations: wireOperations,
-      ...(recoveryBaseLayout ? { recoveryBaseLayout } : {}),
-    });
-    if (!response) return { ok: false, status: 0, layout: null };
-    let body = null;
-    try { body = await response.json(); } catch {}
-    const result = {
-      ok: response.ok,
-      status: response.status,
-      layout: body?.data?.layout || null,
-      placements: body?.data?.placements || null,
-      appliedOperationCount: body?.data?.appliedOperationCount,
-    };
-    return result;
-  }
-
-  _putTabLayoutKeepalive({ baseVersion, operations, recoveryBaseLayout }) {
-    try {
-      void fetch('/api/tab-layout', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseVersion,
-          operations: this._tabLayoutWireOperations(operations),
-          ...(recoveryBaseLayout ? { recoveryBaseLayout } : {}),
-        }),
-        keepalive: true,
-      }).catch(() => {});
-      return true;
-    } catch {
-      return false;
+  /**
+   * Alt+1..9 targets, in the numbers the rail paints: Focus first (COD-509),
+   * then the flat strip's order (sessions, then open web tabs).
+   */
+  _tabAltRefs(projection = this._projectTabGroups()) {
+    const live = this.sessionOrder.filter((id) => this.sessions.has(id));
+    const open = (this.webviewOrder || []).filter((id) => this.webviews?.has(id));
+    if (!window.CodemanTabLayout?.altRefs) {
+      return [...live.map((id) => ({ kind: 'session', id })), ...open.map((id) => ({ kind: 'webview', id }))];
     }
+    return window.CodemanTabLayout.altRefs(projection, live, open);
   }
 
-  _persistPendingTabLayoutOperations() {
-    const coordinator = this._tabLayoutEditCoordinator;
-    const operations = coordinator?.pendingOperations?.() || [];
-    if (!operations.length) return false;
-    try {
-      const snapshot = coordinator.recoverySnapshot?.() || { baseLayout: this.tabLayout, operations };
-      sessionStorage.setItem('codeman:tab-layout-pending-operations', JSON.stringify(snapshot));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  _restorePendingTabLayoutOperations() {
-    let snapshot;
-    try {
-      const raw = sessionStorage.getItem('codeman:tab-layout-pending-operations');
-      if (!raw) return false;
-      sessionStorage.removeItem('codeman:tab-layout-pending-operations');
-      snapshot = JSON.parse(raw);
-    } catch {
-      return false;
-    }
-    const storedOperations = Array.isArray(snapshot) ? snapshot : snapshot?.operations;
-    if (!Array.isArray(storedOperations) || !storedOperations.length) return false;
-    try {
-      const requiresAuthoritativeRecovery =
-        snapshot?.baseLayout && storedOperations.some((operation) => operation?.type === 'followParent');
-      const operations = snapshot?.baseLayout
-        ? requiresAuthoritativeRecovery
-          ? storedOperations
-          : window.CodemanTabLayout.operationsAfterAppliedPrefix(
-            snapshot.baseLayout,
-            storedOperations,
-            this.tabLayout
-          )
-        : storedOperations;
-      if (!operations.length) return false;
-      const restored = operations.map((operation) =>
-        operation?.type === 'moveRef' || operation?.type === 'followParent'
-          ? { ...operation, metadata: this._tabLayoutMetadata() }
-          : operation
-      );
-      const coordinator = this._ensureTabLayoutEditCoordinator();
-      if (requiresAuthoritativeRecovery) {
-        return coordinator.restoreOperations(snapshot.baseLayout, restored);
-      }
-      restored.reduce(
-        (candidate, operation) => window.CodemanTabLayout.applyOperation(candidate, operation),
-        this.tabLayout
-      );
-      for (const operation of restored) coordinator.enqueue(operation);
-      return true;
-    } catch (error) {
-      this.showToast?.(error?.message || 'Could not restore pending tab layout edits.', 'error');
-      return false;
-    }
-  }
-
-  _ensureTabLayoutEditCoordinator() {
-    if (this._tabLayoutEditCoordinator || !this.tabLayout) return this._tabLayoutEditCoordinator;
-    this._tabLayoutEditCoordinator = window.CodemanTabLayout.createEditCoordinator({
-      initialLayout: this.tabLayout,
-      debounceMs: 180,
-      put: (request) => this._putTabLayout(request),
-      putKeepalive: (request) => this._putTabLayoutKeepalive(request),
-      applyLayout: (layout, meta) => this._adoptTabLayoutForEdit(layout, meta),
-      reportError: (message) => {
-        this._tabPendingFollowRefs.clear();
-        this._lastTabStructureKey = null;
-        this._fullRenderSessionTabs();
-        this.showToast?.(message, 'error');
-      },
-      onSettled: () => {
-        if (!this._tabLayoutSsePending) return;
-        this._tabLayoutSsePending = false;
-        this._loadTabLayout();
-      },
-      schedule: (fn, delay) => setTimeout(fn, delay),
-      cancel: (timer) => clearTimeout(timer),
-    });
-    return this._tabLayoutEditCoordinator;
-  }
-
-  _adoptTabLayoutForEdit(layout, meta = {}) {
-    if (Array.isArray(meta.placements)) {
-      this._tabPlacementStates = new Map(
-        meta.placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
-      );
-    }
-    for (const operation of meta.committedOperations || []) {
-      if (operation?.type === 'followParent') {
-        this._tabPendingFollowRefs.delete(`${operation.ref.kind}:${operation.ref.id}`);
-      }
-    }
-    this.tabLayout = layout;
-    this.tabLayoutVersion = layout.version;
-    if (meta.authoritative) this._releaseDeferredCreatedSessions(meta.authoritativeLayout || layout);
-    this.tabLayoutReadOnly = false;
-    this._lastTabStructureKey = null;
-    this._refreshTabProjection();
-    this._fullRenderSessionTabs();
-  }
-
-  editTabLayout(operation, focusIdentity) {
-    if (this.tabLayoutReadOnly || !this.tabLayout) {
-      this.showToast?.('Tab layout is temporarily read-only.', 'error');
-      return false;
-    }
-    try {
-      if (operation?.type === 'followParent') {
-        this._tabPendingFollowRefs.add(`${operation.ref.kind}:${operation.ref.id}`);
-      }
-      this._tabFocusIdentity = focusIdentity || this._focusedTabLayoutIdentity();
-      this._ensureTabLayoutEditCoordinator().enqueue(operation);
-      return true;
-    } catch (error) {
-      this.showToast?.(error?.message || 'Could not edit tab layout.', 'error');
-      return false;
-    }
-  }
-
-  createTabGroup() {
-    if (this.tabLayoutReadOnly) return false;
-    const name = window.prompt?.('Group name');
-    if (!name?.trim()) return false;
-    const id = globalThis.crypto?.randomUUID?.() || `group-${Date.now().toString(36)}`;
-    return this.editTabLayout({ type: 'createGroup', id, name: name.trim() }, `group:${id}`);
-  }
-
-  startTabGroupRename(groupId) {
-    if (this._inlineRenameActive || this.tabLayoutReadOnly) return false;
-    const header = [...(this.$('sessionTabs')?.querySelectorAll('.tab-layout-group-header') || [])].find(
-      (candidate) => candidate.querySelector('[data-tab-group-header]')?.dataset.tabGroupHeader === groupId
-    );
-    const label = header?.querySelector('.tab-layout-group-label');
-    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
-    if (!label || !group) return false;
-    this._inlineRenameActive = true;
-    const input = document.createElement('input');
-    input.className = 'tab-layout-group-rename-input';
-    input.setAttribute('aria-label', `Rename ${group.name} group`);
-    input.value = group.name;
-    input.maxLength = 60;
-    label.replaceChildren(input);
-    let settled = false;
-    const finish = (commit) => {
-      if (settled) return;
-      settled = true;
-      const name = input.value.trim();
-      this._inlineRenameActive = false;
-      if (commit && name && name !== group.name) {
-        if (!this.editTabLayout({ type: 'renameGroup', groupId, name }, `group:${groupId}`)) {
-          this._fullRenderSessionTabs();
-        }
-      } else {
-        this._tabFocusIdentity = `group:${groupId}`;
-        this._fullRenderSessionTabs();
-      }
-    };
-    input.addEventListener('keydown', (event) => {
-      if (event.isComposing || event.keyCode === 229) return;
-      if (event.key === 'Enter') { event.preventDefault(); finish(true); }
-      else if (event.key === 'Escape') { event.preventDefault(); finish(false); }
-    });
-    input.addEventListener('blur', () => finish(true));
-    input.focus();
-    input.select();
-    return true;
-  }
-
-  deleteTabGroup(groupId) {
-    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
-    if (!group || !window.confirm?.(`Delete group “${group.name}”? Its tabs will move to Ungrouped.`)) return false;
-    const index = this.tabLayout.groups.findIndex((candidate) => candidate.id === groupId);
-    const next = this.tabLayout.groups[index + 1] || this.tabLayout.groups[index - 1];
-    return this.editTabLayout(
-      { type: 'deleteGroup', groupId },
-      next ? `group:${next.id}` : 'group:ungrouped'
-    );
-  }
-
-  async createSessionInTabGroup(groupId) {
-    if (this._runInFlight) {
-      this.showToast?.('A session is already starting.', 'info');
-      return false;
-    }
-    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
-    if (this.tabLayoutReadOnly || !group) return false;
-
-    this.toggleTabGroupCollapsed(groupId, false);
-    this.terminal.focus();
-    try {
-      await this.run({ count: 1, tabGroupId: groupId });
-      return true;
-    } catch (error) {
-      this.showToast?.(error?.message || 'Could not start session.', 'error');
-      return false;
-    }
-  }
-
-  closeTabGroupMenu(options = {}) {
-    const menu = this._tabGroupMenu;
-    const trigger = this._tabGroupMenuTrigger;
-    menu?.remove();
-    if (this._tabGroupMenuOutside) {
-      document.removeEventListener('pointerdown', this._tabGroupMenuOutside, true);
-      this._tabGroupMenuOutside = null;
-    }
-    if (this._tabGroupMenuKeydown) {
-      document.removeEventListener('keydown', this._tabGroupMenuKeydown, true);
-      this._tabGroupMenuKeydown = null;
-    }
-    if (trigger?.classList?.contains('tab-layout-group-menu')) trigger.setAttribute('aria-expanded', 'false');
-    this._tabGroupMenu = null;
-    this._tabGroupMenuTrigger = null;
-    if (options.restoreFocus) trigger?.focus?.();
-  }
-
-  openTabGroupMenu(event, groupId) {
-    event?.preventDefault?.();
-    event?.stopPropagation?.();
-    const trigger = event?.currentTarget;
-    if (this._tabGroupMenu?.isConnected && this._tabGroupMenuTrigger === trigger) {
-      this.closeTabGroupMenu();
-      return;
-    }
-    this.closeTabGroupMenu();
-    const groupIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
-    if (groupIndex < 0) return;
-    const group = this.tabLayout.groups[groupIndex];
-    const menu = document.createElement('div');
-    menu.className = 'tab-rail-action-menu tab-layout-group-action-menu';
-    menu.setAttribute('role', 'menu');
-    const actions = [
-      {
-        label: 'New session',
-        ariaLabel: `New session in ${group.name}`,
-        run: () => this.createSessionInTabGroup(groupId),
-      },
-      { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
-      {
-        label: 'Move up',
-        run: () =>
-          this.editTabLayout(
-            { type: 'reorderGroup', groupId, index: Math.max(0, groupIndex - 1) },
-            `group:${groupId}`
-          ),
-      },
-      {
-        label: 'Move down',
-        run: () =>
-          this.editTabLayout(
-            {
-              type: 'reorderGroup',
-              groupId,
-              index: Math.min(this.tabLayout.groups.length - 1, groupIndex + 1),
-            },
-            `group:${groupId}`
-          ),
-      },
-      { label: 'Delete group', run: () => this.deleteTabGroup(groupId) },
-    ];
-    for (const action of actions) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.setAttribute('role', 'menuitem');
-      button.textContent = action.label;
-      if (action.ariaLabel) button.setAttribute('aria-label', action.ariaLabel);
-      button.addEventListener('click', () => {
-        this.closeTabGroupMenu();
-        action.run();
-      });
-      menu.appendChild(button);
-    }
-    document.body.appendChild(menu);
-    const rect = trigger?.getBoundingClientRect?.();
-    if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
-    this._tabGroupMenu = menu;
-    this._tabGroupMenuTrigger = trigger;
-    if (trigger?.classList?.contains('tab-layout-group-menu')) trigger.setAttribute('aria-expanded', 'true');
-    this._tabGroupMenuOutside = (pointerEvent) => {
-      if (menu.contains(pointerEvent.target) || trigger?.contains?.(pointerEvent.target)) return;
-      this.closeTabGroupMenu();
-    };
-    this._tabGroupMenuKeydown = (keyEvent) => {
-      if (keyEvent.key !== 'Escape') return;
-      keyEvent.preventDefault();
-      keyEvent.stopImmediatePropagation();
-      this.closeTabGroupMenu({ restoreFocus: true });
-    };
-    document.addEventListener('pointerdown', this._tabGroupMenuOutside, true);
-    document.addEventListener('keydown', this._tabGroupMenuKeydown, true);
-    menu.addEventListener('keydown', (keyEvent) => {
-      const buttons = [...menu.querySelectorAll('button')];
-      const current = buttons.indexOf(document.activeElement);
-      if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
-        keyEvent.preventDefault();
-        buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
-      }
-    });
-    menu.querySelector('button')?.focus();
-  }
-
-  moveTabRefToGroup(ref, groupId, index) {
-    return this.editTabLayout(this._tabRefMoveOperation(ref, { groupId, index }), `${ref.kind}:${ref.id}`);
-  }
-
-  _tabRefMoveActions(ref) {
-    const location = this._refLocation(ref);
-    if (!location || !this.tabLayout) return [];
-    const refs = location.groupId === null
-      ? this.tabLayout.ungrouped
-      : this.tabLayout.groups.find((group) => group.id === location.groupId)?.refs || [];
-    const metadata = this._tabLayoutMetadata();
-    const key = (candidate) => `${candidate.kind}:${candidate.id}`;
-    const movedKeys = new Set(
-      window.CodemanTabLayout.previewOperation(this.tabLayout, {
-        type: 'moveRef', ref, groupId: location.groupId, index: location.index, metadata,
-      }).refs.map(key)
-    );
-    const movedIndices = refs
-      .map((candidate, index) => (movedKeys.has(key(candidate)) ? index : -1))
-      .filter((index) => index >= 0);
-    const sourceStart = movedIndices.length ? Math.min(...movedIndices) : location.index;
-    const sourceEnd = movedIndices.length ? Math.max(...movedIndices) + 1 : location.index + 1;
-    const blocks = [];
-    for (let start = 0; start < refs.length;) {
-      const blockKeys = new Set(
-        window.CodemanTabLayout.previewOperation(this.tabLayout, {
-          type: 'moveRef', ref: refs[start], groupId: location.groupId, index: start, metadata,
-        }).refs.map(key)
-      );
-      let end = start + 1;
-      while (end < refs.length && blockKeys.has(key(refs[end]))) end++;
-      blocks.push({ start, end });
-      start = end;
-    }
-    const previous = blocks.find((block) => block.end === sourceStart);
-    const next = blocks.find((block) => block.start === sourceEnd);
-    return [
-      ...(sourceStart > 0
-        ? [{ label: 'Move up', groupId: location.groupId, index: previous?.start ?? sourceStart - 1 }]
-        : []),
-      ...(sourceEnd < refs.length
-        ? [{ label: 'Move down', groupId: location.groupId, index: next?.end ?? sourceEnd + 1 }]
-        : []),
-      // COD-335: destination order must match the left navigation, which renders
-      // named groups in layout order and Ungrouped LAST (`project()` pushes a
-      // section per group, then the id-null ungrouped one). Ungrouped used to be
-      // hardcoded first here, so the same destinations read in two different
-      // orders depending on the surface. Derived from `tabLayout` — the same
-      // thing the projection derives the rail from — rather than kept as a second
-      // list sorted to agree, and unaffected by collapse, which changes only what
-      // the rail draws inside a section, never section order.
-      ...this.tabLayout.groups.map((group) => ({
-        label: `Move to ${group.name}`,
-        groupId: group.id,
-        index: group.refs.length,
-      })),
-      { label: 'Move to Ungrouped', groupId: null, index: this.tabLayout.ungrouped.length },
-    ];
-  }
-
-  openTabRefMoveMenu(event, ref) {
-    event?.preventDefault?.();
-    event?.stopPropagation?.();
-    document.querySelector('.tab-layout-ref-move-menu')?.remove();
-    const actions = [
-      this._tabRefFocusAction(ref),
-      ...this._tabRefPlacementActions(ref),
-      ...this._tabRefMoveActions(ref).map(({ label, groupId, index }) => ({
-        label,
-        run: () => this.moveTabRefToGroup(ref, groupId, index),
-      })),
-    ];
-    if (!actions.length) return;
-    const menu = document.createElement('div');
-    menu.className = 'tab-rail-action-menu tab-layout-ref-move-menu';
-    menu.setAttribute('role', 'menu');
-    for (const { label, run, disabled } of actions) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.setAttribute('role', 'menuitem');
-      button.textContent = label;
-      if (disabled) {
-        button.setAttribute('aria-disabled', 'true');
-        button.classList.add('tab-placement-summary');
-      }
-      button.addEventListener('click', () => {
-        if (disabled) return;
-        menu.remove();
-        run();
-      });
-      menu.appendChild(button);
-    }
-    document.body.appendChild(menu);
-    const rect = event?.currentTarget?.getBoundingClientRect?.();
-    if (rect) { menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 4}px`; }
-    menu.addEventListener('keydown', (keyEvent) => {
-      const buttons = [...menu.querySelectorAll('button')];
-      const current = buttons.indexOf(document.activeElement);
-      if (keyEvent.key === 'Escape') { keyEvent.preventDefault(); menu.remove(); event.currentTarget?.focus?.(); }
-      else if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
-        keyEvent.preventDefault();
-        buttons[(current + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
-      }
-    });
-    menu.querySelector('button')?.focus();
-  }
-
-  openFocusShortcutMenu(event, ref) {
-    event?.preventDefault?.();
-    event?.stopPropagation?.();
-    this.closeTabRailActionMenu?.();
-    document.querySelector('.tab-focus-action-menu')?.remove();
-    const trigger = event?.currentTarget;
-    const menu = document.createElement('div');
-    menu.className = 'tab-rail-action-menu tab-focus-action-menu';
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', 'Focus actions');
-    const addItem = (label, run, disabled = false) => {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.setAttribute('role', 'menuitem');
-      item.textContent = label;
-      if (disabled) {
-        item.disabled = true;
-        item.setAttribute('aria-disabled', 'true');
-      } else {
-        item.addEventListener('click', () => {
-          this.closeTabRailActionMenu?.();
-          run();
-        });
-      }
-      menu.appendChild(item);
-      return item;
-    };
-    const searchActive = this._isTabRailSessionSearchActive();
-    if (!searchActive) {
-      addItem('Move up', () => this.moveFocusRefBy(ref, -1), this._focusMoveTarget(ref, -1) === null);
-      addItem('Move down', () => this.moveFocusRefBy(ref, 1), this._focusMoveTarget(ref, 1) === null);
-    }
-    addItem('Remove from Focus', () => this.setTabRefFocus(ref, false));
-    document.body.appendChild(menu);
-    const rect = trigger?.getBoundingClientRect?.();
-    if (rect) {
-      menu.style.left = `${rect.left}px`;
-      menu.style.top = `${rect.bottom + 4}px`;
-    }
-    this._tabRailActionMenuTrigger = trigger;
-    this._tabRailActionMenuOutside = (pointerEvent) => {
-      if (!menu.contains(pointerEvent.target) && !trigger?.contains?.(pointerEvent.target)) {
-        this.closeTabRailActionMenu?.();
-      }
-    };
-    document.addEventListener('pointerdown', this._tabRailActionMenuOutside, true);
-    menu.addEventListener('keydown', (keyEvent) => {
-      if (keyEvent.key !== 'Escape') return;
-      keyEvent.preventDefault();
-      this.closeTabRailActionMenu?.({ restoreFocus: true });
-    });
-    menu.querySelector('[role="menuitem"]:not([disabled])')?.focus();
-  }
-
-  _tabRailSessionSearchNeedle() {
-    return String(this._tabRailSessionSearch || '').trim().toLocaleLowerCase();
-  }
-
-  _isTabRailSessionSearchActive() {
-    return this._tabOrientation() === 'vertical' && this._tabRailSessionSearchNeedle().length > 0;
-  }
-
-  setTabRailSessionSearch(value = '') {
-    this._tabRailSessionSearch = String(value);
-    const input = document.getElementById('tabRailSessionSearch');
-    if (input && input.value !== this._tabRailSessionSearch) input.value = this._tabRailSessionSearch;
-    this._lastTabStructureKey = null;
-    this._fullRenderSessionTabs();
-  }
-
-  _clearTabRailSessionSearchState(options = {}) {
-    this._tabRailSessionSearch = '';
-    const input = document.getElementById('tabRailSessionSearch');
-    if (input) input.value = '';
-    this._updateTabRailSessionSearchControls();
-    this._lastTabStructureKey = null;
-    if (options.render !== false) this._fullRenderSessionTabs();
-    if (options.restoreFocus === true) input?.focus();
-  }
-
-  clearTabRailSessionSearch() {
-    this._clearTabRailSessionSearchState({ restoreFocus: true });
-  }
-
-  _updateTabRailSessionSearchControls(projection) {
-    const active = this._isTabRailSessionSearchActive();
-    const clear = document.getElementById('tabRailSessionSearchClear');
-    const empty = document.getElementById('tabRailSessionSearchEmpty');
-    if (clear) clear.hidden = !active;
-    if (empty) empty.hidden = !(active && projection?.matchCount === 0);
-  }
-
-  _projectTabLayout() {
-    const deferredCreatedSessionIds = this._deferredCreatedSessionIds || new Set();
-    const orientation = this._tabOrientation();
-    const searchActive = orientation === 'vertical' && this._tabRailSessionSearchNeedle().length > 0;
-    const options = {
-      liveSessionIds: [...this.sessions.keys()].filter((id) => !deferredCreatedSessionIds.has(id)),
-      legacySessionOrder: this._legacySessionOrder,
-      openWebviewIds: [...(this.webviewOrder || [])].filter((id) => this.webviews?.has(id)),
-      collapsedGroupIds: searchActive ? [] : [...this.collapsedTabGroupIds],
-      activeSessionId: this.activeSessionId,
-      activeWebviewId: this.activeWebviewId,
-      orientation,
-      focusCollapsed: searchActive ? false : this.focusTabGroupCollapsed,
-    };
-    const projection = this.tabLayout
-      ? window.CodemanTabLayout.project(this.tabLayout, options)
-      : window.CodemanTabLayout.projectFallback({
-          legacySessionOrder: this._legacySessionOrder,
-          liveSessionIds: options.liveSessionIds,
-          openWebviewIds: options.openWebviewIds,
-        });
-    if (!searchActive) return projection;
-    const needle = this._tabRailSessionSearchNeedle();
-    const matchingSessionIds = options.liveSessionIds.filter((id) => {
-      const session = this.sessions.get(id);
-      return session && this.getSessionName(session).toLocaleLowerCase().includes(needle);
-    });
-    return window.CodemanTabLayout.filterSessionProjection(projection, matchingSessionIds);
-  }
-
-  _releaseDeferredCreatedSessions(layout) {
-    if (!this._deferredCreatedSessionIds?.size) return;
-    for (const ref of [...(layout?.groups || []).flatMap((group) => group.refs || []), ...(layout?.ungrouped || [])]) {
-      if (ref.kind === 'session') this._deferredCreatedSessionIds.delete(ref.id);
-    }
-  }
-
-  _refreshTabProjection() {
-    if (this._tabLayoutFirstPaintPending) {
-      const pending = {
-        sessionOrder: [],
-        completeRefs: [],
-        visibleRefs: [],
-        focusRefs: [],
-        focusCollapsed: false,
-        sections: [],
-        hiddenTabGroupByRef: {},
-      };
-      this.sessionOrder = pending.sessionOrder;
-      this._completeTabRefs = pending.completeRefs;
-      this._visibleTabRefs = pending.visibleRefs;
-      this._tabLayoutSections = pending.sections;
-      this._hiddenTabGroupByRef = new Map();
-      return pending;
-    }
-    const projection = this._projectTabLayout();
-    this.sessionOrder = projection.sessionOrder;
-    this._completeTabRefs = projection.completeRefs;
-    this._visibleTabRefs = projection.visibleRefs;
-    this._tabLayoutSections = projection.sections;
-    this._hiddenTabGroupByRef = new Map(Object.entries(projection.hiddenTabGroupByRef || {}));
-    return projection;
-  }
-
-  _applyTabLayout(layout, placements) {
-    if (
-      this.tabLayoutVersion !== null &&
-      Number.isSafeInteger(layout?.version) &&
-      layout.version < this.tabLayoutVersion
-    ) return;
-    if (this._tabLayoutEditCoordinator) {
-      this._tabLayoutEditCoordinator.adoptExternal(layout, { placements });
-      return;
-    }
-    if (Array.isArray(placements)) {
-      this._tabPlacementStates = new Map(
-        placements.map((placement) => [`${placement.kind}:${placement.id}`, placement])
-      );
-    }
-    this.tabLayout = layout;
-    this.tabLayoutVersion = layout.version;
-    this._releaseDeferredCreatedSessions(layout);
-    const storage = this._getTabCollapseStorage();
-    const collapsedState = storage
-      ? window.CodemanTabLayout.loadCollapsedGroupIds(
-          storage,
-          layout.groups?.map((group) => group.id) || []
-        )
-      : { ids: [], ok: false };
-    const focusState = collapsedState.ok && storage
-      ? window.CodemanTabLayout.loadFocusGroupCollapsed(storage)
-      : { collapsed: false, ok: false };
-    const collapseStateOk = collapsedState.ok && focusState.ok;
-    if (!collapseStateOk) this._tabCollapseStorageFailed = true;
-    this.collapsedTabGroupIds = new Set(collapseStateOk ? collapsedState.ids : []);
-    this.focusTabGroupCollapsed = collapseStateOk ? focusState.collapsed : false;
-    this.tabLayoutReadOnly = false;
-    this._tabLayoutFirstPaintPending = false;
-    this._lastTabStructureKey = null;
-    this._refreshTabProjection();
-    if (this._restorePendingTabLayoutOperations()) return;
-    this._fullRenderSessionTabs();
-  }
-
-  _applyTabLayoutFallback() {
-    // Any failed owner-layout read makes the authoritative ordering unknown.
-    // Paint every live session in the safe legacy-flat projection read-only until
-    // a retry succeeds; deferred target placement is unknowable in this mode.
-    this._deferredCreatedSessionIds?.clear();
-    this.tabLayout = null;
-    this.tabLayoutVersion = null;
-    this.tabLayoutReadOnly = true;
-    this._tabLayoutFirstPaintPending = false;
-    this._lastTabStructureKey = null;
-    this._refreshTabProjection();
-    this._fullRenderSessionTabs();
-  }
-
-  _tabStructureKey(projection) {
-    const placementStates = projection.visibleRefs.map((ref) => {
-      const placement = this._tabRefPlacementState(ref);
-      return placement ? `${ref.kind}:${ref.id}:${placement.state}:${placement.parentId}` : `${ref.kind}:${ref.id}:root`;
-    });
-    return window.CodemanTabLayout.structureKey({
-      version: this.tabLayoutVersion,
-      collapsedGroupIds: [...this.collapsedTabGroupIds],
-      orientation: this._tabOrientation(),
-      openWebviewIds: [...(this.webviewOrder || [])],
-      activeSessionId: this.activeSessionId,
-      activeWebviewId: this.activeWebviewId,
-      focusRefs: projection.focusRefs,
-      focusCollapsed: projection.focusCollapsed,
-      altRefs: projection.altRefs,
-      visibleRefs: projection.visibleRefs,
-      placementStates,
-    });
-  }
-
-  _tabAltRefs(projection) {
-    return Array.isArray(projection?.altRefs) ? projection.altRefs : projection?.visibleRefs;
-  }
-
-  _activateVisibleTabNumber(number) {
-    const projection = this._refreshTabProjection();
-    const ref = window.CodemanTabLayout.refAtAltNumber(this._tabAltRefs(projection), number);
-    if (ref?.kind === 'session') this.selectSession(ref.id);
-    else if (ref?.kind === 'webview') this.openWebview(ref.id);
-    else return false;
-    return true;
-  }
-
-  _getTabCollapseStorage() {
-    if (this._tabCollapseStorageFailed) return null;
-    try {
-      return window.localStorage;
-    } catch (_error) {
-      this._tabCollapseStorageFailed = true;
-      return null;
-    }
+  _isTabGroupStructureStale(projection = this._projectTabGroups()) {
+    return this._tabGroupStructureKey(projection) !== this._lastTabGroupStructureKey;
   }
 
   toggleTabGroupCollapsed(groupId, forceCollapsed) {
-    if (this._isTabRailSessionSearchActive()) return false;
+    // Every group is drawn open while the rail search runs; a toggle then would
+    // change what the user sees only after the search is cleared.
+    if (this._tabRailSearchActive()) return false;
+    if (groupId === window.CodemanTabLayout?.FOCUS_SECTION_ID) return this.toggleFocusGroupCollapsed(forceCollapsed);
     if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
     const next = new Set(this.collapsedTabGroupIds);
     const shouldCollapse = forceCollapsed === undefined ? !next.has(groupId) : forceCollapsed === true;
@@ -7194,24 +6981,939 @@ class CodemanApp {
       : { ids: [], ok: false };
     if (!saved.ok) this._tabCollapseStorageFailed = true;
     this.collapsedTabGroupIds = new Set(saved.ids);
-    this._lastTabStructureKey = null;
+    // The full render also redraws connectors anchored to rows that just moved.
     this._fullRenderSessionTabs();
     return this.collapsedTabGroupIds.has(groupId) === shouldCollapse;
   }
 
-  toggleFocusGroupCollapsed(forceCollapsed) {
-    if (this._isTabRailSessionSearchActive()) return false;
-    const shouldCollapse = forceCollapsed === undefined ? !this.focusTabGroupCollapsed : forceCollapsed === true;
-    const storage = this._getTabCollapseStorage();
-    const saved = storage
-      ? window.CodemanTabLayout.saveFocusGroupCollapsed(storage, shouldCollapse)
-      : { collapsed: false, ok: false };
-    if (!saved.ok) this._tabCollapseStorageFailed = true;
-    this.focusTabGroupCollapsed = saved.collapsed;
-    this._lastTabStructureKey = null;
-    this._fullRenderSessionTabs();
-    return this.focusTabGroupCollapsed === shouldCollapse;
+  _tabLayoutEditable() {
+    return !!(this.tabLayout && window.CodemanTabLayout && this._tabOrientation() === 'vertical');
   }
+
+  _tabLayoutParents() {
+    const parents = {};
+    for (const session of this.sessions.values()) {
+      if (session?.parentSessionId && session.parentSessionId !== session.id) parents[session.id] = session.parentSessionId;
+    }
+    return parents;
+  }
+
+  async _putTabLayout({ baseVersion, layout }) {
+    const body = { baseVersion, layout: { ...layout, updatedAt: layout.updatedAt || new Date().toISOString() } };
+    const response = await this._api('/api/tab-layout', { method: 'PUT', body });
+    if (!response) return { ok: false, status: 0, layout: null };
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {}
+    return { ok: response.ok, status: response.status, layout: data?.data?.layout || null };
+  }
+
+  _ensureTabLayoutEditor() {
+    if (this._tabLayoutEditor || !this.tabLayout) return this._tabLayoutEditor || null;
+    this._tabLayoutEditor = window.CodemanTabLayout.createEditCoordinator({
+      initialLayout: this.tabLayout,
+      put: (request) => this._putTabLayout(request),
+      fetchLayout: async () => {
+        const data = await this._apiJson('/api/tab-layout');
+        if (!data?.layout) throw new Error('Tab layout unavailable');
+        return data.layout;
+      },
+      applyLayout: (layout) => this._adoptEditedTabLayout(layout),
+      reportError: (message) => this.showToast?.(message, 'error'),
+      onFailure: () => {
+        // The rail may still show an edit the server refused: read the truth.
+        this._tabLayoutReloadPending = true;
+      },
+      onSettled: () => {
+        if (!this._tabLayoutReloadPending) return;
+        this._tabLayoutReloadPending = false;
+        this._loadTabLayout();
+      },
+    });
+    return this._tabLayoutEditor;
+  }
+
+  _adoptEditedTabLayout(layout) {
+    this.tabLayout = layout;
+    const storage = this._getTabCollapseStorage();
+    if (storage) {
+      // Forget collapse state for groups that no longer exist.
+      const collapsed = window.CodemanTabLayout.loadCollapsedGroupIds(storage, layout.groups.map((group) => group.id));
+      if (collapsed.ok) this.collapsedTabGroupIds = new Set(collapsed.ids);
+    }
+    this._fullRenderSessionTabs();
+  }
+
+  editTabLayout(operation, focusIdentity) {
+    if (!this._tabLayoutEditable()) return false;
+    const active = document.activeElement;
+    const rail = this.$('sessionTabs');
+    if (focusIdentity && (!active || active === document.body || rail?.contains(active))) {
+      this._tabFocusIdentity = focusIdentity;
+      this._tabRefocusAfterEdit = true;
+    }
+    try {
+      const editor = this._ensureTabLayoutEditor();
+      // A drop can be two edits ("leave Focus, then move"). Validate the whole
+      // list on the held layout first, so a bad second step queues neither.
+      const operations = Array.isArray(operation) ? operation : [operation];
+      operations.reduce((layout, next) => window.CodemanTabLayout.applyOperation(layout, next), editor.getLayout());
+      for (const next of operations) editor.enqueue(next);
+      return true;
+    } catch (error) {
+      this._tabRefocusAfterEdit = false;
+      this.showToast?.(error?.message || 'Could not save tab groups.', 'error');
+      return false;
+    }
+  }
+
+  _newTabGroupId() {
+    return globalThis.crypto?.randomUUID?.() || `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  createTabGroup({ ref = null, index } = {}) {
+    if (!this._tabLayoutEditable()) return false;
+    const id = this._newTabGroupId();
+    const name = window.CodemanI18n?.t?.('New group') || 'New group';
+    if (!this.editTabLayout({ type: 'createGroup', id, name, ...(Number.isInteger(index) ? { index } : {}) }, `group:${id}`)) {
+      return false;
+    }
+    if (ref) this.editTabLayout({ type: 'moveRef', ref, groupId: id, index: 0, parents: this._tabLayoutParents() });
+    this.startTabGroupRename(id);
+    return true;
+  }
+
+  deleteTabGroup(groupId) {
+    const groups = this.tabLayout?.groups || [];
+    const index = groups.findIndex((group) => group.id === groupId);
+    if (index < 0) return false;
+    if (!window.confirm(`Delete group "${groups[index].name}"? Its tabs move to Ungrouped.`)) {
+      // The menu that asked is gone; put the keyboard back on the group.
+      this.$('sessionTabs')?.querySelector(`[data-tab-group-header="${CSS.escape(groupId)}"]`)?.focus();
+      return false;
+    }
+    const neighbour = groups[index + 1] || groups[index - 1];
+    return this.editTabLayout({ type: 'deleteGroup', groupId }, neighbour ? `group:${neighbour.id}` : null);
+  }
+
+  moveTabGroup(groupId, delta) {
+    const groups = this.tabLayout?.groups || [];
+    const from = groups.findIndex((group) => group.id === groupId);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= groups.length) return false;
+    return this.editTabLayout({ type: 'reorderGroup', groupId, index: to }, `group:${groupId}`);
+  }
+
+  _tabRefLocation(ref) {
+    const same = (candidate) => candidate.kind === ref.kind && candidate.id === ref.id;
+    for (const group of this.tabLayout?.groups || []) {
+      const index = group.refs.findIndex(same);
+      if (index >= 0) return { groupId: group.id, refs: group.refs, index };
+    }
+    const index = this.tabLayout?.ungrouped?.findIndex(same) ?? -1;
+    return index >= 0 ? { groupId: null, refs: this.tabLayout.ungrouped, index } : null;
+  }
+
+  moveTabRef(ref, groupId, anchor = null, placement = 'before') {
+    const parents = this._tabLayoutParents();
+    let destination;
+    try {
+      destination = window.CodemanTabLayout.moveDestination(this.tabLayout, ref, groupId, anchor, placement, parents);
+    } catch {
+      return false;
+    }
+    return this.editTabLayout({ type: 'moveRef', ref, ...destination, parents }, `${ref.kind}:${ref.id}`);
+  }
+
+  _tabRefMoveActions(ref) {
+    if (!this._tabLayoutEditable()) return [];
+    const location = this._tabRefLocation(ref);
+    if (!location) return [];
+    const actions = [];
+    const grouped = this.tabLayout.groups.length > 0;
+    const focused = location.refs[location.index]?.focus === true;
+    // Where a child session sits and why (COD-510): a read-only summary, plus
+    // the way back to its parent once it was moved by hand.
+    const placement = ref.kind === 'session' ? this._tabPlacementPresentation(ref) : null;
+    if (placement) {
+      actions.push({ label: placement.description, disabled: true });
+      if (placement.canFollow) {
+        actions.push({
+          label: 'Follow parent again',
+          run: () =>
+            this.editTabLayout(
+              { type: 'followParent', ref, parents: this._tabLayoutParents() },
+              `${ref.kind}:${ref.id}`
+            ),
+        });
+      }
+    }
+    actions.push({ label: focused ? 'Remove from Focus' : 'Add to Focus', run: () => this.setTabRefFocus(ref, !focused) });
+    if (focused) {
+      // A Focus row is drawn in Focus, so up/down reorder Focus, not its group.
+      if (this._focusMoveTarget(ref, -1) !== null) actions.push({ label: 'Move up in Focus', run: () => this.moveFocusRefBy(ref, -1) });
+      if (this._focusMoveTarget(ref, 1) !== null) actions.push({ label: 'Move down in Focus', run: () => this.moveFocusRefBy(ref, 1) });
+    }
+    // Up/down follow the STORED order, which is what the rail paints: a named
+    // group keeps it even under the activity sort (COD-494); Ungrouped is
+    // ranked by the sort then, and has nothing to reorder.
+    if (grouped && !focused && (location.groupId !== null || !this.isTabRailSorted())) {
+      // The sessions that follow this one move with it, so "down" means past
+      // the first row that is not part of that block.
+      const moving = new Set(window.CodemanTabLayout.movingRefKeys(this.tabLayout, ref, this._tabLayoutParents()));
+      const previous = location.refs[location.index - 1];
+      const next = location.refs.slice(location.index + 1).find((candidate) => !moving.has(`${candidate.kind}:${candidate.id}`));
+      if (previous) actions.push({ label: 'Move up', run: () => this.moveTabRef(ref, location.groupId, previous, 'before') });
+      if (next) actions.push({ label: 'Move down', run: () => this.moveTabRef(ref, location.groupId, next, 'after') });
+    }
+    for (const group of this.tabLayout.groups) {
+      if (group.id === location.groupId) continue;
+      // Quoted: a group may be NAMED "New group" or "ungrouped", which unquoted
+      // would read (and, case-insensitively, translate) exactly like the
+      // fixed "Move to new group" / "Move to Ungrouped" entries next to it.
+      actions.push({ label: `Move to "${group.name}"`, run: () => this.moveTabRef(ref, group.id) });
+    }
+    if (location.groupId !== null) actions.push({ label: 'Move to Ungrouped', run: () => this.moveTabRef(ref, null) });
+    // At the server's group cap a new group can only fail, so it is not offered.
+    if (this._canCreateTabGroup()) actions.push({ label: 'Move to new group', run: () => this.createTabGroup({ ref }) });
+    return actions;
+  }
+
+  closeTabGroupMenu({ restoreFocus = false } = {}) {
+    const menu = this._tabGroupMenu;
+    if (!menu) return;
+    const trigger = this._tabGroupMenuTrigger;
+    const identity = this._tabGroupMenuKey;
+    this._tabGroupMenu = null;
+    this._tabGroupMenuTrigger = null;
+    this._tabGroupMenuKey = null;
+    document.removeEventListener('pointerdown', this._tabGroupMenuOutside, true);
+    document.removeEventListener('keydown', this._tabGroupMenuKeydown, true);
+    window.removeEventListener('resize', this._tabGroupMenuResize);
+    this._tabGroupMenuOutside = this._tabGroupMenuKeydown = this._tabGroupMenuResize = null;
+    menu.remove();
+    if (!restoreFocus) return;
+    // The trigger may have been re-rendered while the menu was open; find the
+    // live tree item by identity.
+    const rail = this.$('sessionTabs');
+    const item =
+      (trigger?.isConnected && trigger.closest('[role="treeitem"]')) ||
+      [...(rail?.querySelectorAll('[role="treeitem"]') || [])].find((el) => this._tabTreeIdentity(el) === identity);
+    item?.focus();
+  }
+
+  _canCreateTabGroup() {
+    const max = window.CodemanTabLayout?.MAX_GROUPS;
+    return !max || (this.tabLayout?.groups?.length || 0) < max;
+  }
+
+  /**
+   * Start a session straight into a group (COD-512): the run carries
+   * `tabGroupId`, and the server files the new session there when it
+   * registers it with the layout, so it never flashes in Ungrouped first.
+   */
+  async createSessionInTabGroup(groupId) {
+    if (this._runInFlight) {
+      this.showToast?.('A session is already starting.', 'info');
+      return false;
+    }
+    if (!this.tabLayout?.groups?.some((group) => group.id === groupId)) return false;
+    // The new row must be visible where it lands.
+    this.toggleTabGroupCollapsed(groupId, false);
+    try {
+      await this.run({ tabGroupId: groupId });
+      return true;
+    } catch (error) {
+      this.showToast?.(error?.message || 'Could not start session.', 'error');
+      return false;
+    }
+  }
+
+  openTabGroupMenu(event, groupId) {
+    const groups = this.tabLayout?.groups || [];
+    const index = groups.findIndex((group) => group.id === groupId);
+    if (index < 0) return false;
+    return this._openTabLayoutMenu(event, `group:${groupId}`, 'Group actions', [
+      ...(this.canOpenTileGrid?.() ? [{ label: 'Open group as tiles', run: () => this.openGroupAsTiles(groupId) }] : []),
+      { label: 'Rename group', run: () => this.startTabGroupRename(groupId) },
+      { label: 'New session in group', run: () => this.createSessionInTabGroup(groupId) },
+      ...(this._canCreateTabGroup() ? [{ label: 'New group', run: () => this.createTabGroup({ index: index + 1 }) }] : []),
+      ...(index > 0 ? [{ label: 'Move group up', run: () => this.moveTabGroup(groupId, -1) }] : []),
+      ...(index < groups.length - 1 ? [{ label: 'Move group down', run: () => this.moveTabGroup(groupId, 1) }] : []),
+      { label: 'Delete group', className: 'danger', run: () => this.deleteTabGroup(groupId) },
+    ]);
+  }
+
+  openTabWebviewMenu(event, webviewId) {
+    const moves = this._tabRefMoveActions({ kind: 'webview', id: webviewId });
+    if (!moves.length) {
+      this.showWebviewModal?.(webviewId);
+      return false;
+    }
+    return this._openTabLayoutMenu(event, `webview:${webviewId}`, 'Web tab actions', [
+      { label: 'Web tab settings', run: () => this.showWebviewModal?.(webviewId) },
+      ...moves,
+    ]);
+  }
+
+  _openTabLayoutMenu(event, identity, ariaLabel, actions) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    const trigger = event?.currentTarget || null;
+    // Opening the same menu again closes it (a toggle, like the row menu).
+    if (this._tabGroupMenu && this._tabGroupMenuKey === identity) {
+      this.closeTabGroupMenu();
+      return false;
+    }
+    this.closeTabGroupMenu();
+    this.closeTabRailActionMenu?.();
+    if (!this._tabLayoutEditable()) return false;
+    const menu = document.createElement('div');
+    menu.className = 'tab-rail-action-menu tab-layout-group-action-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', ariaLabel);
+    for (const action of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.textContent = action.label;
+      if (action.className) button.className = action.className;
+      button.addEventListener('click', () => {
+        this.closeTabGroupMenu();
+        action.run();
+      });
+      menu.appendChild(button);
+    }
+    document.body.appendChild(menu);
+    const anchor = (trigger?.getBoundingClientRect ? trigger : null) || this.$('sessionTabs');
+    const rect = anchor?.getBoundingClientRect?.() || { left: 8, bottom: 8, right: 8 };
+    const menuRect = menu.getBoundingClientRect();
+    const left = event?.clientX && event.type === 'contextmenu' ? event.clientX : rect.left;
+    menu.style.left = `${Math.max(8, Math.min(left, window.innerWidth - menuRect.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menuRect.height - 8))}px`;
+
+    this._tabGroupMenu = menu;
+    this._tabGroupMenuTrigger = trigger;
+    this._tabGroupMenuKey = identity;
+    this._tabGroupMenuOutside = (pointerEvent) => {
+      if (menu.contains(pointerEvent.target) || (trigger && trigger.contains?.(pointerEvent.target))) return;
+      this.closeTabGroupMenu();
+    };
+    // Capture on document, so Escape closes THIS menu and nothing else (the
+    // global Escape handler defers to it, see the keydown listener in init).
+    this._tabGroupMenuKeydown = (keyEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault();
+      keyEvent.stopImmediatePropagation();
+      this.closeTabGroupMenu({ restoreFocus: true });
+    };
+    this._tabGroupMenuResize = () => this.closeTabGroupMenu();
+    document.addEventListener('pointerdown', this._tabGroupMenuOutside, true);
+    document.addEventListener('keydown', this._tabGroupMenuKeydown, true);
+    window.addEventListener('resize', this._tabGroupMenuResize);
+    menu.addEventListener('keydown', (keyEvent) => {
+      const buttons = [...menu.querySelectorAll('button')];
+      const at = buttons.indexOf(document.activeElement);
+      if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+        keyEvent.preventDefault();
+        buttons[(at + (keyEvent.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      } else if (keyEvent.key === 'Home' || keyEvent.key === 'End') {
+        keyEvent.preventDefault();
+        buttons[keyEvent.key === 'Home' ? 0 : buttons.length - 1]?.focus();
+      } else if (keyEvent.key === 'Tab') {
+        // Tab would walk out and leave the popup on screen: dismiss to the row.
+        keyEvent.preventDefault();
+        this.closeTabGroupMenu({ restoreFocus: true });
+      }
+    });
+    // Focus leaving by any other route (a click elsewhere, a programmatic move).
+    // Hops between the menu's own items are not a departure.
+    menu.addEventListener('focusout', (focusEvent) => {
+      if (focusEvent.relatedTarget && menu.contains(focusEvent.relatedTarget)) return;
+      if (this._tabGroupMenu === menu) this.closeTabGroupMenu();
+    });
+    menu.querySelector('button')?.focus();
+    return true;
+  }
+
+  startTabGroupRename(groupId) {
+    if (!this.tabLayout?.groups?.some((candidate) => candidate.id === groupId)) return false;
+    // Cancelling another editor re-renders the rail, so look the header up after.
+    this._activeRename?.cancel();
+    const group = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+    const header = this.$('sessionTabs')?.querySelector(`[data-tab-group-header="${CSS.escape(groupId)}"]`);
+    const label = header?.querySelector('.tab-layout-group-name');
+    if (!group || !label) return false;
+    this._inlineRenameActive = true;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tab-layout-group-rename-input';
+    input.value = group.name;
+    input.maxLength = 60;
+    input.setAttribute('aria-label', 'Group name');
+    label.classList.add('tab-layout-group-name--renaming');
+    label.replaceChildren(input);
+    // The header toggles collapse on click and opens its menu on right-click;
+    // neither may fire from inside the editor.
+    for (const type of ['click', 'contextmenu', 'pointerdown']) input.addEventListener(type, (e) => e.stopPropagation());
+
+    let settled = false;
+    const handle = { groupId, cancel: () => settle(false) };
+    // `fromBlur`: focus already moved somewhere the user chose (the terminal,
+    // another control). Pulling it back to the header from inside the blur
+    // handler wins over that move, so a blur commit never asks for refocus.
+    const settle = (commit, { fromBlur = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      const name = input.value.trim();
+      // Only the current editor owns the guard: a newer rename keeps it.
+      if (this._activeRename !== handle) return;
+      this._activeRename = null;
+      this._inlineRenameActive = false;
+      const current = this.tabLayout?.groups?.find((candidate) => candidate.id === groupId);
+      const focusIdentity = fromBlur ? null : `group:${groupId}`;
+      if (commit && current && name && name !== current.name) {
+        if (this.editTabLayout({ type: 'renameGroup', groupId, name }, focusIdentity)) return;
+      }
+      if (focusIdentity) {
+        this._tabFocusIdentity = focusIdentity;
+        this._tabRefocusAfterEdit = true;
+      }
+      this._fullRenderSessionTabs();
+    };
+    this._activeRename = handle;
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        settle(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        settle(false);
+      }
+    });
+    input.addEventListener('blur', () => settle(true, { fromBlur: true }));
+    input.focus();
+    input.select();
+    return true;
+  }
+
+  _bindTabLayoutPointerDrag(container) {
+    if (!container || container._tabLayoutDragBound) return;
+    container._tabLayoutDragBound = true;
+    container.addEventListener('pointerdown', (e) => this._onTabLayoutPointerDown(e, container));
+    container.addEventListener('pointermove', (e) => this._onTabLayoutPointerMove(e, container));
+    container.addEventListener('pointerup', (e) => this._finishTabLayoutPointerDrag(e, container));
+    container.addEventListener('pointercancel', () => this._cancelTabLayoutPointerDrag(container));
+    container.addEventListener('lostpointercapture', () => this._cancelTabLayoutPointerDrag(container));
+  }
+
+  _onTabLayoutPointerDown(e, container) {
+    // A press whose release never reached us (let go outside the rail, or
+    // outside the window) must not survive into this one: a stale pending
+    // press turned into a phantom drag on the next hover, and a replaced drag
+    // left its Escape listener behind for good.
+    if (this._tabLayoutDrag) this._cancelTabLayoutPointerDrag(container);
+    if (e.button !== 0 || e.pointerType === 'touch' || !container.classList.contains('session-tabs--grouped')) return;
+    if (this._inlineRenameActive || !this._tabLayoutEditable()) return;
+    // Controls keep their own click; only the row body or the header drags.
+    if (e.target.closest('.tab-actions, .tab-badge, .tab-layout-group-menu, button, input, [onclick*="stopPropagation"]')) return;
+    const header = e.target.closest('[data-tab-group-header]');
+    const row = header ? null : e.target.closest('.session-tab');
+    let source = null;
+    if (header) source = { type: 'group', groupId: header.dataset.tabGroupHeader };
+    else if (row?.dataset.webviewId) source = { type: 'ref', ref: { kind: 'webview', id: row.dataset.webviewId } };
+    else if (row?.dataset.id) source = { type: 'ref', ref: { kind: 'session', id: row.dataset.id } };
+    if (!source) return;
+    const drag = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, source, origin: header || row, active: false, target: null };
+    // Capture is only taken once the press becomes a drag, so until then the
+    // release can land outside the rail: hear it on window.
+    drag.windowUp = (upEvent) => this._finishTabLayoutPointerDrag(upEvent, container);
+    drag.windowCancel = () => this._cancelTabLayoutPointerDrag(container);
+    window.addEventListener('pointerup', drag.windowUp, true);
+    window.addEventListener('pointercancel', drag.windowCancel, true);
+    this._tabLayoutDrag = drag;
+  }
+
+  _tabLayoutDropTarget(x, y, container) {
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || !container.contains(hit)) return null;
+    const row = hit.closest('.session-tab');
+    const section = hit.closest('.tab-layout-group');
+    const sectionGroup = section ? section.dataset.tabGroupId || null : undefined;
+    // A sorted rail paints its own order in Ungrouped, so a row there can only
+    // be dropped INTO the section; named groups and Focus keep their saved
+    // order (COD-494) and take between-row drops.
+    if (row && section && (sectionGroup !== null || !this.isTabRailSorted())) {
+      const ref = row.dataset.webviewId ? { kind: 'webview', id: row.dataset.webviewId } : { kind: 'session', id: row.dataset.id };
+      const rect = row.getBoundingClientRect();
+      return { type: 'ref', ref, groupId: sectionGroup, placement: y >= rect.top + rect.height / 2 ? 'after' : 'before', element: row };
+    }
+    if (sectionGroup === undefined) return null;
+    const element = section.querySelector(':scope > .tab-layout-group-header');
+    return sectionGroup === null ? { type: 'ungrouped', element } : { type: 'group', groupId: sectionGroup, element };
+  }
+
+  _clearTabLayoutDropMarks(container) {
+    container.querySelectorAll('.tab-layout-drop-before, .tab-layout-drop-after, .tab-layout-drop-into').forEach((el) =>
+      el.classList.remove('tab-layout-drop-before', 'tab-layout-drop-after', 'tab-layout-drop-into')
+    );
+  }
+
+  _onTabLayoutPointerMove(e, container) {
+    const drag = this._tabLayoutDrag;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    // The primary button is up, so the release went somewhere we never heard.
+    if ((e.buttons & 1) === 0) {
+      this._cancelTabLayoutPointerDrag(container);
+      return;
+    }
+    if (!drag.active) {
+      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
+      drag.active = true;
+      drag.origin.classList.add('tab-layout-dragging');
+      container.classList.add('tab-layout-drag-active');
+      this.closeTabGroupMenu();
+      this.closeTabRailActionMenu?.();
+      try {
+        container.setPointerCapture(e.pointerId);
+      } catch {}
+      if (this._tabLayoutDragKeydown) document.removeEventListener('keydown', this._tabLayoutDragKeydown, true);
+      this._tabLayoutDragKeydown = (keyEvent) => {
+        if (keyEvent.key !== 'Escape') return;
+        keyEvent.preventDefault();
+        keyEvent.stopImmediatePropagation();
+        this._cancelTabLayoutPointerDrag(container);
+      };
+      document.addEventListener('keydown', this._tabLayoutDragKeydown, true);
+    }
+    e.preventDefault();
+    const target = this._tabLayoutDropTarget(e.clientX, e.clientY, container);
+    this._clearTabLayoutDropMarks(container);
+    drag.target = target;
+    if (!target?.element) return;
+    const cls = target.type === 'ref' && drag.source.type === 'ref' ? `tab-layout-drop-${target.placement}` : 'tab-layout-drop-into';
+    target.element.classList.add(cls);
+  }
+
+  _cancelTabLayoutPointerDrag(container) {
+    const drag = this._tabLayoutDrag;
+    if (!drag) return;
+    this._tabLayoutDrag = null;
+    if (drag.windowUp) window.removeEventListener('pointerup', drag.windowUp, true);
+    if (drag.windowCancel) window.removeEventListener('pointercancel', drag.windowCancel, true);
+    drag.origin?.classList.remove('tab-layout-dragging');
+    container?.classList.remove('tab-layout-drag-active');
+    if (container) this._clearTabLayoutDropMarks(container);
+    if (this._tabLayoutDragKeydown) document.removeEventListener('keydown', this._tabLayoutDragKeydown, true);
+    this._tabLayoutDragKeydown = null;
+    if (drag.active) {
+      // The click that ends a drag must not also select the row or toggle the header.
+      const swallow = (clickEvent) => {
+        clickEvent.stopPropagation();
+        clickEvent.preventDefault();
+      };
+      window.addEventListener('click', swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 0);
+    }
+  }
+
+  _finishTabLayoutPointerDrag(e, container) {
+    const drag = this._tabLayoutDrag;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const target = drag.active ? this._tabLayoutDropTarget(e.clientX, e.clientY, container) || drag.target : null;
+    this._cancelTabLayoutPointerDrag(container);
+    if (!target) return;
+    const operation = window.CodemanTabLayout.dropOperation(this.tabLayout, drag.source, target, this._tabLayoutParents());
+    if (!operation) return;
+    const identity = drag.source.type === 'group' ? `group:${drag.source.groupId}` : `${drag.source.ref.kind}:${drag.source.ref.id}`;
+    this.editTabLayout(operation, identity);
+  }
+
+  _persistPendingTabLayoutEdits() {
+    const editor = this._tabLayoutEditor;
+    const operations = editor?.pendingOperations?.() || [];
+    if (!operations.length) return false;
+    try {
+      sessionStorage.setItem(
+        'codeman:tab-layout-pending',
+        JSON.stringify({ owner: this._tabLayoutOwnerKey(), baseVersion: editor.baseVersion(), savedAt: Date.now(), operations })
+      );
+    } catch {}
+    try {
+      const layout = editor.getLayout();
+      void fetch('/api/tab-layout', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseVersion: editor.baseVersion(), layout: { ...layout, updatedAt: layout.updatedAt || new Date().toISOString() } }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {}
+    return true;
+  }
+
+  _tabLayoutOwnerKey() {
+    const me = window.__codemanUser;
+    if (!me) return null;
+    return me.multiUser ? me.username : '@single';
+  }
+
+  _restorePendingTabLayoutEdits() {
+    let saved;
+    try {
+      const raw = sessionStorage.getItem('codeman:tab-layout-pending');
+      if (!raw) return false;
+      saved = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    const owner = this._tabLayoutOwnerKey();
+    if (owner === null) {
+      // Who we are is not known yet (/api/me still loading): decide once it is.
+      if (!this._tabLayoutRestoreWaiting) {
+        this._tabLayoutRestoreWaiting = true;
+        document.addEventListener(
+          'codeman:me',
+          () => {
+            this._tabLayoutRestoreWaiting = false;
+            this._restorePendingTabLayoutEdits();
+          },
+          { once: true }
+        );
+      }
+      return false;
+    }
+    try {
+      sessionStorage.removeItem('codeman:tab-layout-pending');
+    } catch {}
+    const operations = saved?.operations;
+    if (!Array.isArray(operations) || !operations.length || !this.tabLayout || !window.CodemanTabLayout) return false;
+    if (saved.owner !== owner) return false;
+    const age = Date.now() - saved.savedAt;
+    if (!Number.isFinite(age) || age < 0 || age > TAB_LAYOUT_PENDING_MAX_AGE_MS) return false;
+    if (!Number.isSafeInteger(saved.baseVersion) || saved.baseVersion > this.tabLayout.version) return false;
+    return this._ensureTabLayoutEditor().restore(operations);
+  }
+
+  _tabTreeItems(container) {
+    const sorted = this.isTabRailSorted();
+    const orderOf = (el) => Number(getComputedStyle(el).order) || 0;
+    const items = [];
+    for (const section of container.querySelectorAll('.tab-layout-group')) {
+      // A group the search emptied is hidden whole, header included.
+      if (section.classList.contains('tab-filtered-out')) continue;
+      const header = section.querySelector(':scope > [role="treeitem"]');
+      if (header) items.push(header);
+      const rows = [...section.querySelectorAll('.session-tab[role="treeitem"]:not(.tab-filtered-out)')];
+      if (sorted) rows.sort((a, b) => orderOf(a) - orderOf(b));
+      items.push(...rows);
+    }
+    return items;
+  }
+
+  _applyTabTreePositions(container) {
+    const items = this._tabTreeItems(container);
+    const sets = new Map();
+    for (const item of items) {
+      const owner = item.getAttribute('aria-level') === '2' ? item.closest('[role="group"]') : container;
+      if (!sets.has(owner)) sets.set(owner, []);
+      sets.get(owner).push(item);
+    }
+    for (const members of sets.values()) {
+      members.forEach((item, index) => {
+        const setsize = String(members.length);
+        const posinset = String(index + 1);
+        if (item.getAttribute('aria-setsize') !== setsize) item.setAttribute('aria-setsize', setsize);
+        if (item.getAttribute('aria-posinset') !== posinset) item.setAttribute('aria-posinset', posinset);
+      });
+    }
+    return items;
+  }
+
+  _syncTabGroupHeaderAlerts(container, projection) {
+    const alerts = window.CodemanTabLayout?.hiddenGroupAlerts(projection, (id) => this.tabAlerts?.get(id)) || {};
+    for (const header of container.querySelectorAll('[data-tab-group-header]')) {
+      const alert = alerts[header.dataset.tabGroupHeader];
+      header.classList.toggle('tab-alert-action', alert === 'action');
+      header.classList.toggle('tab-alert-idle', alert === 'idle');
+    }
+  }
+
+  _syncTabTreeSelection(container) {
+    if (container?.getAttribute('role') !== 'tree') return;
+    for (const row of container.querySelectorAll('.session-tab')) {
+      row.setAttribute('aria-selected', row.classList.contains('active') ? 'true' : 'false');
+    }
+  }
+
+  _handleTabTreeKeydown(e, container) {
+    if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+    const items = this._tabTreeItems(container);
+    const current = e.target?.closest?.('[role="treeitem"]');
+    // A key pressed on a control INSIDE a row (its close or overflow button,
+    // focused by a click or handed focus back by the action menu) belongs to
+    // that control: Enter there must reopen the menu, not re-select the row.
+    // Same contract as the flat list, which acts only on a focused row.
+    if (!current || current !== e.target) return;
+    const index = items.indexOf(current);
+    if (index < 0) return;
+    const groupId = current.dataset.tabGroupHeader || null;
+    const expanded = current.getAttribute('aria-expanded') === 'true';
+    // A group with no open rows is a leaf (no aria-expanded): nothing to open.
+    const expandable = current.hasAttribute('aria-expanded');
+    const focusAt = (next) => {
+      if (!next) return;
+      this._setTabTreeStop(container, next);
+      next.focus();
+    };
+    const toggle = (collapse) => {
+      // The toggle re-renders the rail; keep focus on this header through it.
+      this._tabFocusIdentity = `group:${groupId}`;
+      this.toggleTabGroupCollapsed(groupId, collapse);
+    };
+
+    // Alt+Up/Down on a Focus row reorders Focus (COD-509), the keyboard twin
+    // of dragging it.
+    if (e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !groupId) {
+      const ref = current.dataset.webviewId
+        ? { kind: 'webview', id: current.dataset.webviewId }
+        : current.dataset.id
+          ? { kind: 'session', id: current.dataset.id }
+          : null;
+      if (!ref || !this._tabRefFocused(ref)) return;
+      e.preventDefault();
+      this.moveFocusRefBy(ref, e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'ArrowUp': {
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        focusAt(items[(index + step + items.length) % items.length]);
+        break;
+      }
+      case 'Home':
+        focusAt(items[0]);
+        break;
+      case 'End':
+        focusAt(items[items.length - 1]);
+        break;
+      case 'ArrowRight':
+        if (!groupId || !expandable) return;
+        if (!expanded) toggle(false);
+        else {
+          const child = items.find((item) => item.closest('[role="group"]')?.id === current.getAttribute('aria-owns'));
+          if (!child) return;
+          focusAt(child);
+        }
+        break;
+      case 'ArrowLeft':
+        if (groupId) {
+          if (!expandable || !expanded) return;
+          toggle(true);
+        } else {
+          const group = current.closest('[role="group"]');
+          const header = group ? container.querySelector(`[aria-owns="${CSS.escape(group.id)}"]`) : null;
+          if (!header) return;
+          focusAt(header);
+        }
+        break;
+      case 'Enter':
+      case ' ':
+        if (groupId) toggle();
+        else this._activateTabRow(current);
+        break;
+      case 'F2':
+        if (!groupId || !this.startTabGroupRename(groupId)) return;
+        break;
+      case 'F10':
+      case 'ContextMenu': {
+        if (e.key === 'F10' && !e.shiftKey) return;
+        const synthetic = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
+        if (groupId) {
+          this.openTabGroupMenu(synthetic, groupId);
+        } else if (current.dataset.id) {
+          this.openTabRailActionMenu?.(synthetic, current.dataset.id);
+        } else if (current.dataset.webviewId) {
+          this.openTabWebviewMenu(synthetic, current.dataset.webviewId);
+        } else return;
+        break;
+      }
+      default:
+        return;
+    }
+    e.preventDefault();
+  }
+
+  _activateTabRow(row) {
+    if (row?.dataset.webviewId) return this.openWebview(row.dataset.webviewId);
+    if (row?.dataset.id) return this.selectSession(row.dataset.id, { forceReload: true });
+    return undefined;
+  }
+
+  _applyTabListRole(container, grouped) {
+    if (grouped) {
+      container.setAttribute('role', 'tree');
+      container.setAttribute('aria-label', 'Sessions');
+    } else if (container.getAttribute('role') === 'tree') {
+      container.setAttribute('role', 'tablist');
+      container.setAttribute('aria-label', 'Session tabs');
+    }
+  }
+
+  _applyTabTreeSemantics(container, { identity = null, refocus = false } = {}) {
+    for (const row of container.querySelectorAll('.session-tab')) {
+      row.setAttribute('role', 'treeitem');
+      row.setAttribute('aria-selected', row.classList.contains('active') ? 'true' : 'false');
+      row.setAttribute('aria-level', row.closest('[role="group"]') ? '2' : '1');
+      // Controls stay clickable, but leave the tab order: the tree has ONE stop,
+      // and a row's actions are reachable from it with Shift+F10 / ContextMenu.
+      for (const control of row.querySelectorAll('[tabindex], button, a[href], input, select, textarea')) {
+        control.tabIndex = -1;
+      }
+    }
+    for (const header of container.querySelectorAll('[data-tab-group-header]')) header.setAttribute('aria-level', '1');
+    const items = this._applyTabTreePositions(container);
+
+    const byIdentity = (id) => (id ? items.find((item) => this._tabTreeIdentity(item) === id) : null);
+    // A focused row that a collapse just hid hands focus to its group header.
+    const hiddenIn = identity ? this._hiddenTabGroupByRef?.get(identity) : null;
+    const target =
+      byIdentity(identity) ||
+      (hiddenIn ? byIdentity(`group:${hiddenIn}`) : null) ||
+      items.find((item) => item.getAttribute('aria-selected') === 'true') ||
+      items[0];
+    if (!target) return;
+    this._setTabTreeStop(container, target);
+    if (refocus && document.activeElement !== target) target.focus();
+  }
+
+  _setTabTreeStop(container, item) {
+    for (const el of container.querySelectorAll('[role="treeitem"]')) el.tabIndex = el === item ? 0 : -1;
+  }
+
+  _tabTreeIdentity(element) {
+    const item = element?.closest?.('[data-tab-group-header], .session-tab');
+    if (!item) return null;
+    if (item.dataset.tabGroupHeader) return `group:${item.dataset.tabGroupHeader}`;
+    if (item.dataset.webviewId) return `webview:${item.dataset.webviewId}`;
+    if (item.dataset.id) return `session:${item.dataset.id}`;
+    return null;
+  }
+
+  _canSwapActiveTabWith(neighbourId) {
+    const projection = this._projectTabGroups();
+    if (!projection) return true;
+    const sectionOf = (id) => projection.sectionByRef[`session:${id}`];
+    return sectionOf(this.activeSessionId) === sectionOf(neighbourId);
+  }
+
+  setupTabKeyboardNavigation(container) {
+    // Remove existing listener if any to avoid duplicates
+    if (this._tabKeydownHandler) {
+      container.removeEventListener('keydown', this._tabKeydownHandler);
+    }
+
+    this._tabKeydownHandler = (e) => {
+      // The grouped rail is a tree with its own key model; everything else
+      // (header strip, sidebar, flat rail) keeps the tab-strip walk below.
+      if (container.getAttribute('role') === 'tree') {
+        this._handleTabTreeKeydown(e, container);
+        return;
+      }
+      // Up/Down are aliases of Left/Right, not replacements: the strip stays
+      // arrow-key navigable exactly as before, the vertical sidebar just gains
+      // the axis a user reaches for there.
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' '].includes(e.key)) return;
+
+      // Rows hidden by the sidebar filter must not be steppable.
+      const tabs = [...container.querySelectorAll('.session-tab:not(.tab-filtered-out)')];
+      // ⚠️ A sorted rail paints its rows with the flex `order` property while the
+      // DOM stays in `sessionOrder` (that is what keeps the Alt+N badge and the
+      // drag model honest), so a DOM-order walk steps around the screen instead of
+      // down it: ArrowDown from the top card lands wherever that session happens to
+      // sit in the tab order. Walk what the eye sees. Read the COMPUTED order, not
+      // the inline one, or web tabs (pinned past the cards by a CSS `order: 9999`
+      // rather than an inline style) read as 0 and the walk starts on them. Array
+      // sort is stable, so equal orders keep DOM order, which is the unsorted case.
+      if (this.isTabRailSorted() || container.classList.contains('tabs-triage')) {
+        const orderOf = (el) => Number(getComputedStyle(el).order) || 0;
+        // Case clusters are boxes in DOM order and a sorted rail orders rows
+        // INSIDE each one, so the box goes first in the key.
+        const boxes = [...container.querySelectorAll(':scope > .tab-cluster')];
+        const boxOf = (el) => boxes.indexOf(el.closest('.tab-cluster'));
+        tabs.sort((a, b) => boxOf(a) - boxOf(b) || orderOf(a) - orderOf(b));
+      }
+      const currentIndex = tabs.indexOf(document.activeElement);
+
+      // Enter or Space activates the tab
+      if ((e.key === 'Enter' || e.key === ' ') && currentIndex >= 0) {
+        e.preventDefault();
+        this._activateTabRow(tabs[currentIndex]);
+        return;
+      }
+
+      if (currentIndex < 0) return;
+
+      let newIndex;
+      switch (e.key) {
+        case 'ArrowLeft':
+        case 'ArrowUp':
+          newIndex = currentIndex > 0 ? currentIndex - 1 : tabs.length - 1;
+          break;
+        case 'ArrowRight':
+        case 'ArrowDown':
+          newIndex = currentIndex < tabs.length - 1 ? currentIndex + 1 : 0;
+          break;
+        case 'Home':
+          newIndex = 0;
+          break;
+        case 'End':
+          newIndex = tabs.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      e.preventDefault();
+      tabs[newIndex]?.focus();
+    };
+
+    container.addEventListener('keydown', this._tabKeydownHandler);
+
+    // Grouped tree: a row or header focused by pointer becomes the tab stop, so
+    // Tab-ing away and back returns to it and there is still exactly one stop.
+    if (!this._tabTreeFocusinHandler) {
+      this._tabTreeFocusinHandler = (e) => {
+        if (container.getAttribute('role') !== 'tree') return;
+        const item = e.target?.closest?.('[role="treeitem"]');
+        if (item && container.contains(item)) this._setTabTreeStop(container, item);
+      };
+      container.addEventListener('focusin', this._tabTreeFocusinHandler);
+    }
+  }
+
+  /** Full Focus order, including entries that are not currently renderable. */
+
+  /**
+   * Move one Focus entry past the next visible one in that direction. The index
+   * is absolute in the stored Focus order, so a focused-but-hidden ref between
+   * the two neighbours is stepped over rather than landed on.
+   */
+
+  /** Destination index for a Focus move, or null when the entry cannot move. */
+
+
+
+
+
+
+
+
+
+
 
   // ═══════════════════════════════════════════════════════════════
   // Debounce Utility
@@ -7370,17 +8072,6 @@ class CodemanApp {
     return root.getAttribute('data-tab-orientation') === 'vertical' && root.dataset.tabRailSort === 'activity';
   }
 
-  _isNamedGroupTabRef(ref) {
-    return (this.tabLayout?.groups || []).some((group) =>
-      group.refs.some((member) => member.kind === ref.kind && member.id === ref.id)
-    );
-  }
-
-  _tabRailVisualOrder(ref, railSortOrder) {
-    if (this._isNamedGroupTabRef(ref)) return undefined;
-    return ref.kind === 'webview' ? 9999 : railSortOrder.get(ref.id);
-  }
-
   /**
    * Visual position per session id for the sorted rail, or null when the rail is
    * not sorting.
@@ -7404,14 +8095,23 @@ class CodemanApp {
    * @param {Array<string>} ids live session ids, in tab order
    * @returns {Map<string, number>|null}
    */
+  /**
+   * True for a row the user ordered by hand: one stored in a named group, or in
+   * Focus. The activity sort leaves those in their saved order (COD-494) and
+   * ranks only Ungrouped, so selecting a grouped session never moves it.
+   */
+  _isSavedOrderTabRef(ref) {
+    const location = this._tabRefLocation(ref);
+    if (!location) return false;
+    return location.groupId !== null || location.refs[location.index]?.focus === true;
+  }
+
   _tabRailSortOrder(ids) {
     if (!this.isTabRailSorted()) return null;
     if (!window.CodemanSessionOrder || typeof this._mobileOverviewState !== 'function') return null;
     const rows = [];
     for (let i = 0; i < ids.length; i++) {
-      // Named groups keep their saved ref order across selections and activity
-      // updates. Only Ungrouped (or a flat rail) uses activity sorting.
-      if (this._isNamedGroupTabRef({ kind: 'session', id: ids[i] })) continue;
+      if (this._isSavedOrderTabRef({ kind: 'session', id: ids[i] })) continue;
       const session = this.sessions.get(ids[i]);
       if (!session) continue;
       rows.push({
@@ -7426,6 +8126,355 @@ class CodemanApp {
     const out = new Map();
     for (let i = 0; i < sorted.length; i++) out.set(sorted[i].id, i);
     return out;
+  }
+
+  /**
+   * True when the tab list groups by state (`tabArrangement: 'state'`, opt-in;
+   * Discussion #426 option C): a row per state in the header strip, a section
+   * per state in the flat side rail and the sidebar, most urgent on top.
+   *
+   * Read off <html> like the rail gates (applyTabOrientation() owns the
+   * attribute). Named groups in the vertical rail still win, because they are
+   * the user's own structure: `_tabTriageLayout()` returns null while the
+   * grouped projection is on, and the grouped tree renders as it always did.
+   */
+  isTabTriage() {
+    return document.documentElement.dataset.tabArrangement === 'state';
+  }
+
+  /**
+   * Order values and visible groups for one render pass, or null when the list
+   * is not grouped by state. The pure core is `CodemanTabTriage.layout()`
+   * (constants.js); this only feeds it the same classification both home
+   * screens and the sorted rail use.
+   *
+   * Inside a group a row keeps its tab order on the header strip, so the strip
+   * only moves a tab when its state changes. A sorted rail ranks rows inside
+   * each section the way it ranks the whole flat rail (`railSortOrder`).
+   *
+   * @param {Array<string>} ids live session ids, in tab order
+   * @param {object|null} groupProjection the grouped rail's projection, if any
+   * @param {Map<string, number>|null} railSortOrder `_tabRailSortOrder(ids)`
+   */
+  _tabTriageLayout(ids, groupProjection, railSortOrder) {
+    if (groupProjection || !this.isTabTriage()) return null;
+    if (!window.CodemanTabTriage || typeof this._mobileOverviewState !== 'function') return null;
+    const rows = [];
+    for (let i = 0; i < ids.length; i++) {
+      const session = this.sessions.get(ids[i]);
+      if (!session) continue;
+      const state = this._mobileOverviewState(session, this.pendingHooks?.get(ids[i]));
+      rows.push({
+        id: ids[i],
+        state,
+        exited: !!this._mobileOverviewExit?.(state, session),
+        pos: railSortOrder?.has(ids[i]) ? railSortOrder.get(ids[i]) : i,
+      });
+    }
+    const webviewIds = (this.webviewOrder || []).filter((wid) => this.webviews?.has(wid));
+    const reverse = document.documentElement.dataset.tabStateOrder === 'urgent-last';
+    return window.CodemanTabTriage.layout(rows, webviewIds, { reverse });
+  }
+
+  /**
+   * Keep the state headings, the row breaks and the web tabs' `order` in step
+   * with one pass's triage layout. Runs after BOTH render paths, because a
+   * session changing state is an incremental pass (no tab is added or removed)
+   * and can still empty a group or fill a new one.
+   *
+   * Headings and breaks are keyed by group and reconciled in place, never
+   * rebuilt, so an SSE tick that changes nothing writes nothing. They are
+   * direct children of #sessionTabs placed purely by `order`, so where they sit
+   * in the DOM does not matter, and `aria-hidden` keeps them out of the tablist,
+   * whose children must all be tabs. (A tab's state is not announced either way:
+   * its status dot is aria-hidden, as before.) With `triage` null this removes
+   * them all and clears the web tabs' inline order, which is what leaves the
+   * ungrouped strip exactly as it was.
+   */
+  _syncTabTriageChrome(container, triage) {
+    if (!container) return;
+    this._lastTabTriage = triage;
+    container.classList.toggle('tabs-triage', !!triage);
+    const wanted = new Map((triage?.groups || []).map((group) => [group.key, group]));
+    for (const el of [...container.querySelectorAll(':scope > .tab-triage-head, :scope > .tab-triage-break')]) {
+      if (!wanted.has(el.dataset.triageGroup)) el.remove();
+    }
+    const ensure = (className, key) => {
+      let el = container.querySelector(`:scope > .${className}[data-triage-group="${key}"]`);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = className === 'tab-triage-head' ? `tab-triage-head tab-triage-head--${key}` : className;
+        el.dataset.triageGroup = key;
+        el.setAttribute('aria-hidden', 'true');
+        container.appendChild(el);
+      }
+      return el;
+    };
+    for (const group of wanted.values()) {
+      const head = ensure('tab-triage-head', group.key);
+      // A quiet group (idle) keeps its heading as the row's anchor but draws
+      // no label or count.
+      head.classList.toggle('tab-triage-head--quiet', !!group.quiet);
+      if (!group.quiet && !head.firstElementChild) {
+        const label = document.createElement('span');
+        label.className = 'tab-triage-label';
+        label.textContent = group.label;
+        const count = document.createElement('span');
+        count.className = 'tab-triage-count';
+        head.append(label, count);
+      }
+      const count = String(group.count);
+      if (!group.quiet && head.lastElementChild.textContent !== count) head.lastElementChild.textContent = count;
+      // The first row's heading is the one that starts beside the brand in the
+      // header strip (styles.css); every later row starts under it.
+      head.classList.toggle('tab-triage-head--lead', group === triage.groups[0]);
+      const headOrder = String(group.headOrder);
+      if (head.style.order !== headOrder) head.style.order = headOrder;
+      const brk = ensure('tab-triage-break', group.key);
+      const breakOrder = String(group.breakOrder);
+      if (brk.style.order !== breakOrder) brk.style.order = breakOrder;
+    }
+    for (const web of container.querySelectorAll(':scope > .session-tab[data-webview-id]')) {
+      const wid = web.dataset.webviewId;
+      const value = triage?.webOrder.has(wid) ? String(triage.webOrder.get(wid)) : '';
+      if (web.style.order !== value) web.style.order = value;
+    }
+    this._sizeTabTriageGutter(container, triage);
+  }
+
+  /**
+   * Size the header strip's two measured lengths (styles.css, "Header strip,
+   * wrapping"): `--tab-triage-gutter`, the label column, as wide as the widest
+   * label on screen so a row never carries a fixed gutter's worth of empty
+   * space; and `--tab-triage-brand`, the brand's width, because the brand sits
+   * over the strip's top-left corner and only the FIRST row starts beside it,
+   * every later row starting under it.
+   *
+   * The labels are measured only when their text changes (a group appears,
+   * goes, or its count gains a digit), when the strip starts wrapping, and
+   * once more when the web fonts finish loading. Only the WRAPPING strip reads
+   * the label column, so the phone and tablet row (headings hidden under
+   * 600px, inline dividers above) is never measured and keeps no measurement:
+   * a phone turned to landscape or a foldable opened crosses into the wrapping
+   * strip with no tab render behind it, and updateTabOverflowMode(), which the
+   * resize handler calls, sizes it right after deciding to wrap. The brand is
+   * watched by a ResizeObserver (a display-name change, the sidebar toggle
+   * appearing), so a render pass never forces a layout read for it. The
+   * vertical lists use neither length and are never measured.
+   */
+  _sizeTabTriageGutter(container, triage) {
+    const inHeader = !!container.parentElement?.classList.contains('session-tabs-host');
+    if (!triage || !inHeader) {
+      if (container.style.getPropertyValue('--tab-triage-gutter')) container.style.removeProperty('--tab-triage-gutter');
+      if (container.style.getPropertyValue('--tab-triage-brand')) container.style.removeProperty('--tab-triage-brand');
+      this._tabTriageGutterKey = null;
+      return;
+    }
+    this._watchTabTriageBrand(container);
+    if (Number.isFinite(this._tabTriageBrandWidth)) {
+      const brand = `${this._tabTriageBrandWidth}px`;
+      if (container.style.getPropertyValue('--tab-triage-brand') !== brand) {
+        container.style.setProperty('--tab-triage-brand', brand);
+      }
+    }
+    // Not wrapping: forget the measurement, so wrapping again measures afresh.
+    if (!container.classList.contains('tabs-auto-wrap') && !container.classList.contains('tabs-two-rows')) {
+      this._tabTriageGutterKey = null;
+      return;
+    }
+    const key = triage.groups.map((g) => `${g.key}:${g.count}`).join('|');
+    if (key === this._tabTriageGutterKey) return;
+    let widest = 0;
+    for (const head of container.querySelectorAll(':scope > .tab-triage-head')) {
+      // Laid-out parts only. A hidden heading measures 0 per part, and counting
+      // the 5px gap between its parts anyway turned that into a 15px column
+      // that was then cached as if measured.
+      let width = 0;
+      let parts = 0;
+      for (const part of head.children) {
+        const partWidth = part.getBoundingClientRect().width;
+        if (partWidth > 0) {
+          width += partWidth;
+          parts++;
+        }
+      }
+      if (parts) widest = Math.max(widest, width + 5 * (parts - 1));
+    }
+    // Hidden (display: none, or a detached strip): nothing to size, and no key
+    // either, so the next pass measures again.
+    if (!widest) return;
+    this._tabTriageGutterKey = key;
+    container.style.setProperty('--tab-triage-gutter', `${Math.ceil(widest + 10)}px`);
+    if (!this._tabTriageFontsHooked && document.fonts?.ready) {
+      this._tabTriageFontsHooked = true;
+      document.fonts.ready.then(() => {
+        this._tabTriageGutterKey = null;
+        this._sizeTabTriageGutter(this.$('sessionTabs'), this._lastTabTriage);
+      });
+    }
+  }
+
+  /**
+   * Keep `_tabTriageBrandWidth` (the header brand plus the gap after it) in
+   * step with the brand, once per page. The first observation arrives right
+   * after `observe()`, so the width is known from the first frame on.
+   */
+  _watchTabTriageBrand(container) {
+    if (this._tabTriageBrandObserver !== undefined) return;
+    const brand = container.closest('.header')?.querySelector(':scope > .header-brand');
+    if (!brand || typeof ResizeObserver !== 'function') {
+      this._tabTriageBrandObserver = null;
+      return;
+    }
+    const gap = 8;
+    this._tabTriageBrandWidth = Math.ceil(brand.getBoundingClientRect().width + gap);
+    this._tabTriageBrandObserver = new ResizeObserver((entries) => {
+      const box = entries[0]?.borderBoxSize?.[0];
+      const width = Math.ceil((box ? box.inlineSize : brand.getBoundingClientRect().width) + gap);
+      if (width === this._tabTriageBrandWidth) return;
+      this._tabTriageBrandWidth = width;
+      this._sizeTabTriageGutter(this.$('sessionTabs'), this._lastTabTriage);
+    });
+    this._tabTriageBrandObserver.observe(brand);
+  }
+
+  /**
+   * A drag in a grouped strip (by state or by case) may only reorder WITHIN a
+   * group. Inside a group the rows sit in tab order, so a drop there moves the
+   * tab exactly where it was dropped; across groups the dragged tab would stay
+   * in its own group (its state or case did not change) and land somewhere the
+   * user did not put it. State groups are bands of `order` values, so comparing
+   * bands is enough; case clusters are boxes, so the box decides.
+   */
+  _isTabDropAcrossGroups(targetTab) {
+    const container = this.$('sessionTabs');
+    if (!container || !this.draggedTabId || !targetTab) return false;
+    const triage = container.classList.contains('tabs-triage');
+    const clusters = container.classList.contains('tabs-clusters');
+    if (!triage && !clusters) return false;
+    const dragged = container.querySelector(`.session-tab[data-id="${this.draggedTabId}"]`);
+    if (!dragged) return false;
+    // Clusters are real boxes: a drop belongs to the box it lands in.
+    if (clusters) return dragged.closest('.tab-cluster') !== targetTab.closest('.tab-cluster');
+    const stride = window.CodemanTabTriage?.STRIDE || 10000;
+    const band = (el) => Math.floor((Number(el.style.order) || 0) / stride);
+    return band(dragged) !== band(targetTab);
+  }
+
+  /** True when the tab list is clustered by case (`tabArrangement: 'case'`, Discussion #426 option A). */
+  isTabClusters() {
+    return document.documentElement.dataset.tabArrangement === 'case';
+  }
+
+  /**
+   * True when the header strip is drawn as a ledger (`tabArrangement: 'ledger'`,
+   * Discussion #426 option B): the flat list on an aligned column grid with a
+   * status bar per cell. Pure CSS on `.tabs-ledger`, scoped to the desktop
+   * header strip; the rail and the sidebar keep their flat list.
+   */
+  isTabLedger() {
+    return document.documentElement.dataset.tabArrangement === 'ledger';
+  }
+
+  /**
+   * Which case a session belongs to, for clustering: the case whose path is the
+   * longest prefix of its working directory (`_mobileOverviewCaseFor()`, the
+   * home screens' own match), else the directory itself, else the session alone.
+   */
+  _tabClusterIdentity(session, id) {
+    const dir = (session.workingDir || '').replace(/\/+$/, '');
+    const match =
+      dir && typeof this._mobileOverviewCaseFor === 'function' ? this._mobileOverviewCaseFor(dir, this.cases) : null;
+    if (match) return { key: match.path, label: match.name || '' };
+    if (dir) return { key: dir, label: dir.split('/').pop() || dir };
+    return { key: `session:${id}`, label: '' };
+  }
+
+  /**
+   * The cluster layout for one render pass, or null when the list is not
+   * clustered. Named groups in the vertical rail win, exactly as for the state
+   * grouping. `key` is the whole structure as a string: the incremental render
+   * path compares it with the last full render's and rebuilds when it differs,
+   * because a cluster is a real box and a patch in place cannot move a tab into
+   * another one. Membership only changes when sessions come and go (already a
+   * full rebuild) or when the case list arrives, so this rarely fires.
+   *
+   * @param {Array<string>} ids live session ids, in tab order
+   * @param {object|null} groupProjection the grouped rail's projection, if any
+   */
+  _tabClusterLayout(ids, groupProjection) {
+    if (groupProjection || !this.isTabClusters() || !window.CodemanTabClusters) return null;
+    const rows = [];
+    for (const id of ids) {
+      const session = this.sessions.get(id);
+      if (session) rows.push({ id, ...this._tabClusterIdentity(session, id) });
+    }
+    const clusters = window.CodemanTabClusters.compute(rows);
+    // Only a cluster with company drops the case from its tab names.
+    const labelFor = new Map();
+    for (const cluster of clusters) {
+      if (cluster.ids.length > 1) for (const id of cluster.ids) labelFor.set(id, cluster.label);
+    }
+    const webviewIds = (this.webviewOrder || []).filter((wid) => this.webviews?.has(wid));
+    const key = JSON.stringify([clusters.map((c) => [c.key, c.label, c.ids]), webviewIds]);
+    return { clusters, labelFor, webviewIds, key };
+  }
+
+  /**
+   * The cluster boxes for the full render: one box per case, labelled with its
+   * colour swatch, name and count, and a box per open web tab, which has no
+   * case. The header strip shows only the swatch for a case with one tab
+   * (styles.css); the rail and the sidebar label every case. Rows are the
+   * caller's own markup, so a tab is byte-identical to the flat strip's apart
+   * from its name split.
+   */
+  _renderTabClusters(layout, rowHtml, webviewSlotStart) {
+    const parts = [];
+    for (const cluster of layout.clusters) {
+      const rows = cluster.ids.map((id) => rowHtml.get(id) || '').join('');
+      const single = cluster.ids.length < 2;
+      const head =
+        '<span class="tab-cluster-label" aria-hidden="true"><span class="tab-cluster-swatch"></span>' +
+        `<span class="tab-cluster-name" data-i18n-skip>${escapeHtml(cluster.label)}</span>` +
+        `<span class="tab-cluster-count">${cluster.ids.length}</span></span>`;
+      parts.push(
+        `<div class="tab-cluster${single ? ' tab-cluster--single' : ''}" role="presentation" data-cluster-key="${escapeHtml(cluster.key)}" style="--cluster-color: var(--session-${cluster.color})">${head}${rows}</div>`
+      );
+    }
+    layout.webviewIds.forEach((wid, i) => {
+      const tab = this.renderWebviewTab?.(wid, webviewSlotStart + i) || '';
+      if (tab) parts.push(`<div class="tab-cluster tab-cluster--single tab-cluster--web" role="presentation">${tab}</div>`);
+    });
+    return parts.join('');
+  }
+
+  /**
+   * The tab label, as markup. #232: a described name (`w3-x: fix login`) shows
+   * just the description, the generated id kept in a hidden prefix span. Inside
+   * a case cluster a generated `w75-api-gateway` shows `w75`, the `-api-gateway`
+   * kept in a `.tab-name-case` span that only `.tabs-clusters` hides, so the full
+   * name stays in the DOM (copy, find-in-page, the rename editor).
+   */
+  _tabNameHtml(name, clusterLabel) {
+    const parsed = parseSessionPrefix(name);
+    if (parsed && parsed.suffix) {
+      return `<span class="tab-name-prefix">${escapeHtml(parsed.prefix)}: </span>${escapeHtml(parsed.suffix)}`;
+    }
+    const split = clusterLabel ? window.CodemanTabClusters?.nameSplit(name, clusterLabel) : null;
+    if (split) return `${escapeHtml(split.shown)}<span class="tab-name-case">${escapeHtml(split.hidden)}</span>`;
+    return escapeHtml(name);
+  }
+
+  /**
+   * The arrangement classes on #sessionTabs that are not owned by a sync of
+   * their own (`tabs-triage` is `_syncTabTriageChrome()`'s): `tabs-clusters`
+   * while case clusters are drawn, `tabs-ledger` while the ledger is on. The
+   * ledger never applies inside the grouped rail.
+   */
+  _syncTabArrangementClasses(container, { clusters, groupProjection }) {
+    if (!container) return;
+    container.classList.toggle('tabs-clusters', !!clusters);
+    container.classList.toggle('tabs-ledger', this.isTabLedger() && !groupProjection);
   }
 
   /**
@@ -7680,22 +8729,161 @@ class CodemanApp {
    */
   applySidebarFilter(query) {
     this._sidebarFilter = (query ?? '').trim().toLowerCase();
+    this._applyTabListFilter();
+  }
+
+  /**
+   * The ONE row filter behind both search boxes: the sidebar's filter box and
+   * the vertical rail's search box (only one of the two hosts the list at a
+   * time). Classes only, over whatever the last render drew, so grouping, order,
+   * Alt+N badges and the server layout never move; the matching itself is the
+   * pure CodemanTabSearch (constants.js).
+   *
+   * - Sidebar: name (aria-label) + working directory (title), as it always has.
+   * - Rail: the NAME only, a web tab's title included (it is a row in the same
+   *   list, and hiding every web tab would make a dashboard unfindable).
+   *
+   * A session row with a tab alert (red action or yellow idle, whatever
+   * tabAlerts holds, the set a collapsed group header surfaces) stays visible
+   * even when it does not match: a prompt waiting on you is never hidden by a
+   * view filter. Alerts come and go through renderSessionTabs(), and both
+   * render paths end here, so nothing else re-runs this for them.
+   *
+   * A group or case box left with nothing showing hides with its header, its
+   * count shows the rows left showing (a kept row included), and the grouped
+   * tree's roving stop and posinset follow the visible items. A collapsed
+   * group's rows are not in the DOM at all, which is why the rail search also
+   * expands the projection (_projectTabGroups). Rows that appear or disappear
+   * move the rows below them, so the connector lines are redrawn then.
+   */
+  _applyTabListFilter() {
     const container = this.$('sessionTabs');
     if (!container) return;
-    const reachable =
-      this.isSessionSidebarActive() && document.documentElement.dataset.sidebar !== 'collapsed';
-    const needle = reachable ? this._sidebarFilter : '';
-    for (const tab of container.querySelectorAll('.session-tab')) {
-      if (!needle) {
-        tab.classList.remove('tab-filtered-out');
-        continue;
+    const rail = this._tabOrientation() === 'vertical';
+    const sidebarReachable =
+      !rail && this.isSessionSidebarActive() && document.documentElement.dataset.sidebar !== 'collapsed';
+    const query = rail ? this._tabRailSearch : sidebarReachable ? this._sidebarFilter : '';
+    const rows = [...container.querySelectorAll('.session-tab')].map((tab) => ({
+      key: tab,
+      text: rail
+        ? this._tabRowSearchName(tab)
+        : `${tab.getAttribute('aria-label') || ''} ${tab.getAttribute('title') || ''}`,
+      section: tab.closest('.tab-layout-group, .tab-cluster'),
+      // Web tabs carry no alerts; only a session row can be kept.
+      keep: !tab.dataset.webviewId && !!tab.dataset.id && !!this.tabAlerts?.get(tab.dataset.id),
+    }));
+    const result = window.CodemanTabSearch?.filter(rows, query);
+    if (!result) return;
+    // Whether anything appeared or disappeared: the rows below it then moved.
+    let moved = false;
+    // State headings count the whole group, so they step aside while a filter
+    // is narrowing the rows under them (styles.css, .tabs-filtering).
+    if (container.classList.contains('tabs-filtering') !== result.active) {
+      container.classList.toggle('tabs-filtering', result.active);
+      moved = true;
+    }
+    const setFilteredOut = (el, out) => {
+      if (el.classList.contains('tab-filtered-out') === out) return;
+      el.classList.toggle('tab-filtered-out', out);
+      moved = true;
+    };
+    for (const row of rows) setFilteredOut(row.key, result.hidden.has(row.key));
+    for (const section of container.querySelectorAll('.tab-layout-group, .tab-cluster')) {
+      const shown = result.counts.get(section) ?? 0;
+      setFilteredOut(section, result.active && shown === 0);
+      const count = section.querySelector('.tab-layout-group-count, .tab-cluster-count');
+      if (!count) continue;
+      if (count.dataset.total === undefined) count.dataset.total = count.textContent;
+      const text = result.active ? String(shown) : count.dataset.total;
+      if (count.textContent !== text) count.textContent = text;
+    }
+    const empty = document.getElementById('tabRailSearchEmpty');
+    const emptyHidden = !(rail && result.active && result.matchCount === 0);
+    if (empty && empty.hidden !== emptyHidden) {
+      empty.hidden = emptyHidden;
+      moved = true;
+    }
+    // Lineage and subagent/ultracode connectors are anchored to row positions.
+    // A render redraws them itself, but a keystroke in either box only toggles
+    // classes here, so the rows it moved would leave the lines pointing at where
+    // they were. Only when something moved: an unchanged re-apply at every
+    // render tail stays free, and the call coalesces with a render's own.
+    if (moved) this.updateConnectionLines?.();
+    // Both render paths already set posinset and the roving stop over an
+    // unfiltered tree, so this second pass only runs while a search hides
+    // something or right after one changed what shows.
+    if ((moved || result.active) && container.getAttribute('role') === 'tree') {
+      const items = this._applyTabTreePositions(container);
+      const stop = container.querySelector('[role="treeitem"][tabindex="0"]');
+      if (items.length && !items.includes(stop)) {
+        this._setTabTreeStop(container, items.find((item) => item.getAttribute('aria-selected') === 'true') || items[0]);
       }
-      const haystack = `${tab.getAttribute('aria-label') || ''} ${tab.getAttribute('title') || ''}`.toLowerCase();
-      tab.classList.toggle('tab-filtered-out', !haystack.includes(needle));
     }
     // The count shows visible rows, so it moves with every filter change —
     // including keystrokes in the filter box, which call this directly.
     this.updateSidebarCount();
+  }
+
+  /** What the rail search matches on a row: a session's name, a web tab's title. */
+  _tabRowSearchName(tab) {
+    if (tab.dataset.webviewId) return this.webviews?.get(tab.dataset.webviewId)?.name || '';
+    return tab.querySelector('.tab-name')?.dataset.fullName || '';
+  }
+
+  /** True while the vertical rail's search box is narrowing the list. */
+  _tabRailSearchActive() {
+    return this._tabOrientation() === 'vertical' && !!window.CodemanTabSearch?.needle(this._tabRailSearch);
+  }
+
+  /**
+   * The rail search box's input handler. In-memory only: never persisted, never
+   * sent anywhere. Starting or ending a search re-renders once when it changes
+   * what a collapsed group hides (the projection ignores collapse while
+   * searching); every other keystroke only re-applies the row classes.
+   */
+  setTabRailSearch(value) {
+    this._tabRailSearch = typeof value === 'string' ? value : '';
+    const clear = document.getElementById('tabRailSearchClear');
+    if (clear) clear.hidden = this._tabRailSearch.length === 0;
+    if (this._isTabGroupStructureStale()) this._fullRenderSessionTabs();
+    else this._applyTabListFilter();
+  }
+
+  /** Clear button (and Escape): empty the box, restore the list, keep focus in the box. */
+  clearTabRailSearch() {
+    const input = document.getElementById('tabRailSearch');
+    if (input) input.value = '';
+    this.setTabRailSearch('');
+    input?.focus();
+  }
+
+  /**
+   * Escape in a box that holds text clears the search and nothing else. The
+   * global key handler (setupEventListeners) runs in the CAPTURE phase, before
+   * the box's inline onkeydown, so it is the one that routes the key here and
+   * returns before its close-every-panel branch; stopping propagation from the
+   * inline handler would come too late. An empty box leaves Escape to it, and
+   * an Escape that cancels an IME composition is the IME's.
+   */
+  handleTabRailSearchKeydown(event) {
+    if (event.key !== 'Escape' || event.isComposing || !this._tabRailSearch) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.clearTabRailSearch();
+  }
+
+  /**
+   * Forget the search without rendering: the list is leaving the rail
+   * (applyTabOrientation), and the render that follows draws it unfiltered.
+   */
+  _resetTabRailSearch() {
+    this._tabRailSearch = '';
+    const input = document.getElementById('tabRailSearch');
+    if (input) input.value = '';
+    const clear = document.getElementById('tabRailSearchClear');
+    if (clear) clear.hidden = true;
+    const empty = document.getElementById('tabRailSearchEmpty');
+    if (empty) empty.hidden = true;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -7896,11 +9084,21 @@ class CodemanApp {
   // Session Tabs
   // ═══════════════════════════════════════════════════════════════
 
-  renderSessionTabs() {
+  renderSessionTabs({ immediate = false } = {}) {
+    // COD-235: the Files header button follows the active session on every tab render.
     this.updateFileBrowserHeaderButton?.();
-    if (this._tabLayoutFirstPaintPending) return;
     // Don't re-render while user is typing in the inline rename input
     if (this._inlineRenameActive) return;
+    if (immediate) {
+      // For a change the user just made and is watching for (closing a tab). The
+      // debounce restarts on every session update, so with busy sessions around a
+      // debounced pass can lag well past its 100ms. A pass still pending would only
+      // repeat this one, so it is dropped.
+      clearTimeout(this._debounceTimers.sessionTabs);
+      this._debounceTimers.sessionTabs = null;
+      this._renderSessionTabsImmediate();
+      return;
+    }
     this._debouncedCall('sessionTabs', this._renderSessionTabsImmediate);
   }
 
@@ -7908,34 +9106,32 @@ class CodemanApp {
   _updateActiveTabImmediate(sessionId) {
     const container = this.$('sessionTabs');
     if (!container) return;
+    // Grouped rail: selecting a session hidden in a collapsed group must show it
+    // (and re-hide the previous exception), which a class toggle cannot do.
+    if (this._isTabGroupStructureStale()) {
+      this._fullRenderSessionTabs();
+      return;
+    }
     const tabs = container.querySelectorAll('.session-tab[data-id]');
     for (const tab of tabs) {
       if (tab.dataset.id === sessionId) {
         tab.classList.add('active');
-        tab.setAttribute('aria-selected', 'true');
       } else {
         tab.classList.remove('active');
-        tab.setAttribute('aria-selected', 'false');
       }
     }
-    for (const tab of container.querySelectorAll('.session-tab[data-webview-id]')) {
-      tab.classList.remove('active');
-      tab.setAttribute('aria-selected', 'false');
-    }
-    for (const tab of container.querySelectorAll('.session-tab[data-focus-session-id]')) {
-      tab.classList.remove('active');
-      tab.removeAttribute('aria-selected');
-      tab.setAttribute('aria-current', tab.dataset.focusSessionId === sessionId ? 'page' : 'false');
-    }
-    for (const tab of container.querySelectorAll('.session-tab[data-focus-webview-id]')) {
-      tab.classList.remove('active');
-      tab.removeAttribute('aria-selected');
-      tab.setAttribute('aria-current', 'false');
-    }
+    this._syncTabTreeSelection(container);
     // #257: selection used to stop at the class toggle. On phones/tablets the
     // strip scrolls horizontally, so a tab selected from the palette, a swipe,
     // Alt+N or a push notification could stay parked off-screen.
     this._scrollActiveTabIntoView(sessionId);
+    // Where the new active tab sits now, so the render pass that follows can
+    // tell when it changes state band (viewing a waiting tab spends its alert
+    // and drops it into the idle row).
+    this._noteActiveTabBand(container);
+    // Lineage lines draw only the SELECTED tab's family (session-lineage.js), so a
+    // selection change is a redraw whenever any lineage exists at all.
+    if (this._lineageTotalEdges > 0) this.updateConnectionLines();
   }
 
   /**
@@ -7997,6 +9193,54 @@ class CodemanApp {
   }
 
   /**
+   * Record the active tab's state band and report whether it MOVED band since
+   * the last record while staying the active tab.
+   *
+   * Grouped by state (tabArrangement 'state'), the phone/tablet strip is still
+   * one scrolling row, but its tabs come in bands of `order` values, one band
+   * per state (CodemanTabTriage, constants.js). The active session changing
+   * state (a prompt sent: idle to working; a permission prompt: needs you)
+   * moves its tab into another band while scrollLeft stays put, so the tab in
+   * use slid out of view (measured at 390px: x 165 to -870). Both render paths
+   * reveal it when this says so.
+   *
+   * The band, not the raw order: another tab entering or leaving the active
+   * tab's band shifts its order value by one, and that must not yank a strip
+   * the user may be browsing. A changed active tab is not a move either: the
+   * switch already revealed it (#257). Read off the element, so the record is
+   * what is on screen, and called from _updateActiveTabImmediate() too, so a
+   * band change in the pass right after a switch still counts.
+   *
+   * @returns {boolean}
+   */
+  _noteActiveTabBand(container) {
+    const id = this.activeWebviewId ? null : this.activeSessionId;
+    const tab = id && container ? container.querySelector(`.session-tab[data-id="${id}"]`) : null;
+    const prev = this._activeTabBand;
+    if (!tab) {
+      this._activeTabBand = null;
+      return false;
+    }
+    const order = tab.style.order;
+    const stride = window.CodemanTabTriage?.STRIDE || 10000;
+    const band = order === '' ? null : Math.floor(Number(order) / stride);
+    this._activeTabBand = { id, band };
+    return !!prev && prev.id === id && prev.band !== band;
+  }
+
+  /**
+   * True when the tab list is the header's one horizontally scrolling row
+   * (phones and tablets): neither wrapping into rows nor a vertical list.
+   */
+  _isScrollingTabRow(container) {
+    return (
+      !this._isVerticalTabList() &&
+      !container.classList.contains('tabs-auto-wrap') &&
+      !container.classList.contains('tabs-two-rows')
+    );
+  }
+
+  /**
    * Where a floating window (subagent / ultracode) attaches to its parent tab.
    * Header strip: below the tab, connector runs vertically. Sidebar AND the
    * vertical rail: to the RIGHT of the tab, connector runs horizontally —
@@ -8020,6 +9264,20 @@ class CodemanApp {
       spawnTop: rect.bottom,
       vertical: true,
     };
+  }
+
+  /**
+   * The session's tab row when it is painted, else null: not rendered (a
+   * collapsed group) or hidden by the rail search or the sidebar filter. A
+   * display:none row still answers getBoundingClientRect() with an all-zero
+   * rect, which is truthy, so a connector, a spawn or a genie measured from it
+   * would start at the viewport's top-left corner. Every floating window that
+   * anchors to its parent tab measures through this.
+   */
+  _paintedSessionTab(sessionId) {
+    if (!sessionId) return null;
+    const tab = document.querySelector(`.session-tab[data-id="${sessionId}"]`);
+    return tab && tab.getClientRects().length > 0 ? tab : null;
   }
 
   /** Bezier from a _tabAnchor() to a window rect, curving along the right axis. */
@@ -8082,20 +9340,46 @@ class CodemanApp {
     // debounced just BEFORE the rename opened still fires ~100ms later and lands
     // here directly. finishRename() re-renders on both commit and cancel, so a
     // render dropped here is picked back up when the rename settles.
-    if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
+    if (this._inlineRenameActive || this._tabLayoutFirstPaintHeld()) return;
     const container = this.$('sessionTabs');
-    const projection = this._refreshTabProjection();
-    const structureKey = this._tabStructureKey(projection);
-    const existingRefs = [...container.querySelectorAll('.session-tab:not(.tab-focus-shortcut)')].map((tab) =>
-      tab.dataset.webviewId ? `webview:${tab.dataset.webviewId}` : `session:${tab.dataset.id}`
-    );
-    const wantedRefs = projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`);
-    const canIncremental =
-      (projection.focusRefs?.length || 0) === 0 &&
-      structureKey === this._lastTabStructureKey &&
-      existingRefs.length === wantedRefs.length &&
-      existingRefs.every((identity, index) => identity === wantedRefs[index]);
+    const existingTabs = container.querySelectorAll('.session-tab[data-id]');
+    const existingIds = new Set([...existingTabs].map(t => t.dataset.id));
+    // Grouped rail: a collapsed group keeps its rows out of the DOM, so compare
+    // against the rows the projection SHOWS, not every live session.
+    const groupProjection = this._projectTabGroups();
+    const currentIds = groupProjection
+      ? new Set(groupProjection.visibleRefs.filter((ref) => ref.kind === 'session').map((ref) => ref.id))
+      : new Set(this.sessions.keys());
 
+    // Web tabs live in the same strip but are not in this.sessions, so they need
+    // their own change check. Without it, the session-only comparison below is
+    // vacuously "unchanged" whenever session count is stable — most visibly with
+    // ZERO sessions (0 === 0), where opening a dashboard would never draw its tab.
+    const existingWebIds = [...container.querySelectorAll('.session-tab[data-webview-id]')].map(
+      t => t.dataset.webviewId
+    );
+    const wantedWebIds = groupProjection
+      ? groupProjection.visibleRefs.filter((ref) => ref.kind === 'webview').map((ref) => ref.id)
+      : (this.webviewOrder || []).filter(id => this.webviews?.has(id));
+    const webTabsUnchanged =
+      existingWebIds.length === wantedWebIds.length && existingWebIds.every((id, i) => id === wantedWebIds[i]);
+
+    // Check if we can do incremental update (same session IDs and same web tabs)
+    // The grouped rail's structure (sections, collapse, the shown exception) can
+    // change while the id sets stay equal; the in-place patch below cannot move
+    // or hide a row, so any structural change takes the full rebuild.
+    // Case clusters are boxes too: the same rule, keyed on their structure.
+    const clusterLayout = this._tabClusterLayout(
+      this.sessionOrder.filter((sid) => this.sessions.has(sid)),
+      groupProjection
+    );
+    const canIncremental = existingIds.size === currentIds.size &&
+      [...existingIds].every(id => currentIds.has(id)) &&
+      webTabsUnchanged &&
+      !this._isTabGroupStructureStale(groupProjection) &&
+      (clusterLayout ? clusterLayout.key : null) === (this._lastTabClusterKey ?? null);
+
+    let activeBandMoved = false;
     if (canIncremental) {
       // Read once for the whole pass, like the full-rebuild path: this touches
       // the DOM and the loop below runs for every session on every SSE tick.
@@ -8104,7 +9388,13 @@ class CodemanApp {
       // that sees one — a session going working→idle never adds or removes a
       // tab, so the full rebuild below is not reached. Recomputed per pass for
       // the same reason the rich meta line is: the order IS the state.
-      const railSortOrder = this._tabRailSortOrder(this.sessionOrder.filter((sid) => this.sessions.has(sid)));
+      const liveIds = this.sessionOrder.filter((sid) => this.sessions.has(sid));
+      const railSortOrder = this._tabRailSortOrder(liveIds);
+      // Grouped by state: same reasoning, a state change moves a tab between
+      // rows. Its order values replace the rail sort's (which it already folded
+      // in as the rank inside each section).
+      const triage = this._tabTriageLayout(liveIds, groupProjection, railSortOrder);
+      const listOrder = triage ? triage.order : railSortOrder;
       // Incremental update - only modify changed properties
       for (const [id, session] of this.sessions) {
         const tab = container.querySelector(`.session-tab[data-id="${id}"]`);
@@ -8112,12 +9402,8 @@ class CodemanApp {
 
         // An empty string clears the property, which is also what un-sorts the
         // rail when the setting (or the layout) flips without a full rebuild.
-        const railOrder = railSortOrder?.has(id) ? String(railSortOrder.get(id)) : '';
+        const railOrder = listOrder?.has(id) ? String(listOrder.get(id)) : '';
         if (tab.style.order !== railOrder) tab.style.order = railOrder;
-        const dropZone = tab.previousElementSibling;
-        if (dropZone?.classList.contains('tab-layout-drop-zone') && dropZone.style.order !== railOrder) {
-          dropZone.style.order = railOrder;
-        }
 
         // A web tab owns the active state while one is open. activeSessionId stays
         // set (the terminal keeps streaming underneath, and switching back is
@@ -8172,16 +9458,16 @@ class CodemanApp {
         else if (wantIdle && !hasIdle) { tab.classList.add('tab-alert-idle'); tab.classList.remove('tab-alert-action'); }
         else if (!alertType && (hasAction || hasIdle)) { tab.classList.remove('tab-alert-action', 'tab-alert-idle'); }
 
+        // Tile grid membership (tile-grid.js): a tiled session's tab says so.
+        tab.classList.toggle('in-tiles', !!this._tileGrid?.has(id));
+
         // Inject tab-number badge if missing (added after initial render)
         if (!tab.querySelector('.tab-number')) {
-          const number = window.CodemanTabLayout.altNumberForRef(
-            this._tabAltRefs(projection),
-            { kind: 'session', id }
-          );
-          if (number !== null) {
+          const idx = this._tabAltRefs().findIndex((ref) => ref.kind === 'session' && ref.id === id);
+          if (idx >= 0 && idx < 9) {
             const numSpan = document.createElement('span');
             numSpan.className = 'tab-number';
-            numSpan.textContent = String(number);
+            numSpan.textContent = String(idx + 1);
             tab.insertBefore(numSpan, tab.firstChild);
           }
         }
@@ -8196,7 +9482,7 @@ class CodemanApp {
         // The exited-agent badge (Ark0N/Codeman#446). A session going from live
         // to exited changes no tab count, so the full rebuild below never runs
         // for it and this is the only path that ever draws the badge.
-        applyPaneExitBadge(tab, session.paneExit);
+        applyPaneExitBadge(tab, session.paneExit, activity.ariaPhrase);
 
         // Rich sidebar meta ("created 3d ago · working 12m" + pill). The stamps
         // themselves move on _tickSidebarRichTimes(); this is here for the parts
@@ -8217,20 +9503,22 @@ class CodemanApp {
         // name) is the whole tab label; the generated id lives in the tooltip. The
         // compare targets the DISPLAY text, or a described tab would re-render on
         // every pass (textContent never equals the full name there).
-        //
-        // The full name still goes into the DOM either way: #232's compact
-        // horizontal presentation comes from hiding the prefix span in CSS, which
-        // the vertical rail then un-hides so a wrapped row can use the whole name.
         const nameEl = tab.querySelector('.tab-name');
         if (nameEl) {
           const _p = parseSessionPrefix(name);
           if (nameEl.dataset.fullName !== name) {
-            nameEl.textContent = '';
+            nameEl.replaceChildren();
+            const _split = _p && _p.suffix ? null : window.CodemanTabClusters?.nameSplit(name, clusterLayout?.labelFor.get(id));
             if (_p && _p.suffix) {
-              const prefixEl = document.createElement('span');
-              prefixEl.className = 'tab-name-prefix';
-              prefixEl.textContent = `${_p.prefix}: `;
-              nameEl.append(prefixEl, document.createTextNode(_p.suffix));
+              const prefix = document.createElement('span');
+              prefix.className = 'tab-name-prefix';
+              prefix.textContent = `${_p.prefix}: `;
+              nameEl.append(prefix, document.createTextNode(_p.suffix));
+            } else if (_split) {
+              const caseSpan = document.createElement('span');
+              caseSpan.className = 'tab-name-case';
+              caseSpan.textContent = _split.hidden;
+              nameEl.append(document.createTextNode(_split.shown), caseSpan);
             } else {
               nameEl.textContent = name;
             }
@@ -8239,11 +9527,6 @@ class CodemanApp {
               ? (session.workingDir ? `${_p.prefix} (${session.workingDir})` : _p.prefix)
               : (session.workingDir || '');
           }
-          const tooltip = session.workingDir && session.workingDir !== name
-            ? `${name}\n${session.workingDir}`
-            : name;
-          this._syncTabPlacementAccessibility(tab, { kind: 'session', id }, name, tooltip);
-          tab.setAttribute('aria-label', `${tab.getAttribute('aria-label') || `${name} session`}, ${activity.ariaPhrase}`);
         }
 
         // Update task badge
@@ -8301,23 +9584,32 @@ class CodemanApp {
           subagentBadgeEl.remove();
         }
       }
+      // Grouped tree: the loop above can re-sort rows (`style.order`), move the
+      // highlight, and change the alerts a collapsed header stands in for, none
+      // of which rebuilds the rail. Keep what assistive tech and the headers
+      // report in step. The flat list (role=tablist) never takes this branch.
+      if (groupProjection && container.getAttribute('role') === 'tree') {
+        this._syncTabTreeSelection(container);
+        this._applyTabTreePositions(container);
+        this._syncTabGroupHeaderAlerts(container, groupProjection);
+      }
+      this._syncTabTriageChrome(container, triage);
+      this._syncTabArrangementClasses(container, { clusters: !!clusterLayout, groupProjection });
+      // A state change is this path's job, and so is the active tab changing
+      // state band: revealed below, once the wrap mode is current.
+      activeBandMoved = this._noteActiveTabBand(container);
     } else {
-      // Full rebuild needed (identity, order, grouping, collapse, orientation,
-      // locally open webviews, or exclusive active identity changed).
+      // Full rebuild needed (sessions added/removed)
       this._fullRenderSessionTabs();
-      return;
     }
 
     // Keep the reveal-on-change bookkeeping honest when only the incremental
     // branch ran: _updateActiveTabImmediate has already scrolled the new active
     // tab into view, so the next full rebuild must not treat it as a change.
-    this._lastRenderedActiveTabIdentity = this.activeWebviewId
-      ? `webview:${this.activeWebviewId}`
-      : this.activeSessionId
-        ? `session:${this.activeSessionId}`
-        : null;
+    this._lastRenderedActiveTabId = this.activeSessionId;
 
     this.updateTabOverflowMode();
+    if (activeBandMoved && this._isScrollingTabRow(container)) this._scrollActiveTabIntoView(this.activeSessionId);
     // After the wrap measurement: the `unroll` style starts tabs at max-width 0,
     // so measuring mid-animation would decide the wrap on collapsed widths.
     this._applyTabEntrances?.();
@@ -8329,13 +9621,15 @@ class CodemanApp {
     this._refreshHomeSessionsIfVisible?.();
     // The full-render path already redraws the connection SVG; this incremental
     // one does not, and a badge appearing widens a tab and shifts every tab after
-    // it, sliding the lineage arcs off their anchors. Only pay for it when there
-    // is something anchored to tab rects: lineage arcs, or — in a VERTICAL list
-    // (sidebar, where lineage is skipped and the edge count stays 0, or the
-    // rail, which can show connectors with zero lineage edges too) — the
-    // subagent/ultracode connectors, whose rows a badge changes the HEIGHT of.
-    // Same widening as the strip-scroll listener in session-lineage.js.
-    if (this._lineageEdgeCount > 0 || this._isVerticalTabList()) this.updateConnectionLines();
+    // it, sliding the lineage lines off their anchors. Only pay for it when there
+    // is something anchored to tab rects: any lineage at all (not just what is
+    // drawn now: a parentSessionId or a child's working state can arrive on this
+    // path and change the selected family's tree), or, in a VERTICAL list (the
+    // sidebar, where lineage is skipped, or the rail, which can show connectors
+    // with zero lineage edges too), the subagent/ultracode connectors, whose
+    // rows a badge changes the HEIGHT of. updateTabOverflowMode() above has just
+    // refreshed _lineageTotalEdges.
+    if (this._lineageTotalEdges > 0 || this._isVerticalTabList()) this.updateConnectionLines();
 
     this.applySidebarFilter(this._sidebarFilter);
   }
@@ -8346,6 +9640,10 @@ class CodemanApp {
   updateTabOverflowMode() {
     const container = this.$('sessionTabs');
     if (!container) return;
+
+    // Lineage routing room (session-lineage.js) changes the strip's padding and
+    // row gap, so it is decided before the wrap is measured below.
+    this._syncLineageGutter?.();
 
     // The sidebar list is a single vertical column with its own scroller —
     // there is no row to overflow, and measuring it would fight the CSS.
@@ -8377,6 +9675,19 @@ class CodemanApp {
     if (manualTwoRows || deviceType !== 'desktop') {
       container.classList.remove('tabs-auto-wrap');
       this._applyHeaderRightWrap(deviceType, false, false);
+      // Wrap decided: the state labels' column follows it (_sizeTabTriageGutter).
+      this._sizeTabTriageGutter(container, this._lastTabTriage);
+      return;
+    }
+
+    // Grouped by state, the header strip IS rows (one per state), so it always
+    // wraps: the row breaks only take effect in a wrapping flex line. The ledger
+    // is a grid of rows, so the same holds. Narrower screens keep the single
+    // scrolling row above, where state headings read as inline dividers and the
+    // ledger stays the plain strip.
+    if (container.classList.contains('tabs-triage') || container.classList.contains('tabs-ledger')) {
+      container.classList.add('tabs-auto-wrap');
+      this._sizeTabTriageGutter(container, this._lastTabTriage);
       return;
     }
 
@@ -8410,6 +9721,7 @@ class CodemanApp {
           tabCount: this.sessions.size,
           scrollWidth: container.scrollWidth,
           clientWidth: container.clientWidth,
+          innerWrap: container.classList.contains('tabs-clusters') && this._tabClustersWrapInside(container),
         })
       : container.scrollWidth > container.clientWidth + 1;
 
@@ -8445,6 +9757,22 @@ class CodemanApp {
     window.dispatchEvent(new Event('resize'));
   }
 
+  /**
+   * True when a case cluster in the header strip wraps inside its own box: a case
+   * wider than the whole strip (styles.css caps a box at the strip's width). The
+   * strip then has rows although it never overflows, so it must still wrap, or
+   * the lineage routing room (`.lineage-tree.tabs-auto-wrap`) is never reserved
+   * and the routes have no gap between the box's rows to run in. Read right
+   * after the overflow measure, so layout is already clean.
+   */
+  _tabClustersWrapInside(container) {
+    for (const box of container.querySelectorAll(':scope > .tab-cluster')) {
+      const tabs = box.querySelectorAll(':scope > .session-tab');
+      if (tabs.length > 1 && tabs[tabs.length - 1].offsetTop > tabs[0].offsetTop + 4) return true;
+    }
+    return false;
+  }
+
   // Middle-click closes a tab, mirroring browser tab strips. Session tabs go
   // through requestCloseSession (the same confirm modal as the x button), web
   // tabs through closeWebviewTab (same as theirs). Delegated on the container:
@@ -8464,77 +9792,12 @@ class CodemanApp {
     });
   }
 
-  _renderTabShortcutNumber(sourceHtml, number) {
-    if (!sourceHtml) return '';
-    const template = document.createElement('template');
-    template.innerHTML = sourceHtml.trim();
-    const tab = template.content.firstElementChild;
-    if (!tab) return '';
-    tab.querySelectorAll('.tab-number').forEach((element) => element.remove());
-    if (Number.isInteger(number) && number >= 1 && number <= 9) {
-      const badge = document.createElement('span');
-      badge.className = 'tab-number';
-      badge.textContent = String(number);
-      const dragHandle = tab.querySelector('[data-tab-ref-drag]');
-      if (dragHandle) dragHandle.insertAdjacentElement('afterend', badge);
-      else tab.insertBefore(badge, tab.querySelector('.tab-load-spinner') || tab.firstChild);
-    }
-    return tab.outerHTML;
-  }
-
-  _renderFocusShortcut(ref, sourceHtml, number) {
-    if (!sourceHtml) return '';
-    const template = document.createElement('template');
-    template.innerHTML = sourceHtml.trim();
-    const tab = template.content.firstElementChild;
-    if (!tab) return '';
-    const key = `${ref.kind}:${ref.id}`;
-    const selected = ref.kind === 'webview'
-      ? this.activeWebviewId === ref.id
-      : !this.activeWebviewId && this.activeSessionId === ref.id;
-    tab.classList.remove('active');
-    tab.classList.add('tab-focus-shortcut');
-    // Focus keeps its canonical order; a copied rail sort value would move the
-    // shortcut away from its drop zone and leave another blank run of slots.
-    tab.style.order = '';
-    tab.setAttribute('data-tab-focus-shortcut', key);
-    tab.setAttribute(ref.kind === 'webview' ? 'data-focus-webview-id' : 'data-focus-session-id', ref.id);
-    tab.removeAttribute(ref.kind === 'webview' ? 'data-webview-id' : 'data-id');
-    tab.removeAttribute('oncontextmenu');
-    tab.removeAttribute('aria-selected');
-    tab.setAttribute('aria-current', selected ? 'page' : 'false');
-    tab.setAttribute('role', 'treeitem');
-    tab.setAttribute('tabindex', '-1');
-    tab.setAttribute('aria-label', `Focus shortcut, ${tab.getAttribute('aria-label') || ref.id}`);
-    tab
-      .querySelectorAll('.tab-number, .tab-focus-marker, .tab-actions')
-      .forEach((element) => element.remove());
-    tab.querySelectorAll('[id]').forEach((element) => element.removeAttribute('id'));
-    const actions = document.createElement('span');
-    actions.className = 'tab-actions tab-focus-actions';
-    const more = document.createElement('button');
-    more.type = 'button';
-    more.className = 'tab-more';
-    more.textContent = '⋯';
-    more.title = 'Focus actions';
-    more.setAttribute('aria-label', 'Focus actions');
-    more.setAttribute(
-      'onclick',
-      `event.stopPropagation(); app.openFocusShortcutMenu(event, ${JSON.stringify(ref)})`
-    );
-    actions.appendChild(more);
-    tab.appendChild(actions);
-    return this._renderTabShortcutNumber(tab.outerHTML, number);
-  }
-
   _fullRenderSessionTabs() {
     this.closeTabRailActionMenu?.();
-    if (this._inlineRenameActive || this._tabLayoutFirstPaintPending) return;
+    if (this._inlineRenameActive || this._tabLayoutFirstPaintHeld()) return;
+    // The group menu's trigger is about to be replaced.
     this.closeTabGroupMenu();
     const container = this.$('sessionTabs');
-    const projection = this._refreshTabProjection();
-    this._updateTabRailSessionSearchControls(projection);
-    const structureKey = this._tabStructureKey(projection);
 
     // Sidebar rows are always tall (name + folder) and never wrap. Re-assert it
     // here so a render triggered straight from applyTabWrapSettings() — which
@@ -8558,9 +9821,16 @@ class CodemanApp {
     // Sidebar layout scrolls the same container VERTICALLY, so it needs the
     // same protection on the other axis.
     const prevScrollTop = container.scrollTop;
-    const focusIdentity = this._tabFocusIdentity || this._focusedTabLayoutIdentity();
-    const prevActiveTabIdentity = this._lastRenderedActiveTabIdentity;
+    const prevActiveTabId = this._lastRenderedActiveTabId;
     const isFirstRender = !container.querySelector('.session-tab');
+    // The rebuild below destroys the focused row. In the grouped tree, put focus
+    // back on the same item (by identity) so a background render or a keyboard
+    // collapse does not drop a keyboard user to <body>.
+    // An edit made from a menu (focus now on <body>) asks to land back in the rail.
+    const focusWasInside = container.contains(document.activeElement) || this._tabRefocusAfterEdit === true;
+    const focusIdentity = this._tabFocusIdentity || (focusWasInside ? this._tabTreeIdentity(document.activeElement) : null);
+    this._tabFocusIdentity = null;
+    this._tabRefocusAfterEdit = false;
 
     // Build tabs HTML using array for better string concatenation performance.
     // Iterate in sessionOrder to respect the user's custom tab arrangement, on
@@ -8571,18 +9841,8 @@ class CodemanApp {
     // depended on which render path happened to run. Scrolling the active tab
     // into view replaces it.
     const parts = [];
-    const renderedRefs = [];
-    const orientation = this._tabOrientation();
-    const altRefs = this._tabAltRefs(projection);
-    const focusedIdentities = new Set(
-      (projection.focusRefs || []).map((ref) => `${ref.kind}:${ref.id}`)
-    );
-    const visibleKeys = new Set(projection.visibleRefs.map((ref) => `${ref.kind}:${ref.id}`));
-    const tabOrder = [
-      ...projection.visibleRefs,
-      ...(projection.focusRefs || []).filter((ref) => !visibleKeys.has(`${ref.kind}:${ref.id}`)),
-    ];
-    // Read once, not per session: isSessionSidebarRich() touches the DOM and
+    const tabOrder = this.sessionOrder;
+    // Read once, not per session: isRichTabRows() touches the DOM and
     // this loop runs for every tab on every full rebuild.
     const richRows = this.isRichTabRows();
     // The sorted vertical rail (tabRailSort) moves cards with the flex `order`
@@ -8590,28 +9850,29 @@ class CodemanApp {
     // below still counts the strip, not the sorted list. Null in every other
     // layout, and the tabs then carry no inline order at all — the header
     // strip's markup is byte-identical to before.
-    // ⚠️ `tabOrder` here is a list of REFS ({kind, id}), not ids (the grouped tab
-    // layout projects both sessions and web tabs into it), so the ids have to be
-    // pulled out — passing refs straight through made every `sessions.has()`
-    // false and handed the sorter an empty list, i.e. a silently unsorted rail.
-    const railSortOrder = this._tabRailSortOrder(
-      tabOrder.filter((ref) => ref.kind !== 'webview' && this.sessions.has(ref.id)).map((ref) => ref.id)
-    );
+    const liveIds = tabOrder.filter((id) => this.sessions.has(id));
+    const railSortOrder = this._tabRailSortOrder(liveIds);
+    // Grouped by state (tabArrangement 'state', opt-in): the same `order` mechanism,
+    // one band of values per state. Null in the grouped rail and with grouping
+    // off, and the rows then carry exactly the inline order they did before.
+    const groupProjection = this._projectTabGroups();
+    // Alt+N slot per row: Focus first, then the flat strip's order.
+    const altSlots = new Map(this._tabAltRefs(groupProjection).map((ref, index) => [`${ref.kind}:${ref.id}`, index]));
+    const triage = this._tabTriageLayout(liveIds, groupProjection, railSortOrder);
+    const listOrder = triage ? triage.order : railSortOrder;
+    // Clustered by case: rows are wrapped in one box per case below, and a tab
+    // in a cluster with company drops the `-<case>` from its name.
+    const clusterLayout = this._tabClusterLayout(liveIds, groupProjection);
+    // One row per session, in tab order. The flat strip emits them as-is; the
+    // grouped rail places the SAME markup into its sections, so a row never
+    // differs between the two (badge = Alt+N slot in sessionOrder either way).
+    const rowHtml = new Map();
     let _tabIdx = 0;
-    for (const ref of tabOrder) {
-      if (ref.kind === 'webview') {
-        const html = this.renderWebviewTab?.(ref.id, _tabIdx);
-        if (html) {
-          parts.push(html);
-          renderedRefs.push(ref);
-          _tabIdx++;
-        }
-        continue;
-      }
-      const id = ref.id;
+    for (const id of tabOrder) {
       const session = this.sessions.get(id);
       if (!session) continue; // Skip if session was removed
-      const railOrderStyle = railSortOrder?.has(id) ? ` style="order:${railSortOrder.get(id)}"` : '';
+      const railOrderStyle = listOrder?.has(id) ? ` style="order:${listOrder.get(id)}"` : '';
+      const altSlot = altSlots.get(`session:${id}`) ?? _tabIdx;
 
       // See the note in the incremental path: a web tab owns the active highlight
       // while one is open, even though activeSessionId stays set.
@@ -8643,26 +9904,14 @@ class CodemanApp {
       const tallTabsEnabled = this._tallTabsEnabled ?? false;
       const showFolder = tallTabsEnabled && session.name && folderName && folderName !== name;
 
-      // Keep the complete name in the DOM. #232's horizontal view hides the
-      // generated prefix span; COD-299's vertical rail reveals and wraps it.
+      // #232: a session with a description (the `: suffix` part of its name) shows
+      // JUST the description on the tab; the generated w<n>-<case> id moves to the
+      // tooltip and stays visible in the session settings modal.
       const parsedName = parseSessionPrefix(name);
-      const tabLabel = parsedName && parsedName.suffix
-        ? `<span class="tab-name-prefix">${escapeHtml(parsedName.prefix)}: </span>${escapeHtml(parsedName.suffix)}`
-        : escapeHtml(name);
-      // COD-299: CSS may clamp the visible label after two lines, but the native
-      // tooltip and accessible name always retain the complete session name.
-      const tabTooltip = session.workingDir && session.workingDir !== name
-        ? `${name}\n${session.workingDir}`
-        : name;
-      const placement = this._tabPlacementPresentation({ kind: 'session', id });
-      const placementBadge = placement
-        ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" title="${escapeHtml(placement.description)}" aria-label="${escapeHtml(placement.description)}">${escapeHtml(placement.short)}</span>`
-        : '';
-      const focusMarker = this._tabRefFocused({ kind: 'session', id })
-        ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
-        : '';
-      const accessibleName = `${placement ? `${name} session, ${placement.description}` : `${name} session`}, ${activity.ariaPhrase}`;
-      const completeTooltip = placement ? `${tabTooltip}\n${placement.description}` : tabTooltip;
+      const tabLabel = this._tabNameHtml(name, clusterLayout?.labelFor.get(id));
+      const tabTooltip = parsedName && parsedName.suffix
+        ? (session.workingDir ? `${parsedName.prefix} (${session.workingDir})` : parsedName.prefix)
+        : (session.workingDir || '');
 
       // Rich rows only (the detailed sidebar OR the vertical tab rail): the home
       // screen's created/state stamps and a status pill. richRow is null in every
@@ -8680,90 +9929,121 @@ class CodemanApp {
       // (direct-PTY, remote SSH, docker). See paneExitLabel().
       const paneExitBadge = paneExitLabel(session.paneExit);
 
+      // Which harness runs here. A shell keeps its SH pill (it is not an agent);
+      // every agent CLI, claude included, shows its logo through PR #532's
+      // `run-mode-dot <id>` slot, the id as DATA, so the tab, the tile and split
+      // headers and the Run menus draw the same mark. An id with no logo rule (a
+      // CLI added through ~/.codeman/clis.json) gets that slot's plain dot. The
+      // span is always emitted: CLI Logos on Tabs (`showTabCliLogos`) hides it
+      // in CSS under html[data-tab-logos='off'], so a toggle never re-renders.
+      const tabModeHtml = mode === 'shell'
+        ? '<span class="tab-mode shell" aria-hidden="true">sh</span>'
+        : `<span class="tab-harness run-mode-dot ${escapeHtml(mode)}" aria-hidden="true"></span>`;
+
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">&#x22EF;</button></span>`;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
-          <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(name)} tab"></button>
-          ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
+      // COD-510: a child session says where it sits relative to its parent, in
+      // the badge, the tooltip and its accessible name. Grouped rail only.
+      const placement = groupProjection ? this._tabPlacementPresentation({ kind: 'session', id }) : null;
+      const placementBadge = placement
+        ? `<span class="tab-placement-state tab-placement-state--${escapeHtml(placement.state)}" aria-hidden="true">${escapeHtml(placement.short)}</span>`
+        : '';
+      const focusMarker = groupProjection && this._tabRefFocused({ kind: 'session', id })
+        ? '<span class="tab-focus-marker" aria-hidden="true">&#x2605;</span>'
+        : '';
+      const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}${placement ? `, ${placement.description}` : ''}, ${activity.ariaPhrase}`;
+      const rowTooltip = placement ? (tabTooltip ? `${tabTooltip}\n${placement.description}` : placement.description) : tabTooltip;
+      rowHtml.set(id, `<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}${this._tileGrid?.has(id) ? ' in-tiles' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" data-activity-status="${escapeHtml(status)}"${placement ? ` data-placement-description="${escapeHtml(placement.description)}"` : ''} ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(tabAria)}" data-aria-source="${escapeHtml(tabAria)}" ${rowTooltip ? `title="${escapeHtml(rowTooltip)}"` : ''}>
+          ${altSlot < 9 ? '<span class="tab-number">' + (altSlot + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
           <span class="tab-info">
             <span class="tab-name-row">
-              ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : mode === 'grok' ? '<span class="tab-mode grok" aria-hidden="true">gk</span>' : mode === 'deepseek' ? '<span class="tab-mode deepseek" aria-hidden="true">ds</span>' : mode === 'omp' ? '<span class="tab-mode omp" aria-hidden="true">om</span>' : ''}
+              ${tabModeHtml}
+              ${focusMarker}
               <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
-              ${paneExitBadge ? `<span class="tab-exited-badge" data-i18n-skip aria-hidden="true">${escapeHtml(paneExitBadge)}</span>` : ''}
+              ${placementBadge}
+              ${paneExitBadge ? `<span class="tab-exited-badge" data-label="${escapeHtml(paneExitBadge)}" aria-hidden="true">${escapeHtml(paneExitBadge)}</span>` : ''}
               ${inlineSessionActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
-            ${placementBadge}
             ${showFolder ? `<span class="tab-folder">\u{1F4C1} ${escapeHtml(folderName)}</span>` : ''}
             ${richMeta}
           </span>
-          ${focusMarker}
           ${hasRunningTasks ? `<span class="tab-badge" onclick="event.stopPropagation(); app.toggleTaskPanel()" aria-label="${taskStats.running} running tasks">${taskStats.running}</span>` : ''}
           ${subagentBadge}
           ${ultracodeBadge}
           ${inlineSessionActions ? '' : tabActionsHtml}
         </div>`);
-      renderedRefs.push(ref);
       _tabIdx++;
     }
 
-    const renderedByRef = new Map(
-      renderedRefs.map((ref, index) => [`${ref.kind}:${ref.id}`, parts[index]])
-    );
-    container.innerHTML = window.CodemanTabLayout.renderProjection(
-      projection,
-      orientation,
-      (ref) => {
-        const identity = `${ref.kind}:${ref.id}`;
-        const number = focusedIdentities.has(identity)
-          ? null
-          : window.CodemanTabLayout.altNumberForRef(altRefs, ref);
-        return this._renderTabShortcutNumber(renderedByRef.get(identity) || '', number);
-      },
-      escapeHtml,
-      (ref) =>
-        this._renderFocusShortcut(
-          ref,
-          renderedByRef.get(`${ref.kind}:${ref.id}`) || '',
-          window.CodemanTabLayout.altNumberForRef(altRefs, ref)
-        ),
-      railSortOrder
-        ? (ref) => this._tabRailVisualOrder(ref, railSortOrder)
-        : null
-    );
-    container.setAttribute('role', orientation === 'vertical' ? 'presentation' : 'tablist');
-    container.setAttribute('aria-label', orientation === 'vertical' ? 'Session groups' : 'Session tabs');
-    this._lastTabStructureKey = structureKey;
+    if (clusterLayout) {
+      // Clustered by case. Web tabs keep their flat-strip Alt+N slot (after
+      // every session), each in a box of its own.
+      parts.push(this._renderTabClusters(clusterLayout, rowHtml, _tabIdx));
+      this._hiddenTabGroupByRef = new Map();
+    } else if (groupProjection) {
+      // Grouped vertical rail. Web tabs keep their flat-strip Alt+N slot (after
+      // every session), wherever their group puts them.
+      const webviewSlots = new Map(
+        (this.webviewOrder || []).filter((wid) => this.webviews?.has(wid)).map((wid) => [wid, altSlots.get(`webview:${wid}`) ?? Infinity])
+      );
+      parts.push(
+        window.CodemanTabLayout.renderProjection(
+          groupProjection,
+          (ref) =>
+            ref.kind === 'session'
+              ? rowHtml.get(ref.id) || ''
+              : this.renderWebviewTab?.(ref.id, webviewSlots.get(ref.id) ?? Infinity) || '',
+          escapeHtml
+        )
+      );
+      this._hiddenTabGroupByRef = new Map(Object.entries(groupProjection.hiddenTabGroupByRef));
+    } else {
+      parts.push(...rowHtml.values());
+      // Web tabs (dashboard URLs) render after the session tabs, continuing the
+      // Alt+N numbering. They carry data-webview-id instead of data-id, so every
+      // session-tab code path above (drag-and-drop, alerts, badges) skips them.
+      parts.push(this.renderWebviewTabs ? this.renderWebviewTabs(_tabIdx) : '');
+      this._hiddenTabGroupByRef = new Map();
+    }
+    this._lastTabGroupStructureKey = this._tabGroupStructureKey(groupProjection);
+    this._lastTabClusterKey = clusterLayout ? clusterLayout.key : null;
+
+    container.innerHTML = parts.join('');
+    container.classList.toggle('session-tabs--grouped', !!groupProjection);
+    this._applyTabListRole(container, !!groupProjection);
+    if (groupProjection) {
+      this._applyTabTreeSemantics(container, { identity: focusIdentity, refocus: focusWasInside });
+      this._syncTabGroupHeaderAlerts(container, groupProjection);
+    }
+    this._syncTabTriageChrome(container, triage);
+    this._syncTabArrangementClasses(container, { clusters: !!clusterLayout, groupProjection });
+    const activeBandMoved = this._noteActiveTabBand(container) && this._isScrollingTabRow(container);
 
     // Put the strip back where the user left it, then reveal the active tab
-    // only when it CHANGED (or on the first paint). Restoring unconditionally
+    // only when it CHANGED, or moved to another state band in the scrolling row
+    // (_noteActiveTabBand), or on the first paint. Restoring unconditionally
     // and revealing conditionally is what lets someone browse the far end of
     // the strip while a background rebuild fires, without the active tab ever
     // being stranded off-screen after a switch.
     container.scrollLeft = prevScrollLeft;
     container.scrollTop = prevScrollTop;
-    const activeTabIdentity = this.activeWebviewId
-      ? `webview:${this.activeWebviewId}`
-      : this.activeSessionId
-        ? `session:${this.activeSessionId}`
-        : null;
-    this._lastRenderedActiveTabIdentity = activeTabIdentity;
-    if (isFirstRender || prevActiveTabIdentity !== activeTabIdentity) {
+    this._lastRenderedActiveTabId = this.activeSessionId;
+    if (isFirstRender || prevActiveTabId !== this.activeSessionId || activeBandMoved) {
       this._scrollActiveTabIntoView(this.activeSessionId, isFirstRender ? 'auto' : 'smooth');
     }
 
     // Set up drag-and-drop handlers for tab reordering
     this.setupTabDragHandlers();
+    // The grouped rail drags with its own pointer model (rows across groups,
+    // group reorder); bound once, inert unless the rail is grouped.
+    this._bindTabLayoutPointerDrag(container);
 
     // Set up keyboard navigation for tabs
     this.setupTabKeyboardNavigation(container);
-    this._restoreTabLayoutFocus(focusIdentity);
-    this._tabFocusIdentity = null;
-
-    this.updateTabOverflowMode();
 
     // Update connection lines after tabs change (positions may have shifted)
     this.updateConnectionLines();
@@ -8776,9 +10056,6 @@ class CodemanApp {
     // Newly created tabs animate in; a re-render mid-cascade resumes them rather
     // than restarting, since this rebuild just destroyed the animating elements.
     this._applyTabEntrances?.();
-    this._refreshMobileOverviewIfVisible?.();
-    this._refreshHomeSessionsIfVisible?.();
-    this._refreshCommandPaletteIfOpen?.();
 
     // innerHTML was rebuilt wholesale, so the sidebar filter classes are gone —
     // re-apply them or filtered-out sessions flicker back on every SSE tick.
@@ -8789,220 +10066,53 @@ class CodemanApp {
     // underneath a render, and a solo window forces 'header' regardless.
     if (richRows) this._startSidebarRichClock();
     else this._stopSidebarRichClock();
+
+    // Home surfaces and an open command palette list the same sessions; a full
+    // rebuild (create/delete/reorder) must refresh them too.
+    this._refreshMobileOverviewIfVisible?.();
+    this._refreshHomeSessionsIfVisible?.();
+    this._refreshCommandPaletteIfOpen?.();
   }
 
   // Set up arrow key navigation for session tabs (accessibility)
-  setupTabKeyboardNavigation(container) {
-    // Remove existing listener if any to avoid duplicates
-    if (this._tabKeydownHandler) {
-      container.removeEventListener('keydown', this._tabKeydownHandler);
-    }
 
-    this._tabKeydownHandler = (e) => {
-      if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
-      const vertical = this._tabOrientation() === 'vertical';
-      // Rows hidden by the sidebar filter must not be steppable — arrowing onto
-      // an invisible row leaves focus nowhere and Enter then selects a session
-      // the user cannot see.
-      const items = vertical
-        ? [...container.querySelectorAll('[role="treeitem"]:not(.tab-filtered-out)')]
-        : [...container.querySelectorAll('.session-tab[role="tab"]:not(.tab-filtered-out)')];
-      // ⚠️ A sorted rail paints its rows with the flex `order` property while the
-      // DOM stays in `sessionOrder` (that is what keeps the Alt+N badge and the
-      // drag model honest), so a DOM-order walk steps around the screen instead of
-      // down it: ArrowDown from the top card lands wherever that session happens to
-      // sit in the tab order. Walk what the eye sees. Read the COMPUTED order, not
-      // the inline one, or web tabs (pinned past the cards by a CSS `order: 9999`
-      // rather than an inline style) read as 0 and the walk starts on them. Array
-      // sort is stable, so equal orders keep DOM order, which is the unsorted case.
-      // Only for a FLAT rail: a grouped layout puts headers and their children in
-      // one tree whose reading order is structural, and re-sorting that list by a
-      // flex order group headers never carry would interleave them.
-      if (
-        this.isTabRailSorted?.() &&
-        items.length > 0 &&
-        items.every((el) => el.classList?.contains('session-tab'))
-      ) {
-        const orderOf = (el) => Number(getComputedStyle(el).order) || 0;
-        items.sort((a, b) => orderOf(a) - orderOf(b));
-      }
-      const active = document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]');
-      const currentIndex = items.indexOf(active);
-      if (currentIndex < 0) return;
+  /**
+   * Visible tree items in the order the eye reads them: each section's header,
+   * then its rows. A sorted rail paints rows with the flex `order` property
+   * inside their own group column, so rows are ordered by COMPUTED order within
+   * a section (stable, so the unsorted rail keeps DOM order).
+   */
 
-      const focusAt = (index) => {
-        if (index < 0 || index >= items.length) return;
-        for (const item of items) item.tabIndex = -1;
-        items[index].tabIndex = 0;
-        items[index].focus();
-        this._tabFocusIdentity = this._tabLayoutIdentity(items[index]);
-      };
-      const activate = () => {
-        const current = items[currentIndex];
-        const currentIsFocusGroup = Boolean(current.querySelector?.('[data-tab-focus-toggle]'));
-        const currentGroupId =
-          current.dataset.tabGroupHeader ||
-          current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
-        if (currentIsFocusGroup) {
-          this.toggleFocusGroupCollapsed();
-        } else if (currentGroupId) {
-          this.toggleTabGroupCollapsed(currentGroupId);
-        } else if (current.dataset.focusSessionId) {
-          this.selectSession(current.dataset.focusSessionId);
-        } else if (current.dataset.focusWebviewId) {
-          this.openWebview(current.dataset.focusWebviewId);
-        } else if (current.dataset.id) {
-          this.selectSession(current.dataset.id);
-        } else if (current.dataset.webviewId) {
-          this.openWebview(current.dataset.webviewId);
-        }
-      };
-      const current = items[currentIndex];
-      const currentIsFocusGroup = Boolean(current.querySelector?.('[data-tab-focus-toggle]'));
-      const currentGroupId =
-        current.dataset.tabGroupHeader ||
-        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
-      if (vertical && e.key === 'Insert') {
-        e.preventDefault();
-        this.createTabGroup();
-        return;
-      }
-      if (vertical && currentGroupId && e.key === 'F2') {
-        e.preventDefault();
-        this.startTabGroupRename(currentGroupId);
-        return;
-      }
-      if (vertical && currentGroupId && e.key === 'Delete') {
-        e.preventDefault();
-        this.deleteTabGroup(currentGroupId);
-        return;
-      }
-      if (
-        vertical &&
-        currentGroupId &&
-        e.ctrlKey &&
-        (e.key === 'ArrowUp' || e.key === 'ArrowDown')
-      ) {
-        e.preventDefault();
-        const groupIndex = this.tabLayout.groups.findIndex((group) => group.id === currentGroupId);
-        const index = Math.max(0, Math.min(this.tabLayout.groups.length - 1, groupIndex + (e.key === 'ArrowUp' ? -1 : 1)));
-        this.editTabLayout({ type: 'reorderGroup', groupId: currentGroupId, index }, `group:${currentGroupId}`);
-        return;
-      }
-      if (vertical && e.shiftKey && e.key === 'F10') {
-        e.preventDefault();
-        const syntheticEvent = { preventDefault() {}, stopPropagation() {}, currentTarget: current };
-        if (currentGroupId) this.openTabGroupMenu(syntheticEvent, currentGroupId);
-        else if (current.dataset.focusSessionId || current.dataset.focusWebviewId) {
-          const ref = current.dataset.focusWebviewId
-            ? { kind: 'webview', id: current.dataset.focusWebviewId }
-            : { kind: 'session', id: current.dataset.focusSessionId };
-          this.openFocusShortcutMenu(syntheticEvent, ref);
-        } else {
-          const ref = current.dataset.webviewId
-            ? { kind: 'webview', id: current.dataset.webviewId }
-            : current.dataset.id
-              ? { kind: 'session', id: current.dataset.id }
-              : null;
-          if (ref) this.openTabRefMoveMenu(syntheticEvent, ref);
-        }
-        return;
-      }
-      if (e.key === 'Home' || e.key === 'End') {
-        e.preventDefault();
-        focusAt(e.key === 'Home' ? 0 : items.length - 1);
-        return;
-      }
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        activate();
-        return;
-      }
-      if (!vertical && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-        e.preventDefault();
-        focusAt((currentIndex + (e.key === 'ArrowLeft' ? -1 : 1) + items.length) % items.length);
-        return;
-      }
-      if (vertical && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-        e.preventDefault();
-        focusAt((currentIndex + (e.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length);
-        return;
-      }
-      if (!vertical || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
-      const groupId =
-        current.dataset.tabGroupHeader ||
-        current.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
-      if (groupId || currentIsFocusGroup) {
-        const expanded = current.getAttribute('aria-expanded') === 'true';
-        if (e.key === 'ArrowLeft' && expanded) {
-          e.preventDefault();
-          this._tabFocusIdentity = currentIsFocusGroup ? 'focus-group' : `group:${groupId}`;
-          if (currentIsFocusGroup) this.toggleFocusGroupCollapsed(true);
-          else this.toggleTabGroupCollapsed(groupId, true);
-        } else if (e.key === 'ArrowRight' && !expanded) {
-          e.preventDefault();
-          this._tabFocusIdentity = currentIsFocusGroup ? 'focus-group' : `group:${groupId}`;
-          if (currentIsFocusGroup) this.toggleFocusGroupCollapsed(false);
-          else this.toggleTabGroupCollapsed(groupId, false);
-        } else if (e.key === 'ArrowRight' && expanded) {
-          const child = current.closest('.tab-layout-group')?.querySelector('[role="group"] [role="treeitem"]');
-          if (child) {
-            e.preventDefault();
-            focusAt(items.indexOf(child));
-          }
-        }
-        return;
-      }
-      if (e.key === 'ArrowLeft') {
-        const header = current.closest('.tab-layout-group')?.querySelector('[data-tab-group-header]')
-          ?.closest('[role="treeitem"]');
-        if (header) {
-          e.preventDefault();
-          focusAt(items.indexOf(header));
-        }
-      }
-    };
+  /**
+   * aria-posinset / aria-setsize within each level, in PAINTED order: the
+   * level-1 run (headers, ungrouped rows, a collapsed group's kept row) and each
+   * group's own rows. Runs after every full render AND after an incremental pass,
+   * because the activity-sorted rail re-sorts rows in place. Returns the items.
+   */
 
-    container.addEventListener('keydown', this._tabKeydownHandler);
-  }
+  /**
+   * A collapsed group hides its rows, including ones that need the user. Its
+   * header takes the most urgent hidden alert in the tab alert language
+   * (`tab-alert-action` red, `tab-alert-idle` yellow), so a permission prompt
+   * behind a collapse is never invisible. Patched in place on both render paths:
+   * alerts change without a rebuild.
+   */
 
-  _tabLayoutIdentity(element) {
-    if (!element) return null;
-    if (element.querySelector?.('[data-tab-focus-toggle]')) return 'focus-group';
-    const groupId = element.dataset?.tabGroupHeader || element.querySelector?.('[data-tab-group-header]')?.dataset.tabGroupHeader;
-    if (groupId) return `group:${groupId}`;
-    if (element.dataset?.focusSessionId) return `focus:session:${element.dataset.focusSessionId}`;
-    if (element.dataset?.focusWebviewId) return `focus:webview:${element.dataset.focusWebviewId}`;
-    if (element.dataset?.id) return `session:${element.dataset.id}`;
-    if (element.dataset?.webviewId) return `webview:${element.dataset.webviewId}`;
-    if (element.classList?.contains('tab-layout-ungrouped-header')) return 'group:ungrouped';
-    return null;
-  }
+  /** Keep aria-selected on the grouped tree in step with the .active class. */
 
-  _focusedTabLayoutIdentity() {
-    return this._tabLayoutIdentity(document.activeElement?.closest?.('[role="treeitem"], .session-tab[role="tab"]'));
-  }
-
-  _restoreTabLayoutFocus(identity) {
-    const container = this.$('sessionTabs');
-    if (!container) return;
-    const items = this._tabOrientation() === 'vertical'
-      ? [...container.querySelectorAll('[role="treeitem"]')]
-      : [...container.querySelectorAll('.session-tab[role="tab"]')];
-    if (!items.length) return;
-    let target = items.find((item) => this._tabLayoutIdentity(item) === identity);
-    if (!target && identity?.startsWith('session:')) {
-      const sessionId = identity.slice('session:'.length);
-      const hiddenGroup = this._hiddenTabGroupByRef?.get(`session:${sessionId}`);
-      target = items.find((item) => this._tabLayoutIdentity(item) === `group:${hiddenGroup}`);
-    }
-    target ||= items.find((item) => item.getAttribute('aria-selected') === 'true') || items[0];
-    for (const item of items) item.tabIndex = item === target ? 0 : -1;
-    if (identity && document.activeElement !== target) target.focus?.();
-  }
+  /**
+   * Keyboard model of the grouped tree (WAI-ARIA tree view): Up/Down walk the
+   * visible items, Home/End jump, Right expands a header or enters it, Left
+   * collapses a header or climbs from a row to its header, Enter/Space select a
+   * row or toggle a header, Shift+F10 / ContextMenu open a row's actions.
+   */
 
   handleSessionTabClick(event, sessionId) {
     event?.preventDefault?.();
+    // Ctrl/Cmd+click puts the session in the tile grid (opening it if needed)
+    // instead of switching to it; on a window too narrow for the grid it is an
+    // ordinary click.
+    if ((event?.ctrlKey || event?.metaKey) && this.addSessionToTiles?.(sessionId)) return;
     // On touch with the keyboard hidden, blur the tapped tab so switching
     // sessions doesn't pop the on-screen keyboard. Focus policy itself lives
     // in selectSession via _shouldFocusTerminalForTabSwitch().
@@ -9048,14 +10158,24 @@ class CodemanApp {
   // Legacy entry point retained for old callers. Owner layout semantic edits
   // are the sole ordering authority.
   saveSessionOrder() {
-    // Session-only persistence must not race the owner layout coordinator.
-    return;
+    try {
+      localStorage.setItem('codeman-session-order', JSON.stringify(this.sessionOrder));
+    } catch {
+      // Ignore storage errors
+    }
+    const order = [...this.sessionOrder];
+    this._debouncedCall('saveSessionOrderServer', () => {
+      fetch('/api/session-order', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order }),
+      }).catch(() => {});
+    }, 400);
   }
 
   // Ignore legacy broadcasts while owner layout controls rendering. The old
   // branch remains only for compatibility with unmanaged embeds.
   _onSessionOrderChanged(data) {
-    if (this._tabLayoutManaged) return;
     if (!data || !Array.isArray(data.order)) return;
     try {
       localStorage.setItem('codeman-session-order', JSON.stringify(data.order));
@@ -9071,264 +10191,255 @@ class CodemanApp {
     }
   }
 
-  // One delegated Pointer Events system serves mouse, pen, and touch from the
-  // explicit ref/group drag handles. The container survives structural renders,
-  // so listeners are installed once without intercepting ordinary tab clicks.
+  // ═══════════════════════════════════════════════════════════════
+  // Owner tab layout: grouped vertical rail (reading and drawing)
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // The server owns named tab groups (GET /api/tab-layout, tab-layout*.ts) and
+  // already projects them onto the global session order, so sessionOrder, Alt+N,
+  // Ctrl+Tab and every other order consumer are untouched here. This layer only
+  // decides how the VERTICAL rail draws rows: in sections, with per-device
+  // collapse. With no groups (or any read failure) the rail is the flat list it
+  // has always been. Editing the groups is the next block.
+
+  /** SSE tab:layoutChanged carries `{ owner, version }`; the layout itself is re-read. */
+
+  /** Adopt a layout read (or null after a failed read, which renders flat). */
+
+  /** localStorage, or null once it has failed (collapse then stays all-expanded). */
+
+  /**
+   * The grouped projection for the CURRENT render, or null when the rail should
+   * render flat: horizontal strip (incl. phones and the sidebar, which force it),
+   * no layout yet, a failed read, or a layout without groups.
+   */
+
+  /** True when the DOM's grouping no longer matches what a render would draw. */
+
+  /**
+   * Collapse/expand one group (header click). Per-device: stored in localStorage,
+   * never sent to the server, so collapsing on a laptop leaves the desktop alone.
+   * A storage failure leaves every group expanded rather than half-remembered.
+   */
+
+  // ═══════════════════════════════════════════════════════════════
+  // Owner tab layout: editing groups from the vertical rail
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // Every edit is a named operation (tab-layout-browser.js) applied to the rail
+  // at once and saved by ONE serialized PUT /api/tab-layout at a time, with the
+  // version the server last returned. A 409 is rebased onto the server's layout
+  // and retried; a failure re-reads. Editing is a vertical-rail feature: the
+  // header strip, the sidebar and phones never offer it.
+
+  /** child session id -> parent session id, so a moved session takes the sessions that follow it. */
+
+  /** The editor's view of the layout (optimistic or confirmed) becomes the rail. */
+
+  /**
+   * Apply one edit. `focusIdentity` names the tree item that should hold focus
+   * afterwards (the moved row, the renamed group), so a keyboard user who acted
+   * from a menu lands back in the rail rather than on <body>.
+   */
+
+  /** New group (optionally holding `ref`), then straight into renaming it. */
+
+  /** Where a ref is stored: { groupId (null = Ungrouped), refs, index } or null. */
+
+  /**
+   * Group placement actions for a row's action menu: reorder within its
+   * container, move to another group, out to Ungrouped, or into a new group.
+   * Empty outside the vertical rail, so the header strip's menu is unchanged.
+   */
+
+  // ─── Group and web-tab menus (right-click, the header's ⋯, Shift+F10) ──
+
+  /**
+   * Close the open group / web-tab menu. Every dismissal path lands here:
+   * Escape, a pointer outside it, focus leaving it, Tab, a viewport resize, an
+   * action, and any full re-render of the rail (which would orphan its trigger).
+   */
+
+  /** Keyboard actions for a web-tab row in the vertical rail: its settings plus group moves. */
+
+  // ─── Inline group rename ───────────────────────────────────────────
+
+  /**
+   * Rename a group in place. Shares the session rename's ownership handle
+   * (`_activeRename`), so starting one cancels the other and only the CURRENT
+   * editor may release the render guard. Enter or blur commits, Escape cancels,
+   * IME composition keys belong to the IME. The commit goes through the edit
+   * coordinator, so it is serialized behind any write already in flight.
+   */
+
+  // ─── Pointer drag in the grouped rail ──────────────────────────────
+
+  /**
+   * Drag rows between groups and reorder groups, in the GROUPED rail only.
+   * Pointer Events (mouse and pen; touch keeps scrolling the rail), bound once
+   * on the container, which survives every re-render. The flat rail and the
+   * header strip keep the HTML5 drag in setupTabDragHandlers() untouched.
+   * Keyboard equivalents live in the row and group menus.
+   */
+
+  /** What a pointer at (x, y) would drop onto, from the rendered rail. */
+
+  // ─── Unsaved edits across a reload ─────────────────────────────────
+
+  /**
+   * The page is going away with edits not yet confirmed: send them with a
+   * keepalive PUT (it outlives the page) AND keep a copy in sessionStorage. If
+   * the keepalive lands, the copy replays to no change after reload; if it lost
+   * a race, the copy is rebased onto the fresh layout and saved properly.
+   */
+
+  /** Whose layout this page edits, as the server keys it (`@single` without multi-user). */
+
+  /**
+   * Replay the previous page's unsaved edits, but only that page's: the copy is
+   * ignored when it belongs to another owner (a different login in this tab),
+   * is older than a reload could explain, or names a layout newer than the one
+   * just read (a different server behind the same origin).
+   */
+
+  // Set up drag-and-drop handlers on tab elements
   setupTabDragHandlers() {
     const container = this.$('sessionTabs');
-    if (!container || this._tabPointerHandlersBound) return;
-    this._tabPointerHandlersBound = true;
-    const cleanup = () => this._cancelTabPointerDrag();
-    container.addEventListener('pointerdown', (event) => {
-      if (event.button !== undefined && event.button !== 0) return;
-      const handle = event.target.closest?.('[data-tab-group-drag]');
-      const refHandle = event.target.closest?.('[data-tab-ref-drag]');
-      const tab = event.target.closest?.('.session-tab');
-      const focusShortcut = tab?.classList.contains('tab-focus-shortcut') === true;
-      if (!handle && !refHandle) return;
-      // A self-sorting list cannot also be hand-ordered: the drop rewrites
-      // sessionOrder correctly, the sort then puts the card straight back where
-      // it was, and the user is left dragging a row that refuses to move. Refuse
-      // the gesture instead of lying about it — `tabRailSort: 'manual'` is the
-      // way back to drag-reordering, and Alt+N / Ctrl+Shift+{ } still walk the
-      // strip order this list is no longer showing. Only when the list is FLAT:
-      // with groups defined, a ref drag also moves a tab BETWEEN groups, which
-      // the sort does not undo, and a Focus-shortcut drag orders its own list.
-      if (
-        this.isTabRailSorted?.() &&
-        !focusShortcut &&
-        !handle &&
-        (this.tabLayout?.groups?.length ?? 0) === 0
-      ) {
-        return;
-      }
-      const ref = tab
-        ? tab.dataset.webviewId
-          ? { kind: 'webview', id: tab.dataset.webviewId }
-          : tab.dataset.focusWebviewId
-            ? { kind: 'webview', id: tab.dataset.focusWebviewId }
-            : tab.dataset.focusSessionId
-              ? { kind: 'session', id: tab.dataset.focusSessionId }
-              : { kind: 'session', id: tab.dataset.id }
-        : null;
-      this._tabPointerDrag = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        active: false,
-        source: handle
-          ? { type: 'group', groupId: handle.dataset.tabGroupDrag }
-          : { type: focusShortcut ? 'focus' : 'ref', ref },
-        origin: handle || refHandle || tab,
-        zone: null,
-      };
-      try { container.setPointerCapture(event.pointerId); } catch {}
-    });
-    container.addEventListener('pointermove', (event) => {
-      const drag = this._tabPointerDrag;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
-      if (!drag.active) {
-        drag.active = true;
-        drag.origin.classList.add('tab-layout-dragging');
-        if (drag.source.type === 'ref') {
-          const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
-            type: 'moveRef', ref: drag.source.ref, groupId: null, index: 0, metadata: this._tabLayoutMetadata(),
-          });
-          for (const ref of preview.refs) {
-            const selector = ref.kind === 'session'
-              ? `.session-tab[data-id="${CSS.escape(ref.id)}"]`
-              : `.session-tab[data-webview-id="${CSS.escape(ref.id)}"]`;
-            container.querySelector(selector)?.classList.add('tab-layout-drag-block');
-          }
-        }
-      }
-      event.preventDefault();
-      const hit = document.elementFromPoint?.(event.clientX, event.clientY);
-      const candidate = hit?.closest?.('.tab-layout-drop-zone, .session-tab');
-      const focusDrag = drag.source.type === 'focus';
-      const isFocusZone = candidate?.classList?.contains('tab-focus-drop-zone');
-      const isFocusShortcut = candidate?.classList?.contains('tab-focus-shortcut');
-      const zone = focusDrag
-        ? isFocusZone || isFocusShortcut
-          ? candidate
-          : null
-        : isFocusZone || isFocusShortcut
-          ? null
-          : candidate;
-      if (drag.zone === zone) return;
-      drag.zone?.classList?.remove('tab-layout-drop-active');
-      drag.zone = zone;
-      drag.zone?.classList?.add('tab-layout-drop-active');
-    });
-    container.addEventListener('pointerup', (event) => this._finishTabPointerDrag(event));
-    container.addEventListener('pointercancel', cleanup);
-    container.addEventListener('lostpointercapture', cleanup);
-    window.addEventListener('pagehide', cleanup);
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') cleanup();
-    });
-  }
+    const tabs = container.querySelectorAll('.session-tab[data-id]');
 
-  _cancelTabPointerDrag() {
-    this.$('sessionTabs')?.querySelectorAll(
-      '.tab-layout-dragging, .tab-layout-drag-block, .tab-layout-drop-active'
-    ).forEach((element) => element.classList.remove(
-      'tab-layout-dragging', 'tab-layout-drag-block', 'tab-layout-drop-active'
-    ));
-    this._tabPointerDrag = null;
-  }
-
-  _refLocation(ref) {
-    for (const group of this.tabLayout?.groups || []) {
-      const index = group.refs.findIndex((candidate) => candidate.kind === ref.kind && candidate.id === ref.id);
-      if (index >= 0) return { groupId: group.id, index };
+    // A self-sorting list cannot also be hand-ordered: the drop below rewrites
+    // sessionOrder correctly, the sort then puts the card straight back where it
+    // was, and the user is left dragging a row that refuses to move. Drop the
+    // affordance instead of lying about it — `tabRailSort: 'manual'` is the way
+    // back to drag-reordering, and Alt+N / Ctrl+Shift+{ } still walk the strip
+    // order this list is no longer showing.
+    // The grouped rail opts out too: a flat-order drag cannot express "move
+    // into that group", and the server would re-rank it within its old group
+    // anyway. It has its own pointer drag (_bindTabLayoutPointerDrag).
+    if (this.isTabRailSorted() || container.classList.contains('session-tabs--grouped')) {
+      tabs.forEach((tab) => tab.setAttribute('draggable', 'false'));
+      return;
     }
-    const index = this.tabLayout?.ungrouped?.findIndex(
-      (candidate) => candidate.kind === ref.kind && candidate.id === ref.id
-    );
-    return index >= 0 ? { groupId: null, index } : null;
-  }
 
-  _adjustTabRefMoveDestination(ref, destination) {
-    const preview = window.CodemanTabLayout.previewOperation(this.tabLayout, {
-      type: 'moveRef', ref, ...destination, metadata: this._tabLayoutMetadata(),
+    tabs.forEach(tab => {
+      tab.setAttribute('draggable', 'true');
+
+      tab.addEventListener('dragstart', (e) => {
+        this.draggedTabId = tab.dataset.id;
+        tab.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', tab.dataset.id);
+      });
+
+      tab.addEventListener('dragend', () => {
+        tab.classList.remove('dragging');
+        this.draggedTabId = null;
+        // Remove all drag-over indicators
+        container.querySelectorAll('.session-tab').forEach(t => {
+          t.classList.remove('drag-over-left', 'drag-over-right');
+        });
+      });
+
+      tab.addEventListener('dragover', (e) => {
+        // Grouped by state: a tab in another group is not a drop target, and
+        // leaving the event alone (no preventDefault) is what shows "no drop".
+        if (this._isTabDropAcrossGroups(tab)) return;
+        e.preventDefault();
+        if (!this.draggedTabId || this.draggedTabId === tab.dataset.id) return;
+
+        e.dataTransfer.dropEffect = 'move';
+
+        // Determine drop position based on mouse position. Read the layout here,
+        // inside the handler — these listeners survive a layout flip between
+        // renders, so capturing the axis at bind time would go stale.
+        // drag-over-left/-right keep their names and now read as before/after;
+        // the sidebar/rail CSS just draws them as top/bottom edges.
+        const rect = tab.getBoundingClientRect();
+        const insertBefore = this._isVerticalTabList()
+          ? e.clientY < rect.top + rect.height / 2
+          : e.clientX < rect.left + rect.width / 2;
+
+        // Update visual indicator
+        tab.classList.toggle('drag-over-left', insertBefore);
+        tab.classList.toggle('drag-over-right', !insertBefore);
+      });
+
+      tab.addEventListener('dragleave', () => {
+        tab.classList.remove('drag-over-left', 'drag-over-right');
+      });
+
+      tab.addEventListener('drop', (e) => {
+        e.preventDefault();
+        tab.classList.remove('drag-over-left', 'drag-over-right');
+
+        if (!this.draggedTabId || this.draggedTabId === tab.dataset.id) return;
+        if (this._isTabDropAcrossGroups(tab)) return;
+
+        const targetId = tab.dataset.id;
+        const draggedId = this.draggedTabId;
+
+        // Determine insertion position (same axis rule as the dragover handler)
+        const rect = tab.getBoundingClientRect();
+        const insertBefore = this._isVerticalTabList()
+          ? e.clientY < rect.top + rect.height / 2
+          : e.clientX < rect.left + rect.width / 2;
+
+        // Reorder sessionOrder array
+        const fromIndex = this.sessionOrder.indexOf(draggedId);
+        let toIndex = this.sessionOrder.indexOf(targetId);
+
+        if (fromIndex === -1 || toIndex === -1) return;
+
+        // Remove dragged item
+        this.sessionOrder.splice(fromIndex, 1);
+
+        // Recalculate target index after removal
+        toIndex = this.sessionOrder.indexOf(targetId);
+        if (toIndex === -1) return;
+
+        // Insert at correct position
+        if (insertBefore) {
+          this.sessionOrder.splice(toIndex, 0, draggedId);
+        } else {
+          this.sessionOrder.splice(toIndex + 1, 0, draggedId);
+        }
+
+        // Save and re-render
+        this.saveSessionOrder();
+        this._fullRenderSessionTabs();
+      });
     });
-    let removedBefore = 0;
-    for (const moved of preview.refs) {
-      const location = this._refLocation(moved);
-      if (location?.groupId === destination.groupId && location.index < destination.index) removedBefore++;
-    }
-    return { ...destination, index: Math.max(0, destination.index - removedBefore) };
   }
 
-  _tabRefMoveOperation(ref, destination) {
-    return {
-      type: 'moveRef',
-      ref,
-      ...this._adjustTabRefMoveDestination(ref, destination),
-      metadata: this._tabLayoutMetadata(),
-    };
-  }
-
-  _tabRefFromElement(element) {
-    if (!element) return null;
-    if (element.dataset.focusWebviewId) return { kind: 'webview', id: element.dataset.focusWebviewId };
-    if (element.dataset.focusSessionId) return { kind: 'session', id: element.dataset.focusSessionId };
-    if (element.dataset.webviewId) return { kind: 'webview', id: element.dataset.webviewId };
-    if (element.dataset.id) return { kind: 'session', id: element.dataset.id };
-    return null;
-  }
-
-  _focusPointerDropIndex(zone) {
-    const visible = this._refreshTabProjection()?.focusRefs || [];
-    const visibleIndex = Number(zone?.dataset?.tabFocusDropIndex);
-    if (!Number.isInteger(visibleIndex) || visibleIndex < 0 || visibleIndex > visible.length) return null;
-    const order = this._focusOrder();
-    if (visibleIndex === visible.length) {
-      const last = visible.at(-1);
-      const lastIndex = last ? order.findIndex((ref) => ref.kind === last.kind && ref.id === last.id) : -1;
-      return lastIndex < 0 ? null : lastIndex + 1;
-    }
-    const target = visible[visibleIndex];
-    const targetIndex = order.findIndex((ref) => ref.kind === target.kind && ref.id === target.id);
-    return targetIndex < 0 ? null : targetIndex;
-  }
-
-  _adjustGroupReorderIndex(groupId, destinationIndex) {
-    const sourceIndex = this.tabLayout?.groups?.findIndex((group) => group.id === groupId) ?? -1;
-    return sourceIndex >= 0 && sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex;
-  }
-
-  _finishTabPointerDrag(event) {
-    const drag = this._tabPointerDrag;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const zone = drag.zone;
-    if (drag.active && zone) {
-      if (drag.source.type === 'focus') {
-        const sourceRef = drag.source.ref;
-        const order = this._focusOrder();
-        const sourceIndex = order.findIndex((ref) => ref.kind === sourceRef.kind && ref.id === sourceRef.id);
-        let destinationIndex = zone.classList.contains('tab-focus-drop-zone')
-          ? this._focusPointerDropIndex(zone)
-          : null;
-        if (destinationIndex === null && zone.classList.contains('tab-focus-shortcut')) {
-          const targetRef = this._tabRefFromElement(zone);
-          const targetIndex = targetRef
-            ? order.findIndex((ref) => ref.kind === targetRef.kind && ref.id === targetRef.id)
-            : -1;
-          if (targetIndex >= 0) {
-            const rect = zone.getBoundingClientRect();
-            const after = event.clientY >= rect.top + rect.height / 2;
-            destinationIndex = targetIndex + (after ? 1 : 0);
-          }
-        }
-        if (sourceIndex >= 0 && destinationIndex !== null) {
-          const adjustedIndex = sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex;
-          if (adjustedIndex !== sourceIndex) {
-            this.editTabLayout(
-              { type: 'moveFocus', ref: sourceRef, index: adjustedIndex },
-              `${sourceRef.kind}:${sourceRef.id}`
-            );
-          }
-        }
-      } else if (drag.source.type === 'group') {
-        const beforeId = zone.dataset.tabDropBeforeGroup;
-        if (beforeId !== undefined) {
-          const beforeIndex = beforeId
-            ? this.tabLayout.groups.findIndex((group) => group.id === beforeId)
-            : this.tabLayout.groups.length;
-          const index = this._adjustGroupReorderIndex(drag.source.groupId, beforeIndex);
-          this.editTabLayout(
-            { type: 'reorderGroup', groupId: drag.source.groupId, index: Math.max(0, index) },
-            `group:${drag.source.groupId}`
-          );
-        }
-      } else {
-        let destination = null;
-        if (zone.classList.contains('tab-layout-drop-zone') && zone.dataset.tabDropGroup !== undefined) {
-          destination = { groupId: zone.dataset.tabDropGroup || null, index: Number(zone.dataset.tabDropIndex) };
-        } else if (zone.classList.contains('session-tab')) {
-          const target = zone.dataset.webviewId
-            ? { kind: 'webview', id: zone.dataset.webviewId }
-            : { kind: 'session', id: zone.dataset.id };
-          const targetLocation = this._refLocation(target);
-          if (targetLocation) {
-            // Which axis decides before/after has to follow the layout that is
-            // actually on screen, and there are TWO vertical ones: the COD-286
-            // rail (data-tab-orientation) and the upstream sidebar. Read both
-            // here, inside the handler — this listener survives a layout flip.
-            const rect = zone.getBoundingClientRect();
-            const stacked = this._tabOrientation() === 'vertical' || this.isSessionSidebarActive?.() === true;
-            const after = stacked
-              ? event.clientY >= rect.top + rect.height / 2
-              : event.clientX >= rect.left + rect.width / 2;
-            destination = { ...targetLocation, index: targetLocation.index + (after ? 1 : 0) };
-          }
-        }
-        if (destination) {
-          this.editTabLayout(
-            this._tabRefMoveOperation(drag.source.ref, destination),
-            `${drag.source.ref.kind}:${drag.source.ref.id}`
-          );
-        }
-      }
-    }
-    this._cancelTabPointerDrag();
-  }
+  /**
+   * Grouped rail: Ctrl+Shift+{ / } may only swap the active session with a
+   * neighbour in its OWN section. Across a group boundary the server re-ranks
+   * each group on its own (`putLegacyOrder`), so nothing moves there, no
+   * session:orderChanged comes back, and this client would keep a swapped
+   * sessionOrder (and Alt+N targets) that no other device shares. Same reason
+   * the HTML5 flat-order drag is off in the grouped rail (its own pointer drag
+   * and the row menu's moves go through moveRef instead, which can cross a
+   * group). Any other layout: always allowed.
+   */
 
   moveActiveTabLeft() {
     if (!this.activeSessionId) return;
-    const ref = { kind: 'session', id: this.activeSessionId };
-    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move up');
-    if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
+    const idx = this.sessionOrder.indexOf(this.activeSessionId);
+    if (idx <= 0) return;
+    if (!this._canSwapActiveTabWith(this.sessionOrder[idx - 1])) return;
+    [this.sessionOrder[idx - 1], this.sessionOrder[idx]] = [this.sessionOrder[idx], this.sessionOrder[idx - 1]];
+    this.saveSessionOrder();
+    this._fullRenderSessionTabs();
   }
 
   moveActiveTabRight() {
     if (!this.activeSessionId) return;
-    const ref = { kind: 'session', id: this.activeSessionId };
-    const destination = this._tabRefMoveActions(ref).find((action) => action.label === 'Move down');
-    if (destination) this.moveTabRefToGroup(ref, destination.groupId, destination.index);
+    const idx = this.sessionOrder.indexOf(this.activeSessionId);
+    if (idx === -1 || idx >= this.sessionOrder.length - 1) return;
+    if (!this._canSwapActiveTabWith(this.sessionOrder[idx + 1])) return;
+    [this.sessionOrder[idx], this.sessionOrder[idx + 1]] = [this.sessionOrder[idx + 1], this.sessionOrder[idx]];
+    this.saveSessionOrder();
+    this._fullRenderSessionTabs();
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -9413,7 +10524,9 @@ class CodemanApp {
     }
   }
 
-  _cleanupPreviousSession(newSessionId) {
+  // `skipSnapshot`: the tile grid opening on the session it parks
+  // (tile-grid.js openTileGrid), whose snapshot closing the grid discards.
+  _cleanupPreviousSession(newSessionId, { skipSnapshot = false } = {}) {
     // Snapshot the OUTGOING session's xterm rendered state (viewport + scrollback +
     // colors/attrs) before the terminal gets cleared/reset. Lets us restore the
     // exact view on switch-back rather than replaying codex's byte stream, which
@@ -9434,6 +10547,7 @@ class CodemanApp {
       this._hideHistoryPill?.();
     }
     if (
+      !skipSnapshot &&
       this.activeSessionId &&
       !outgoingMirror &&
       outgoingSession?.mode !== 'shell' &&
@@ -9656,6 +10770,8 @@ class CodemanApp {
     const sessionId = this.activeSessionId;
     if (!sessionId || this._fullHistoryRepullInFlight || this._isLoadingBuffer) return;
     if (this.detachedSessions?.has(sessionId)) return;
+    // The parked main terminal has no history to pull while tiles own the screen.
+    if (this._tilesOwnTerminal?.()) return;
     const session = this.sessions.get(sessionId);
     // A shell's full capture can be many megabytes, and replaying all of it from
     // an ordinary scroll gesture blocks xterm's main thread. So a shell scroll
@@ -9942,6 +11058,20 @@ class CodemanApp {
         this._terminalViewerActivity?.activate('session-select');
       }
       return;
+    }
+    // Tile grid open (tile-grid.js): a tiled session is FOCUSED in its tile and
+    // never loaded into the parked main terminal. Decision 1: only a USER-
+    // initiated pick of a session that is not tiled (or an explicit
+    // `leaveTiles`, a followed link) leaves the grid for the single view, the
+    // grid remembered for one-click return. An app-driven pick (`auto`) never
+    // collapses it.
+    if (this._tileGrid?.open) {
+      if (this._tileGrid.has(sessionId)) return this._selectTiledSession(sessionId, options);
+      if (options?.auto === true && !options?.leaveTiles) return;
+      this.closeTileGrid({ keepStored: true, reselect: false });
+      // The parked terminal still holds what it showed before the grid opened;
+      // with no active id, the switch below snapshots none of it.
+      this.activeSessionId = null;
     }
     if (this.activeSessionId === sessionId && forceReload) {
       this.terminalBufferCache?.delete(sessionId);
@@ -10590,53 +11720,7 @@ class CodemanApp {
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.
       const idleCb = typeof requestIdleCallback === 'function' ? requestIdleCallback : (cb) => setTimeout(cb, 16);
-      idleCb(() => {
-        // Guard against stale generation — user may have switched tabs again
-        if (selectGen !== this._selectGeneration) return;
-
-        // Update respawn banner
-        if (this.respawnStatus[sessionId]) {
-          this.showRespawnBanner();
-          this.updateRespawnBanner(this.respawnStatus[sessionId].state);
-          document.getElementById('respawnCycleCount').textContent = this.respawnStatus[sessionId].cycleCount || 0;
-          this.updateCountdownTimerDisplay();
-          this.updateActionLogDisplay();
-          if (Object.keys(this.respawnCountdownTimers[sessionId] || {}).length > 0) {
-            this.startCountdownInterval();
-          }
-        } else {
-          this.hideRespawnBanner();
-          this.stopCountdownInterval();
-        }
-
-        // Update task panel if open
-        const taskPanel = document.getElementById('taskPanel');
-        if (taskPanel && taskPanel.classList.contains('open')) {
-          this.renderTaskPanel();
-        }
-
-        // Update ralph state panel for this session
-        const curSession = this.sessions.get(sessionId);
-        if (curSession && (curSession.ralphLoop || curSession.ralphTodos)) {
-          this.updateRalphState(sessionId, {
-            loop: curSession.ralphLoop,
-            todos: curSession.ralphTodos
-          });
-        }
-        this.renderRalphStatePanel();
-
-        // Update CLI info bar (mobile - shows Claude version/model)
-        this.updateCliInfoDisplay();
-
-        // Update project insights panel for this session
-        this.renderProjectInsightsPanel();
-
-        // Update subagent window visibility for active session
-        this.updateSubagentWindowVisibility();
-
-        // Load file browser if enabled
-        this.showConfiguredFileBrowserPanel?.(sessionId);
-      });
+      idleCb(() => this._refreshSessionPanels(sessionId, selectGen));
 
       _crashDiag.log('FOCUS');
       if (shouldFocusTerminal && this.terminal) focusTerminalWithoutActivation();
@@ -10766,6 +11850,65 @@ class CodemanApp {
     }
   }
 
+  /**
+   * The panels that follow the active session (respawn banner and countdown,
+   * action log, task panel, Ralph state, CLI info, project insights, subagent
+   * window visibility, file browser). Run deferred, after the terminal content
+   * is on screen, by selectSession and by the tile grid's focus change
+   * (tile-grid.js _selectTiledSession), so both share one copy.
+   *
+   * @param {string} sessionId - the session that just became active
+   * @param {number} selectGen - the `_selectGeneration` of that selection; a
+   *   newer one (the user switched again) makes this a no-op
+   */
+  _refreshSessionPanels(sessionId, selectGen) {
+    // A newer selection won: the user switched tabs again.
+    if (selectGen !== this._selectGeneration) return;
+
+    // Update respawn banner
+    if (this.respawnStatus[sessionId]) {
+      this.showRespawnBanner();
+      this.updateRespawnBanner(this.respawnStatus[sessionId].state);
+      document.getElementById('respawnCycleCount').textContent = this.respawnStatus[sessionId].cycleCount || 0;
+      this.updateCountdownTimerDisplay();
+      this.updateActionLogDisplay();
+      if (Object.keys(this.respawnCountdownTimers[sessionId] || {}).length > 0) {
+        this.startCountdownInterval();
+      }
+    } else {
+      this.hideRespawnBanner();
+      this.stopCountdownInterval();
+    }
+
+    // Update task panel if open
+    const taskPanel = document.getElementById('taskPanel');
+    if (taskPanel && taskPanel.classList.contains('open')) {
+      this.renderTaskPanel();
+    }
+
+    // Update ralph state panel for this session
+    const curSession = this.sessions.get(sessionId);
+    if (curSession && (curSession.ralphLoop || curSession.ralphTodos)) {
+      this.updateRalphState(sessionId, {
+        loop: curSession.ralphLoop,
+        todos: curSession.ralphTodos
+      });
+    }
+    this.renderRalphStatePanel();
+
+    // Update CLI info bar (mobile - shows Claude version/model)
+    this.updateCliInfoDisplay();
+
+    // Update project insights panel for this session
+    this.renderProjectInsightsPanel();
+
+    // Update subagent window visibility for active session
+    this.updateSubagentWindowVisibility();
+
+    // Load file browser if enabled
+    this.showConfiguredFileBrowserPanel?.(sessionId);
+  }
+
   // Shared cleanup for all session data — called from both closeSession() and session:deleted handler
   _cleanupSessionData(sessionId) {
     this.closeTabRailActionMenu?.();
@@ -10778,7 +11921,6 @@ class CodemanApp {
       this._activeRename.cancel();
     }
     this.sessions.delete(sessionId);
-    this._deferredCreatedSessionIds?.delete(sessionId);
     // Remove from tab order
     const orderIndex = this.sessionOrder.indexOf(sessionId);
     if (orderIndex !== -1) {
@@ -10839,21 +11981,38 @@ class CodemanApp {
   }
 
   async closeSession(sessionId, killMux = true) {
-    // ⚠️ Captured BEFORE the await, and the delete is announced to
-    // _onSessionDeleted through _closingSessions. The `session_deleted` SSE
-    // broadcast for THIS delete routinely lands while the request is still in
-    // flight, and that handler nulls activeSessionId and shows the welcome
-    // screen. Re-reading the field after the await therefore made the fallback
-    // below a coin flip: closing the tab you were on either moved you to the
-    // next session or dumped you on the home screen, depending on which path
-    // won the race (both outcomes measured on one build, 2026-08-17).
+    // Already on its way out (a repeated click, the mux panel racing the tab).
+    if (this._closingSessions.has(sessionId)) return;
+    // The tab goes FIRST and the server is asked after. The kill takes the server
+    // a few hundred ms (SIGTERM grace, the process tree, tmux), and a tab that sat
+    // there that long after "Kill" read as a click that did nothing. A refused
+    // delete puts the row back below.
+    //
+    // ⚠️ Everything is read BEFORE the first await, and the delete is announced
+    // to _onSessionDeleted through _closingSessions: the `session_deleted` SSE
+    // broadcast for THIS delete arrives while the request is still in flight, and
+    // that handler must leave the follow-up selection to this method (both
+    // outcomes of that race were measured on one build, 2026-08-17).
+    const session = this.sessions.get(sessionId);
+    const orderIndex = this.sessionOrder.indexOf(sessionId);
     const wasActive = this.activeSessionId === sessionId;
+    // Tile grid open: the fallback is the NEIGHBOURING TILE, never the first
+    // sessionOrder entry (often not tiled, which would collapse the grid).
+    const grid = this._tileGrid;
+    const tileNeighborId = grid?.has(sessionId) ? window.CodemanTileGrid.tileNeighbor(grid.ids, sessionId) : null;
     this._closingSessions.add(sessionId);
+    let res = null;
     try {
-      await this._apiDelete(`/api/sessions/${sessionId}?killMux=${killMux}`);
-      this._cleanupSessionData(sessionId);
+      // The same teardown the SSE event runs (split pane, tile, detached window,
+      // WebSocket, per-session state), only now instead of when the server is
+      // done. It is idempotent, so the real event finds nothing left to do.
+      this._onSessionDeleted({ id: sessionId });
 
-      if (wasActive) {
+      if (wasActive && grid?.open) {
+        // `auto`: the app chose this tile because the previous one went away.
+        const target = grid.has(tileNeighborId) ? tileNeighborId : grid.ids[0];
+        this._selectTiledSession(target, { auto: true });
+      } else if (wasActive) {
         this.activeSessionId = null;
         try { localStorage.removeItem('codeman-active-session'); } catch {}
         // COD-285: reset terminal background to the skin's slate when no session is active
@@ -10874,18 +12033,50 @@ class CodemanApp {
         }
       }
 
-      this.renderSessionTabs();
+      this.renderSessionTabs({ immediate: true });
 
+      res = await this._apiDelete(`/api/sessions/${sessionId}?killMux=${killMux}`);
+    } catch (err) {
+      // `res` stays null: handled below like a delete that got no answer.
+      console.warn('[closeSession] close failed:', err);
+    } finally {
+      this._closingSessions.delete(sessionId);
+    }
+
+    // 404: already gone (closed from another tab or device), which is what was asked.
+    let gone = !!res && (res.ok || res.status === 404);
+    if (!gone) {
+      // Refused, or no answer. Ask rather than guess: a delete can land on the
+      // server and still lose its reply, and its session_deleted event has then
+      // already been spent while the request was in flight.
+      const check = await this._api(`/api/sessions/${sessionId}`);
+      gone = check?.status === 404;
+    }
+
+    if (gone) {
+      // An SSE resync (handleInit) that landed mid-request rebuilds the list from
+      // the server, which still had the session then.
+      if (this.sessions.has(sessionId)) this._onSessionDeleted({ id: sessionId });
       if (killMux) {
         this.showToast('Session closed and tmux killed', 'success');
       } else {
         this.showToast('Tab hidden, tmux still running', 'info');
       }
-    } catch (err) {
-      this.showToast('Failed to close session', 'error');
-    } finally {
-      this._closingSessions.delete(sessionId);
+      return;
     }
+
+    // Still on the server (or the server is unreachable, in which case the resync
+    // on reconnect has the last word): its row comes back where it was.
+    if (session && !this.sessions.has(sessionId)) {
+      this.sessions.set(sessionId, session);
+      if (!this.sessionOrder.includes(sessionId)) {
+        const at = orderIndex === -1 ? this.sessionOrder.length : Math.min(orderIndex, this.sessionOrder.length);
+        this.sessionOrder.splice(at, 0, sessionId);
+        this.saveSessionOrder();
+      }
+      this.renderSessionTabs();
+    }
+    this.showToast('Failed to close session', 'error');
   }
 
   // Request confirmation before closing a session
@@ -10940,15 +12131,22 @@ class CodemanApp {
   }
 
   nextSession() {
+    // With the tile grid open, Ctrl+Tab and Alt+[ / Alt+] cycle through the tiles.
+    if (this._cycleTileFocus?.(1)) return;
     if (this.sessionOrder.length <= 1) return;
-    const nextId = window.CodemanTabLayout.adjacentSession(this.sessionOrder, this.activeSessionId, 1);
-    if (nextId) this.selectSession(nextId);
+
+    const currentIndex = this.sessionOrder.indexOf(this.activeSessionId);
+    const nextIndex = (currentIndex + 1) % this.sessionOrder.length;
+    this.selectSession(this.sessionOrder[nextIndex]);
   }
 
   prevSession() {
+    if (this._cycleTileFocus?.(-1)) return;
     if (this.sessionOrder.length <= 1) return;
-    const prevId = window.CodemanTabLayout.adjacentSession(this.sessionOrder, this.activeSessionId, -1);
-    if (prevId) this.selectSession(prevId);
+
+    const currentIndex = this.sessionOrder.indexOf(this.activeSessionId);
+    const prevIndex = (currentIndex - 1 + this.sessionOrder.length) % this.sessionOrder.length;
+    this.selectSession(this.sessionOrder[prevIndex]);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -10959,6 +12157,8 @@ class CodemanApp {
     // Going Home is choosing something else, so a `#session=<id>` link still
     // waiting for its session must not take the screen later.
     this._retireUrlSession();
+    // Home is a choice to leave the grid too; it is remembered for Tiles.
+    this.closeTileGrid?.({ keepStored: true, reselect: false });
     // Deselect active session and show welcome screen
     this.activeSessionId = null;
     try { localStorage.removeItem('codeman-active-session'); } catch {}
@@ -11023,6 +12223,10 @@ class CodemanApp {
 
     try {
       await this._apiDelete('/api/sessions');
+      // Every tiled session is gone: nothing to reselect. The stored grid is
+      // kept like every other close; it now names only gone sessions, so the
+      // next Tiles click ranks the open sessions from scratch.
+      this.closeTileGrid?.({ keepStored: true, reselect: false });
       this.sessions.clear();
       this.terminalBuffers.clear();
       this.terminalBufferCache.clear();

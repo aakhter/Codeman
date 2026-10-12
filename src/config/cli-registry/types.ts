@@ -93,8 +93,25 @@ export interface CliVariant {
 /** The newline chord a CLI's composer reads as "insert a line break" (see `CliCapabilities.newline`). */
 export type NewlineSequence = 'line-feed' | 'esc-enter';
 
+/** The config readers `capabilities.modelDetect.configResolver` may name (src/model-config-resolvers.ts). */
+export type ModelConfigResolverName = 'deepseek-route';
+
+/**
+ * The synced App Settings keys `capabilities.launchDefaults` may name (src/web/launch-defaults.ts).
+ * A closed list rather than any settings key, so a clis.json override cannot feed an
+ * arbitrary setting onto a command line; each name must also be a `SettingsUpdateSchema`
+ * key, which the resolver's typing enforces.
+ */
+export type LaunchDefaultSettingKey = 'codexModel' | 'codexReasoningEffort';
+
 /** The MCP config dialects `src/mcp-sync.ts` has an adapter for. */
-export type McpConfigFormat = 'claude-json' | 'gemini-json' | 'codex-toml' | 'opencode-json' | 'antigravity-json';
+export type McpConfigFormat =
+  | 'claude-json'
+  | 'gemini-json'
+  | 'codex-toml'
+  | 'opencode-json'
+  | 'antigravity-json'
+  | 'copilot-json';
 
 export interface CliLaunch {
   params: Record<string, ParamSpec>;
@@ -374,8 +391,8 @@ export interface CliCapabilities {
     /**
      * How many rows at the FOOT of the screen that row can appear in, counting non-blank
      * rows only. Claude writes its chip on the last row and keeps the default; Codex pins
-     * its own above the composer, which puts it third from the bottom, so it declares
-     * more. Keep each number as small as that CLI's layout allows: every extra row is
+     * its own above the composer, which puts it third or fourth from the bottom (its hint
+     * row comes and goes), so it declares more. Keep each number as small as that CLI's layout allows: every extra row is
      * another row an agent might be able to write, and the label is what silences an
      * alert. See `watchingLabel()` in `session-activity.ts`.
      */
@@ -417,6 +434,17 @@ export interface CliCapabilities {
    * Absent means no strip at all, the same fail-safe direction `workDetect` takes.
    */
   transcriptGutter?: number;
+  /**
+   * Literal text the TUI draws once its composer can take a prompt — what `codeman agent
+   * spawn` waits for (a `wait-output` match) before it calls a worker ready.
+   *
+   * Deliberately NOT `workDetect.promptGlyph`: claude's `❯` also marks the selected row
+   * of its workspace-trust dialog, which is exactly the screen a readiness wait must not
+   * mistake for a composer, so claude declares its composer's own hint text instead.
+   * Absent means no readiness wait: a spawn returns as soon as the session exists, and
+   * the caller synchronizes on `wait-output` markers.
+   */
+  composerReadyMark?: string;
   /** No direct-PTY fallback: the CLI must run inside tmux (secrets ride tmux setenv). */
   requiresMux: boolean;
   /**
@@ -448,11 +476,40 @@ export interface CliCapabilities {
    */
   transcript: 'claude-jsonl' | 'codex-rollout' | 'deepseek-zstd' | 'omp-jsonl' | 'none';
   /**
-   * 'strip-full'     — alt-screen + erase-scrollback + mouse DECSETs stripped (Ink TUIs).
-   * 'strip-mux-only' — only tmux's own attach-time smcup (the safe default).
-   * 'preserve'       — leave everything (a direct-PTY shell running vim/less/htop).
+   * What the server strips from this CLI's output stream before the browser sees it.
+   * The value encodes three independent choices (predicates in session.ts):
+   *
+   * | value                 | alt-screen toggles  | `3J` (erase scrollback) | mouse DECSETs       |
+   * |-----------------------|---------------------|-------------------------|---------------------|
+   * | `strip-full`          | stripped            | stripped                | stripped            |
+   * | `strip-mux-and-mouse` | stripped under tmux | kept                    | stripped under tmux |
+   * | `strip-mux-only`      | stripped under tmux | kept                    | kept                |
+   * | `preserve`            | stripped under tmux | kept                    | kept                |
+   *
+   * `strip-full` is `isAltScreenStripMode`; `strip-mux-and-mouse` is `isMuxMouseStripMode`;
+   * every other value takes `isMuxAltScreenOnlyStripMode`, so at runtime `preserve` and
+   * `strip-mux-only` are the same row — `preserve` only says what such a CLI's pane
+   * holds (terminal-owned scrollback: a shell, pi), not a different strip.
+   *
+   * - alt-screen: the tmux CLIENT emits `smcup` as its first bytes at attach, parking
+   *   xterm in the scrollback-less alternate buffer; a pane program's own toggles never
+   *   reach the client (tmux repaints instead). "Under tmux" means `useMux`: on a
+   *   direct-PTY fallback the `?1049h` is the program's own and must stay.
+   * - `3J`: a user's `clear` is a deliberate scrollback wipe; only an Ink TUI's
+   *   redraw-driven `3J` (strip-full) is noise.
+   * - mouse DECSETs: stripping them keeps a drag a local selection instead of a report
+   *   to the TUI. The browser then hand-encodes clicks (`_sendSyntheticSgrTap`), gated
+   *   on the `cliMouseTracking` the server records as it strips. Kept where a program's
+   *   own mouse support must work in the pane (htop/vim in a shell).
+   *
+   * Stock CLIs: `strip-full` = claude, codex, gemini (Ink TUIs); `strip-mux-and-mouse` =
+   * opencode (a full-screen TUI that enables tracking itself); `strip-mux-only` =
+   * antigravity, grok, deepseek, omp; `preserve` = shell, pi.
+   *
+   * A fourth combination is the point to split this into flags; three is still cheaper
+   * as an enum.
    */
-  altScreen: 'strip-full' | 'strip-mux-only' | 'preserve';
+  altScreen: 'strip-full' | 'strip-mux-only' | 'strip-mux-and-mouse' | 'preserve';
   echo: {
     policy: 'buffer' | 'predict' | 'off';
     /** How the local-echo overlay locates the composer row. */
@@ -540,6 +597,55 @@ export interface CliCapabilities {
   approvals: boolean;
   /** Where a model override is delivered. Claude uniquely writes settings.local.json. */
   model: { source: 'flag' | 'claude-settings-file' | 'none'; param?: string };
+  /**
+   * Where this CLI draws the model it is running, so a session header can name it
+   * (`SessionState.displayModel`, src/session-display-model.ts).
+   *
+   * `screenLine` is the source of a regex with exactly ONE capture group, the model. It
+   * runs over the last `screenLines` non-blank rows of the pane capture the idle/working
+   * probe already takes (rows joined with `\n`, so a pattern may span them), which costs no
+   * extra tmux call and re-reads the footer at every turn transition, so an in-session
+   * `/model` switch is followed.
+   *
+   * ⚠ The rows are pane text and the agent writes most of a pane, so a pattern must anchor
+   * on chrome only this CLI draws (the row under its own composer, an effort word in its
+   * own footer format), never on a shape the agent could print in its transcript. Measured
+   * on a live pane per CLI; absent means the CLI's screen is never read for a model and
+   * the session shows its launch model, if any.
+   *
+   * `configResolver` names a reader (src/model-config-resolvers.ts) that resolves the
+   * model the CLI's own config pins, the way that CLI resolves it for the session, for
+   * while the screen names none (its status line switched off, or not drawn yet). Read
+   * once per pane start, attach or relaunch, bounded and read-only; the screen still
+   * wins whenever it names a model. A NAMED reader, like a launcher profile, so the
+   * per-CLI behaviour stays data here and code in one module.
+   */
+  modelDetect?: {
+    screenLine?: string;
+    screenLines?: number;
+    /**
+     * Words the `screenLine` field can show when it is NOT the model (a footer whose model
+     * field is switched off shows the next field there), compared lower-cased. A field
+     * equal to the session's own working-directory basename is never the model either,
+     * for every CLI; that rule is the shared reader's, not data.
+     */
+    rejectWords?: string[];
+    configResolver?: ModelConfigResolverName;
+  };
+  /**
+   * Synced App Settings that seed this CLI's launch params when the caller left them unset,
+   * keyed by LAUNCH PARAM name (`{ model: 'codexModel' }`), never the legacy wire name; the
+   * resolver translates through `launch.legacyConfigAliases` like every other `param`.
+   *
+   * Filled into the entry's `launch.legacyConfigField` object at create time by
+   * `applyLaunchDefaults()` (src/web/launch-defaults.ts), which re-validates each value
+   * with `SettingsUpdateSchema` and never overwrites a value the caller sent. Which
+   * launches get it is the CALLER's decision (local ones only: never remote, Docker or a
+   * custom model endpoint). `schema.ts` refuses an undeclared param, and an entry without
+   * a `legacyConfigField`, whose params would otherwise be read off the request body itself.
+   * Absent = no launch defaults.
+   */
+  launchDefaults?: Record<string, LaunchDefaultSettingKey>;
   /**
    * Params a non-granted multi-user owner may not set freely, and what they are forced to.
    * Data-driven so a CUSTOM CLI's bypass flag is clampable exactly like codex's.

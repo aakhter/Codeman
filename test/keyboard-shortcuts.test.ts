@@ -15,15 +15,13 @@ describe('keyboard shortcuts', () => {
     expect(appSource).toContain('Digit([1-9])');
     expect(appSource).not.toMatch(/e\.key\.match\(\/\^Digit/);
 
-    // The matched digit travels as a 1-BASED tab number (it names Alt+N), and is
-    // converted to an index exactly once, at the site that indexes the
-    // projection. Asserting the dispatch rather than the arithmetic: pinning the
-    // literal '- 1' here is what let this test go stale when COD-306 moved the
-    // decrement into refAtAltNumber, leaving the real invariant unguarded.
-    expect(appSource).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
-    expect(appSource).toContain('refAtAltNumber(this._tabAltRefs(projection), number)');
-    expect(tabLayoutSource).toContain('refs[number - 1]');
-    expect(tabLayoutSource).toMatch(/number < 1 \|\| number > 9/);
+    // The matched digit is converted to an index once and resolved through the
+    // Focus-aware Alt+N order (COD-509): Focus rows, then live sessions, then
+    // open web tabs.
+    expect(appSource).toContain('const idx = parseInt(digitMatch[1], 10) - 1;');
+    expect(appSource).toContain('const target = this._tabAltRefs()[idx];');
+    expect(appSource).toContain("if (target.kind === 'session') this.selectSession(target.id);");
+    void tabLayoutSource;
   });
 
   it('provides Option+bracket shortcuts for previous and next session', () => {

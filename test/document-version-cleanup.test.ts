@@ -16,18 +16,19 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebServer } from '../src/web/server.js';
 import { documentVersionStore } from '../src/document-version-store.js';
 
-const PORT = 3311;
 
 describe('closing a session clears its document version history', () => {
   let server: WebServer;
   let workingDir: string;
-  const base = `http://localhost:${PORT}`;
+  // Ephemeral port (test-ports-guard): set once the server has bound.
+  let base = '';
 
   beforeAll(async () => {
     workingDir = mkdtempSync(join(tmpdir(), 'codeman-docver-'));
     writeFileSync(join(workingDir, 'draft.md'), '# draft v1\n');
-    server = new WebServer(PORT, false, true);
+    server = new WebServer(0, false, true);
     await server.start();
+    base = `http://localhost:${server.boundPort}`;
   });
 
   afterAll(async () => {

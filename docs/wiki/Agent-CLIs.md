@@ -69,7 +69,7 @@ output. The other CLIs expose no equivalent.
 | Respawn cycling and unattended runs               | Yes    | Yes                                                  |
 | Cron jobs                                         | Yes    | Yes                                                  |
 | Docker cases, remote SSH cases                    | Yes    | Yes                                                  |
-| Precise idle detection                            | Yes    | Codex: same screen check, via its own prompt and working line. DeepSeek: reports its state itself. Others: output stabilization, coarser |
+| Precise idle detection                            | Yes    | Codex, Pi, OpenCode, OMP and Gemini: same screen check, via their own prompt and working line. DeepSeek: reports its state itself. Others: output stabilization, coarser |
 | Auto-resume when a usage limit resets             | Yes    | No                                                   |
 | Plan usage chip                                   | Yes    | No                                                   |
 | Approvals Inbox                                   | Yes    | DeepSeek yes; others no                              |
@@ -121,9 +121,23 @@ Renders its own TUI, so Codeman treats readiness as output stabilization rather 
 watching for a prompt marker. Requires tmux, with no direct-PTY fallback, because its
 environment is injected through socket-scoped `tmux setenv` rather than the command line.
 
+Working and idle come from the screen: while a turn runs, OpenCode draws a small spinner at
+the start of its footer (`⬝■■■■■■⬝  esc interrupt`), and Codeman reads that to tell a working
+session from an idle one. A pending permission prompt shows as idle, since it is waiting on
+you. Before 1.40.0 an OpenCode session that had run a tool showed as working for good.
+
 Integration detail: [`docs/opencode-integration.md`](https://github.com/Ark0N/Codeman/blob/master/docs/opencode-integration.md).
 
 ### Codex
+
+App Settings has synced **Default Codex model** and **Default Codex reasoning effort**
+controls. Enter a model ID supported by your Codex provider; available reasoning levels
+depend on the model and CLI version. Empty defaults use Codex's own configuration.
+The defaults apply to local Codex sessions started from the Run menu, from Resume, and through
+`POST /api/sessions` or `/api/quick-start`; scheduled (cron) jobs do not use them.
+Explicit `codexConfig.model` / `codexConfig.reasoningEffort` values take precedence.
+Custom model endpoints, Docker containers and remote host command overrides keep their own settings.
+Changing a default affects new sessions and does not edit Codex configuration files.
 
 Two behaviours that are deliberate and worth knowing:
 
@@ -148,6 +162,11 @@ needs `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS`, and
 `GOOGLE_GENAI_USE_VERTEXAI`. That is the loosest allowlist entry in Codeman and it affects
 only the CLI you spawned yourself.
 
+Working and idle come from the screen: while a turn runs, Gemini CLI draws a spinner line
+(`⠦ Thinking... (esc to cancel, 6s)`) above its composer, and Codeman reads that. A tool
+confirmation that waits for you shows as idle. Before 1.40.0 a Gemini session showed as
+working for good after its first turn.
+
 ### Antigravity
 
 Google's successor to the consumer Gemini CLI, invoked as `agy`. It keeps all of its state
@@ -169,6 +188,10 @@ Pi needs the opposite instincts from every other CLI here.
   `HF_TOKEN`, and so on) share no common prefix, and the environment allowlist is global
   rather than per mode, so admitting them for Pi would widen the allowlist for every mode at
   once. They stay out.
+- **Work detection reads Pi's composer rule.** Pi has no prompt glyph; while a turn runs it
+  puts a spinner into the rule above the composer (`── ⠏ Working ───`), and Codeman reads
+  that to tell working from idle. Before 1.40.0 a Pi session that had started a turn showed
+  as working for good.
 
 Guide: [`docs/pi-integration.md`](https://github.com/Ark0N/Codeman/blob/master/docs/pi-integration.md).
 
@@ -222,7 +245,9 @@ documented default approval mode is `yolo`, so an OMP pane auto-approves tool us
 flag from Codeman; change that in OMP's own config, not here.
 
 OMP conversations appear in Past Sessions and can be resumed, and a respawn continues the
-same conversation with `--continue`.
+same conversation with `--continue`. Codeman tells working from idle by reading OMP's status
+bar, where a spinner and the elapsed time replace the `π` while a turn runs. Before 1.40.0
+an OMP session that had started a turn showed as working for good.
 
 Guide: [`docs/omp-integration.md`](https://github.com/Ark0N/Codeman/blob/master/docs/omp-integration.md).
 

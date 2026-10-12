@@ -971,12 +971,10 @@ Object.assign(CodemanApp.prototype, {
 
   buildCommandPaletteItems(query = '') {
     const needle = query.trim().toLowerCase();
-    const orderedIds = this._tabLayoutFirstPaintPending
-      ? []
-      : [
-          ...(Array.isArray(this.sessionOrder) ? this.sessionOrder : []),
-          ...Array.from(this.sessions?.keys?.() || []).filter((id) => !this.sessionOrder?.includes?.(id)),
-        ];
+    const orderedIds = [
+      ...(Array.isArray(this.sessionOrder) ? this.sessionOrder : []),
+      ...Array.from(this.sessions?.keys?.() || []).filter((id) => !this.sessionOrder?.includes?.(id)),
+    ];
     const seen = new Set();
     const sessionItems = [];
 
@@ -5389,6 +5387,14 @@ Object.assign(CodemanApp.prototype, {
   openFilePreviewInNewTab() {
     const url = this.filePreviewState?.externalPreviewUrl;
     if (!url) return;
+    // A native wrapper (window.CodemanHost) opens it in a window of its own; a host
+    // that refuses must not fall through to window.open.
+    const hosted = this.openInHostWindow?.(url) ?? null;
+    if (hosted !== null) {
+      if (hosted) this.closeFilePreview();
+      else this.showToast('Could not open a new window for this preview', 'error');
+      return;
+    }
     const opened = window.open(url, '_blank', 'noopener');
     if (opened) {
       try {
@@ -8655,7 +8661,8 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * `duration` defaults to 3000ms for every toast type. A message worth
+   * `duration` defaults to the "Toast display time" preference (3000ms unless changed in
+   * Settings → Notifications) for every toast type. A message worth
    * reading rather than glancing at (e.g. "Session started on the native
    * backend — could not apply the custom endpoint: <the actual reason>")
    * passes an explicit `opts.duration: 0` at its own call site instead of
@@ -8667,7 +8674,7 @@ Object.assign(CodemanApp.prototype, {
    * regardless of duration.
    */
   showToast(message, type = 'info', opts = {}) {
-    const { duration = 3000, action } = opts;
+    const { duration = this.notificationManager?.getToastDurationMs?.() ?? 3000, action } = opts;
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
 
@@ -8879,6 +8886,11 @@ Object.assign(CodemanApp.prototype, {
       }
     }
 
+    // Rings for the Compact header style, kept current in every style (two
+    // style writes a poll) so switching styles never shows an empty ring.
+    this._setStatRing('statCpuRing', stats.cpu);
+    this._setStatRing('statMemRing', stats.memory?.percent);
+
     if (memEl && memBar) {
       const memGB = (stats.memory.usedMB / 1024).toFixed(1);
       memEl.textContent = `${memGB}G`;
@@ -8894,6 +8906,20 @@ Object.assign(CodemanApp.prototype, {
         memBar.classList.add('medium');
       }
     }
+  },
+
+  /**
+   * Fill one stat ring (Compact header style) to `percent`, clamped to 0-100,
+   * and flag it `high` above 80%, the same threshold at which the value next
+   * to it turns red.
+   */
+  _setStatRing(id, percent) {
+    const ring = this.$(id);
+    if (!ring) return;
+    const value = Number(percent);
+    const fill = Number.isFinite(value) ? Math.round(Math.min(100, Math.max(0, value))) : 0;
+    ring.style.setProperty('--pu', String(fill));
+    ring.classList.toggle('high', fill > 80);
   },
 
   // ─── Clipboard ──────────────────────────────────────────────────────────────

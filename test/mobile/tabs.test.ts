@@ -1,7 +1,7 @@
-// Port 3201 - Tab switching and navigation tests
+// Ephemeral port - Tab switching and navigation tests
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Page, BrowserContext } from 'playwright';
-import { PORTS, SELECTORS, SWIPE, BODY_CLASSES, WAIT } from './helpers/constants.js';
+import { SELECTORS, SWIPE, BODY_CLASSES, WAIT } from './helpers/constants.js';
 import { createTestServer, stopTestServer } from './helpers/server.js';
 import { createDevicePage, closeAllBrowsers } from './helpers/browser.js';
 import { swipe, swipeViaCDP, swipeViaSynthetic } from './helpers/touch-sim.js';
@@ -9,8 +9,7 @@ import { assertHidden, assertVisible, getCSSProperty, getCSSNumericValue } from 
 import { REPRESENTATIVE_DEVICES } from './devices.js';
 import type { WebServer } from '../src/web/server.js';
 
-const PORT = PORTS.TABS;
-const BASE_URL = `http://localhost:${PORT}`;
+let baseUrl: string;
 
 const standardPhone = REPRESENTATIVE_DEVICES['standard-phone']; // iPhone 14 Pro
 
@@ -18,7 +17,8 @@ describe('Tab Navigation', () => {
   let server: WebServer;
 
   beforeAll(async () => {
-    server = await createTestServer(PORT);
+    server = await createTestServer();
+    baseUrl = `http://localhost:${server.boundPort}`;
   });
 
   afterAll(async () => {
@@ -33,7 +33,7 @@ describe('Tab Navigation', () => {
     let page: Page;
 
     beforeAll(async () => {
-      ({ context, page } = await createDevicePage(standardPhone, BASE_URL));
+      ({ context, page } = await createDevicePage(standardPhone, baseUrl));
       // Wait for SSE and JS to fully initialize
       await page.waitForTimeout(WAIT.PAGE_SETTLE);
     });
@@ -157,7 +157,7 @@ describe('Tab Navigation', () => {
 
     it('tabs remain visible on large phone and tablet headers', async () => {
       for (const device of [REPRESENTATIVE_DEVICES['large-phone'], REPRESENTATIVE_DEVICES['small-tablet']]) {
-        const { context: deviceContext, page: devicePage } = await createDevicePage(device, BASE_URL, 'chromium');
+        const { context: deviceContext, page: devicePage } = await createDevicePage(device, baseUrl, 'chromium');
         try {
           await devicePage.waitForTimeout(WAIT.PAGE_SETTLE);
           await devicePage.evaluate(() => {
@@ -314,7 +314,7 @@ describe('Tab Navigation', () => {
     }
 
     it('reveals a rightmost tab that selection would otherwise leave off-screen', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await seedTabs(page, 5);
@@ -340,7 +340,7 @@ describe('Tab Navigation', () => {
     });
 
     it('scrolls back to reveal a leftmost tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await seedTabs(page, 5);
@@ -361,7 +361,7 @@ describe('Tab Navigation', () => {
     });
 
     it('keeps the scroll position across an ambient full re-render', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await seedTabs(page, 5);
@@ -386,7 +386,7 @@ describe('Tab Navigation', () => {
     });
 
     it('renders tabs in sessionOrder on phones instead of hoisting the active one', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await seedTabs(page, 5, 3); // 4th tab active
@@ -407,7 +407,7 @@ describe('Tab Navigation', () => {
     });
 
     it('reaches the last tab with a horizontal touch drag', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await seedTabs(page, 5);
@@ -446,7 +446,7 @@ describe('Tab Navigation', () => {
     let page: Page;
 
     beforeAll(async () => {
-      ({ context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium'));
+      ({ context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium'));
       await page.waitForTimeout(WAIT.PAGE_SETTLE);
     });
 
@@ -561,7 +561,7 @@ describe('Tab Navigation', () => {
     it('synthetic swipe left triggers navigation on WebKit', async () => {
       let context: BrowserContext | undefined;
       try {
-        const result = await createDevicePage(standardPhone, BASE_URL, 'webkit');
+        const result = await createDevicePage(standardPhone, baseUrl, 'webkit');
         context = result.context;
         await result.page.waitForTimeout(WAIT.PAGE_SETTLE);
 
@@ -600,7 +600,7 @@ describe('Tab Navigation', () => {
     it('synthetic swipe right triggers prevSession on WebKit', async () => {
       let context: BrowserContext | undefined;
       try {
-        const result = await createDevicePage(standardPhone, BASE_URL, 'webkit');
+        const result = await createDevicePage(standardPhone, baseUrl, 'webkit');
         context = result.context;
         await result.page.waitForTimeout(WAIT.PAGE_SETTLE);
 
@@ -668,7 +668,7 @@ describe('Tab Navigation', () => {
     }
 
     it('ArrowRight moves focus to next tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await injectMockTabs(page, 3);
@@ -692,7 +692,7 @@ describe('Tab Navigation', () => {
     });
 
     it('ArrowLeft moves focus to previous tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await injectMockTabs(page, 3);
@@ -717,7 +717,7 @@ describe('Tab Navigation', () => {
     });
 
     it('Home key focuses first tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await injectMockTabs(page, 4);
@@ -741,7 +741,7 @@ describe('Tab Navigation', () => {
     });
 
     it('End key focuses last tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await injectMockTabs(page, 4);
@@ -765,7 +765,7 @@ describe('Tab Navigation', () => {
     });
 
     it('Enter activates focused tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
         await injectMockTabs(page, 3);
@@ -801,7 +801,7 @@ describe('Tab Navigation', () => {
 
   describe('Tab Touch Focus', () => {
     it('switching tabs with the keyboard closed does not leave the terminal textarea focused', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
 
@@ -848,7 +848,7 @@ describe('Tab Navigation', () => {
 
   describe('Tab Close Button Visibility', () => {
     it('close button hidden on non-active tabs', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
 
@@ -884,7 +884,7 @@ describe('Tab Navigation', () => {
     });
 
     it('gear icon visible only on active tab', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
 
@@ -940,7 +940,7 @@ describe('Tab Navigation', () => {
 
   describe('Subagent Badge on Tab', () => {
     it('subagent badge has correct dimensions', async () => {
-      const { context, page } = await createDevicePage(standardPhone, BASE_URL, 'chromium');
+      const { context, page } = await createDevicePage(standardPhone, baseUrl, 'chromium');
       try {
         await page.waitForTimeout(WAIT.PAGE_SETTLE);
 

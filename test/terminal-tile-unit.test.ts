@@ -1,8 +1,9 @@
-// test/split-pane-terminal-unit.test.ts
-// Port: N/A (no server/browser; SplitTerminalPane is loaded via `vm`, like
+// test/terminal-tile-unit.test.ts
+// Port: N/A (no server/browser; TerminalTile is loaded via `vm`, like
 // split-pane-auto-collapse-unit.test.ts loads the CodemanApp patches).
 //
-// Unit coverage for the two SplitTerminalPane (terminal-split.js) fixes from
+// Unit coverage for the two TerminalTile (terminal-tile.js, the split pane's
+// Pane B until it moved out of terminal-split.js) fixes from
 // the final review of #453 that need no browser: destroy() nulling EVERY socket
 // handler (onclose used to survive it and fire its "disconnected" write into a
 // pane already torn down), and the `{t:'r'}` server-refresh path being
@@ -15,7 +16,7 @@
 // The last block covers the scroll-to-top history pull: a burst of output leaves
 // a shell pane's xterm with about one screen of scrollback while tmux holds every
 // line, and Pane B (a separate xterm from the primary pane) never went back to
-// ask. See _maybeLoadMoreHistory / _pullHistory in terminal-split.js.
+// ask. See _maybeLoadMoreHistory / _pullHistory in terminal-tile.js.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
@@ -64,18 +65,18 @@ type PaneUnderTest = {
   _onLiveOutput(data: string): void;
   _onLiveClear(): void;
   _installWheelListener(): void;
+  _installClickListener(): void;
+  _onClick: unknown;
   _writeDisconnectedMarker(): void;
   _onSocketClosed(): void;
 };
 
 const fetchMock = vi.fn();
-/** requestAnimationFrame stand-in: chunked writes queue here and are drained by hand. */
-const rafQueue: Array<() => void> = [];
 /** Recorded deadline timers (see the context's setTimeout); `fn` aborts the request. */
 const deadlines: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
-const SOURCE = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-split.js'), 'utf8');
+const SOURCE = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-tile.js'), 'utf8');
 
-function loadSplitTerminalPane() {
+function loadTerminalTile() {
   const context = vm.createContext({
     console: { ...console, log: vi.fn(), warn: vi.fn(), error: vi.fn() },
     // The primary pane's row estimator, reduced to a line count: the pull only
@@ -104,25 +105,24 @@ function loadSplitTerminalPane() {
       else clearTimeout(id as Parameters<typeof clearTimeout>[0]);
     },
     fetch: (...args: unknown[]) => fetchMock(...args),
-    requestAnimationFrame: (fn: () => void) => rafQueue.push(fn),
     // The constants.js globals the module reads at call time.
     TERMINAL_CHUNK_SIZE,
     TERMINAL_TAIL_SIZE,
   });
   // The module's tail patches CodemanApp.prototype; nothing on it runs here.
   vm.runInContext(`class CodemanApp { _onSessionDeleted() {} selectSession() {} }\n${SOURCE}`, context);
-  return (context.window as { SplitTerminalPane: new (id: string, mount: unknown, opts?: object) => PaneUnderTest })
-    .SplitTerminalPane;
+  return (context.window as { TerminalTile: new (id: string, mount: unknown, opts?: object) => PaneUnderTest })
+    .TerminalTile;
 }
 
-const SplitTerminalPane = loadSplitTerminalPane();
+const TerminalTile = loadTerminalTile();
 
 function makePane(
   mode = 'claude',
   mount: unknown = {},
   opts: { detachedSessions?: Set<string> } = {}
 ): PaneUnderTest & { terminal: FakeTerminal } {
-  const pane = new SplitTerminalPane('s1', mount, { mode, ...opts });
+  const pane = new TerminalTile('s1', mount, { mode, ...opts });
   pane.terminal = {
     // xterm invokes a write's callback once everything before it is parsed.
     write: vi.fn((_data: string, done?: () => void) => done?.()),
@@ -175,19 +175,52 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const isMarker = (data: unknown) => typeof data === 'string' && data.includes('Pane B disconnected');
+// Every marker variant (reconnecting, session ended, refused, taken over) starts the same way.
+const isMarker = (data: unknown) => typeof data === 'string' && data.includes('[disconnected');
+
+/**
+ * What reached the pane's screen. A replay also queues an empty write, only to
+ * hear through its callback that everything before it has been parsed
+ * (writeChunked); it puts nothing on screen, so it is left out.
+ */
+const screenWrites = (pane: { terminal: FakeTerminal }) =>
+  pane.terminal.write.mock.calls.map((call) => call[0]).filter((data) => data !== '');
+// Live frames are written with a callback (the tile counts them until xterm
+// has parsed them, _writeLive), so they are matched on the data argument
+// alone, never with toHaveBeenCalledWith(data): that would also miss, and a
+// `.not` on it would then pass for nothing.
+
+/**
+ * Holds xterm's write callbacks, as a real xterm still parsing a replay does:
+ * the replay stays in progress until `parse()` runs the ones held so far.
+ */
+function holdParses(pane: { terminal: FakeTerminal }) {
+  const held: Array<() => void> = [];
+  pane.terminal.write = vi.fn((_data: string, done?: () => void) => {
+    if (done) held.push(done);
+  });
+  return {
+    held,
+    parse: () => {
+      for (const done of held.splice(0)) done();
+    },
+  };
+}
+
+/** The in-stream reset (RIS) a refresh queues right before its replay, never xterm's clear(). */
+const RIS = '\x1bc';
+const resets = (pane: { terminal: FakeTerminal }) => screenWrites(pane).filter((data) => data === RIS).length;
 
 /** Lets every microtask the vm-side promise chain queued run. */
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
   fetchMock.mockReset();
-  rafQueue.length = 0;
   deadlines.length = 0;
   clock = 0;
 });
 
-describe('SplitTerminalPane.destroy()', () => {
+describe('TerminalTile.destroy()', () => {
   it('nulls every WebSocket handler, onclose included, before closing the socket', () => {
     const pane = makePane();
     const terminal = pane.terminal;
@@ -210,17 +243,26 @@ describe('SplitTerminalPane.destroy()', () => {
   });
 });
 
-describe('SplitTerminalPane server-refresh single-flight', () => {
-  it('a refresh with nothing in flight clears and fetches straight away', async () => {
+describe('TerminalTile server-refresh single-flight', () => {
+  // These used to count xterm clear() calls: the refresh wiped the pane with a
+  // synchronous clear() BEFORE its fetch. It now fetches first and resets with
+  // the queued in-stream RIS right before the replay (CLAUDE.md, Terminal
+  // resilience), so they count that reset instead, and pin clear() at zero.
+  it('a refresh with nothing in flight fetches straight away, then resets in-stream and replays', async () => {
     const pane = makePane();
     fetchMock.mockResolvedValueOnce(jsonResponse('one'));
 
     pane._refreshBuffer();
+    // Fetching: the pane keeps its last frame, nothing written or cleared yet.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(pane.terminal.write).not.toHaveBeenCalled();
     await settle();
 
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/s1/terminal?full=1');
-    expect(pane.terminal.write).toHaveBeenCalledWith('one');
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
+    // The second argument carries the load's deadline (an AbortSignal).
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/s1/terminal?full=1', expect.anything());
+    // The reset immediately before the replay, queued in the same stream.
+    expect(screenWrites(pane)).toEqual([RIS, 'one']);
     expect(pane._bufferLoading).toBe(false);
   });
 
@@ -231,71 +273,128 @@ describe('SplitTerminalPane server-refresh single-flight', () => {
     pane._refreshBuffer();
     await settle();
 
-    expect(fetchMock).toHaveBeenCalledWith(`/api/sessions/s1/terminal?tail=${1024 * 1024}`);
+    expect(fetchMock).toHaveBeenCalledWith(`/api/sessions/s1/terminal?tail=${1024 * 1024}`, expect.anything());
   });
 
-  it('refreshes arriving mid-fetch neither clear nor fetch again, and run ONCE after the replay lands', async () => {
+  it('refreshes arriving mid-fetch neither reset nor fetch again, and run ONCE after the replay lands', async () => {
     const pane = makePane();
     const first = deferred<ReturnType<typeof jsonResponse>>();
     const second = deferred<ReturnType<typeof jsonResponse>>();
     fetchMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
     pane._refreshBuffer();
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(1);
+    expect(resets(pane)).toBe(0); // fetch first
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Two more frames while the first replay is still in flight.
     pane._refreshBuffer();
     pane._refreshBuffer();
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(1);
+    expect(resets(pane)).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(pane._bufferRefreshPending).toBe(true);
 
     first.resolve(jsonResponse('replay-1'));
     await settle();
 
-    expect(pane.terminal.write).toHaveBeenCalledWith('replay-1');
-    // Exactly one trailing re-run for the two coalesced frames, not two.
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(2);
+    expect(screenWrites(pane)).toEqual([RIS, 'replay-1']);
+    // Exactly one trailing re-run for the two coalesced frames, not two; it is
+    // fetching, so it has not reset anything yet.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(resets(pane)).toBe(1);
 
     second.resolve(jsonResponse('replay-2'));
     await settle();
 
-    expect(pane.terminal.write).toHaveBeenLastCalledWith('replay-2');
+    expect(screenWrites(pane)).toEqual([RIS, 'replay-1', RIS, 'replay-2']);
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(pane._bufferLoading).toBe(false);
     expect(pane._bufferRefreshPending).toBe(false);
   });
 
-  it('holds the flag across the chunked write, not just the fetch', async () => {
+  it('queues the whole replay at once and holds the flag until xterm has parsed it', async () => {
     const pane = makePane();
-    // Three chunks: two full ones plus a tail, so the last two are queued on
-    // requestAnimationFrame and the replay is mid-write after the fetch lands.
+    const xterm = holdParses(pane);
+    // Three slices: two full ones plus a tail.
     const big = 'x'.repeat(TERMINAL_CHUNK_SIZE * 2 + 5);
     fetchMock.mockResolvedValueOnce(jsonResponse(big));
 
     pane._refreshBuffer();
     await settle();
-    expect(pane.terminal.write).toHaveBeenCalledTimes(1);
-    expect(rafQueue).toHaveLength(1);
+    // The reset, then every slice queued at once, then the empty write whose
+    // callback ends the replay: nothing waits for an animation frame.
+    expect(pane.terminal.write.mock.calls[0][0]).toBe(RIS);
+    expect(pane.terminal.write.mock.calls.map((call) => call[0].length)).toEqual([
+      RIS.length,
+      TERMINAL_CHUNK_SIZE,
+      TERMINAL_CHUNK_SIZE,
+      5,
+      0,
+    ]);
+    // xterm is still parsing: the replay, and with it the flag, is not done.
     expect(pane._bufferLoading).toBe(true);
 
-    // A refresh mid-write must not clear the terminal under the chunks still
-    // to come, nor start a second fetch.
+    // A refresh mid-parse must not reset the terminal under the replay, nor
+    // start a second fetch.
     pane._refreshBuffer();
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(1);
+    expect(resets(pane)).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     fetchMock.mockResolvedValueOnce(jsonResponse('after'));
-    rafQueue.shift()!();
-    rafQueue.shift()!();
+    xterm.parse();
     await settle();
-
-    expect(pane.terminal.write).toHaveBeenCalledTimes(4);
-    expect(pane.terminal.write).toHaveBeenLastCalledWith('after');
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(2);
+    // Parsed: the coalesced refresh runs now, once, and resets before its replay.
+    expect(resets(pane)).toBe(2);
+    expect(screenWrites(pane).slice(-2)).toEqual([RIS, 'after']);
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(pane._bufferLoading).toBe(true);
+
+    xterm.parse();
+    await settle();
+    expect(screenWrites(pane).at(-1)).toBe('after');
+    expect(pane._bufferLoading).toBe(false);
+  });
+
+  it('queues a replay larger than the window one window at a time', async () => {
+    // xterm's write queue throws past 50 MB, and an unbounded `full=1` capture
+    // can reach the server's 32 MB: at most 1 MiB is queued before xterm has
+    // parsed what came before it.
+    const pane = makePane();
+    const xterm = holdParses(pane);
+    fetchMock.mockResolvedValueOnce(jsonResponse('z'.repeat(TERMINAL_TAIL_SIZE + 5)));
+
+    pane._refreshBuffer();
+    await settle();
+    // The replay's own bytes; the reset queued ahead of them is checked apart.
+    expect(pane.terminal.write.mock.calls[0][0]).toBe(RIS);
+    const queued = () =>
+      pane.terminal.write.mock.calls.slice(1).reduce((n: number, call: unknown[]) => n + (call[0] as string).length, 0);
+    expect(queued()).toBe(TERMINAL_TAIL_SIZE);
+
+    xterm.parse();
+    await settle();
+    expect(queued()).toBe(TERMINAL_TAIL_SIZE + 5);
+    expect(pane._bufferLoading).toBe(true);
+
+    xterm.parse();
+    await settle();
+    expect(pane._bufferLoading).toBe(false);
+  });
+
+  it('a replay still parsing when the pane is destroyed settles at once', async () => {
+    // A disposed xterm never runs a write callback: without destroy() settling
+    // the replay, the flag (and in the grid the one load queue) would wait forever.
+    const pane = makePane();
+    holdParses(pane);
+    fetchMock.mockResolvedValueOnce(jsonResponse('replay'));
+
+    pane._refreshBuffer();
+    await settle();
+    expect(pane._bufferLoading).toBe(true);
+
+    pane.destroy();
+    await settle();
     expect(pane._bufferLoading).toBe(false);
   });
 
@@ -329,7 +428,138 @@ describe('SplitTerminalPane server-refresh single-flight', () => {
   });
 });
 
-describe('SplitTerminalPane scroll-to-top history pull', () => {
+describe('TerminalTile refresh order: fetch, then the in-stream reset, then the held frames', () => {
+  // The primary pane's order (_onSessionNeedsRefresh / _resetTerminalForReplay,
+  // CLAUDE.md "Terminal resilience"). The refresh used to wipe the pane with a
+  // synchronous xterm clear() before its fetch and wrote live frames straight
+  // through the fetch and the replay: queued bytes fused into the snapshot, the
+  // capture started at the old cursor column, and a failed fetch left it blank.
+  it.each([
+    ['the request fails', () => fetchMock.mockRejectedValueOnce(new Error('offline'))],
+    ['the capture is empty', () => fetchMock.mockResolvedValueOnce(jsonResponse(''))],
+  ])('when %s, the screen is left exactly as it was', async (_label, arrange) => {
+    const pane = makePane();
+    arrange();
+
+    pane._refreshBuffer();
+    await settle();
+
+    expect(pane.terminal.write).not.toHaveBeenCalled();
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
+    expect(pane._liveQueue).toBeNull();
+    expect(pane._bufferLoading).toBe(false);
+  });
+
+  it('a body read that fails after the headers resets nothing and writes every held frame, in order', async () => {
+    const pane = makePane();
+    const held = headersOnly();
+    fetchMock.mockResolvedValueOnce(held.response);
+
+    pane._refreshBuffer();
+    await settle(); // headers landed: the queue is open
+    pane._onLiveOutput('frame-A');
+    pane._onLiveOutput('frame-B');
+    expect(pane.terminal.write).not.toHaveBeenCalled();
+    held.fail();
+    await settle();
+
+    expect(screenWrites(pane)).toEqual(['frame-A', 'frame-B']);
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
+    expect(pane._liveQueue).toBeNull();
+    expect(pane._bufferLoading).toBe(false);
+  });
+
+  it('writes frames from before the response straight through, holds later ones, and writes them behind the replay', async () => {
+    const pane = makePane();
+    const xterm = holdParses(pane);
+    const response = deferred<ReturnType<typeof jsonResponse>>();
+    fetchMock.mockReturnValueOnce(response.promise);
+
+    pane._refreshBuffer();
+    expect(pane._liveQueue).toBeNull(); // the round trip holds nothing
+    clock = 1;
+    pane._onLiveOutput('early'); // the pane keeps painting; the capture then replaces it
+    clock = 2; // the response arrives: this is the cutoff
+    response.resolve(jsonResponse('snapshot'));
+    await settle();
+    // The replay is queued and xterm is still parsing it.
+    expect(pane._liveQueue).not.toBeNull();
+    clock = 3;
+    pane._onLiveOutput('late'); // news the capture cannot hold
+    expect(screenWrites(pane)).toEqual(['early', RIS, 'snapshot']);
+
+    xterm.parse();
+    await settle();
+
+    // 'early' sits before the reset (wiped by it, never repeated); 'late' lands after the snapshot.
+    expect(screenWrites(pane)).toEqual(['early', RIS, 'snapshot', 'late']);
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
+    expect(pane._liveQueue).toBeNull();
+    expect(pane._bufferLoading).toBe(false);
+  });
+
+  it('drops a held frame that arrived before the response once the replay covers it', async () => {
+    // The response's arrival is the cutoff (the primary pane's `since`): a frame
+    // held with an earlier stamp is already in the capture.
+    const pane = makePane();
+    const held = headersOnly();
+    clock = 5;
+    fetchMock.mockResolvedValueOnce(held.response);
+
+    pane._refreshBuffer();
+    await settle(); // headers landed at clock 5
+    clock = 4; // stamped before the cutoff (a stand-in for a frame the capture holds)
+    pane._onLiveOutput('in-the-capture');
+    clock = 6;
+    pane._onLiveOutput('after-the-capture');
+    held.release('snapshot');
+    await settle();
+
+    expect(screenWrites(pane)).toEqual([RIS, 'snapshot', 'after-the-capture']);
+  });
+
+  it('a bounded window gives the body read the short budget; an unbounded capture keeps the long one', async () => {
+    const bounded = makePane('shell'); // a shell loads the `tail=` window
+    const unbounded = makePane(); // the split's Pane B: a TUI's whole history
+    const a = headersOnly();
+    const b = headersOnly();
+    fetchMock.mockResolvedValueOnce(a.response).mockResolvedValueOnce(b.response);
+
+    bounded._refreshBuffer();
+    await settle(); // headers landed
+    expect(deadlines.map((d) => d.ms)).toEqual([45_000, 10_000]);
+    expect(deadlines[0].cleared).toBe(true);
+
+    unbounded._refreshBuffer();
+    await settle();
+    // No re-arm: a body of up to 32 MB keeps the request's own budget.
+    expect(deadlines.map((d) => d.ms)).toEqual([45_000, 10_000, 45_000]);
+    expect(deadlines[2].cleared).toBe(false);
+
+    a.release('one');
+    b.release('two');
+    await settle();
+    expect(deadlines.every((d) => d.cleared)).toBe(true);
+  });
+
+  it('a close mid-refresh whose fetch fails writes exactly one marker: nothing wiped it', async () => {
+    const pane = makePane();
+    const response = deferred<ReturnType<typeof jsonResponse>>();
+    fetchMock.mockReturnValueOnce(response.promise);
+
+    pane._refreshBuffer();
+    pane._onSocketClosed(); // owed: a load is running
+    expect(pane.terminal.write).not.toHaveBeenCalled();
+    response.resolve({ json: async () => Promise.reject(new Error('body read failed')) } as never);
+    await settle();
+
+    const writes = screenWrites(pane);
+    expect(writes.filter(isMarker)).toHaveLength(1);
+    expect(writes).not.toContain(RIS);
+  });
+});
+
+describe('TerminalTile scroll-to-top history pull', () => {
   it('a shell pane at the top pulls a bounded window of full history and replays it', async () => {
     const pane = makePane('shell');
     const term = pane.terminal;
@@ -500,6 +730,7 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
   it('holds live output during the replay and replays only what arrived after the capture', async () => {
     const pane = makePane('shell');
     const term = pane.terminal;
+    const xterm = holdParses(pane);
     const response = deferred<ReturnType<typeof jsonResponse>>();
     fetchMock.mockReturnValueOnce(response.promise);
 
@@ -511,28 +742,32 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     // keeps painting during the round trip), and the replay then replaces it.
     clock = 1;
     pane._onLiveOutput('early');
-    expect(term.write).toHaveBeenCalledWith('early');
+    expect(screenWrites(pane)).toContain('early');
     await settle();
 
     // 200 rows (more than the pane holds, so it replays) of 400 columns each:
-    // three chunks, which leaves the replay mid-write once the fetch lands.
+    // three chunks, still being parsed once the fetch lands.
     const bigReplay = Array.from({ length: 200 }, () => 'y'.repeat(400)).join('\n');
     expect(bigReplay.length).toBeGreaterThan(TERMINAL_CHUNK_SIZE * 2);
     clock = 2; // the response arrives: this is the cutoff
     response.resolve(jsonResponse(bigReplay));
     await settle();
-    expect(rafQueue).toHaveLength(1);
+    // Two parses pending: 'early' (a live write, counted until xterm parses it)
+    // and the replay's end marker.
+    expect(xterm.held).toHaveLength(2);
 
-    // Arrives while the snapshot is still being written: must not land under it.
+    // Arrives while the snapshot is still being parsed: must not land under it.
     clock = 3;
     pane._onLiveOutput('late');
-    expect(term.write).not.toHaveBeenCalledWith('late');
+    expect(screenWrites(pane)).not.toContain('late');
 
-    rafQueue.shift()!();
-    rafQueue.shift()!();
+    // The replay parsed, then the pull's own settle write before it scrolls.
+    xterm.parse();
+    await settle();
+    xterm.parse();
     await settle();
 
-    const written = term.write.mock.calls.map((call) => call[0]);
+    const written = screenWrites(pane);
     // 'early' went out before the reset, so the replay wiped it and it is not repeated.
     expect(written.indexOf('early')).toBeLessThan(written.indexOf('\x1bc'));
     expect(written.filter((w) => w === 'early')).toHaveLength(1);
@@ -549,12 +784,12 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     pane._maybeLoadMoreHistory();
     await settle();
     pane._onLiveOutput('held');
-    expect(pane.terminal.write).not.toHaveBeenCalledWith('held');
+    expect(screenWrites(pane)).not.toContain('held');
     held.release(rowsOf(30)); // nothing to gain: no replay
     await settle();
 
     // Nothing replaced the terminal, so the held frame is news.
-    expect(pane.terminal.write).toHaveBeenCalledWith('held');
+    expect(screenWrites(pane)).toContain('held');
   });
 
   it('a failed fetch releases the flag and the queue, so live output flows again', async () => {
@@ -570,9 +805,9 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
 
     expect(pane._bufferLoading).toBe(false);
     expect(pane._liveQueue).toBeNull();
-    expect(pane.terminal.write).toHaveBeenCalledWith('held');
+    expect(screenWrites(pane)).toContain('held');
     pane._onLiveOutput('after');
-    expect(pane.terminal.write).toHaveBeenLastCalledWith('after');
+    expect(screenWrites(pane).at(-1)).toBe('after');
   });
 
   it('a refresh frame during the pull runs once behind it', async () => {
@@ -582,64 +817,97 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
 
     pane._maybeLoadMoreHistory();
     pane._refreshBuffer();
-    expect(pane.terminal.clear).not.toHaveBeenCalled();
+    expect(pane.terminal.write).not.toHaveBeenCalled();
     expect(pane._bufferRefreshPending).toBe(true);
 
     response.resolve(jsonResponse(rowsOf(30)));
     await settle();
 
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(1);
+    // The pull had nothing to replay; the refresh behind it reset once, then replayed.
+    expect(screenWrites(pane)).toEqual([RIS, 'refreshed']);
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(pane.terminal.write).toHaveBeenCalledWith('refreshed');
   });
 
-  it('a clear frame during the pull is queued in order, never applied under the replay', async () => {
+  // The server's `{t:'c'}` means "refresh after startup" (its one emitter is a
+  // fresh Claude pane's first prompt, session.ts), and the primary pane answers
+  // it with a refetch and replay (_onSessionClearTerminal). The three below
+  // replace two tests that pinned it as a bare xterm clear(), which kept only
+  // the cursor's row: a Claude session Run into the grid came up a near-empty
+  // tile.
+  it('a clear frame during the pull is coalesced into one refresh behind it, never applied under the replay', async () => {
     const pane = makePane('shell');
     const term = pane.terminal;
     const order: string[] = [];
     term.write.mockImplementation((data: string, done?: () => void) => {
-      order.push(`write:${data}`);
+      if (data) order.push(`write:${data}`);
       done?.();
     });
     term.clear.mockImplementation(() => order.push('clear'));
     const held = headersOnly();
-    fetchMock.mockResolvedValueOnce(held.response);
+    fetchMock.mockResolvedValueOnce(held.response).mockResolvedValueOnce(jsonResponse('after startup'));
 
     pane._maybeLoadMoreHistory();
     await settle();
     pane._onLiveOutput('before');
     pane._onLiveClear();
+    pane._onLiveClear(); // a second one joins the same trailing refresh
     pane._onLiveOutput('after');
-    // Held: clearing now would wipe a half-written snapshot.
+    // Held: nothing touches the screen under the pull, and nothing fetches yet.
     expect(order).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(pane._bufferRefreshPending).toBe(true);
 
     held.release(rowsOf(30)); // nothing to gain: no replay
     await settle();
 
-    expect(order).toEqual(['write:before', 'clear', 'write:after']);
+    // The held frames land in order, then ONE refresh fetches the pane's
+    // current screen and replays it last.
+    expect(order.slice(0, 2)).toEqual(['write:before', 'write:after']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `/api/sessions/s1/terminal?tail=${TERMINAL_TAIL_SIZE}`,
+      expect.anything()
+    );
+    expect(order.at(-1)).toBe('write:after startup');
     expect(pane._liveQueue).toBeNull();
-
-    // With nothing in flight a clear frame applies straight away.
-    pane._onLiveClear();
-    expect(order.at(-1)).toBe('clear');
+    expect(pane._bufferLoading).toBe(false);
+    expect(pane._bufferRefreshPending).toBe(false);
   });
 
-  it('a clear that arrived before the capture is not replayed after it', async () => {
+  it('a clear frame with nothing in flight refetches the capture and replays it, like a refresh frame', async () => {
+    const pane = makePane();
+    fetchMock.mockResolvedValueOnce(jsonResponse('banner\r\n❯ '));
+
+    pane._onLiveClear();
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/s1/terminal?full=1', expect.anything());
+    expect(screenWrites(pane).at(-1)).toBe('banner\r\n❯ ');
+    expect(pane._bufferLoading).toBe(false);
+  });
+
+  it('a clear frame while a pull waits for its response does not touch the screen, and refreshes behind the pull', async () => {
     const pane = makePane('shell');
     const term = pane.terminal;
     const response = deferred<ReturnType<typeof jsonResponse>>();
-    fetchMock.mockReturnValueOnce(response.promise);
+    fetchMock.mockReturnValueOnce(response.promise).mockResolvedValueOnce(jsonResponse('refreshed'));
 
     pane._maybeLoadMoreHistory();
     clock = 1;
-    pane._onLiveClear(); // before the response: applied now, already in the capture
-    expect(term.clear).toHaveBeenCalledTimes(1);
+    pane._onLiveClear(); // before the response
+    expect(term.clear).not.toHaveBeenCalled();
+    expect(pane._bufferRefreshPending).toBe(true);
     clock = 2;
     response.resolve(jsonResponse(rowsOf(100)));
     await settle();
 
-    expect(term.write).toHaveBeenCalledWith('\x1bc');
-    expect(term.clear).toHaveBeenCalledTimes(1); // not replayed after the capture
+    const writes = screenWrites(pane);
+    expect(writes).toContain(rowsOf(100)); // the pull still replayed
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(writes.at(-1)).toBe('refreshed');
+    expect(pane._bufferLoading).toBe(false);
   });
 
   it('destroy() mid-pull leaves nothing running and nothing written to the dead terminal', async () => {
@@ -659,7 +927,7 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     expect(pane._liveQueue).toBeNull();
     expect(pane.terminal).toBeNull();
     expect(term.write).not.toHaveBeenCalledWith('\x1bc');
-    expect(term.write).not.toHaveBeenCalledWith('held');
+    expect(term.write.mock.calls.map((call) => call[0])).not.toContain('held');
   });
 
   it('a pull whose request is aborted (the deadline) frees the pane', async () => {
@@ -675,7 +943,7 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
 
     expect(pane._bufferLoading).toBe(false);
     expect(pane._liveQueue).toBeNull();
-    expect(pane.terminal.write).toHaveBeenCalledWith('held');
+    expect(screenWrites(pane)).toContain('held');
   });
 
   it('the wheel listener is capture-phase, and only a wheel UP can trigger a pull', async () => {
@@ -688,9 +956,13 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     // Capture phase: xterm's own wheel handler stopPropagation()s the events it
     // consumes, so a bubbling listener would never fire while the pane still has
     // scrollback to scroll, and the pull would work only from the exact top row.
+    // Not passive: the hollow-buffer paging route consumes its wheel right here
+    // (test/terminal-tile-scroll.test.ts). This stub window has neither the
+    // shared paging helpers nor the app's gates, so that route stays inert and
+    // every wheel below falls through to the pull, as before.
     const [type, listener, options] = mount.addEventListener.mock.calls[0];
     expect(type).toBe('wheel');
-    expect(options).toEqual({ capture: true, passive: true });
+    expect(options).toEqual({ capture: true, passive: false });
 
     listener({ deltaY: 120 }); // wheel down
     listener({ deltaY: 0 });
@@ -714,15 +986,41 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     expect(pane._onWheel).toBeNull();
   });
 
+  it('destroy() detaches exactly the click listener it registered', () => {
+    const mount = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    const pane = makePane('opencode', mount);
+    pane._installWheelListener();
+    pane._installClickListener();
+    const [type, registered, options] = mount.addEventListener.mock.calls[1];
+    // Bubble phase, like the primary pane's click reporter (terminal-ui.js).
+    expect(type).toBe('click');
+    expect(options).toBeUndefined();
+
+    pane.destroy();
+
+    expect(mount.removeEventListener).toHaveBeenCalledWith('click', registered);
+    expect(pane._onClick).toBeNull();
+  });
+
   it('connect() installs the wheel listener (static guard)', () => {
     // connect() needs a whole xterm to run, so its wiring is pinned by source
     // rather than executed; the listener's behaviour is exercised above.
-    const connect = SOURCE.slice(SOURCE.indexOf('async connect()'), SOURCE.indexOf('async _loadBuffer()'));
+    const start = SOURCE.indexOf('async connect()');
+    const end = SOURCE.indexOf('async _loadBuffer(');
+    // Both anchors must resolve, or the slice runs to the end of the file and
+    // every check below passes against code outside connect().
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const connect = SOURCE.slice(start, end);
     expect(connect).toContain('this._installWheelListener();');
+    expect(connect).toContain('this._installClickListener();');
     expect(connect).toContain('this._onLiveClear();');
     expect(connect).not.toContain('this.terminal.clear();');
-    // The tests below drive the close through _onSocketClosed() directly.
-    expect(connect).toContain('this.ws.onclose = () => this._onSocketClosed();');
+    // The tests below drive the close through _onSocketClosed() directly; the
+    // socket's own handler forwards the close event (and its code) there, and
+    // only for the current socket (_openSocket).
+    expect(connect).toContain('this._onSocketClosed(event);');
+    expect(connect).toMatch(/ws\.onclose = \(event\) => \{\s*if \(ws !== this\.ws\) return;/);
   });
 
   it('a close with no pull running writes the marker straight away', () => {
@@ -746,9 +1044,9 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     void pane._pullHistory();
     await settle();
 
-    const marker = expect.stringContaining('Pane B disconnected');
+    const marker = expect.stringContaining('[disconnected');
     const writes = pane.terminal.write.mock.calls.map((c) => c[0]);
-    expect(writes.at(-1)).toEqual(expect.stringMatching(/Pane B disconnected/));
+    expect(writes.at(-1)).toEqual(expect.stringMatching(/\[disconnected/));
     expect(pane.terminal.write).toHaveBeenCalledWith(marker);
   });
 
@@ -806,10 +1104,9 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
 
   it('back-to-back refreshes on a closed socket leave exactly one marker, at the end', async () => {
     // R1's finally runs the trailing refresh R2, so R1 leaves the owed marker to
-    // R2 instead of stamping it: in real xterm R1's write would still be queued
-    // when R2's synchronous clear() runs, and would land above R2's replay. The
-    // write mock records every stamp whatever clear() does, so counting marker
-    // writes pins that R1 never stamps (the async-parse test below shows why).
+    // R2 instead of stamping it: R2 settles it, below its own replay. The write
+    // mock records every stamp, so counting marker writes pins that R1 never
+    // stamps (the async-parse test below shows the screen).
     const pane = makePane('shell');
     pane._wsClosed = true;
     const first = deferred<ReturnType<typeof jsonResponse>>();
@@ -820,12 +1117,14 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     pane._refreshBuffer(); // coalesced into the trailing R2
     first.resolve(jsonResponse('first'));
     await settle();
-    // R1 settled its marker, then R2 cleared and is still fetching.
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(2);
+    // R1 replayed and left the marker to R2, which is still fetching: it has
+    // reset nothing yet, so R1's replay is still on screen.
+    expect(screenWrites(pane)).toEqual([RIS, 'first']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     second.resolve(jsonResponse('second'));
     await settle();
 
-    const writes = pane.terminal.write.mock.calls.map((c) => c[0]);
+    const writes = screenWrites(pane);
     expect(writes.at(-1)).toSatisfy(isMarker);
     expect(writes.lastIndexOf('second')).toBe(writes.length - 2);
     expect(writes.filter(isMarker)).toHaveLength(1);
@@ -881,33 +1180,35 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     }
   );
 
-  it('a close during the chunked replay writes exactly one marker, at the end', async () => {
+  it('a close during the replay writes exactly one marker, at the end', async () => {
     const pane = makePane('shell');
+    const xterm = holdParses(pane);
     const response = deferred<ReturnType<typeof jsonResponse>>();
     fetchMock.mockReturnValueOnce(response.promise);
 
     const pull = pane._pullHistory();
-    // Three chunks, so the replay is still mid-write once the fetch lands.
+    // Three chunks, still being parsed once the fetch lands.
     const bigReplay = Array.from({ length: 200 }, () => 'y'.repeat(400)).join('\n');
     response.resolve(jsonResponse(bigReplay));
     await settle();
-    expect(rafQueue).toHaveLength(1);
+    expect(xterm.held).toHaveLength(1);
 
-    // Written now, the marker would land between two chunks of recovered history.
+    // Written now, the marker would land above the recovered history's end.
     pane._onSocketClosed();
-    rafQueue.shift()!();
-    rafQueue.shift()!();
+    xterm.parse();
+    await settle();
+    xterm.parse();
     await pull;
 
-    const writes = pane.terminal.write.mock.calls.map((c) => c[0]);
+    const writes = screenWrites(pane);
     expect(writes[0]).toBe('\x1bc');
     expect(writes.filter(isMarker)).toHaveLength(1);
     expect(isMarker(writes.at(-1))).toBe(true);
   });
 
   it('a refresh queued behind a pull on a closed socket does not wipe the marker', async () => {
-    // The refresh's clear() runs after the pull's finally block has written the
-    // marker, so without a re-stamp the dead pane would look current again.
+    // The refresh's reset lands after the pull's finally block, so without a
+    // re-stamp the dead pane would look current again.
     const pane = makePane('shell');
     const held = headersOnly();
     fetchMock.mockResolvedValueOnce(held.response).mockResolvedValueOnce(jsonResponse('refreshed'));
@@ -921,7 +1222,9 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     await settle();
 
     const writes = pane.terminal.write.mock.calls.map((c) => c[0]);
-    expect(pane.terminal.clear).toHaveBeenCalledTimes(1);
+    expect(resets(pane)).toBe(1);
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
+    expect(writes.indexOf(RIS)).toBe(writes.indexOf('refreshed') - 1);
     expect(writes).toContain('refreshed');
     expect(isMarker(writes.at(-1))).toBe(true);
     expect(writes.lastIndexOf('refreshed')).toBeLessThan(writes.length - 1);
@@ -954,9 +1257,10 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
   ])('with xterm parsing writes on a later tick, %s leave one marker on screen, last', async (_label, drive) => {
     // Real xterm queues write() and parses it on a later tick (WriteBuffer's
     // setTimeout), while clear() rewrites the buffer at once. The default fake
-    // applies writes synchronously and so cannot show a marker overtaken by a
-    // trailing refresh's clear(): parsed after it, that marker sat above the
-    // refresh's replay as a second, stale copy.
+    // applies writes synchronously and so cannot show ordering on the real
+    // screen: back when a trailing refresh began with a clear(), a marker parsed
+    // after it sat above the refresh's replay as a second, stale copy. A
+    // refresh never calls clear() now (pinned below); its reset is in-stream.
     const pane = makePane('shell');
     const screen: string[] = [];
     const pending: Array<{ data: string; done?: () => void }> = [];
@@ -979,6 +1283,7 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     await drive(pane);
     for (let i = 0; i < 5; i++) await settle();
 
+    expect(pane.terminal.clear).not.toHaveBeenCalled();
     expect(pane._bufferLoading).toBe(false);
     expect(screen.filter(isMarker)).toHaveLength(1);
     expect(screen.at(-1)).toSatisfy(isMarker);
@@ -1003,7 +1308,7 @@ describe('SplitTerminalPane scroll-to-top history pull', () => {
     await settle();
 
     for (const call of pane.terminal.write.mock.calls) {
-      expect(call[0]).toEqual(expect.not.stringMatching(/Pane B disconnected/));
+      expect(call[0]).toEqual(expect.not.stringMatching(/\[disconnected/));
     }
   });
 

@@ -82,8 +82,10 @@ html.mobile-init .file-browser-panel {
 
   /* No "open in new window" (detach) on phones/tablets — popped-out browser
      windows aren't usable there. !important beats the hover/detached reveal
-     rules in styles.css */
-  .session-tab .tab-detach {
+     rules in styles.css. A native wrapper that opens windows of its own (side
+     by side on a foldable) keeps it at tablet widths: app.js sets
+     html.host-windows. Phone widths hide it again in the 599px block. */
+  html:not(.host-windows) .session-tab .tab-detach {
     display: none !important;
   }
 
@@ -423,6 +425,34 @@ html.mobile-init .file-browser-panel {
     padding: 0.4rem 0.75rem;
     font-size: 0.75rem;
     min-height: unset;
+  }
+}
+
+/* Tab Layout "By case" at tablet widths, getDeviceType()'s 'tablet' (600 to
+   767px). The strip is the tablet block's one scrolling row and
+   updateTabOverflowMode() never wraps it here, so the boxes, which may shrink
+   below 768px, squeezed and wrapped their tabs inside themselves instead of
+   overflowing: the strip never scrolled, and every tab past a box's first
+   line was clipped under the fixed header. The boxes dissolve into the chip
+   row as on phones (the 599px block), which keeps the tablet's own 40px chip
+   geometry; a 44px box would hang below the 48px header. Ends at 767px, not
+   at the tablet block's 768: from 768 getDeviceType() says 'desktop', and the
+   desktop rule in styles.css (flex-shrink: 0, wrapping box by box) owns the
+   strip. With the boxes, their labels and their case-colour borders gone, the
+   `-<case>` part of a generated name (.tab-name-case, which styles.css hides
+   in the clustered strip) is the only cue left to which case a chip is in: the
+   w<n> counter is per case, so w1-alpha and w1-beta would both read "w1". */
+@media (min-width: 600px) and (max-width: 767px) {
+  :where(.header) .session-tabs-host > .session-tabs.tabs-clusters > .tab-cluster {
+    display: contents;
+  }
+
+  :where(.header) .tab-cluster-label {
+    display: none;
+  }
+
+  :where(.header) .session-tabs-host > .session-tabs.tabs-clusters .tab-name-case {
+    display: inline;
   }
 }
 
@@ -885,6 +915,31 @@ html.mobile-init .file-browser-panel {
     font-weight: 500;
   }
 
+  /* Grouped by state (tabArrangement 'state'), the phone strip keeps its one scrolling
+     row: the tabs still come in state order, most urgent first, but the
+     headings would cost chips and the dots already say which state is which.
+     The phone overview is where the labelled sections live. */
+  :where(.header) .tab-triage-head {
+    display: none;
+  }
+
+  /* Clustered by case, the same holds: the boxes dissolve into the one chip
+     row (in cluster order) and the labels go, since every chip still names
+     its session. It does so in full: the `-<case>` part of a generated name,
+     which styles.css hides in the clustered strip, shows again, or w1-alpha
+     and w1-beta (the w<n> counter is per case) would both read "w1". */
+  :where(.header) .session-tabs-host > .session-tabs.tabs-clusters > .tab-cluster {
+    display: contents;
+  }
+
+  :where(.header) .tab-cluster-label {
+    display: none;
+  }
+
+  :where(.header) .session-tabs-host > .session-tabs.tabs-clusters .tab-name-case {
+    display: inline;
+  }
+
   /* Only the active tab shows its action icons on a phone (see below), so on
      every other tab the container is empty but still a flex item, and its gap
      made the chip visibly wider on the right than on the left. */
@@ -980,6 +1035,13 @@ html.mobile-init .file-browser-panel {
   .session-tab .tab-close,
   .session-tab .tab-gear {
     display: none;
+  }
+
+  /* The tap-zone reserve counts gear + close only (test/mobile-tab-tap-zones),
+     so the pop-out icon stays off phone tabs even under a window-opening host,
+     which offers the pop-out from its own chrome (app.detachSession). */
+  .session-tab .tab-detach {
+    display: none !important;
   }
 
   /* Gear icon on active tab - tiny, subtle */
@@ -1582,15 +1644,6 @@ html.mobile-init .file-browser-panel {
     padding: 6px 14px;
   }
 
-  /* Add case button - compact (keeping for when shown via menu) */
-  .btn-case-add {
-    display: none !important;
-  }
-
-  .btn-case-settings {
-    display: none !important;
-  }
-
   /* When keyboard is visible, also move accessory bar up */
   .keyboard-visible .keyboard-accessory-bar.visible {
     /* Position is handled by JS transform along with toolbar */
@@ -1602,33 +1655,6 @@ html.mobile-init .file-browser-panel {
   /* LEGACY: Hide old toolbar select (no longer used on mobile) */
   .toolbar-select {
     display: none !important;
-  }
-
-  /* Keep btn-case-add styling for tablet/future use */
-  .toolbar .btn-case-add {
-    min-width: 26px !important;
-    max-width: 26px !important;
-    width: 26px !important;
-    min-height: 26px !important;
-    max-height: 26px !important;
-    height: 26px !important;
-    padding: 0 !important;
-    font-size: 0.9rem;
-    font-weight: bold;
-    display: inline-flex !important;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-    border-radius: 4px;
-    background: transparent;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #9ca3af;
-  }
-
-  .btn-case-add:hover,
-  .btn-case-add:active {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
   }
 
   /* Panels on mobile - full width, positioned above toolbar, visibility controlled by JS */
@@ -1886,17 +1912,24 @@ html.mobile-init .file-browser-panel {
   }
 
   .welcome-actions {
-    flex-direction: column;
-    gap: 0.5rem;
     margin-top: 1rem;
   }
 
-  .welcome-btn {
+  /* Only reached with the phone overview switched off. The primary spans the
+     column; the chips keep wrapping at the finger size styles.css gives touch
+     screens (40px, its pointer: coarse rule). This rule loads later at equal
+     specificity, so a lower value here made a phone's chips shorter than a
+     tablet's; restating 40px also covers a narrow window with a mouse. */
+  .welcome-primary {
     width: 100%;
     justify-content: center;
     min-height: 44px;
-    padding: 0.75rem 1rem;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
+  }
+
+  .welcome-chip {
+    height: 40px;
+    border-radius: 20px;
   }
 
   .history-show-more {
@@ -2451,6 +2484,18 @@ html.mobile-init .file-browser-panel {
     width: 32px;
     height: 32px;
     font-size: 1.5rem;
+  }
+
+  /* With the keyboard up the sheet is lifted above it (mobile-handlers.js), so
+     what is left to fit is much shorter than 80dvh of the layout viewport. Cap
+     the list rather than the sheet, so the search row and the Create button
+     stay on screen and only the rows scroll. */
+  .keyboard-visible .mobile-case-picker-sheet {
+    max-height: 45vh;
+  }
+
+  .keyboard-visible .mobile-case-picker-body {
+    max-height: 28vh;
   }
 
   .mobile-case-picker-footer {
@@ -3387,13 +3432,13 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
    both stylesheets and repainted the armed modifier back to a resting button on
    all four light skins. Excluding the state here fixes phone and tablet at once;
    adding a class to the armed rules would only have moved the tie. */
-html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-voice-mobile, .btn-settings-mobile, .btn-toolbar.btn-shell, .toolbar .btn-case-add, .accessory-btn:not(.armed)) {
+html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-voice-mobile, .btn-settings-mobile, .btn-toolbar.btn-shell, .accessory-btn:not(.armed)) {
   background: var(--control-bg);
   border-color: var(--control-border);
   color: var(--text-dim);
 }
 
-html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-voice-mobile:active, .btn-settings-mobile:active, .btn-toolbar.btn-shell:hover, .btn-toolbar.btn-shell:active, .btn-case-add:hover, .btn-case-add:active, .accessory-btn:active) {
+html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="catppuccin-latte"], [data-skin="rose-pine-dawn"]) :is(.btn-voice-mobile:active, .btn-settings-mobile:active, .btn-toolbar.btn-shell:hover, .btn-toolbar.btn-shell:active, .accessory-btn:active) {
   background: var(--control-bg-hover);
   border-color: var(--control-border-hover);
   color: var(--text);
@@ -3695,7 +3740,7 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   }
 
   /* Save + Close are the two ways out of the sheet (save-and-close vs
-     discard-and-close), hit in the same corner with the same thumb, so here —
+     discard-and-close; Apply saves but keeps the sheet open), hit in the same corner with the same thumb, so here —
      and only here, since Save is header-only below 860px — they share a
      recessed tray and matching pill geometry instead of reading as a fat
      accent pill parked beside a stray × glyph. Tray colors come from skin
@@ -4272,5 +4317,26 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab .tab-close {
 @media (vertical-viewport-segments: 2) {
   .response-viewer {
     max-height: min(88vh, env(viewport-segment-height 0 1, 88vh));
+  }
+}
+
+/* XLSX preview (spreadsheet-preview.js): larger sheet tabs and a taller,
+   touch-scrollable grid on phones. */
+@media (max-width: 700px) {
+  .spreadsheet-sheet-tabs {
+    padding-inline: 4px;
+    scroll-snap-type: x proximity;
+  }
+
+  .spreadsheet-sheet-tab {
+    min-width: 96px;
+    min-height: 40px;
+    scroll-snap-align: start;
+  }
+
+  .spreadsheet-grid {
+    min-height: 55vh;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x pan-y;
   }
 }

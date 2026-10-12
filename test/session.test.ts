@@ -5,8 +5,6 @@ import { join } from 'node:path';
 import { WebServer } from '../src/web/server.js';
 import { Session } from '../src/session.js';
 
-const TEST_PORT = 3102;
-
 describe('Session autonomous availability', () => {
   it.each([
     ['waiting_agents', true],
@@ -48,9 +46,9 @@ describe('Interactive Session Lifecycle', () => {
 
   beforeAll(async () => {
     testWorkingDir = mkdtempSync(join(tmpdir(), 'codeman-session-test-'));
-    server = new WebServer(TEST_PORT, false, true);
+    server = new WebServer(0, false, true);
     await server.start();
-    baseUrl = `http://localhost:${TEST_PORT}`;
+    baseUrl = `http://localhost:${server.boundPort}`;
   });
 
   afterAll(async () => {

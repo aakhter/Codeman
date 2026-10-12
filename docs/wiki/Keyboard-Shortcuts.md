@@ -9,12 +9,15 @@ Press `Ctrl+?` in the app for the same list in a floating overlay.
 | Shortcut                        | Action                                                          |
 | ------------------------------- | --------------------------------------------------------------- |
 | `Ctrl+K` (also `Cmd+K`, `Alt+K`)| Find an open session or start a new one.                         |
-| `Ctrl+W`                        | Kill the active session.                                         |
 | `Ctrl+Tab`                      | Next session.                                                    |
 | `Alt+[` / `Alt+]`               | Previous / next tab.                                             |
 | `Alt+1` to `Alt+9`              | Switch to tab N. Physical keys, so macOS Option layouts work.    |
 | `Ctrl+Shift+{` / `Ctrl+Shift+}` | Move the active tab left / right.                                |
 | `Alt+B`                         | Collapse / expand the session sidebar, when that layout is on.    |
+
+`Ctrl+W` is not a Codeman shortcut: it goes to the terminal, where shells and agent CLIs
+use it to delete the previous word. **Close Session** has no key by default; close a session
+from its tab, or bind a key to it in App Settings → Shortcuts.
 
 ## Terminal
 
@@ -35,6 +38,22 @@ Press `Ctrl+?` in the app for the same list in a floating overlay.
 | `Ctrl+Z`                | Swallowed in agent sessions so a running CLI cannot be suspended. Normal job control in a shell. |
 
 Anything you copy is cleaned on the way to the clipboard: each line loses the padding spaces a full-screen program paints across the rest of the row. Leading indentation is left exactly as it is, so indented code, a `git log` message body and `git diff` context lines paste back the way they looked on screen. An `Alt+drag` rectangular selection is copied exactly as it looks, so its columns stay lined up.
+
+## Tile grid
+
+| Shortcut                    | Action                                                       |
+| --------------------------- | ------------------------------------------------------------ |
+| `Ctrl+Shift+G`              | Open or close the tile grid (needs the Tiles setting on).     |
+| `Alt+Shift+Arrows`          | Focus the tile to the left, right, above or below.            |
+| `Ctrl+Shift+Arrows`         | Move the focused tile one place: into an empty slot, or swap. |
+| Drag a tile's header        | Move the tile: onto another tile they swap, onto an empty slot it moves there. |
+| `Alt+Shift+Enter`           | Zoom the focused tile, or restore the grid.                   |
+| `Ctrl`+click / `Cmd`+click a tab | Add that session to the grid.                            |
+| Right-click the Tiles button | Choose how many tiles: 2, 4 or 6 (remembered).           |
+
+While the grid is open, `Ctrl+Tab` and `Alt+[` / `Alt+]` cycle through the tiles, and the
+terminal shortcuts above act on the focused tile. **Remove Focused Tile** has no key by
+default. See [Tile Grid](Tile-Grid).
 
 ## Everything else
 

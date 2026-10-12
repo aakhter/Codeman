@@ -45,6 +45,13 @@ payload return `{ "success": true, "data": {} }`.
 > `GET /api/sessions/:id/tail-file` (SSE), `GET /api/download`,
 > `GET /api/screenshots/:name`, `GET /q/:code` (QR redirect), and the
 > `GET /ws/sessions/:id/terminal` WebSocket upgrade.
+>
+> **Deprecated:** `POST /api/screenshots`, `GET /api/screenshots` and
+> `GET /api/screenshots/:name` keep working but log a one-time warning on first
+> use. They are removed in a later MAJOR, after at least one MINOR release that
+> carries this warning (see `docs/versioning-policy.md`). To hand
+> a file to an agent, use `POST /api/sessions/:id/paste-image`, which saves it into
+> that session's workspace.
 
 > The [agent wait endpoints](#long-polling-agent-wait) use the normal envelope but
 > are the only JSON endpoints that deliberately **hold the connection open**, for up
@@ -79,6 +86,93 @@ the HTTP status.
 | `INTERNAL_ERROR`   | 500  | Unexpected server error                             |
 
 Adding a new error code is non-breaking; removing or renaming one is a major change.
+
+## Cron jobs
+
+Saved jobs and their launch history are separate from the legacy `/api/scheduled`
+duration-bounded loops. Use `/api/v1/cron/...` in external clients; `/api/cron/...`
+is the unversioned alias. These routes use the response envelope above; the table
+lists the value inside `data` on success.
+
+| Method | Path | Request body | Response `data` |
+| --- | --- | --- | --- |
+| GET | `/api/v1/cron/jobs` | None | `CronJob[]` |
+| POST | `/api/v1/cron/jobs` | Full job definition below | `{ job: CronJob }` |
+| GET | `/api/v1/cron/jobs/:id` | None | `CronJob` |
+| PUT | `/api/v1/cron/jobs/:id` | Partial job definition | `{ job: CronJob }` |
+| DELETE | `/api/v1/cron/jobs/:id` | None | `{}` |
+| PUT | `/api/v1/cron/jobs/:id/enabled` | `{ enabled: boolean }` | `{ job: CronJob }` |
+| POST | `/api/v1/cron/jobs/:id/run` | None | `{ run: CronJobRun, activeAgents: number }` |
+| GET | `/api/v1/cron/jobs/:id/runs` | None | `CronJobRun[]` |
+| GET | `/api/v1/cron/runs` | None | `CronJobRun[]` |
+
+### Job request fields
+
+The create body requires `name`, `agentType`, `workingDir`, `promptMode`,
+`inputMode`, `scheduleType`, `enabled`, and `concurrencyPolicy`. Additional fields
+are required according to the selected prompt and schedule:
+
+| Field | Type / validation |
+| --- | --- |
+| `name` | String, 1–200 characters |
+| `agentType` | A supported session mode (including `shell`) |
+| `workingDir` | Existing, allowed working-directory path |
+| `launchCommand` | Optional single-line string, at most 2000 characters; for shell jobs |
+| `promptMode` | `inline_text` or `prompt_file_path` |
+| `promptText` | Required for `inline_text`; nonempty single-line string, at most 100000 characters |
+| `promptFilePath` | Required for `prompt_file_path`; absolute path inside `workingDir` to a regular file, at most 1 MiB, read when the job fires |
+| `inputMode` | `paste` or `typed` |
+| `scheduleType` | `once`, `interval`, `daily`, or `weekly` |
+| `runAt` | Required for `once`; positive integer Unix timestamp in milliseconds |
+| `intervalMinutes` | Required for `interval`; integer from 1 to 525600 |
+| `dailyTime` | Required for `daily`; `HH:MM` in server-local time |
+| `weeklyDays` | Required for `weekly`; 1–7 weekday integers, 0 (Sunday) through 6 (Saturday) |
+| `weeklyTime` | Required for `weekly`; `HH:MM` in server-local time |
+| `enabled` | Boolean |
+| `concurrencyPolicy` | `warn_only` or `skip_if_same_agent_running`; scheduled runs only |
+| `autoClosePreviousSession` | Optional boolean, default `true`; ignored for `once` |
+| `notes` | Optional string, at most 2000 characters |
+
+`PUT /jobs/:id` accepts any subset of these fields, then validates the merged job.
+When changing `promptMode` or `scheduleType`, supply the fields the new mode needs.
+`Run Now` works even when the job is disabled, bypasses the scheduled concurrency
+policy, and does not change the schedule. `activeAgents` counts live sessions of
+the same agent type, excluding sessions created by this job.
+For recurring jobs with `autoClosePreviousSession` enabled (the default), `Run Now`
+also closes the previous run's session before launching, even if it is still working.
+
+### Job and run response fields
+
+`CronJob` contains the request fields plus server-maintained `id`, optional
+`owner` (multi-user mode), `createdAt`, `updatedAt`, `lastRunAt`, `nextRunAt`,
+`lastStatus`, `lastDueKey`, and optional `completedOnce`. Times are Unix
+milliseconds; `lastRunAt`, `nextRunAt`, `lastStatus`, and `lastDueKey` can be `null`.
+`lastDueKey` is an opaque internal duplicate-launch guard, not a stable API format.
+
+`CronJobRun` contains `id`, `cronJobId`, nullable `sessionId` and `sessionName`,
+`startedAt`, nullable `finishedAt`, `status`, optional `errorMessage`,
+`triggerType` (`scheduled` or `manual_run_now`), and nullable `createdSessionUrl`.
+Run times are also Unix milliseconds. Status is one of `created`,
+`session_started`, `prompt_sent`, `failed`, or `skipped`.
+
+Prompt delivery continues asynchronously after session launch, so `Run Now` can
+return `session_started` before the prompt is sent. Read run history for subsequent
+updates, but do not assume a terminal status will follow: if the session is closed
+during the readiness wait or the server restarts before delivery, the run can remain
+`session_started` indefinitely with `finishedAt: null`.
+`finishedAt` refers to the launch/prompt-delivery attempt, **not completion
+of the agent's task**; `prompt_sent` does not prove that the task succeeded.
+
+In multi-user mode, list/history endpoints filter to accessible jobs. An unknown
+or inaccessible job returns `NOT_FOUND`. Job creation and updates can return
+`403 FORBIDDEN` for a working directory outside the owner's workspace or a shell /
+launch-command job without the required privilege grant. Invalid definitions or
+working directories return `INVALID_INPUT`; launch/delivery failures are recorded
+on the run, so inspect its `status` and `errorMessage` even after an HTTP success.
+
+See [Cron Jobs](wiki/Cron-Jobs.md) for the UI, scheduling, and prompt-file rules.
+See the [complete cron guide](cron-guide.md) for the `cron:runCreated` and
+`cron:runUpdated` SSE events.
 
 ## Long-polling (agent wait)
 
@@ -445,6 +539,41 @@ count against the same 16, not 16 of each. An abandoned request no longer holds 
 slot, because the routes release the waiter when the client disconnects, but a
 client that opens many concurrent waits against one session will still hit the cap.
 
+## Terminal capture (`GET /api/v1/sessions/:id/terminal`)
+
+What a session's terminal shows, for a client to replay: `data.terminalBuffer`,
+with `source` (`mux-visible`, `mux-full-history` or `history`), `truncated`,
+`truncationReason`, `fullSize`, and `captureCols`/`captureRows` when the pane's
+geometry was read. The capture runs synchronous tmux calls on the server; the
+`Server-Timing` header reports `capture`, `prepare` and `total`.
+
+| Query | Meaning |
+|---|---|
+| `full=1` | tmux's scrollback, not only the visible frame (`source: 'mux-full-history'`), ending with a relative cursor move back to the pane's caret. |
+| `tail=<bytes>` | Keep the newest `<bytes>` of the result (`truncationReason: 'tail'` when it cut). |
+| `lines=<n>` | With `full=1` only: read at most `<n>` lines of tmux history above the visible frame. An integer of at least 1, clamped to the configured history limit; absent or malformed, the whole limit (100,000 lines by default), as before. `truncated` and `truncationReason` describe byte cuts only, not this bound. Without it a full capture reads all of that history before `tail` cuts it, so a client that keeps a fixed number of lines (the tile grid sends its xterm's scrollback plus its rows) should send it. |
+
+## The `codeman agent` CLI (client over these endpoints)
+
+`codeman agent ls|spawn|send|wait|read|interrupt|rm` (`src/cli-agent.ts`) is the command-line client for the endpoints above, for agents in modes that never receive the claude-only skill preamble. It adds no route: `spawn` is `POST /api/v1/quick-start` (+ `wait-output` on the mode's `capabilities.composerReadyMark` from the CLI registry, where it declares one), `send` is `POST …/input` with `clientId`+`seq` (and `wait`/`waitTimeout` for `--wait` / `--until <signals>`; `delivered:false` without `duplicate` and `wait.ended` both exit 3 — the CLI never reports a dead worker as done), `wait` is `GET …/wait` (`--until`) or `GET …/wait-output` (`--match`, `from=buffer` by default), `read` is `GET …/last-response` or `GET …/terminal?tail=`, `interrupt` is `POST …/input` with a bare `\u001b`, `rm` is `DELETE …/sessions/:id`. A fire-and-forget `send` to a sleeping wake-on-LAN host reads the route's `buffered` (own line, exit 0) and `dropped` (exit 1: the chunk is gone). An id may be the 8-character form `ls` prints, resolved through `GET /api/v1/sessions`; anything shorter refuses before any request, the same floor as `PARENT_SESSION_ID_MIN_PREFIX`. Every call carries `X-Codeman-Parent-Session`; only `spawn`'s quick-start carries `X-Codeman-Agent-Origin: codeman-agent-cli` (the agent-scratch label must never reach a request that cannot create the case directory). Basic auth comes from `CODEMAN_PASSWORD` or the data dir's `.env`. Server-side error codes are shown verbatim (`INVALID_INPUT: until=stop …` on a hook-less mode is not hidden); exit codes are `0` ok, `1` error, `2` timeout, `3` the session exited, `4` refused by a client-side guard. See the README section "`codeman agent`" for the guards and `test/cli-agent.test.ts` for the pinned behaviour.
+
+## Prompt uploads (`POST /api/v1/sessions/:id/paste-image`)
+
+A `multipart/form-data` body with one `image` part. The file is written into the
+session's workspace as `<workingDir>/.codeman-uploads/paste-<ms>-<hex>.<ext>`, and
+`data` carries `path` and `filename` for the client to type the path into the
+prompt. The folder is Codeman's own: hidden, created on first use with a
+`.gitignore` containing `*` (written once, never over a file already there), and
+cleaned up the way pasted images always were: `paste-*` files older than 7 days
+go in an hourly sweep, and the folder goes when the last session of that
+workspace is killed. Uploads made before this release sit in `.claude-images/`;
+that folder receives nothing new, and is swept and removed the same way for one
+release. A remote (SSH) session answers 400, since the file would land on the
+Codeman host under a path the remote agent cannot read. A Docker session of an
+owned case is fine, its workspace is bind-mounted at the same absolute path; an
+adopted container (`owned: false`) mounts nothing, so its agent can open the file
+only if the container itself exposes that host path.
+
 ## Session lineage (`parentSessionId`)
 
 A create request may name the session that spawned it, which the web UI draws as a
@@ -469,6 +598,32 @@ silently dropped and the session is created without lineage — never a `400`. I
 also pure decoration: it confers no permission, and a child is unaffected by its
 parent exiting. It appears on session state as `parentSessionId` (absent when
 unresolved) and survives a server restart.
+
+## Session model (`displayModel`)
+
+Session state (`GET /api/v1/sessions`, the `session:updated` event) carries the model a
+session runs as far as the server knows it, for the web UI's session headers:
+
+```json
+"displayModel": { "model": "qwen3.8-27b", "source": "screen" }
+```
+
+`source` is where it came from, strongest first:
+
+| `source`          | Meaning                                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `custom-endpoint` | The session is pointed at a Custom Model Endpoint Profile; its `modelId` answers, whatever the CLI prints. |
+| `statusline`      | Claude's statusLine exporter reported it (`model.display_name`); follows an in-session `/model`.          |
+| `screen`          | Read off the CLI's own footer (`capabilities.modelDetect`, today dsh and codex); follows a switch.      |
+| `config`          | What the CLI's own config pins for the session (`capabilities.modelDetect.configResolver`, today dsh-TUI's route), while its screen names none. |
+| `launch`          | What the session was launched with (`--model`, the app-wide default, `<cli>Config.model`); nothing has reported since. |
+
+Between `statusline` and `screen` the newest report wins. The field is absent when no
+model is known (a shell, a CLI that reports none and was launched without one). `model`
+is display text from a pane or a CLI report: control characters are stripped and it is at
+most 64 characters, but treat it as untrusted text. A `statusline` or `screen` value is
+persisted and restored after a server restart until the next report replaces it; a
+`config` value is read again at every pane start, attach and relaunch instead.
 
 ## Approvals Inbox
 
@@ -710,6 +865,46 @@ normal `caseName`/`mode`/etc. body)
   jarring than a full relaunch, and folding it into the one-shot path is
   separate work — see `docs/custom-model-endpoints-plan.md`).
 
+## Creating a case in a custom folder
+
+`POST /api/cases` takes `{ name, description?, path? }`. Without `path` it creates `<cases dir>/<name>` as always. With `path` (absolute, or starting with `~`) the case folder is created at that exact path instead, scaffolded the same way (`CLAUDE.md`, `src/`, `.claude/settings.local.json`), and registered in the linked-cases registry, so it lists, resolves and deletes like a linked case (deleting unlinks; it never removes files). Response: `{ case: { name, path } }`, where `path` is the symlink-resolved folder.
+
+The target is judged before anything is written:
+
+- It must be absolute with no `..` and none of the shell metacharacters a session working directory is rejected for (spaces are fine). `400 INVALID_INPUT` otherwise.
+- It must not be a system directory (`/etc`, `/usr`, `/proc`, ...), the home folder itself, Codeman's own data folder, or a credential/config tree (`~/.ssh`, `~/.aws`, `~/.claude`, ...). Judged on the path as typed and on its symlink-resolved form, against both the given and the symlink-resolved roots. `400`.
+- It must not be, or be inside, the cases directory (the caller's own and the shared one): a case there is a plain create without `path`. `400`.
+- Its parent must already exist (one folder is created, never a chain): `404 NOT_FOUND`. A parent that does not answer (an unreachable network mount) or cannot be read is `422 OPERATION_FAILED`, checked through the bounded path probe before anything else touches it.
+- The folder must not exist, or must be an **empty** directory; a folder with contents is Link Existing's job: `409 ALREADY_EXISTS`. A symlink or a plain file at the target is `400`.
+- `409 ALREADY_EXISTS` also for a case name already in use (in the cases dir or the registry) and for a folder that is already a case.
+
+Admin only in multi-user mode (`403`), like `POST /api/cases/link`: it writes outside the cases directory and into the shared, ownerless registry. If anything fails after the first write, what this call created is removed (the whole folder if it created it, otherwise only the scaffold inside the empty folder you picked) and the response is `500`.
+
+## Git status
+
+`GET /api/sessions/:id/git-status` is what the bottom-bar Git indicator and its panel read (Settings → Header & Panels → Bottom bar, per-device, default off). It reports what the session's workspace has not committed or pushed. **Read-only and offline:** it never fetches, pulls, commits or writes (it runs `git status` with `--no-optional-locks`, so it does not even refresh the index), which is why `behind` is as of the last `git fetch`. The session is resolved like every session route (ownership via `findSessionOrFail`; another user's session is `404`). A repository whose root is, or is inside, a Docker case workspace is dropped (from the walk-up, the scan below a folder, and the diff route): a container can write there, and a repository's own clean filter or signature program would run on the host. When a branch's upstream does not exist on the remote (deleted and pruned, or never pushed, as after cloning an empty repository and committing), `upstreamGone` is `true` and the unpushed list falls back to commits on no remote-tracking ref at all.
+
+`GET /api/sessions/:id/git-diff?repo=<repoRoot>&path=<path>&kind=staged|unstaged|untracked|conflicted` returns the unified diff of one file the panel lists (`{ diff, truncated, binary }`; staged is index vs HEAD, unstaged is working tree vs index, untracked is the whole file as additions). It is what opens when you click a file in the Git panel. `repo` and `path` are matched against the current status rather than trusted, so anything the status does not list is `404`. Read-only: it passes `--no-ext-diff --no-textconv` (no external diff or textconv driver runs), but a repository's clean filters still run, as they do for any `git diff`, which is why a repository a container can write to is never inspected (below). Capped at 400 KB, and refused (`400`) for remote and Docker sessions; a repository at or inside a Docker case workspace is not in the status, so it is `404` here.
+
+**Which repositories.** git finds a repository by walking *up* from the session's working directory, so:
+
+- Inside a repository (or at its root): that one repository, whole (a subfolder reports its enclosing repo, `path` says where it is, e.g. `../..`). A nested repo below it is just an untracked folder to the outer one and is not scanned; start the session inside it to see it.
+- **Not** inside one (a folder that holds several projects): every repository found up to **two levels down**, nearest and alphabetical first, at most `maxRepos` of them (default 12, 1 to 50; `reposTruncated` says when there were more and `repoLimit` is the limit that was applied). Dot-folders, `node_modules`, `dist`, `build`, `target`, `vendor`, `venv` and `__pycache__` are skipped, symlinks are never followed, and a repository's own contents are not searched. The list of repositories is re-scanned at most every 30 s; each repository's status is cached for 4 s.
+- A repository that merely sits **above** the workspace and is the home folder or higher (a dotfiles repo in `$HOME`, or `/`) is ignored: its dirty files are not this session's work. A workspace that *is* that repository's root is not ignored.
+- A worktree (whose `.git` is a file) counts as a repository. A submodule's own uncommitted files are not reported, only a changed submodule pointer.
+
+Both routes accept two optional query parameters, which the UI sends from its per-device settings and the server clamps again: `maxRepos` (1 to 50, default 12) and `timeout` (seconds one git command may run, 5 to 120, default 30). An empty or non-numeric value means the default. A repository whose `git status` fails (typically a timeout on a slow network share) is **kept in `repos[]`** with `status.state: 'error'` and the reason in `status.error`, not dropped, so it is visible that something is not being reported.
+
+`data` is `{ state, repos, reposTruncated, repoLimit, checkedAt }` (`repoLimit` in the folder-of-projects case only):
+
+- `state: 'ok'`: `repos[]`, each `{ name, path, status }` where `name` is the repository folder's name, `path` its root relative to the working directory, and `status` is:
+  `branch` (null when `detached`), `upstream`, `ahead`, `behind`, `hasRemote`, `counts` (`staged`, `unstaged`, `untracked`, `conflicted`, `uncommitted` = distinct paths, `stashes`), `files[]` (`path` relative to `repoRoot`, `origPath` for a rename, `index` and `worktree` status letters, `kind`: `staged` \| `unstaged` \| `untracked` \| `conflicted`; a file that is staged *and* modified again appears once per kind), `filesTruncated`, `unpushedCount` (exact) and `unpushed[]` (newest first: `hash`, `author`, `time` in epoch seconds, `subject`), `repoRoot`, `checkedAt`.
+- `state: 'not-a-repo'`: no repository here, above (that counts) or within two levels below.
+- `state: 'unsupported'` with `reason: 'remote' | 'docker'`: those sessions are never inspected (a Docker workspace is writable from inside its sandbox, and git here would run on the host).
+- `state: 'error'` with a short `error` (git missing, timed out, or git's first stderr line with any `user:token@` credentials redacted).
+
+Lists are capped (300 files and 50 commits per repository) while the counts stay exact. A branch with no upstream reports the commits no remote has (`HEAD --not --remotes`); a repository with no remote reports `unpushedCount: 0`, since there is nothing to push to. Concurrent polls of one folder share a single git invocation; `?fresh=1` (what the panel's Refresh button and opening the panel send) skips the short-lived caches, though it still joins a computation already running.
+
 ## CLI management
 
 Read and write the CLI registry (`docs/cli-registry.md`). Every **write** route answers `403 FORBIDDEN` while `cliManagementEnabled` is off (the default), and for a non-admin in multi-user mode. A write that would overwrite a `clis.json` which does not parse, or which has group/world permission bits, is refused with `409 CONFLICT` and a message naming the fix; the file is left untouched.
@@ -735,10 +930,10 @@ Copies MCP servers between the agent CLIs' own user-level config files (`docs/cl
 Result (`data`):
 
 - `applied` — `false` for the dry run.
-- `targets[]` — one per enabled CLI that declares an MCP config: `id`, `label`, `file`, `status`, `error?`, `servers` (names it already has), `added` (names added, or that would be), `skipped` (names its dialect cannot express, e.g. SSE for Codex and Antigravity).
+- `targets[]` — one per enabled CLI that declares an MCP config, plus GitHub Copilot CLI (`id: "copilot"`, a sync-only target that is not a run mode): `id`, `label`, `file`, `status`, `error?`, `servers` (names it already has), `added` (names added, or that would be), `skipped` (names its dialect cannot express, e.g. SSE for Codex and Antigravity).
   - `status`: `ok`; `absent` (not installed and no config file, so not read or created); `skipped` (the CLI's relocation env var, e.g. `CODEX_HOME`, is set to a relative path in the server's environment, so its file cannot be located safely and is neither read nor written); `unreadable` (the file exists but cannot be parsed safely, so it is not written); `failed` (a read or write error, the file may be unchanged).
   - `error` says why a target is not `ok`. A parse failure is reported by position only (`not valid TOML (line 3, column 21)`, `not valid JSON`), never with text from the file.
-  - `file` honours each CLI's own relocation env var as the server process sees it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME`); see `docs/cli-registry.md`.
+  - `file` honours each CLI's own relocation env var as the server process sees it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME`, and `COPILOT_HOME` for the sync-only Copilot CLI); see `docs/cli-registry.md`.
 - `conflicts[]` — names defined differently by different CLIs. Existing definitions are kept; the first CLI's is copied where the name is missing.
 - `disabled[]` — names left out because every definition is switched off in its own CLI (codex `enabled = false`, opencode `enabled: false`, antigravity `disabled: true`).
 - `unsupported[]` — labels of enabled agent CLIs with no known MCP config file (nothing is guessed).
@@ -757,6 +952,10 @@ Posts the Web Push events to ntfy, Slack, Discord or a generic JSON URL (Setting
 | `POST` | `/api/webhook/test`  | none                                         | Sends one message with the saved config, even while disabled. `200` with `data.ok` telling whether the webhook accepted it; `400` if no URL is saved. |
 
 Delivery goes through the same egress guard as web tabs (refused on the resolved address too), does not follow redirects, times out after 5 s, sends the same event for the same session at most once per 3 s, and has at most 5 requests in flight. Error text never contains the URL.
+
+## Diagnostics
+
+`GET /api/doctor[?category=core|office|other]` returns the `codeman doctor --json` report (`platform`, `summary`, `tools[]` with `status` `ok` \| `missing` \| `outdated` \| `skipped` \| `error`, `version`, `path`, `installHint`). The probe engine is synchronous, so it runs in a child process of the same entry script, never on the server's event loop (30 s timeout). It names install paths and versions, so it is admin only in multi-user mode (`403`). `400` for an unknown category, `500` if the child produces no report.
 
 ## Voice dictation
 

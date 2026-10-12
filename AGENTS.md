@@ -78,7 +78,7 @@ Never push, tag, publish, open releases or post announcements on `Ark0N/Codeman`
 
 Bitbucket Pipelines runs `npm run check:lockfile`, so lockfile drift fails the build even if the `version-packages` script is bypassed.
 
-**Version**: 1.35.0 (must match `package.json`)
+**Version**: 1.41.0 (must match `package.json`)
 
 ## Fork Workflow: Bitbucket + Jira (this checkout)
 

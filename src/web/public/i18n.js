@@ -25,6 +25,7 @@
     '.response-viewer-content',
     '.file-preview-content',
     '.session-tab-name',
+    '.tab-name',
     '.session-name',
     '.case-name',
     '.notif-item-message',
@@ -45,6 +46,15 @@
   // Exact English-source translations. Technical names, command examples, model
   // names, keyboard chords, and user-authored content intentionally stay unchanged.
   const ZH_CN = Object.freeze({
+    'Default Codex model': 'Codex 默认模型',
+    'Default Codex reasoning effort': 'Codex 默认思考强度',
+    'Use Codex configuration': '使用 Codex 配置',
+    'Model ID for new local Codex sessions, including WSL. Leave empty to use Codex configuration.':
+      '新本地 Codex 会话（包括 WSL）使用的模型 ID。留空时使用 Codex 配置。',
+    'Applies to new local sessions; supported levels depend on the model and Codex version. Custom endpoints, Docker and remote sessions keep their own settings.':
+      '应用于新本地会话；可用强度取决于模型和 Codex 版本。自定义端点、Docker 和远程会话保留自己的设置。',
+    'Default Codex model may only contain letters, digits, ".", "_", "-" and "/"':
+      'Codex 默认模型只能包含字母、数字、"."、"_"、"-" 和 "/"',
     'Skip to terminal': '跳转到终端',
     'Go to main page': '返回主页',
     'Session tabs': '会话标签页',
@@ -52,6 +62,8 @@
     'Collapse session sidebar': '收起会话侧边栏',
     'Expand session sidebar': '展开会话侧边栏',
     'Filter sessions': '筛选会话',
+    'Search sessions': '搜索会话',
+    'No sessions match': '没有匹配的会话',
     'Admin Panel': '管理面板',
     'Open admin panel': '打开管理面板',
     'Re-dock to dashboard (close window)': '重新停靠到主界面（关闭窗口）',
@@ -67,6 +79,25 @@
     'Open away digest': '打开离开期间摘要',
     'Session Manager': '会话管理器',
     'Session actions': '会话操作',
+    Ungrouped: '未分组',
+    'Group actions': '分组操作',
+    'Group name': '分组名称',
+    'Web tab actions': '网页标签操作',
+    'Web tab settings': '网页标签设置',
+    'New group': '新建分组',
+    'Rename group': '重命名分组',
+    'Move group up': '上移分组',
+    'Move group down': '下移分组',
+    'Delete group': '删除分组',
+    'Move up': '上移',
+    'Move down': '下移',
+    'Move to Ungrouped': '移到未分组',
+    'Move to new group': '移到新分组',
+    'Could not save tab groups.': '无法保存标签分组。',
+    'Tab groups changed elsewhere; part of your edit no longer applies.':
+      '标签分组已在别处更改；你的部分编辑已不再适用。',
+    'Tab groups kept changing elsewhere; your edit was not saved.': '标签分组在别处持续更改；你的编辑未保存。',
+    'Your tab group edit was not saved.': '你的标签分组编辑未保存。',
     'Open session manager': '打开会话管理器',
     Attachments: '附件',
     'Open attachment history': '打开附件历史',
@@ -77,6 +108,89 @@
     'Split: close the second session': '分屏：关闭第二个会话',
     'Close split': '关闭分屏',
     'No other sessions to split with': '没有其他可用于分屏的会话',
+    // Tile grid (tile-grid.js, docs/tile-grid-plan.md). 平铺 is the feature (the
+    // button, the setting, the grid), 窗格 one tile in it. Key names stay as
+    // they are; Click / Right-click are mouse actions, Arrows the arrow keys.
+    // Counts, exit codes and durations are patterns in translateDynamic.
+    Tiles: '平铺',
+    Split: '分屏',
+    'Tiled sessions': '平铺的会话',
+    'Tiles: show several sessions side by side (right-click for how many)':
+      '平铺：并排显示多个会话（右键单击可选择窗格数量）',
+    'Tiles: back to a single session (right-click for how many tiles)': '平铺：返回单个会话（右键单击可选择窗格数量）',
+    'How many tiles': '窗格数量',
+    // The Tiles button's hover card (the count and the fits note are patterns).
+    'Click: open the grid': '单击：打开平铺网格',
+    'Click: close the grid': '单击：关闭平铺网格',
+    'Right-click: choose 2, 4 or 6 tiles': '右键单击：选择 2、4 或 6 个窗格',
+    'Shift+F10: the same menu from the keyboard': 'Shift+F10：用键盘打开同一菜单',
+    'Split: unavailable while tiles are open': '分屏：平铺打开时不可用',
+    'Toggle Tile Grid': '切换平铺网格',
+    'Focus Tile Left': '聚焦左侧窗格',
+    'Focus Tile Right': '聚焦右侧窗格',
+    'Focus Tile Up': '聚焦上方窗格',
+    'Focus Tile Down': '聚焦下方窗格',
+    'Focus Tile Left / Right / Up / Down': '聚焦左侧 / 右侧 / 上方 / 下方窗格',
+    'Move Tile Left': '向左移动窗格',
+    'Move Tile Right': '向右移动窗格',
+    'Move Tile Up': '向上移动窗格',
+    'Move Tile Down': '向下移动窗格',
+    'Move Tile Left / Right / Up / Down': '向左 / 右 / 上 / 下移动窗格',
+    Drag: '拖动',
+    "a tile's header": '窗格的标题栏',
+    'Move the Tile (onto Another: Swap)': '移动窗格（拖到另一个窗格上：互换位置）',
+    'Zoom Focused Tile': '放大聚焦的窗格',
+    'Remove Focused Tile': '移除聚焦的窗格',
+    'Add the Session to the Tile Grid': '将该会话加入平铺网格',
+    'Choose How Many Tiles (2, 4 or 6)': '选择窗格数量（2、4 或 6）',
+    'a tab': '标签页',
+    'the Tiles button': '平铺按钮',
+    Click: '单击',
+    'Right-click': '右键单击',
+    Arrows: '方向键',
+    'not bound': '未绑定',
+    'Open group as tiles': '以平铺方式打开分组',
+    'No sessions to show as tiles': '没有可平铺显示的会话',
+    'This group has no session to show as tiles': '此分组没有可平铺显示的会话',
+    'Zoom this tile': '放大此窗格',
+    'Restore the grid': '恢复平铺网格',
+    'Remove tile (the session keeps running)': '移除窗格（会话继续运行）',
+    'Drop a tab or a tile here': '将标签页或窗格拖放到此处',
+    // A file dropped on a tile (tile-grid.js) or the single view (image-input.js).
+    'Only image files are supported': '仅支持图像文件',
+    // Redraw (Ctrl+Shift+R, terminal-ui.js restoreTerminalSize) on the main pane, a tile or Pane B.
+    'No active session': '没有活动会话',
+    'This session is sized by its own window': '此会话的尺寸由它自己的窗口决定',
+    'Terminal not connected: its size is sent when it reconnects': '终端未连接：重新连接后会发送其尺寸',
+    'Could not determine terminal size': '无法确定终端尺寸',
+    'Failed to restore terminal size': '恢复终端尺寸失败',
+    'Terminal restore queued until connection recovers': '终端恢复已排队，连接恢复后执行',
+    // A tile header's tooltip while tiles can move (with the state above it: a pattern below).
+    'Drag to move the tile': '拖动可移动窗格',
+    'Resize tile columns': '调整窗格列宽',
+    'Resize tile rows': '调整窗格行高',
+    Attach: '附加',
+    'Attaching…': '正在附加…',
+    'Not attached': '未附加',
+    'The session ended': '会话已结束',
+    'The agent exited': '智能体已退出',
+    'It cannot be restarted in place: close it from ⋯ (Close session).': '无法原地重启：请通过 ⋯（关闭会话）关闭它。',
+    'Could not attach the session': '无法附加会话',
+    // The tab's exited-agent badge (app.js applyPaneExitBadge, Ark0N/Codeman#446);
+    // its exit-code forms and the tab's accessible name are patterns.
+    exited: '已退出',
+    // The Run button family (session-ui.js _applyRunMode; "Run CC", "Run SH" ...
+    // are a pattern; mode codes and product names stay), and the toolbar beside it.
+    'Terminal / Shell': '终端 / Shell',
+    'Send Enter': '发送回车',
+    // The Help modal and the shortcut overlay. Key names stay; Wheel is a mouse
+    // input like Click (单击).
+    Tabs: '标签页',
+    'Toggle Session Sidebar': '切换会话侧边栏',
+    'Copy Selection': '复制选中内容',
+    'Copy Selection (interrupts when nothing is selected)': '复制选中内容（无选中内容时中断）',
+    'Focus Tabs': '聚焦标签页',
+    Wheel: '滚轮',
     'Ultracode / Workflow agents': 'Ultracode / Workflow 智能体',
     'Open ultracode workflow agents': '打开 Ultracode 工作流智能体',
     Notifications: '通知',
@@ -121,10 +235,16 @@
     'Run DeepSeek': '运行 DeepSeek',
     'Run OMP': '运行 OMP',
     'Run Shell': '运行 Shell',
+    'More tools': '更多工具',
     'Select AI backend': '选择 AI 后端',
     'Create New Case': '新建案例',
     'Create new case': '新建案例',
     'Link Existing': '关联现有目录',
+    // The toolbar case picker's action rows (session-ui.js CASE_PICKER_ACTIONS),
+    // which replaced the "+" and gear buttons, and its empty state.
+    'New or link a case…': '新建或关联案例…',
+    'Case settings…': '案例设置…',
+    'No cases match': '没有匹配的案例',
     'Add Case': '添加案例',
     'Open sessions': '打开会话',
     'Recent Sessions': '最近会话',
@@ -214,6 +334,7 @@
     'Codex is waiting for your input': 'Codex 正在等待您的输入',
     'Claude is waiting for your input': 'Claude 正在等待您的输入',
     Working: '工作中',
+    Waiting: '等待中',
     Today: '今天',
     Home: '主页',
     Local: '本地',
@@ -235,6 +356,36 @@
       '此设备使用的界面语言。动态状态消息与对话框也会使用同一语言。',
     English: 'English',
     Appearance: '外观',
+    // App Settings > Animations (#571). 平铺 is the grid, 窗格 one tile in it.
+    Animations: '动画',
+    'How tabs, terminal panes, agent windows and tiles arrive. All off by default, applied as you pick them.':
+      '标签页、终端面板、智能体窗口和平铺窗格如何出现。默认全部关闭，选择后立即生效。',
+    Entrances: '入场',
+    'Entrance Theme': '入场主题',
+    'One look for how new tabs, terminal panes, agent windows and their lines arrive.':
+      '为新标签页、终端面板、智能体窗口及其连线的出现方式选择统一的风格。',
+    'Off (default)': '关闭（默认）',
+    'Terminal (CRT)': '终端（CRT）',
+    'Beam down': '光束降临',
+    'Launch (tiles fly from tabs)': '发射（窗格从标签页飞出）',
+    'Soft focus (blur)': '柔焦（模糊）',
+    Quiet: '安静',
+    Playful: '活泼',
+    'Custom (set in the lab)': '自定义（在实验室中设置）',
+    'Tile Animations': '平铺动画',
+    'How tiles arrive when the grid opens and leave when it closes. A theme above presets it.':
+      '平铺打开时窗格如何出现、关闭时如何离开。上方的主题会预设此项。',
+    'Fly from tab': '从标签页飞出',
+    Deal: '发牌',
+    Cascade: '级联',
+    Pop: '弹出',
+    Soft: '柔和',
+    'None (tiles just appear)': '无（窗格直接出现）',
+    Lab: '实验室',
+    'Animation Lab': '动画实验室',
+    'Closes settings and opens every style per surface side by side, with replay and speed. Same as adding ?animlab=1 to the URL.':
+      '关闭设置，并按界面并排打开所有样式，可重放和调速。等同于在网址后添加 ?animlab=1。',
+    'Open lab': '打开实验室',
     Skin: '皮肤',
     'Visual theme for this device (not synced)': '此设备的视觉主题（不同步）',
     'Daylight Blue': '日光蓝',
@@ -264,6 +415,56 @@
       '会话列表显示为顶栏横向标签条，或左侧可折叠侧边栏（Alt+B）。完整侧边栏为每个会话显示与主界面相同的详细信息。',
     'Tall Tabs (Name + Folder)': '双行标签（名称 + 文件夹）',
     'Pop-out Button on Tabs': '标签页弹出窗口按钮',
+    'CLI Logos on Tabs': '标签页上的 CLI 图标',
+    "Show each agent's CLI logo before the session name on tabs and the home screen's tab list. Off leaves the status dot and the shell's SH badge. Tiles, split headers and the Run menus keep their logos.":
+      '在标签页和主界面的标签列表中，于会话名称前显示每个智能体的 CLI 图标。关闭后仍保留状态圆点和 Shell 的 SH 标记。平铺、分屏标题栏和运行菜单中的图标不受影响。',
+    // Tab Layout and Header Stats Style (Discussion #426). The header style's
+    // "Tiles" is 磁贴, never 平铺: that is the tile grid's word (the Tiles
+    // button), and "Tiles (label over value)" must not read as the grid.
+    'Tab Layout': '标签页布局',
+    'By state: a row each for needs you, waiting, working and idle. By case: one box per case. Ledger: an aligned column grid. Classic: the single list, as before. By state and By case group the side rail and sidebar too. Alt+1..9 keeps the tab order.':
+      '按状态：需要你、等待中、工作中和空闲各占一行。按案例：每个案例一个框。台账：对齐的列网格。经典：与以前相同的单一列表。按状态和按案例也会为侧边标签栏和侧边栏分组。Alt+1..9 仍按标签页顺序切换。',
+    'By state (rows per state)': '按状态（每种状态一行）',
+    'By case (clusters)': '按案例（分组框）',
+    'Ledger (aligned columns)': '台账（对齐的列）',
+    'Classic (default)': '经典（默认）',
+    'State Order': '状态顺序',
+    'For Tab Layout by state. At the bottom flips the rows, so needs you sits right above the terminal.':
+      '用于按状态的标签页布局。选择在底部会倒转各行，让“需要你”紧挨在终端上方。',
+    'Needs you on top (default)': '“需要你”在顶部（默认）',
+    'Needs you at the bottom': '“需要你”在底部',
+    'Header Stats Style': '顶部栏状态样式',
+    'How WS, CPU, MEM and the plan-usage windows are drawn. Compact puts a ring beside each value in two pills; Tiles put each label over its value with a bar underneath.':
+      'WS、CPU、MEM 和套餐用量窗口的显示方式。紧凑：在两个胶囊中每个数值旁显示一个圆环；磁贴：每个标签位于数值上方，下方带一条进度条。',
+    'As before (bars)': '与以前相同（进度条）',
+    'Compact (default)': '紧凑（默认）',
+    'Tiles (label over value)': '磁贴（标签在数值上方）',
+    // The connection tile's value word in that style (app.js
+    // _connectionTileValueText). Scoped keys on purpose: the bare words also
+    // name other things ("retry" is the orchestrator's Retry button, "LIVE" a
+    // badge in the resume list), and a bare key would translate those too.
+    'Connection tile: live': '已连接',
+    'Connection tile: fallback': '回退',
+    'Connection tile: offline': '离线',
+    'Connection tile: queued': '已排队',
+    'Connection tile: retry': '重连中',
+    // App Settings → Bottom bar, translated as one group (the Git status rows,
+    // #543's two included). Keys are the trimmed label text, without the scope tag.
+    'Bottom bar': '底部栏',
+    'Git status': 'Git 状态',
+    "Shows, at the right of the bottom bar, when the active session's repository (or each repository inside its folder, up to two levels down) has uncommitted files or commits that are not pushed. Click it for the list. Read-only: Codeman never fetches or changes the repository. Not shown for Docker or remote sessions. Off by default.":
+      '在底部栏右侧显示当前会话的仓库（或其文件夹内向下两层以内的每个仓库）是否有未提交的文件或未推送的提交。点击可查看列表。只读：{name} 从不拉取或更改仓库。Docker 和远程会话不显示。默认关闭。',
+    'Git status: group files by folder': 'Git 状态：按文件夹分组显示文件',
+    'In the Git window, show changed files under their folders, collapsed until you click a folder. Off lists every file by its full path. On by default.':
+      '在 Git 窗口中，将更改的文件显示在各自的文件夹下，点击文件夹前保持折叠。关闭时按完整路径列出每个文件。默认开启。',
+    'Git status: max repositories': 'Git 状态：最多仓库数',
+    "When the session's folder holds several projects instead of being one, the Git window lists up to this many (1 to 50, default 12). Each one costs a few git commands per refresh.":
+      '当会话的文件夹包含多个项目（而不是本身就是一个项目）时，Git 窗口最多列出这么多个（1 到 50，默认 12）。每个仓库每次刷新都要运行几条 git 命令。',
+    'Git status: git timeout': 'Git 状态：git 超时',
+    'Seconds one git command may run before that repository is reported as unreadable (5 to 120, default 30). Raise it for repositories on a slow network share.':
+      '单条 git 命令可运行的秒数，超时后该仓库会被报告为无法读取（5 到 120，默认 30）。仓库位于较慢的网络共享上时请调高此值。',
+    'Refresh git status': '刷新 Git 状态',
+    'Close git status': '关闭 Git 状态',
     Panels: '面板',
     Monitor: '监视器',
     'Project Insights': '项目洞察',
@@ -343,7 +544,6 @@
     'Remote Access': '远程访问',
     'Cloudflare Tunnel': 'Cloudflare 隧道',
     'Tunnel URL': '隧道地址',
-    'Upload URL': '上传地址',
     Updates: '更新',
     'Current Version': '当前版本',
     'Check for Updates': '检查更新',
@@ -440,6 +640,11 @@
     'Audio Alerts': '声音提醒',
     'Push Notifications': '推送通知',
     'Notification Levels': '通知级别',
+    'Toast display time': '弹出提示显示时长',
+    'How long the corner pop-ups stay on screen.': '角落弹出提示在屏幕上停留的时长。',
+    'Browser notification display time': '浏览器通知显示时长',
+    'How long a desktop notification stays up before Codeman closes it. Your OS may close it sooner.':
+      '桌面通知在 Codeman 关闭它之前保持显示的时长。系统可能会更早关闭它。',
     Critical: '严重',
     'Per-Event Settings': '按事件设置',
     'Permission prompts': '权限提示',
@@ -566,6 +771,8 @@
 
     // Dynamic common status / toasts
     'Settings saved': '设置已保存',
+    'Settings applied': '设置已应用',
+    'Save and keep Settings open': '保存并保持设置打开',
     'Settings saved locally': '设置已保存到本机',
     'Tunnel active': '隧道已启用',
     'Tunnel starting — QR code will appear when ready...': '隧道正在启动，准备好后将显示二维码…',
@@ -584,6 +791,13 @@
     'Nothing to copy': '没有可复制的内容',
     // A `#session=<id>` link whose session never appeared (app.js _armUrlSessionWait).
     'Session not found': '未找到会话',
+    // A native host that would not open a window (app.js openInHostWindow); the
+    // "dashboard" is a web tab.
+    'Could not open a new window for this session': '无法在新窗口中打开此会话',
+    'Could not open a new window for this preview': '无法在新窗口中打开此预览',
+    'Could not open a new window for this dashboard': '无法在新窗口中打开此网页标签',
+    // Dictation whose session closed before the text was sent (voice-input.js).
+    'That session has closed; dictation not sent': '该会话已关闭，语音输入未发送',
     // Terminal touch-selection bar (long-press to select). The bar is a sibling of
     // `.xterm`, not a descendant, so SKIP_SELECTOR does not cover it and these apply.
     Copy: '复制',
@@ -745,6 +959,40 @@
     'Wrap lines': '自动换行',
     'Unsaved changes': '未保存的更改',
     Saved: '已保存',
+    'Loading spreadsheet…': '正在加载电子表格…',
+    'This workbook is too large to preview (10 MB limit).': '此工作簿太大，无法预览（上限 10 MB）。',
+    'This workbook has no visible worksheets.': '此工作簿没有可见的工作表。',
+    'This worksheet is empty.': '此工作表为空。',
+    'Some workbook features are not shown': '部分工作簿功能未显示',
+    'Spreadsheet preview timed out.': '电子表格预览超时。',
+    'Spreadsheet preview failed': '电子表格预览失败',
+    'Spreadsheet parser failed.': '电子表格解析器出错。',
+    'Spreadsheet parser failed to start': '电子表格解析器启动失败',
+    'Spreadsheet parser message failed.': '电子表格解析器消息出错。',
+    'Spreadsheet parser message failed': '电子表格解析器消息出错',
+    'Spreadsheet preview is unavailable.': '电子表格预览不可用。',
+    'Spreadsheet preview must use a same-origin URL': '电子表格预览必须使用同源 URL',
+    // Worker refusals, one sentence per error code (spreadsheet-preview.js
+    // WORKER_ERROR_TEXT), and the notice bar's items (renderWarnings). The
+    // counted ones are patterns in translateDynamic below.
+    'This workbook is password-protected or in the old .xls format, so it cannot be previewed.':
+      '此工作簿受密码保护或为旧版 .xls 格式，无法预览。',
+    'This workbook uses ZIP64, which the preview does not support.': '此工作簿使用 ZIP64 格式，预览不支持该格式。',
+    'This workbook is too large or complex to preview.': '此工作簿过大或过于复杂，无法预览。',
+    'This workbook could not be read. The file may be damaged or not a valid .xlsx file.':
+      '无法读取此工作簿。文件可能已损坏，或不是有效的 .xlsx 文件。',
+    // The features the preview leaves out (spreadsheet-preview.js warningText).
+    // Scoped keys on purpose: a bare 'charts' or 'macros' key would also
+    // translate a folder or case of that name (a Helm chart's charts/, a dbt
+    // project's macros/) in the Files panel and the case picker.
+    'Spreadsheet feature: charts': '图表',
+    'Spreadsheet feature: drawings': '绘图',
+    'Spreadsheet feature: pivot tables': '数据透视表',
+    'Spreadsheet feature: external links': '外部链接',
+    'Spreadsheet feature: macros': '宏',
+    'Formula has no cached result': '公式没有缓存的计算结果',
+    'Unsupported cell value': '不支持的单元格值',
+    'Unsupported number format': '不支持的数字格式',
     'Export as JSON': '导出为 JSON',
     'Export as Markdown': '导出为 Markdown',
     'Mark all read': '全部标为已读',
@@ -759,6 +1007,7 @@
     'Tmux sessions keep running in background': 'Tmux 会话继续在后台运行',
     'Refresh tmux sessions': '刷新 Tmux 会话',
     'Restore Terminal Size': '恢复终端大小',
+    'Rename Tab': '重命名标签',
     'Clear Terminal': '清空终端',
     'Stop current run': '停止当前运行',
     'Stop respawn': '停止重生',
@@ -780,6 +1029,22 @@
       '现有项目文件夹的绝对路径，例如 /home/you/my-project',
     'Letters, numbers, hyphens, underscores only. Created in ~/codeman-cases/':
       '仅允许字母、数字、连字符和下划线；将在 ~/codeman-cases/ 中创建。',
+    'Letters, numbers, hyphens, underscores only. Created inside the parent folder below.':
+      '仅允许字母、数字、连字符和下划线；将在下方的父文件夹中创建。',
+    'A fresh workspace under ~/codeman-cases, scaffolded with its own CLAUDE.md.':
+      '在 ~/codeman-cases 下新建工作区，并生成独立的 CLAUDE.md。',
+    'A fresh workspace in a folder you choose, scaffolded with its own CLAUDE.md.':
+      '在你选择的文件夹中新建工作区，并生成独立的 CLAUDE.md。',
+    'Create in a custom folder': '在自定义文件夹中创建',
+    '📁 Create in a custom folder': '📁 在自定义文件夹中创建',
+    'By default a new case is created under ~/codeman-cases. Choose another folder and the case is created there instead; it is listed like any other case.':
+      '新案例默认创建在 ~/codeman-cases 下。选择其他文件夹后，案例会改为创建在那里，并像其他案例一样列出。',
+    'Parent Folder': '父文件夹',
+    'Pick the folder the new case folder should be created inside.': '选择要在其中创建新案例文件夹的文件夹。',
+    'Choose the folder to create the case in': '选择要在其中创建案例的文件夹',
+    'Not available for a Docker case': 'Docker 案例不可用',
+    'Not available with a custom folder': '使用自定义文件夹时不可用',
+    'Browse…': '浏览…',
     'Docker exports': 'Docker 导出',
     'No exports yet. Export a docker case from its tab.': '暂无导出；请从 Docker 案例标签页导出。',
     'Runs inside an isolated container. Multiple sessions can share the same container.':
@@ -927,6 +1192,17 @@
     return value.replace(/\{([a-zA-Z][\w]*)\}/g, (_match, key) => String(variables[key] ?? ''));
   }
 
+  // The six-state words of a tile header's tooltip (tile-grid.js _paintTileHandle).
+  const TILE_STATE_ZH = {
+    'needs you': '需要你',
+    error: '错误',
+    waiting: '等待中',
+    working: '工作中',
+    idle: '空闲',
+    done: '已完成',
+    exited: '已退出',
+  };
+
   function translateDynamic(source) {
     const patterns = [
       [/^(\d+) tokens?$/, (_m, count) => `${count} 个 Token`],
@@ -944,6 +1220,83 @@
       [/^Update available: v(.+)$/, (_m, version) => `有可用更新：v${version}`],
       [/^Selected: (.+)$/, (_m, value) => `已选择：${value}`],
       [/^Failed to (.+)$/, (_m, action) => `操作失败：${action}`],
+      [/^Will create: (.+)$/, (_m, path) => `将创建：${path}`],
+      // The spreadsheet preview: an HTTP status, and the notice bar's counts.
+      [/^Spreadsheet preview failed \((\d+)\)$/, (_m, status) => `电子表格预览失败（${status}）`],
+      [/^Terminal restored to (\d+)x(\d+)$/, (_m, cols, rows) => `终端已恢复为 ${cols}x${rows}`],
+      [/^View truncated to the first (\d+) cells$/, (_m, n) => `视图仅显示前 ${n} 个单元格`],
+      [/^(\d+) unsupported number formats$/, (_m, n) => `${n} 种不支持的数字格式`],
+      // Group names are user text: they pass through untranslated.
+      [/^Move to "(.+)"$/, (_m, group) => `移到“${group}”`],
+      [
+        /^Delete group "(.+)"\? Its tabs move to Ungrouped\.$/,
+        (_m, group) => `删除分组“${group}”？其中的标签将移到未分组。`,
+      ],
+      // Tile grid: counts, exit codes and durations pass through.
+      [/^(\d+) tiles$/, (_m, n) => `${n} 个窗格`],
+      [/^Tiles \u00B7 (\d+)$/, (_m, n) => `平铺 · ${n}`],
+      [
+        /^This window fits (\d+) tiles?: a click opens (\d+)$/,
+        (_m, n, m) => `此窗口可容纳 ${n} 个窗格：单击将打开 ${m} 个`,
+      ],
+      [/^This window fits (\d+) tiles?$/, (_m, n) => `此窗口可容纳 ${n} 个窗格`],
+      [/^The grid holds at most (\d+) tiles$/, (_m, n) => `平铺网格最多容纳 ${n} 个窗格`],
+      [
+        /^The grid already holds what this window fits \((\d+)\)$/,
+        (_m, n) => `平铺网格已达到此窗口可容纳的数量（${n}）`,
+      ],
+      [
+        /^The grid holds at most (\d+) tiles: the new session opens on its own$/,
+        (_m, n) => `平铺网格最多容纳 ${n} 个窗格：新会话将单独打开`,
+      ],
+      [
+        /^The grid already holds what this window fits \((\d+)\): the new session opens on its own$/,
+        (_m, n) => `平铺网格已达到此窗口可容纳的数量（${n}）：新会话将单独打开`,
+      ],
+      [
+        /^The window is too small for (\d+) tiles: showing the focused one$/,
+        (_m, n) => `窗口太小，容纳不下 ${n} 个窗格：只显示聚焦的窗格`,
+      ],
+      [/^The agent exited \((-?\d+)\)$/, (_m, code) => `智能体已退出（${code}）`],
+      [/^The agent exited \(signal (\d+)\)$/, (_m, signal) => `智能体已退出（信号 ${signal}）`],
+      // A session header's harness logo (tile grid, split pane): "<harness> · <model>",
+      // and where the model came from when the CLI did not report it. The harness
+      // and model names pass through untranslated.
+      [/^(.+) \(set at launch\)$/, (_m, names) => `${names}（启动时设定）`],
+      [/^(.+) \(custom endpoint\)$/, (_m, names) => `${names}（自定义端点）`],
+      [/^(.+) \(from config\)$/, (_m, names) => `${names}（来自配置）`],
+      // The Run button's mode codes ("Run CC", "Run SH", "Run OC" ...; a registry
+      // CLI's shortBadge too). Exact entries win first ("Run Shell", "Run OMP").
+      [/^Run ([A-Z][A-Z0-9]{1,5})$/, (_m, code) => `运行 ${code}`],
+      // The tab's exited-agent badge, and the tab's accessible name carrying it.
+      // The session name is user text: it passes through untranslated.
+      [/^exited \((-?\d+)\)$/, (_m, code) => `已退出（${code}）`],
+      [/^exited \(signal (\d+)\)$/, (_m, signal) => `已退出（信号 ${signal}）`],
+      [
+        /^(.+) session, agent exited \(signal (\d+)\)$/,
+        (_m, name, signal) => `${name} 会话，智能体已退出（信号 ${signal}）`,
+      ],
+      [/^(.+) session, agent exited \((-?\d+)\)$/, (_m, name, code) => `${name} 会话，智能体已退出（${code}）`],
+      [/^(.+) session, agent exited$/, (_m, name) => `${name} 会话，智能体已退出`],
+      // A session name is user text: it passes through untranslated.
+      [
+        /^(.+) was stopped after crashing repeatedly\. Restart it\?$/,
+        (_m, name) => `${name} 因反复崩溃已被停止。要重启吗？`,
+      ],
+      // A tile header's tooltip: a state and how long ("idle 3m"). The duration
+      // is required: bare state words stay out of the table, they collide with
+      // state strings on other surfaces (see mobile-overview.js).
+      [
+        /^(needs you|error|waiting|working|idle|done|exited) (<1m|\d+[dhm](?: \d+[hm])?)$/,
+        (_m, state, duration) => `${TILE_STATE_ZH[state]} ${duration}`,
+      ],
+      // The same while tiles can move, with the drag hint on a second line.
+      // Anchored on the hint, so a bare state word is safe here.
+      [
+        /^(needs you|error|waiting|working|idle|done|exited)(?: (<1m|\d+[dhm](?: \d+[hm])?))?\nDrag to move the tile$/,
+        (_m, state, duration) =>
+          `${TILE_STATE_ZH[state]}${duration ? ` ${duration}` : ''}\n${ZH_CN['Drag to move the tile']}`,
+      ],
     ];
     for (const [pattern, replacement] of patterns) {
       const match = source.match(pattern);
@@ -1000,6 +1353,23 @@
   function shouldSkip(node) {
     const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
     return !element || Boolean(element.closest(SKIP_SELECTOR));
+  }
+
+  // xterm's DOM renderer rewrites its rows (`.xterm-rows > div`) on every frame
+  // a pane changes: thousands of mutation records a second with a grid of tiles,
+  // each paying a closest() over the whole skip list. All rows of one terminal
+  // share that parent, so its own shouldSkip() verdict is kept once it says
+  // skip; a skip verdict cannot lapse, since xterm keeps `.xterm-rows` inside
+  // its `.xterm`. A rows container that is not skipped is never kept: its rows
+  // go through the full check below like any other node.
+  const skippedRows = new WeakSet();
+  function isSkippedRow(node) {
+    const rows = node.parentNode;
+    if (!rows?.classList?.contains('xterm-rows')) return false;
+    if (skippedRows.has(rows)) return true;
+    if (!shouldSkip(rows)) return false;
+    skippedRows.add(rows);
+    return true;
   }
 
   function shouldSkipText(node) {
@@ -1097,6 +1467,13 @@
     observer = new MutationObserver((mutations) => {
       if (applying) return;
       for (const mutation of mutations) {
+        // A change inside a skipped surface cannot need translating: every
+        // node it adds or edits sits under the same skip ancestor, so both
+        // translators would return on their own closest() check anyway. One
+        // check per record instead of one per text node and attribute matters
+        // for xterm's DOM renderer, which replaces rows every frame (the split
+        // pane, every tile of the grid).
+        if (isSkippedRow(mutation.target) || shouldSkip(mutation.target)) continue;
         if (mutation.type === 'characterData') translateNode(mutation.target);
         if (mutation.type === 'attributes') translateAttributes(mutation.target);
         for (const added of mutation.addedNodes) translateNode(added);

@@ -488,7 +488,6 @@ Object.assign(CodemanApp.prototype, {
       sessions: this.sessions,
       cases: this.cases,
       sessionOrder: this.sessionOrder,
-      layoutPending: this._tabLayoutFirstPaintPending,
       pendingHooks: this.pendingHooks,
       history: this._mobileOverviewHistory,
     });

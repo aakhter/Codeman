@@ -13,9 +13,9 @@
  */
 
 import { z } from 'zod';
-import { compileVersionRegex, TOKEN_PATTERNS } from './patterns.js';
+import { compileVersionRegex, countCaptureGroups, TOKEN_PATTERNS } from './patterns.js';
 import { isKnownCheckpointFrameProfile, isKnownLauncherProfile, isKnownSetenvProfile } from './profiles.js';
-import type { McpConfigFormat } from './types.js';
+import type { LaunchDefaultSettingKey, McpConfigFormat, ModelConfigResolverName } from './types.js';
 
 /** A bare CLI id: lowercase, starts with a letter, at most 24 chars. Also used as a CSS/URL token. */
 const cliId = z
@@ -305,7 +305,7 @@ const capabilitiesSchema = z
     requiresMux: z.boolean(),
     hooks: z.enum(['none', 'always', 'supervised']),
     transcript: z.enum(['claude-jsonl', 'codex-rollout', 'deepseek-zstd', 'omp-jsonl', 'none']),
-    altScreen: z.enum(['strip-full', 'strip-mux-only', 'preserve']),
+    altScreen: z.enum(['strip-full', 'strip-mux-only', 'strip-mux-and-mouse', 'preserve']),
     echo: echoSchema,
     checkpoint: checkpointSchema.optional(),
     // COD-464: read by the desktop wheel (terminal-ui.js `_shouldPaceWheelToCli`)
@@ -356,6 +356,8 @@ const capabilitiesSchema = z
     // A declared width cannot do either. Absent means no strip, so a CLI whose
     // transcript layout nobody has measured is never touched.
     transcriptGutter: z.number().int().min(1).max(8).optional(),
+    // Literal text matched by a `wait-output` long-poll, never compiled as a regex.
+    composerReadyMark: z.string().min(1).max(64).optional(),
     workDetect: z
       .object({
         promptGlyph: z.string().min(1).max(8),
@@ -406,6 +408,56 @@ const capabilitiesSchema = z
     model: z
       .object({ source: z.enum(['flag', 'claude-settings-file', 'none']), param: z.string().optional() })
       .strict(),
+    // Same guard as the workDetect patterns: ~/.codeman/clis.json can set it, and it runs
+    // over the foot of a pane capture every time a session settles. Exactly one capture
+    // group (the model), checked here so a pattern without one fails at LOAD time instead
+    // of silently never naming a model.
+    modelDetect: z
+      .object({
+        screenLine: z
+          .string()
+          .min(1)
+          .refine(
+            (src) => compileVersionRegex(src) !== null && countCaptureGroups(src) === 1,
+            'screenLine must be a regex compileVersionRegex() accepts (at most 200 characters, no nested quantifiers) with exactly one capture group'
+          )
+          .optional(),
+        // Bounded hard, like watchingLines: every row it adds is one more row the agent
+        // itself may be able to write. 8 is the reader's own cap (readScreenModel); a
+        // window taller than the CLI's footer needs a pattern only that CLI's chrome can
+        // satisfy at its position, as opencode's does by taking the LAST composer row.
+        screenLines: z.number().int().min(1).max(8).optional(),
+        // Single tokens, bounded: each is compared against one captured field.
+        rejectWords: z.array(z.string().min(1).max(40).regex(/^\S+$/)).max(32).optional(),
+        // A NAMED reader (src/model-config-resolvers.ts), never code in config.
+        configResolver: z.enum(['deepseek-route'] as const satisfies readonly ModelConfigResolverName[]).optional(),
+      })
+      .strict()
+      // Typos rather than configurations, refused at LOAD time like watchingLines.
+      .refine(
+        (v) => v.screenLine !== undefined || v.configResolver !== undefined,
+        'modelDetect declares nothing to read'
+      )
+      .refine(
+        (v) => v.screenLines === undefined || v.screenLine !== undefined,
+        'screenLines has nothing to bound without a screenLine'
+      )
+      .refine(
+        (v) => v.rejectWords === undefined || v.screenLine !== undefined,
+        'rejectWords has nothing to filter without a screenLine'
+      )
+      .optional(),
+    // Launch param -> synced App Settings key. The values are a closed enum, like
+    // configResolver: a clis.json override names one of the settings this build knows
+    // how to validate, never an arbitrary key. Params are checked against the declared
+    // ones in the superRefine below.
+    launchDefaults: z
+      .record(
+        z.string(),
+        z.enum(['codexModel', 'codexReasoningEffort'] as const satisfies readonly LaunchDefaultSettingKey[])
+      )
+      .refine((v) => Object.keys(v).length >= 1 && Object.keys(v).length <= 8, 'launchDefaults takes 1 to 8 params')
+      .optional(),
     privilegedParams: z
       .array(
         z
@@ -435,6 +487,7 @@ const capabilitiesSchema = z
           'codex-toml',
           'opencode-json',
           'antigravity-json',
+          'copilot-json',
         ] as const satisfies readonly McpConfigFormat[]),
         // The env var the CLI reads to move the file, and the path under it (same no-traversal
         // rule: sync writes there too). Resolved from the server env at call time, never here.
@@ -652,6 +705,30 @@ export const CliEntrySchema = z
         });
       }
     });
+
+    // Same silent-no-op class again: a launch default for a param the entry never declared
+    // would be filled into the config object and then read by nothing. And without a
+    // `legacyConfigField` the entry's params are read off the request body itself, where a
+    // filled `model` would be a different field (claude's per-session one), so refuse it.
+    const { launchDefaults } = entry.capabilities;
+    if (launchDefaults !== undefined) {
+      if (entry.launch.legacyConfigField === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'launchDefaults needs launch.legacyConfigField to fill',
+          path: ['capabilities', 'launchDefaults'],
+        });
+      }
+      for (const param of Object.keys(launchDefaults)) {
+        if (!declaredParams.has(param)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `launchDefaults param "${param}" is not a declared launch param`,
+            path: ['capabilities', 'launchDefaults', param],
+          });
+        }
+      }
+    }
 
     const { setenvProfile } = entry.env;
     if (setenvProfile !== undefined && !isKnownSetenvProfile(setenvProfile)) {

@@ -66,7 +66,7 @@
        app.js, NOT the handheld storage-key test `m`. Use a different predicate
        here and boot will contradict this value, animating the drawer open by
        itself on every load between 768 and 1023px. -->
-  <script>try{var m=window.innerWidth<768||(('ontouchstart' in window||navigator.maxTouchPoints>0)&&window.innerWidth<1024);var k=m?'codeman-app-settings-mobile':'codeman-app-settings';var A=JSON.parse(localStorage.getItem(k)||'{}');var L=A.sessionListLayout;var F=Number(A.sessionSidebarFontSize);var solo=/^\/session\//.test(location.pathname);var C=localStorage.getItem('codeman-sidebar-collapsed');var S=(L==='sidebar'||L==='sidebar-rich')&&!solo;document.documentElement.dataset.sessionList=S?'sidebar':'header';document.documentElement.dataset.sidebarDetail=(S&&L==='sidebar-rich')?'rich':'simple';document.documentElement.dataset.sidebar=(C===null?window.innerWidth<1024:C==='1')?'collapsed':'expanded';var V=A.tabOrientation==='vertical'&&!S&&!solo&&window.innerWidth>=768;document.documentElement.dataset.tabOrientation=V?'vertical':'horizontal';document.documentElement.dataset.tabRailDetail=(A.tabRailDetail==='simple')?'simple':'rich';document.documentElement.dataset.tabRailSort=(A.tabRailSort==='manual')?'manual':'activity';var W=Number(A.tabRailWidth);if(V){if(Number.isInteger(W)&&W>=208&&W<=360)document.documentElement.style.setProperty('--tab-rail-width',W+'px');else if(document.documentElement.dataset.tabRailDetail!=='simple')document.documentElement.style.setProperty('--tab-rail-width','320px');}if(Number.isInteger(F)&&F>=11&&F<=18)document.documentElement.style.setProperty('--session-sidebar-name-font-size',F+'px');}catch(e){document.documentElement.dataset.sessionList='header';document.documentElement.dataset.sidebarDetail='simple';document.documentElement.dataset.sidebar='expanded';document.documentElement.dataset.tabOrientation='horizontal';document.documentElement.dataset.tabRailDetail='rich';document.documentElement.dataset.tabRailSort='activity';}</script>
+  <script>try{var m=window.innerWidth<768||(('ontouchstart' in window||navigator.maxTouchPoints>0)&&window.innerWidth<1024);var k=m?'codeman-app-settings-mobile':'codeman-app-settings';var A=JSON.parse(localStorage.getItem(k)||'{}');var L=A.sessionListLayout;var F=Number(A.sessionSidebarFontSize);var solo=/^\/session\//.test(location.pathname);var C=localStorage.getItem('codeman-sidebar-collapsed');var S=(L==='sidebar'||L==='sidebar-rich')&&!solo;document.documentElement.dataset.sessionList=S?'sidebar':'header';document.documentElement.dataset.sidebarDetail=(S&&L==='sidebar-rich')?'rich':'simple';document.documentElement.dataset.sidebar=(C===null?window.innerWidth<1024:C==='1')?'collapsed':'expanded';var V=A.tabOrientation==='vertical'&&!S&&!solo&&window.innerWidth>=768;document.documentElement.dataset.tabOrientation=V?'vertical':'horizontal';document.documentElement.dataset.tabRailDetail=(A.tabRailDetail==='simple')?'simple':'rich';document.documentElement.dataset.tabRailSort=(A.tabRailSort==='manual')?'manual':'activity';var T=A.tabArrangement;document.documentElement.dataset.tabArrangement=(T==='state'||T==='case'||T==='ledger')?T:'classic';document.documentElement.dataset.tabStateOrder=(A.tabStateOrder==='urgent-last')?'urgent-last':'urgent-first';document.documentElement.dataset.tabLogos=(A.showTabCliLogos===false)?'off':'on';var H=A.headerStatsStyle;document.documentElement.dataset.headerStats=(window.innerWidth<768||solo)?'classic':(H==='classic'||H==='tiles')?H:'compact';var W=Number(A.tabRailWidth);if(V){if(Number.isInteger(W)&&W>=208&&W<=360)document.documentElement.style.setProperty('--tab-rail-width',W+'px');else if(document.documentElement.dataset.tabRailDetail!=='simple')document.documentElement.style.setProperty('--tab-rail-width','320px');}if(Number.isInteger(F)&&F>=11&&F<=18)document.documentElement.style.setProperty('--session-sidebar-name-font-size',F+'px');}catch(e){document.documentElement.dataset.sessionList='header';document.documentElement.dataset.sidebarDetail='simple';document.documentElement.dataset.sidebar='expanded';document.documentElement.dataset.tabOrientation='horizontal';document.documentElement.dataset.tabRailDetail='rich';document.documentElement.dataset.tabRailSort='activity';document.documentElement.dataset.tabArrangement='classic';document.documentElement.dataset.tabStateOrder='urgent-first';document.documentElement.dataset.headerStats='classic';document.documentElement.dataset.tabLogos='on';}</script>
   <!-- Inline critical CSS for instant skeleton paint (before styles.css loads) -->
   <style>
     .loading-skeleton{display:flex;flex-direction:column;height:100vh;height:100dvh;background:var(--bg-dark,#11151c)}
@@ -158,13 +158,14 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           <span>Admin Panel</span>
         </button>
-        <button class="btn-icon-header btn-solo-redock" id="soloRedockBtn" style="display: none;" onclick="window.close()" title="Re-dock to dashboard (close window)" aria-label="Re-dock session to dashboard">&#x229E;</button>
+        <button class="btn-icon-header btn-solo-redock" id="soloRedockBtn" style="display: none;" onclick="app._closeSoloWindow()" title="Re-dock to dashboard (close window)" aria-label="Re-dock session to dashboard">&#x229E;</button>
         <button class="tunnel-indicator" id="tunnelIndicator" style="display: none;" onclick="app.toggleTunnelPanel()" title="Cloudflare Tunnel" aria-label="Tunnel status">
           <span class="tunnel-dot"></span>
         </button>
         <div class="connection-indicator" id="connectionIndicator" style="display: none;">
           <span class="connection-dot" id="connectionDot"></span>
           <span class="connection-text" id="connectionText"></span>
+          <span class="connection-tile"><span class="connection-tile-label" id="connectionTileLabel"></span><span class="connection-tile-value" id="connectionTileValue" data-i18n-skip></span></span>
         </div>
         <div class="header-font-controls">
           <button class="btn-icon-header btn-sm" onclick="app.decreaseFontSize()" title="Decrease font (Ctrl+-)" aria-label="Decrease font size">A-</button>
@@ -173,6 +174,7 @@
         </div>
         <div class="header-system-stats" id="headerSystemStats" title="System resource usage">
           <div class="stat-item">
+            <span class="stat-ring" id="statCpuRing" aria-hidden="true"></span>
             <span class="stat-label">CPU</span>
             <div class="stat-bar">
               <div class="stat-bar-fill stat-bar-cpu" id="statCpuBar"></div>
@@ -180,6 +182,7 @@
             <span class="stat-value" id="statCpu">--%</span>
           </div>
           <div class="stat-item">
+            <span class="stat-ring" id="statMemRing" aria-hidden="true"></span>
             <span class="stat-label">MEM</span>
             <div class="stat-bar">
               <div class="stat-bar-fill stat-bar-mem" id="statMemBar"></div>
@@ -203,9 +206,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           <span class="attachment-history-badge" id="attachmentHistoryBadge" style="display:none;">0</span>
         </button>
-        <button class="btn-icon-header btn-file-viewer" onclick="app.toggleFileBrowserButton()" title="File Viewer" aria-label="Open file viewer" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+        <button class="btn-icon-header btn-file-viewer" onclick="app.toggleFileBrowserButton()" title="File Viewer" aria-label="Open file viewer" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="icon-folder-closed" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><g class="icon-folder-open"><path d="M3 17V7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v1.5"/><path d="M3 17l2.3-5.4A2 2 0 0 1 7.2 10.5H20a1.5 1.5 0 0 1 1.4 2l-1.9 5.2A2 2 0 0 1 17.6 19H5a2 2 0 0 1-2-2z"/></g></svg></button>
         <button class="btn-icon-header btn-multimonitor btn-multimonitor--hidden" onclick="app.launchMultiMonitor()" title="Open Codeman across all displays" aria-label="Open Codeman across all displays"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="9" rx="1.5"/><rect x="11" y="9" width="11" height="8" rx="1.5"/></svg></button>
         <button class="btn-icon-header btn-split btn-split--hidden" onclick="app.openSplitPicker(event)" title="Split: open a second session beside this one" aria-label="Split: open a second session beside this one" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg></button>
+        <button class="btn-icon-header btn-tile-grid btn-tile-grid--hidden" onclick="app.toggleTileGrid()" oncontextmenu="app.openTileCountMenu(event)" aria-describedby="tileGridHint" aria-label="Tiles: show several sessions side by side (right-click for how many)" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg></button>
         <button class="btn-icon-header btn-ultracode-agents btn-ultracode-agents--hidden" onclick="app.toggleUltracodeAgentsPanel()" title="Ultracode / Workflow agents" aria-label="Open ultracode workflow agents"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.2 7.2 15.6 11M8.2 16.8 15.6 13"/></svg></button>
         <div class="header-plan-usage header-plan-usage--hidden" id="planUsageChip" title="Claude and Codex plan usage limits">—</div>
         <button class="btn-icon-header btn-notifications" onclick="app.toggleNotifications()" title="Notifications" aria-label="Toggle notifications" style="display:none;">
@@ -419,30 +423,19 @@
            MOVES the one #sessionTabs strip in here (never clones it) when the
            orientation setting is vertical, so every tab behaviour keeps working. -->
       <div class="tab-rail" id="tabRail" aria-label="Session navigation">
-        <div class="tab-rail-session-search" id="tabRailSessionSearchWrap">
-          <input
-            id="tabRailSessionSearch"
-            class="tab-rail-session-search-input"
-            type="search"
-            placeholder="Search sessions"
-            aria-label="Search sessions"
-            autocomplete="off"
-            spellcheck="false"
-            oninput="app.setTabRailSessionSearch(this.value)"
-          />
-          <button
-            id="tabRailSessionSearchClear"
-            class="tab-rail-session-search-clear"
-            type="button"
-            aria-label="Clear session search"
-            title="Clear session search"
-            onclick="app.clearTabRailSessionSearch()"
-            hidden
-          >&times;</button>
+        <!-- Session-name search (app.js setTabRailSearch): a view filter over the
+             rows below, in memory only. Shown with the rail, never elsewhere. -->
+        <div class="session-sidebar-filter tab-rail-search">
+          <input type="search" id="tabRailSearch" class="session-sidebar-filter-input"
+            placeholder="Search sessions" aria-label="Search sessions"
+            autocomplete="off" spellcheck="false"
+            oninput="app.setTabRailSearch(this.value)"
+            onkeydown="app.handleTabRailSearchKeydown(event)">
+          <button type="button" id="tabRailSearchClear" class="tab-rail-search-clear"
+            aria-label="Clear search" title="Clear search"
+            onclick="app.clearTabRailSearch()" hidden>&times;</button>
         </div>
-        <div id="tabRailSessionSearchEmpty" class="tab-rail-session-search-empty" role="status" hidden>
-          No sessions match
-        </div>
+        <div id="tabRailSearchEmpty" class="tab-rail-search-empty" role="status" hidden>No sessions match</div>
         <div
           class="tab-rail-resize-handle"
           id="tabRailResizeHandle"
@@ -493,6 +486,12 @@
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
       </div>
 
+      <!-- Tile grid (tile-grid.js): 1 to 6 sessions side by side, each a
+           TerminalTile. A SIBLING of .terminal-wrap, never a parent: while
+           .main.tiles-active is set the main terminal is parked (hidden) and
+           this section takes its place. -->
+      <section class="tile-grid" id="tileGrid" aria-label="Tiled sessions"></section>
+
       <!-- Web tab layer: one iframe per open dashboard, shown in place of the
            terminal while a web tab is active. Frames stay mounted while hidden so
            switching tabs does not reload (and re-authenticate) a dashboard. -->
@@ -508,9 +507,14 @@
         <div class="welcome-content">
           <h1 class="welcome-title">Codeman</h1>
           <p class="welcome-desc">Manage AI Coding tools in persistent tmux sessions.</p>
+          <!-- Launchers (settings-ui.js renderWelcomeCliActions): one primary
+               button for the first agent in the registry catalog, then a chip
+               row for every other enabled CLI. The tunnel is not a launcher, so
+               it sits under them as a quiet link; settings-ui.js rewrites its
+               contents on every state change and owns its inline display. -->
           <div class="welcome-actions">
             <div class="welcome-cli-actions" id="welcomeCliActions"></div>
-            <button class="welcome-btn welcome-btn-tunnel" id="welcomeTunnelBtn" style="display: none;" onclick="app.toggleTunnelFromWelcome()">
+            <button type="button" class="welcome-tunnel-link" id="welcomeTunnelBtn" style="display: none;" onclick="app.toggleTunnelFromWelcome()">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
               Cloudflare Tunnel
             </button>
@@ -627,6 +631,19 @@
       <div class="file-browser-status" id="fileBrowserStatus"></div>
     </div>
 
+    <!-- Git status panel (git-status-ui.js): what the active session's repo has not committed or pushed. -->
+    <div class="git-status-panel" id="gitStatusPanel" role="dialog" aria-label="Git status">
+      <div class="git-status-header">
+        <span class="git-status-title">Git <span class="git-status-branch" id="gitStatusBranch" data-i18n-skip></span></span>
+        <div class="git-status-actions">
+          <button class="btn-icon-sm" onclick="app.refreshGitStatusNow()" title="Refresh" aria-label="Refresh git status">&#x21BB;</button>
+          <button class="btn-icon-sm" onclick="app.closeGitStatusPanel()" title="Close" aria-label="Close git status">&times;</button>
+        </div>
+      </div>
+      <div class="git-status-body" id="gitStatusBody" data-i18n-skip></div>
+      <div class="git-status-footer" id="gitStatusFooter" data-i18n-skip></div>
+    </div>
+
     <!-- File Preview Overlay -->
     <div class="file-preview-overlay" id="filePreviewOverlay">
       <div class="file-preview-window">
@@ -645,7 +662,6 @@
             <button class="btn-icon-sm" id="filePreviewWrapBtn" onclick="app.toggleFilePreviewWrap()" title="Wrap lines" aria-label="Wrap lines" aria-pressed="true" hidden><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><line x1="3" y1="18" x2="10" y2="18"/></svg></button>
             <button type="button" class="btn-icon-sm file-preview-edit-btn" id="filePreviewEditBtn" onclick="app.enterFilePreviewEdit()" title="Edit file" aria-label="Edit file" hidden><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg></button>
             <button class="btn-icon-sm" onclick="app.copyFilePreviewContent()" title="Copy content">&#x2398;</button>
-            <button class="btn-icon-sm" id="filePreviewDetachBtn" onclick="app.detachFilePreview()" title="Open in new tab" aria-label="Open in new tab" hidden><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>
             <button class="btn-icon-sm" onclick="app.closeFilePreview()" title="Close">&times;</button>
           </div>
         </div>
@@ -752,11 +768,9 @@
           <button class="btn-toolbar btn-enter" onclick="app.sendEnterKey()" title="Send Enter">
             Enter
           </button>
-          <div class="tab-count-group" title="Instance count">
-            <button class="tab-count-btn" onclick="app.decrementShellCount()">−</button>
-            <input type="number" id="shellCount" class="tab-count-input" value="1" min="1" max="20" readonly>
-            <button class="tab-count-btn" onclick="app.incrementShellCount()">+</button>
-          </div>
+          <!-- Run Shell had a second, identical instance-count stepper here. The
+               toolbar carried two of them side by side, so it is gone and Run
+               Shell reads the one above (#tabCount) like the Run button does. -->
           <div class="case-select-group">
             <div class="case-combobox" id="quickStartCasePicker">
               <input
@@ -776,8 +790,9 @@
             <select id="quickStartCase" class="toolbar-select case-native-select" title="Select case" aria-hidden="true" tabindex="-1">
               <option value="testcase">testcase</option>
             </select>
-            <button class="btn-case-add" onclick="app.showCreateCaseModal()" title="Create new case">+</button>
-            <button class="btn-case-settings" onclick="app.toggleCaseSettings()" title="Case settings">&#x2699;</button>
+            <!-- "New or link a case…" and "Case settings…" are the last two rows of
+                 the case picker's own list (CASE_PICKER_ACTIONS, session-ui.js); the
+                 "+" and gear buttons that sat here were removed (owner, 1.36.0). -->
             <div class="case-settings-popover hidden" id="caseSettingsPopover">
               <label class="checkbox-inline">
                 <input type="checkbox" id="caseAgentTeams" onchange="app.onCaseSettingChanged()">
@@ -863,6 +878,13 @@
         <!-- <button class="btn-toolbar btn-sm" onclick="app.toggleOrchestratorPanel()" title="Orchestrator Loop">&#x2699; Orchestrator</button> -->
         <button class="btn-toolbar btn-sm" onclick="app.openCron()" title="Cron Jobs">&#x23F0; Cron</button>
         <button id="skillsChipBtn" class="btn-skills-chip hidden" title="Skills" onclick="app.openSkillsDrawer()"></button>
+        <!-- Git status of the active session's repository (git-status-ui.js). Optional and per-device
+             (App Settings → Header & Panels → Bottom bar, default OFF), so it is hidden until that
+             setting is on AND the session is a local git repository. -->
+        <button type="button" class="btn-toolbar btn-sm btn-git-status" id="gitStatusBtn" hidden aria-expanded="false" aria-controls="gitStatusPanel" onclick="app.toggleGitStatusPanel()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7"/><path d="M18 10.5c0 4-6 3-11 6"/></svg>
+          <span class="git-status-label" data-i18n-skip></span>
+        </button>
         <span class="version-display" id="versionDisplay" title="Codeman version">v0.0.0</span>
       </div>
     </footer>
@@ -879,7 +901,6 @@
           <section class="shortcut-section">
             <h4>Session</h4>
             <div class="shortcuts-grid">
-              <div><kbd>Ctrl</kbd>+<kbd>W</kbd></div><div>Close Session</div>
               <div><kbd>Ctrl/Cmd/Option</kbd>+<kbd>K</kbd></div><div>Find Open Session</div>
               <div><kbd>Ctrl</kbd>+<kbd>Tab</kbd></div><div>Next Session</div>
               <div><kbd>Alt/Option</kbd>+<kbd>[</kbd> / <kbd>Alt/Option</kbd>+<kbd>]</kbd></div><div>Previous / Next Session</div>
@@ -894,9 +915,21 @@
               <div><kbd>Ctrl</kbd>+<kbd>}</kbd></div><div>Move Active Tab Right</div>
               <div><kbd>ArrowLeft</kbd> / <kbd>ArrowUp</kbd></div><div>Focus Previous Tab</div>
               <div><kbd>ArrowRight</kbd> / <kbd>ArrowDown</kbd></div><div>Focus Next Tab</div>
-              <div><kbd>Home</kbd></div><div>Focus First Tab</div>
+              <div><kbd data-i18n-skip>Home</kbd></div><div>Focus First Tab</div>
               <div><kbd>End</kbd></div><div>Focus Last Tab</div>
               <div><kbd>Enter</kbd> / <kbd>Space</kbd></div><div>Activate Focused Tab</div>
+            </div>
+          </section>
+          <section class="shortcut-section">
+            <h4>Tiles</h4>
+            <div class="shortcuts-grid">
+              <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd></div><div>Toggle Tile Grid</div>
+              <div><kbd>Alt/Option</kbd>+<kbd>Shift</kbd>+<kbd>Arrows</kbd></div><div>Focus Tile Left / Right / Up / Down</div>
+              <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Arrows</kbd></div><div>Move Tile Left / Right / Up / Down</div>
+              <div><kbd>Drag</kbd> a tile's header</div><div>Move the Tile (onto Another: Swap)</div>
+              <div><kbd>Alt/Option</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd></div><div>Zoom Focused Tile</div>
+              <div><kbd>Ctrl/Cmd</kbd>+<kbd>Click</kbd> a tab</div><div>Add the Session to the Tile Grid</div>
+              <div><kbd>Right-click</kbd> the Tiles button</div><div>Choose How Many Tiles (2, 4 or 6)</div>
             </div>
           </section>
           <section class="shortcut-section">
@@ -907,7 +940,7 @@
               <div><kbd>Ctrl</kbd>+<kbd>L</kbd></div><div>Clear Terminal</div>
               <div><kbd>Ctrl</kbd>+<kbd>+</kbd></div><div>Increase Font</div>
               <div><kbd>Ctrl</kbd>+<kbd>-</kbd></div><div>Decrease Font</div>
-              <div><kbd>Shift</kbd>+<kbd>Wheel</kbd></div><div>Scroll local history when mouse passthrough is active</div>
+              <div><kbd>Shift</kbd>+<kbd>Wheel</kbd></div><div>Scroll local history (when mouse passthrough is active)</div>
               <div><kbd>Shift</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
               <div><kbd>Ctrl</kbd>+<kbd>Enter</kbd></div><div>Insert Newline</div>
               <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd></div><div>Voice Input</div>
@@ -1711,6 +1744,7 @@
                Save; row-reverse keeps Save to the left of it on phones. -->
           <div class="set-head-actions">
             <button class="modal-close" onclick="app.closeAppSettings()" aria-label="Close app settings">&times;</button>
+            <button class="set-head-save set-head-apply" onclick="app.applyAppSettings()" title="Save and keep Settings open">Apply</button>
             <button class="set-head-save" onclick="app.saveAppSettings()">Save</button>
           </div>
         </div>
@@ -1738,6 +1772,10 @@
               <button type="button" class="set-rail-item" data-section="settings-appearance">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18 4.5 4.5 0 0 0 0-9 4.5 4.5 0 0 1 0-9z"/></svg>
                 <span>Appearance</span>
+              </button>
+              <button type="button" class="set-rail-item" data-section="settings-animations">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/><path d="M3 19h6"/></svg>
+                <span>Animations</span>
               </button>
               <button type="button" class="set-rail-item" data-section="settings-models">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
@@ -2060,7 +2098,7 @@
                 <div class="set-group-head"><h4>Header buttons</h4><span class="set-scope">device</span></div>
                 <p class="set-group-hint">Tap to show a control in the header. Multi-monitor is the one entry here that syncs across devices.</p>
                 <div class="set-group-body">
-                  <div class="set-chips" data-search="header buttons plan usage font stats lifecycle response file viewer attachments monitor session away cron redraw">
+                  <div class="set-chips" data-search="header buttons plan usage font stats lifecycle response file viewer attachments monitor session away cron redraw split tiles">
                     <label class="set-chip" data-preview="header" data-preview-order="1" data-preview-text="A+"><input type="checkbox" id="appSettingsShowFontControls"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20 10 5l6 15"/><path d="M6.5 15h7"/><path d="M18 12h4M20 10v4"/></svg><span>Font Size</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="2" data-preview-text="CPU 12%"><input type="checkbox" id="appSettingsShowSystemStats" checked><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2.5-7 4 14L16 12h5"/></svg><span>System Stats</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="3"><input type="checkbox" id="appSettingsShowRedrawButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg><span>Redraw Terminal</span></label>
@@ -2070,7 +2108,8 @@
                     <label class="set-chip" data-preview="header" data-preview-order="9"><input type="checkbox" id="appSettingsShowAttachmentsButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>Attachments</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="10"><input type="checkbox" id="appSettingsShowFileViewerButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>File Viewer</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="11"><input type="checkbox" id="appSettingsShowMultiMonitorButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="9" rx="1.5"/><rect x="11" y="9" width="11" height="8" rx="1.5"/></svg><span>Multi-monitor</span></label>
-                    <label class="set-chip" data-preview="header" data-preview-order="11.5"><input type="checkbox" id="appSettingsShowSplitButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg><span>Split</span></label>
+                    <label class="set-chip" data-search="split pane side by side two sessions" data-preview="header" data-preview-order="11.5"><input type="checkbox" id="appSettingsShowSplitButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg><span>Split</span></label>
+                    <label class="set-chip" data-search="tiles tile grid side by side several sessions" data-preview="header" data-preview-order="11.6"><input type="checkbox" id="appSettingsShowTileGridButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg><span>Tiles</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="13" data-preview-text="42%"><input type="checkbox" id="appSettingsShowPlanUsageLimits"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4.5-5"/></svg><span>Plan Usage</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="14"><input type="checkbox" id="appSettingsShowLifecycleLog"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>Lifecycle Log</span></label>
                   </div>
@@ -2080,6 +2119,17 @@
                       <span class="set-row-desc">Show the Away Digest button in the header. Off by default.</span>
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsShowAwayDigest"><span class="slider"></span></label>
+                  </div>
+                  <div class="set-row has-field" data-search="header stats style system cpu mem ws plan usage tiles compact rings">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Header Stats Style <span class="set-tag">desktop</span></span>
+                      <span class="set-row-desc">How WS, CPU, MEM and the plan-usage windows are drawn. Compact puts a ring beside each value in two pills; Tiles put each label over its value with a bar underneath.</span>
+                    </div>
+                    <select id="appSettingsHeaderStatsStyle" class="set-select">
+                      <option value="classic">As before (bars)</option>
+                      <option value="compact">Compact (default)</option>
+                      <option value="tiles">Tiles (label over value)</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -2119,6 +2169,40 @@
               </div>
 
               <div class="set-group">
+                <div class="set-group-head"><h4>Bottom bar</h4></div>
+                <div class="set-group-body">
+                  <div class="set-row" data-search="git status uncommitted unpushed commit push indicator bottom bar toolbar">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Git status <span class="set-scope">device</span></span>
+                      <span class="set-row-desc">Shows, at the right of the bottom bar, when the active session's repository (or each repository inside its folder, up to two levels down) has uncommitted files or commits that are not pushed. Click it for the list. Read-only: Codeman never fetches or changes the repository. Not shown for Docker or remote sessions. Off by default.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsShowGitStatus"><span class="slider"></span></label>
+                  </div>
+                  <div class="set-row" data-search="git status folders tree flat list collapsed expand files">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Git status: group files by folder <span class="set-scope">device</span></span>
+                      <span class="set-row-desc">In the Git window, show changed files under their folders, collapsed until you click a folder. Off lists every file by its full path. On by default.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsGitStatusTree" checked><span class="slider"></span></label>
+                  </div>
+                  <div class="set-row" data-search="git status maximum repositories folder many repos limit">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Git status: max repositories <span class="set-scope">device</span></span>
+                      <span class="set-row-desc">When the session's folder holds several projects instead of being one, the Git window lists up to this many (1 to 50, default 12). Each one costs a few git commands per refresh.</span>
+                    </div>
+                    <input type="number" id="appSettingsGitStatusMaxRepos" class="set-num" value="12" min="1" max="50" step="1">
+                  </div>
+                  <div class="set-row" data-search="git status timeout seconds slow share network">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Git status: git timeout <span class="set-scope">device</span></span>
+                      <span class="set-row-desc">Seconds one git command may run before that repository is reported as unreadable (5 to 120, default 30). Raise it for repositories on a slow network share.</span>
+                    </div>
+                    <input type="number" id="appSettingsGitStatusTimeout" class="set-num" value="30" min="5" max="120" step="1">
+                  </div>
+                </div>
+              </div>
+
+              <div class="set-group">
                 <div class="set-group-head"><h4>Subagent windows</h4></div>
                 <div class="set-group-body">
                   <div class="set-row" data-search="subagent tracking background agents">
@@ -2145,7 +2229,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18 4.5 4.5 0 0 0 0-9 4.5 4.5 0 0 1 0-9z"/></svg>
                 <h2>Appearance</h2>
               </div>
-              <p class="set-section-blurb">Theme, motion, and what this install calls itself.</p>
+              <p class="set-section-blurb">Theme, and what this install calls itself.</p>
 
               <div class="set-group">
                 <div class="set-group-head"><h4>Theme</h4><span class="set-scope">device</span></div>
@@ -2167,21 +2251,6 @@
                         <option value="daylight-green">Daylight Green</option>
                         <option value="og">OG Codeman</option>
                       </optgroup>
-                    </select>
-                  </div>
-                  <div class="set-row has-field" data-search="entrance animations motion tabs windows">
-                    <div class="set-row-text">
-                      <span class="set-row-label">Entrance Animations</span>
-                      <span class="set-row-desc">How new tabs, panes and agent windows arrive. Add ?animlab=1 to the URL for per-surface control.</span>
-                    </div>
-                    <select id="appSettingsEntranceAnim" class="set-select">
-                      <option value="legacy">Off (default)</option>
-                      <option value="terminal">Terminal (CRT)</option>
-                      <option value="beamdown">Beam down</option>
-                      <option value="softfocus">Soft focus (blur)</option>
-                      <option value="quiet">Quiet</option>
-                      <option value="playful">Playful</option>
-                      <option value="custom">Custom (set in the lab)</option>
                     </select>
                   </div>
                 </div>
@@ -2213,6 +2282,28 @@
               <div class="set-group">
                 <div class="set-group-head"><h4>Tabs</h4><span class="set-scope">device</span></div>
                 <div class="set-group-body">
+                  <div class="set-row has-field" data-search="tab layout grouping group by state triage needs you waiting working idle case clusters ledger columns classic old new">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Tab Layout</span>
+                      <span class="set-row-desc">By state: a row each for needs you, waiting, working and idle. By case: one box per case. Ledger: an aligned column grid. Classic: the single list, as before. By state and By case group the side rail and sidebar too. Alt+1..9 keeps the tab order.</span>
+                    </div>
+                    <select id="appSettingsTabArrangement" class="set-select">
+                      <option value="state">By state (rows per state)</option>
+                      <option value="case">By case (clusters)</option>
+                      <option value="ledger">Ledger (aligned columns)</option>
+                      <option value="classic">Classic (default)</option>
+                    </select>
+                  </div>
+                  <div class="set-row has-field" data-search="state order reverse needs you bottom top rows sections">
+                    <div class="set-row-text">
+                      <span class="set-row-label">State Order</span>
+                      <span class="set-row-desc">For Tab Layout by state. At the bottom flips the rows, so needs you sits right above the terminal.</span>
+                    </div>
+                    <select id="appSettingsTabStateOrder" class="set-select">
+                      <option value="urgent-first">Needs you on top (default)</option>
+                      <option value="urgent-last">Needs you at the bottom</option>
+                    </select>
+                  </div>
                   <div class="set-row has-field" data-search="tab orientation horizontal vertical side rail">
                     <div class="set-row-text">
                       <span class="set-row-label">Tab Orientation</span>
@@ -2236,7 +2327,7 @@
                   <div class="set-row has-field" data-search="tab rail sort order activity manual drag reorder">
                     <div class="set-row-text">
                       <span class="set-row-label">Vertical Rail Order</span>
-                      <span class="set-row-desc">By activity uses the home screen's order: blocked on you first, then whatever has been running longest, then the most recently quiet. Manual keeps your tab order and is the only mode you can drag rows in. Alt+1..9 always follows the tab order either way.</span>
+                      <span class="set-row-desc">By activity uses the home screen's order: blocked on you first, then whatever has been running longest, then the most recently quiet. Manual keeps your tab order and is the only mode you can drag rows in. With Tab Layout by state or by case it orders the rows inside each section. Alt+1..9 always follows the tab order either way.</span>
                     </div>
                     <select id="appSettingsTabRailSort" class="set-select">
                       <option value="activity">By activity (home screen order)</option>
@@ -2286,6 +2377,13 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsTabTwoRows"><span class="slider"></span></label>
                   </div>
+                  <div class="set-row" data-search="cli logos on tabs logo icon harness agent cli tab hide">
+                    <div class="set-row-text">
+                      <span class="set-row-label">CLI Logos on Tabs</span>
+                      <span class="set-row-desc">Show each agent's CLI logo before the session name on tabs and the home screen's tab list. Off leaves the status dot and the shell's SH badge. Tiles, split headers and the Run menus keep their logos.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsShowTabCliLogos" checked><span class="slider"></span></label>
+                  </div>
                   <div class="set-row" data-search="pop out detach tab window">
                     <div class="set-row-text">
                       <span class="set-row-label">Pop-out Button on Tabs</span>
@@ -2296,7 +2394,7 @@
                   <div class="set-row" id="appSettingsLineageLinesItem" data-search="lineage lines spawned worker parent connection">
                     <div class="set-row-text">
                       <span class="set-row-label">Spawn Lineage Lines <span class="set-tag">desktop</span></span>
-                      <span class="set-row-desc">Draw a line under the tab strip from a session to the sessions it spawned.</span>
+                      <span class="set-row-desc">Draw lines from each session to the sessions it spawned. The selected tab's family is drawn thicker.</span>
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsLineageLines" checked><span class="slider"></span></label>
                   </div>
@@ -2336,6 +2434,70 @@
                       <option value="320">Wide (320px)</option>
                       <option value="360">Maximum (360px)</option>
                     </select>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- ══ Animations ═══════════════════════════════════════════════
+                 Every entrance animation in one place (entrance-animations.js).
+                 All per-device localStorage keys, applied as they are picked,
+                 never part of PUT /api/settings. -->
+            <section class="set-section" id="settings-animations" data-label="Animations">
+              <div class="set-section-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/><path d="M3 19h6"/></svg>
+                <h2>Animations</h2>
+              </div>
+              <p class="set-section-blurb">How tabs, terminal panes, agent windows and tiles arrive. All off by default, applied as you pick them.</p>
+
+              <div class="set-group">
+                <div class="set-group-head"><h4>Entrances</h4><span class="set-scope">device</span></div>
+                <div class="set-group-body">
+                  <div class="set-row has-field" data-search="entrance animations theme motion tabs windows panes lines">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Entrance Theme</span>
+                      <span class="set-row-desc">One look for how new tabs, terminal panes, agent windows and their lines arrive.</span>
+                    </div>
+                    <select id="appSettingsEntranceAnim" class="set-select">
+                      <option value="legacy">Off (default)</option>
+                      <option value="terminal">Terminal (CRT)</option>
+                      <option value="beamdown">Beam down</option>
+                      <option value="launch">Launch (tiles fly from tabs)</option>
+                      <option value="softfocus">Soft focus (blur)</option>
+                      <option value="quiet">Quiet</option>
+                      <option value="playful">Playful</option>
+                      <option value="custom">Custom (set in the lab)</option>
+                    </select>
+                  </div>
+                  <div class="set-row has-field" data-search="tile animations tiles grid motion entrance fly deal crt beam">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Tile Animations</span>
+                      <span class="set-row-desc">How tiles arrive when the grid opens and leave when it closes. A theme above presets it.</span>
+                    </div>
+                    <select id="appSettingsTileAnim" class="set-select">
+                      <option value="settle">Off (default)</option>
+                      <option value="fly">Fly from tab</option>
+                      <option value="deal">Deal</option>
+                      <option value="crt">CRT</option>
+                      <option value="beam">Beam down</option>
+                      <option value="cascade">Cascade</option>
+                      <option value="pop">Pop</option>
+                      <option value="soft">Soft</option>
+                      <option value="off">None (tiles just appear)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="set-group">
+                <div class="set-group-head"><h4>Lab</h4></div>
+                <div class="set-group-body">
+                  <div class="set-row has-field" data-search="animation lab compare replay styles per surface animlab">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Animation Lab</span>
+                      <span class="set-row-desc">Closes settings and opens every style per surface side by side, with replay and speed. Same as adding ?animlab=1 to the URL.</span>
+                    </div>
+                    <button type="button" id="appSettingsOpenAnimLab" class="btn-toolbar btn-sm">Open lab</button>
                   </div>
                 </div>
               </div>
@@ -2700,6 +2862,30 @@
               <div class="set-group" id="appSettingsCodexGroup">
                 <div class="set-group-head"><h4>Codex</h4><span class="set-scope">synced</span></div>
                 <div class="set-group-body">
+                  <div class="set-row has-field" data-search="codex default model">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Default Codex model</span>
+                      <span class="set-row-desc">Model ID for new local Codex sessions, including WSL. Leave empty to use Codex configuration.</span>
+                    </div>
+                    <input id="appSettingsCodexModel" class="set-input" type="text" maxlength="100" aria-label="Default Codex model" placeholder="Use Codex configuration" autocomplete="off" spellcheck="false">
+                  </div>
+                  <div class="set-row has-field" data-search="codex default reasoning effort thinking">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Default Codex reasoning effort</span>
+                      <span class="set-row-desc">Applies to new local sessions; supported levels depend on the model and Codex version. Custom endpoints, Docker and remote sessions keep their own settings.</span>
+                    </div>
+                    <select id="appSettingsCodexReasoningEffort" class="set-select" aria-label="Default Codex reasoning effort">
+                      <option value="">Use Codex configuration</option>
+                      <option value="none">none</option>
+                      <option value="minimal">minimal</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                      <option value="max">max</option>
+                      <option value="ultra">ultra</option>
+                    </select>
+                  </div>
                   <div class="set-row" data-search="codex bypass approvals sandbox">
                     <div class="set-row-text">
                       <span class="set-row-label">Bypass approvals and sandbox</span>
@@ -2780,17 +2966,17 @@
               <div class="set-group" id="mcpSyncGroup">
                 <div class="set-group-head"><h4>MCP servers</h4><span class="set-scope">synced</span></div>
                 <div class="set-group-body">
-                  <div class="set-row" data-search="mcp server sync enable claude codex gemini opencode antigravity">
+                  <div class="set-row" data-search="mcp server sync enable claude codex gemini opencode antigravity copilot github">
                     <div class="set-row-text">
                       <span class="set-row-label">Enable MCP server sync</span>
-                      <span class="set-row-desc">Adds a control that copies MCP servers between your enabled CLIs by writing their own config files. Off by default: this changes other tools' configuration, not just Codeman's.</span>
+                      <span class="set-row-desc">Adds a control that copies MCP servers between your enabled CLIs, and GitHub Copilot CLI if it is installed, by writing their own config files. Off by default: this changes other tools' configuration, not just Codeman's.</span>
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsMcpSync" onchange="app.applyMcpSyncVisibility()"><span class="slider"></span></label>
                   </div>
                   <div class="set-row" id="mcpSyncActionRow" style="display:none" data-search="mcp server sync preview">
                     <div class="set-row-text">
                       <span class="set-row-label">Sync MCP servers across CLIs</span>
-                      <span class="set-row-desc">Copies each installed, enabled CLI's MCP servers into the others. Only adds missing servers; never edits, removes or copies a server you switched off. Env values and headers are copied too, so a file that receives them is left readable by you only. The previous file is kept as <code>.codeman-bak</code> (overwritten by each sync). A config dir moved by the CLI's own env var (<code>CODEX_HOME</code>, <code>CLAUDE_CONFIG_DIR</code>, <code>XDG_CONFIG_HOME</code>, <code>GEMINI_CLI_HOME</code>) is followed as Codeman's server sees it; a per-session override is not.</span>
+                      <span class="set-row-desc">Copies each installed, enabled CLI's MCP servers (and GitHub Copilot CLI's) into the others. Only adds missing servers; never edits, removes or copies a server you switched off. Env values and headers are copied too, so a file that receives them is left readable by you only. The previous file is kept as <code>.codeman-bak</code> (overwritten by each sync). A config dir moved by the CLI's own env var (<code>CODEX_HOME</code>, <code>CLAUDE_CONFIG_DIR</code>, <code>XDG_CONFIG_HOME</code>, <code>GEMINI_CLI_HOME</code>, <code>COPILOT_HOME</code>) is followed as Codeman's server sees it; a per-session override is not.</span>
                     </div>
                     <span>
                       <button class="btn-toolbar btn-sm" id="mcpSyncPreviewBtn" onclick="app.mcpSync(false)">Preview</button>
@@ -2857,6 +3043,26 @@
                     <div class="set-row-actions">
                       <input type="number" id="appSettingsNotifStuckMins" class="set-num" value="10" min="1" max="120">
                       <span class="set-unit">min</span>
+                    </div>
+                  </div>
+                  <div class="set-row" data-search="toast display time popup dismiss seconds notification">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Toast display time</span>
+                      <span class="set-row-desc">How long the corner pop-ups stay on screen.</span>
+                    </div>
+                    <div class="set-row-actions">
+                      <input type="number" id="appSettingsNotifToastSecs" class="set-num" value="3" min="1" max="300">
+                      <span class="set-unit">sec</span>
+                    </div>
+                  </div>
+                  <div class="set-row" data-search="browser notification auto close dismiss seconds">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Browser notification display time</span>
+                      <span class="set-row-desc">How long a desktop notification stays up before Codeman closes it. Your OS may close it sooner.</span>
+                    </div>
+                    <div class="set-row-actions">
+                      <input type="number" id="appSettingsNotifBrowserSecs" class="set-num" value="8" min="1" max="300">
+                      <span class="set-unit">sec</span>
                     </div>
                   </div>
                 </div>
@@ -3140,6 +3346,20 @@
               </div>
               <p class="set-section-blurb">Paths, automation and remote access. Set once, rarely touched.</p>
 
+              <div class="set-group" id="doctorGroup">
+                <div class="set-group-head"><h4>Diagnostics</h4><span class="set-scope">server</span></div>
+                <div class="set-group-body">
+                  <div class="set-row" data-search="diagnostics doctor dependencies tmux node claude codex check install">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Check this machine</span>
+                      <span class="set-row-desc">Runs <code>codeman doctor</code> on the server: which agent CLIs, tmux, Node and the optional office tools are installed, their versions, and how to install what is missing.</span>
+                    </div>
+                    <button class="btn-toolbar btn-sm" id="doctorRunBtn" onclick="app.runDoctor()">Run checks</button>
+                  </div>
+                  <div id="doctorResult" class="set-note" style="display:none" data-i18n-skip></div>
+                </div>
+              </div>
+
               <div class="set-group">
                 <div class="set-group-head"><h4>Paths</h4><span class="set-scope">synced</span></div>
                 <div class="set-group-body">
@@ -3190,10 +3410,6 @@
                       <button class="btn-icon-sm" id="tunnelQrBtn" onclick="app.showTunnelQR()" title="Show QR code">&#x229E;</button>
                     </div>
                   </div>
-                  <div class="set-row" id="tunnelUploadUrlRow" style="display:none">
-                    <div class="set-row-text"><span class="set-row-label">Upload URL</span></div>
-                    <span id="tunnelUploadUrlDisplay" class="set-copy" title="Click to copy"></span>
-                  </div>
                 </div>
               </div>
             </section>
@@ -3201,6 +3417,7 @@
         </div>
         <div class="form-actions set-foot">
           <button class="btn-toolbar" onclick="app.closeAppSettings()">Cancel</button>
+          <button class="btn-toolbar" onclick="app.applyAppSettings()" title="Save and keep Settings open">Apply</button>
           <button class="btn-toolbar btn-primary" onclick="app.saveAppSettings()">Save</button>
         </div>
       </div>
@@ -3280,11 +3497,11 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v8M8 12h8"/></svg>
               <h2>Create New</h2>
             </div>
-            <p class="set-section-blurb">A fresh workspace under ~/codeman-cases, scaffolded with its own CLAUDE.md.</p>
+            <p class="set-section-blurb" id="newCaseBlurb">A fresh workspace under ~/codeman-cases, scaffolded with its own CLAUDE.md.</p>
             <div class="form-row">
               <label>Case Name</label>
-              <input type="text" id="newCaseName" placeholder="my-project" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
-              <span class="form-hint">Letters, numbers, hyphens, underscores only. Created in ~/codeman-cases/</span>
+              <input type="text" id="newCaseName" placeholder="my-project" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="app.updateNewCasePathPreview()">
+              <span class="form-hint" id="newCaseNameHint">Letters, numbers, hyphens, underscores only. Created in ~/codeman-cases/</span>
             </div>
             <div class="form-row">
               <label>Description (optional)</label>
@@ -3297,8 +3514,20 @@
               <div id="localCaseCodexCommandCustom" class="hidden"><label for="localCaseCodexCommandCustomInput">Custom command</label><input type="text" id="localCaseCodexCommandCustomInput" oninput="app.onCaseCodexProfileChanged(true, 'local')" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
               <span class="form-hint">Runs the saved command exactly as shown, with no extra Codeman flags. Applies to local cases only.</span>
             </div>
+            <div class="form-row" id="newCaseCustomPathToggleRow">
+              <label class="checkbox-row"><input type="checkbox" id="newCaseCustomPathToggle" onchange="app.toggleNewCaseCustomPath()"> 📁 Create in a custom folder</label>
+              <span class="form-hint">By default a new case is created under ~/codeman-cases. Choose another folder and the case is created there instead; it is listed like any other case.</span>
+            </div>
+            <div class="form-row" id="newCaseCustomPathRow" style="display:none">
+              <label>Parent Folder</label>
+              <div class="path-input-group">
+                <input type="text" id="newCasePath" placeholder="~/projects" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="app.updateNewCasePathPreview()">
+                <button type="button" class="btn path-input-browse" onclick="app.openNewCasePathPicker()">Browse&hellip;</button>
+              </div>
+              <span class="form-hint" id="newCasePathPreview">Pick the folder the new case folder should be created inside.</span>
+            </div>
             <div class="form-row docker-quick-row">
-              <label class="checkbox-row"><input type="checkbox" id="newCaseDocker"> 🐳 Run in an isolated Docker container</label>
+              <label class="checkbox-row"><input type="checkbox" id="newCaseDocker" onchange="app.toggleNewCaseCustomPath()"> 🐳 Run in an isolated Docker container</label>
               <span class="form-hint">Runs this case in a hardened, isolated container. The base image is built automatically on first use. Docker/Podman must be installed.</span>
               <span class="form-hint">Already have a container running? <button type="button" class="btn-inline-check" id="dockerAdoptJumpBtn">Attach to it instead</button> Codeman only runs docker exec into it and never touches its lifecycle.</span>
             </div>
@@ -4347,7 +4576,9 @@
   <script defer src="app.js"></script>
   <script defer src="tab-rail-resize.js"></script>
   <script defer src="terminal-ui.js"></script>
+  <script defer src="terminal-tile.js"></script>
   <script defer src="terminal-split.js"></script>
+  <script defer src="tile-grid.js"></script>
   <script defer src="respawn-ui.js"></script>
   <script defer src="ralph-panel.js"></script>
   <script defer src="orchestrator-panel.js"></script>
@@ -4366,6 +4597,7 @@
   <script defer src="mobile-tabs.js"></script>
   <script defer src="mobile-overview.js"></script>
   <script defer src="home-sessions.js"></script>
+  <script defer src="git-status-ui.js"></script>
   <script defer src="entrance-animations.js"></script>
   <script defer src="ralph-wizard.js"></script>
   <button type="button" class="btn-toolbar assistant-mobile-entry" onclick="app.openAssistants()" aria-label="Open assistants">Assistants</button>

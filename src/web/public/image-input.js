@@ -59,8 +59,13 @@ Object.assign(CodemanApp.prototype, {
   // Called from customKeyEventHandler in terminal-ui.js on Ctrl+V keydown.
   // Creates a hidden paste trap, lets the browser paste into it, then inspects
   // the result for images. Works on plain HTTP (no Clipboard API needed).
-  _handleImagePaste() {
+  // `target` names the terminal the Ctrl+V came from and its session; both
+  // default to the primary pane. A second terminal (the split pane) passes its
+  // own, so text pastes into THAT xterm and images upload to THAT session.
+  _handleImagePaste(target = {}) {
     const self = this;
+    const terminal = target.terminal || this.terminal;
+    const sessionId = target.sessionId || this.activeSessionId;
 
     // Create a hidden contenteditable div to receive the paste
     const trap = document.createElement('div');
@@ -102,11 +107,11 @@ Object.assign(CodemanApp.prototype, {
       setTimeout(function() {
         if (trap.parentNode) trap.parentNode.removeChild(trap);
         // Refocus the terminal
-        if (self.terminal) self.terminal.focus();
+        if (terminal) terminal.focus();
       }, 0);
 
       if (imageFiles.length > 0) {
-        self._uploadAndInsertImages(imageFiles);
+        self._uploadAndInsertImages(imageFiles, { sessionId: sessionId });
       } else {
         // No image -- route text through xterm's paste() so bracketed-paste
         // markers (CSI 200~ ... CSI 201~) survive when the inner application
@@ -115,7 +120,7 @@ Object.assign(CodemanApp.prototype, {
         // indistinguishable from typed input, weakening the CLI's
         // prompt-injection defenses.
         var text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
-        if (text && self.terminal) self.terminal.paste(text);
+        if (text && terminal) terminal.paste(text);
       }
     });
 
@@ -135,9 +140,10 @@ Object.assign(CodemanApp.prototype, {
 
   /** Upload a batch and normally insert its paths into the active terminal.
    *  The prompt composer passes `{ insert: false }` so it can put those paths
-   *  into its textarea instead. Returns successful paths in selection order. */
+   *  into its textarea instead. `options.sessionId` names the session to upload
+   *  to (default: the active one). Returns successful paths in selection order. */
   async _uploadAndInsertImages(fileList, options = {}) {
-    const sessionId = this.activeSessionId;
+    const sessionId = options.sessionId || this.activeSessionId;
     if (!sessionId) return [];
 
     let files = Array.from(fileList || []);
@@ -153,6 +159,7 @@ Object.assign(CodemanApp.prototype, {
     const total = files.length;
     let done = 0;
     let failed = 0;
+    let failReason = ''; // first server reason, shown in the toast so a failure is not just a count
     const results = new Array(total); // preserve selection order for insertion
     const progress = () =>
       this.showToast(`Uploading ${Math.min(done + 1, total)}/${total} image${total > 1 ? 's' : ''}…`, 'info');
@@ -176,6 +183,7 @@ Object.assign(CodemanApp.prototype, {
           results[i] = await this._uploadPasteImage(sessionId, normalized);
         } catch (err) {
           failed++;
+          if (!failReason && err && err.message) failReason = err.message;
           console.warn('Image upload failed:', err);
           results[i] = null;
         } finally {
@@ -188,14 +196,18 @@ Object.assign(CodemanApp.prototype, {
 
     const paths = results.filter(Boolean);
     if (paths.length > 0 && options.insert !== false) {
-      // Insert all paths in one shot, space-separated, in selection order.
-      await this.sendInput(paths.join(' '));
+      // Insert all paths in one shot, space-separated, in selection order, into
+      // the session the batch was uploaded TO. Not sendInput(): it re-reads
+      // activeSessionId, and after the awaits above that is whatever tab the
+      // user switched to mid-upload, so the paths landed in the wrong session.
+      // Same delivery sendInput() uses (durable queue, useMux for the POST path).
+      this._sendInputAsync(sessionId, paths.join(' '), { useMux: true });
     }
 
     // Final status: successes, plus any failures / cap so nothing is silent.
     const parts = [];
     if (paths.length > 0) parts.push(`${paths.length} image${paths.length > 1 ? 's' : ''} ready`);
-    if (failed > 0) parts.push(`${failed} failed`);
+    if (failed > 0) parts.push(failReason ? `${failed} failed: ${failReason}` : `${failed} failed`);
     if (capped) parts.push(`max ${this._maxBatchImages} per batch`);
     const tone = paths.length > 0 ? (failed > 0 || capped ? 'info' : 'success') : 'error';
     this.showToast(parts.join(' · ') || 'No images uploaded', tone);

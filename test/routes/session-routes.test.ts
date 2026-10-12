@@ -15,15 +15,15 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
-import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyMultipart from '@fastify/multipart';
-import { rm, mkdir, writeFile } from 'node:fs/promises';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { registryFilePath, reloadCliRegistry } from '../../src/config/cli-registry/registry.js';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtemp, rm, mkdir, writeFile, readFile, readdir, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
@@ -1370,6 +1370,165 @@ and effort involved in moving workloads.
       expect(argv).toContain('saqebakhter@192.168.21.109');
       expect(String(argv.at(-1))).toContain('mkdir "$dir"');
       expect(Buffer.concat(stdinChunks)).toEqual(png);
+      expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+      expect(heicConvert).toHaveBeenCalledWith(heic);
+    });
+
+    it('converts mislabeled HEIC (declared image/jpeg, HEIF bytes — the MIUI/Android case) via magic sniff', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-heic-mislabel-'));
+      harness.ctx._session.workingDir = workDir;
+      heicConvert.mockClear();
+
+      const boundary = 'codeman-test-boundary';
+      // ftyp brand mif1 — HEIF bytes hiding under a JPEG filename + MIME.
+      const heic = Buffer.from('000000346674797061696631000000006d69663168656963', 'hex');
+      heic.write('mif1', 8, 'ascii'); // major brand
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: imageUploadBody(boundary, 'IMG_2001.jpg', 'image/jpeg', heic),
+      });
+
+      await rm(workDir, { recursive: true });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+      expect(heicConvert).toHaveBeenCalledWith(heic);
+    });
+
+    const jpeg = Buffer.from('ffd8ffe000104a46494600010100', 'hex');
+    const upload = (name: string, mime: string, bytes: Buffer) =>
+      harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': 'multipart/form-data; boundary=codeman-test-boundary',
+        },
+        payload: imageUploadBody('codeman-test-boundary', name, mime, bytes),
+      });
+
+    it('writes into .codeman-uploads with a self-ignoring .gitignore, written once and never over a file already there', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      try {
+        const first = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(first.statusCode).toBe(200);
+        expect(JSON.parse(first.body).data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+        expect(await readdir(workDir)).toEqual(['.codeman-uploads']);
+        expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('*\n');
+
+        await writeFile(join(workDir, '.codeman-uploads', '.gitignore'), 'theirs\n');
+        expect((await upload('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
+        expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('theirs\n');
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('takes back an ignore file whose write failed, so the next upload writes a real one', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      const ignoreFile = join(workDir, '.codeman-uploads', '.gitignore');
+      // The exclusive create succeeds and the two-byte write fails, as on a full disk.
+      const spy = vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (path) => {
+        await writeFile(path as string, '');
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      });
+      try {
+        expect((await upload('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(500);
+        expect(existsSync(ignoreFile)).toBe(false);
+        expect((await upload('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
+        expect(await readFile(ignoreFile, 'utf8')).toBe('*\n');
+      } finally {
+        spy.mockRestore();
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('refuses a planted symlink at .codeman-uploads and writes nothing through it', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      const elsewhere = await mkdtemp(join(tmpdir(), 'codeman-elsewhere-'));
+      harness.ctx._session.workingDir = workDir;
+      await symlink(elsewhere, join(workDir, '.codeman-uploads'));
+      try {
+        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(403);
+        expect(JSON.parse(res.body).error).toBe('.codeman-uploads is not a regular directory');
+        expect(await readdir(elsewhere)).toEqual([]);
+      } finally {
+        await rm(workDir, { recursive: true });
+        await rm(elsewhere, { recursive: true });
+      }
+    });
+
+    it('refuses an upload for a remote session before touching disk', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      // A remote session's workingDir is the REMOTE path: a file written here is unreadable there.
+      (harness.ctx._session as unknown as { remote: unknown }).remote = { hostId: 'gpu-box' };
+      try {
+        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(400);
+        expect(JSON.parse(res.body).error).toMatch(/remote/);
+        expect(await readdir(workDir)).toEqual([]);
+      } finally {
+        (harness.ctx._session as unknown as { remote: unknown }).remote = undefined;
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('returns 415 with the error envelope when HEIC conversion fails', async () => {
+      heicConvert.mockClear();
+      heicConvert.mockRejectedValueOnce(new Error('HEIC dimensions 30000x30000 exceed the 64MP decode limit'));
+
+      const boundary = 'codeman-test-boundary';
+      const heic = Buffer.from('00000034667479706865696300000000', 'hex');
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: imageUploadBody(boundary, 'IMG_4997.HEIC', 'image/heic', heic),
+      });
+
+      expect(res.statusCode).toBe(415);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe('INVALID_INPUT');
+      expect(body.error).toMatch(/HEIC/);
+    });
+
+    it('rejects ftyp brands heic-decode cannot convert (e.g. heim) without invoking the converter', async () => {
+      heicConvert.mockClear();
+
+      const boundary = 'codeman-test-boundary';
+      const heim = Buffer.from('00000034667479706865696d00000000', 'hex');
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: imageUploadBody(boundary, 'IMG_4998.HEIC', 'image/heic', heim),
+      });
+
+      expect(res.statusCode).toBe(415);
+      expect(JSON.parse(res.body).success).toBe(false);
+      expect(heicConvert).not.toHaveBeenCalled();
     });
   });
 
@@ -2755,6 +2914,62 @@ and effort involved in moving workloads.
       expect(body.data.terminalBuffer).toContain(newestMarker);
       expect(body.data.terminalBuffer).not.toContain(oldestMarker);
       expect(body.data.terminalBuffer.endsWith(`${newestMarker}${cursorRestore}`)).toBe(true);
+    });
+
+    it('`lines=` bounds the history a full capture reads, clamped to the configured limit', async () => {
+      // Grid tiles send it (TerminalTile._historyLinesQuery): without it a full
+      // capture reads the whole history limit synchronously, and `tail` cuts it
+      // only afterwards. Absent or malformed, the limit itself, as before.
+      const limit = (await harness.ctx.getTerminalHistoryConfig()).tmuxHistoryLimit;
+      harness.ctx._session.mode = 'claude';
+      const captureSpy = vi.fn((_name: string, _opts?: { historyLimitLines?: number }) => 'captured frame');
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+      const linesFor = async (query: string) => {
+        captureSpy.mockClear();
+        await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?${query}` });
+        return captureSpy.mock.calls[0]?.[1]?.historyLimitLines;
+      };
+
+      expect(await linesFor(`full=1&tail=${1024 * 1024}&lines=10040`)).toBe(10040);
+      expect(await linesFor('full=1&lines=1')).toBe(1);
+      expect(await linesFor('full=1')).toBe(limit);
+      expect(await linesFor(`full=1&lines=${limit + 5}`)).toBe(limit);
+      for (const bad of ['0', '-5', 'abc', '1.5', '', '1e4', '9999999999']) {
+        expect(await linesFor(`full=1&lines=${bad}`), `lines=${bad}`).toBe(limit);
+      }
+    });
+
+    it('`lines=` leaves a visible-frame capture (no full=1) exactly as it was', async () => {
+      harness.ctx._session.mode = 'shell';
+      const captureSpy = vi.fn(() => 'only the visible frame');
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+      await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=${1024 * 1024}&lines=500`,
+      });
+      expect(captureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, {});
+    });
+
+    it('a capture bounded by `lines=` is still a full capture: rows kept, cursor restore last', async () => {
+      // Only how much history tmux reads changes. The row-preserving skips key
+      // on isFullCapture, and the relative cursor move must still end it.
+      const cursorRestore = '\x1b[3A\r\x1b[2C';
+      const capture = `\r\n${['first row', 'second row', 'last row'].join('\r\n')}${cursorRestore}`;
+      harness.ctx._session.mode = 'claude';
+      harness.ctx._session.terminalBuffer = 'byte history that must not be prepended';
+      const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+        opts?.fullHistory ? capture : 'only the visible frame'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1&tail=${1024 * 1024}&lines=40`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('mux-full-history');
+      expect(body.data.terminalBuffer.startsWith('\r\nfirst row')).toBe(true);
+      expect(body.data.terminalBuffer.endsWith(`last row${cursorRestore}`)).toBe(true);
+      expect(body.data.terminalBuffer).not.toContain('byte history');
     });
 
     it('full reload (?full=1) returns the tmux capture ALONE — byte history is not duplicated', async () => {
@@ -4243,10 +4458,15 @@ and effort involved in moving workloads.
           // The request budget, not the 90 s session default: the reverse proxy would
           // cut the request at 60 s while the session was still being built.
           expect(wakeWaitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ hostId: 'hufflepuff' }), {
-            timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+            timeoutMs: expect.any(Number),
             // The shutdown signal rides along so `WebServer.stop()` can end the poll.
             signal: expect.any(AbortSignal),
           });
+          // Not asserted to the millisecond: the wake's own elapsed time is subtracted,
+          // so a slow runner lands a few ms under the budget.
+          const [, readyOpts] = wakeWaitUntilReady.mock.calls[0] as unknown as [unknown, { timeoutMs: number }];
+          expect(readyOpts.timeoutMs).toBeLessThanOrEqual(REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS);
+          expect(readyOpts.timeoutMs).toBeGreaterThan(REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS - 1_000);
         } finally {
           startShell.mockRestore();
         }
