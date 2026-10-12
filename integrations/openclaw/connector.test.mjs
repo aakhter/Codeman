@@ -345,7 +345,8 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
     assert.equal((await handler({ ctx: source, sendPolicy: 'allow', ...patch }, dispatch)).queuedFinal, false);
   }
   assert.equal(
-    (await handler({ ctx: { ...source, BodyForCommands: 'hello' }, sendPolicy: 'allow' }, dispatch)).handled,
+    (await handler({ ctx: { ...source, BodyForCommands: 'hello', MessageSid: '900' }, sendPolicy: 'allow' }, dispatch))
+      .handled,
     false
   );
   assert.equal(
@@ -434,7 +435,13 @@ test('ordinary Telegram reply_dispatch routes trusted metadata and short-circuit
     (
       await handler(
         {
-          ctx: { ...source, BodyForCommands: 'another question', ReplyToId: '999', ReplyToBody: 'Brain result' },
+          ctx: {
+            ...source,
+            BodyForCommands: 'another question',
+            MessageSid: '901',
+            ReplyToId: '999',
+            ReplyToBody: 'Brain result',
+          },
           sendPolicy: 'allow',
         },
         dispatch
@@ -1131,7 +1138,8 @@ test('ordinary WhatsApp reply_dispatch routes trusted metadata and short-circuit
     assert.equal((await handler({ ctx: source, sendPolicy: 'allow', ...patch }, dispatch)).queuedFinal, false);
   }
   assert.equal(
-    (await handler({ ctx: { ...source, BodyForCommands: 'hello' }, sendPolicy: 'allow' }, dispatch)).handled,
+    (await handler({ ctx: { ...source, BodyForCommands: 'hello', MessageSid: '900' }, sendPolicy: 'allow' }, dispatch))
+      .handled,
     false
   );
   assert.equal(
@@ -1220,7 +1228,13 @@ test('ordinary WhatsApp reply_dispatch routes trusted metadata and short-circuit
     (
       await handler(
         {
-          ctx: { ...source, BodyForCommands: 'another question', ReplyToId: '999', ReplyToBody: 'Brain result' },
+          ctx: {
+            ...source,
+            BodyForCommands: 'another question',
+            MessageSid: '901',
+            ReplyToId: '999',
+            ReplyToBody: 'Brain result',
+          },
           sendPolicy: 'allow',
         },
         dispatch
@@ -1561,8 +1575,24 @@ test('multiline ingress survives duplicate delivery and connector restart with u
   c = h.make();
   assert.match((await c.inbound(message, ctx)).reply.text, /already/);
   assert.equal(c.outbox.records.length, 1);
-  assert.match((await c.inbound({ ...message, content: `brain ${text.replace('\r\n', '\n')}` }, ctx)).reply.text, /conflict/);
+  assert.match(
+    (await c.inbound({ ...message, content: `brain ${text.replace('\r\n', '\n')}` }, ctx)).reply.text,
+    /conflict/
+  );
   await c.tick();
   assert.equal(c.outbox.records[0].status, 'running');
   assert.equal(readFileSync(saved, 'utf8'), text);
+});
+
+test('selected conversation context stays separate from exact original message bytes', (t) => {
+  const f = mediaFixture(t);
+  const text = 'move it\r\n\r\nto Tuesday\n';
+  const context = { exchangeId: 'a'.repeat(64), user: 'Find a meeting', answer: 'Tuesday is free' };
+  const prompt = stageMedia({ ...f, text, media: [], conversationContext: context });
+  const original = JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(prompt)[1]);
+  const parent = JSON.parse(/referenced exchange at ("[^"\n]+")/.exec(prompt)[1]);
+  assert.equal(readFileSync(original, 'utf8'), text);
+  assert.deepEqual(JSON.parse(readFileSync(parent, 'utf8')), context);
+  assert.doesNotMatch(prompt, /[\r\n]/);
+  assert.equal(stageMedia({ ...f, text, media: [], conversationContext: context }), prompt);
 });

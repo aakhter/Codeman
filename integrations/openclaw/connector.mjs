@@ -81,6 +81,8 @@ function channelConfig(config, channel) {
   return channel === 'telegram' ? config : channel === 'whatsapp' ? config.whatsapp : undefined;
 }
 export function validateConfig(input) {
+  if (input.contextRouting !== undefined && typeof input.contextRouting !== 'boolean')
+    throw new Error('contextRouting must be boolean');
   const url = new URL(input.baseUrl);
   if (
     url.username ||
@@ -396,8 +398,9 @@ export class Outbox {
 class ContractViolation extends Error {}
 
 export class Connector {
-  constructor({ config, outbox, token, fetchImpl = fetch, deliver, now = Date.now }) {
+  constructor({ config, outbox, token, fetchImpl = fetch, deliver, now = Date.now, routing }) {
     this.config = validateConfig(config);
+    this.routing = routing;
     this.outbox = outbox;
     this.token = token;
     this.fetch = fetchImpl;
@@ -542,6 +545,7 @@ export class Connector {
         if (!validMessageId(channelOf(r.destination), String(receipt?.messageId)))
           throw new Error('Missing question receipt');
         q.receipts.push(String(receipt.messageId));
+        this.routing?.delivered(r.destination, r.key, q.parts.join('\n\n'), String(receipt.messageId), true);
         q.delivery = 'pending';
         delete q.failures;
         delete q.retryAt;
@@ -560,7 +564,7 @@ export class Connector {
   }
   async inbound(event, ctx) {
     const body = event.content ?? '';
-    let text = this.addressedText(event, ctx);
+    let text = ctx.contextRouted ? event.content : this.addressedText(event, ctx);
     if (text === undefined) return { handled: false };
     const destination = trustedDestination(event, ctx, this.config);
     if (!destination) return { handled: true }; // Never send unauthorized text to the model or reply destination.
@@ -604,6 +608,7 @@ export class Connector {
         },
       };
     }
+    const originalText = text;
     const inputHash = mediaIdentity(text, media);
     const control = !media.length && /^(status|result|cancel)(?: +([a-f0-9]{64}))?$/i.exec(text);
     if (control) {
@@ -740,6 +745,7 @@ export class Connector {
           workingDir: assistant.binding?.workingDir,
           key,
           baseUrl: this.config.baseUrl,
+          conversationContext: ctx.routingContext,
         });
       } catch (error) {
         return {
@@ -762,6 +768,7 @@ export class Connector {
         receipts: [],
       });
     }
+    this.routing?.accepted(destination, originalText, key);
     return { handled: true, reply: { text: 'On it — sending this to Brain.' } };
   }
   async tick() {
@@ -818,6 +825,13 @@ export class Connector {
             const receipt = await this.deliver(r.destination, r.parts[index]);
             if (!receipt?.messageId) throw new Error('Missing delivery receipt');
             r.receipts.push(String(receipt.messageId));
+            if (r.status === 'completed')
+              this.routing?.delivered(
+                r.destination,
+                r.key,
+                r.parts.filter((p) => typeof p === 'string').join('\n\n'),
+                String(receipt.messageId)
+              );
             r.delivery = 'polling';
             delete r.deliveryFailures;
             this.outbox.put(r);

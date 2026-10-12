@@ -1,11 +1,17 @@
 {
   "id": "codeman-assistant",
   "name": "Codeman Assistant",
-  "description": "Explicit private Telegram and WhatsApp requests to a named Codeman assistant. Requires the durable request engine.",
+  "description": "Private Telegram and WhatsApp requests and conversation-aware follow-ups to a Codeman assistant. OpenClaw remains the default for new topics.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["baseUrl", "assistantId", "accountId", "allowFrom", "tokenEnv"],
+    "required": [
+      "baseUrl",
+      "assistantId",
+      "accountId",
+      "allowFrom",
+      "tokenEnv"
+    ],
     "properties": {
       "baseUrl": {
         "type": "string"
@@ -35,7 +41,10 @@
       "whatsapp": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["accountId", "allowFrom"],
+        "required": [
+          "accountId",
+          "allowFrom"
+        ],
         "properties": {
           "accountId": {
             "type": "string",
@@ -54,6 +63,10 @@
             "description": "Absolute WhatsApp inbound download directory; same-host forwarding only."
           }
         }
+      },
+      "contextRouting": {
+        "type": "boolean",
+        "description": "Route clear unquoted follow-ups using scoped conversation context; defaults to true. Set false for explicit-only routing."
       }
     }
   },

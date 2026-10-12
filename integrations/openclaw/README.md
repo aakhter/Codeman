@@ -473,3 +473,45 @@ never retypes the message and does not rearm old delivery intents after restart.
 Run `node scripts/smoke-openclaw-assistant.mjs --whatsapp --submit-retry` to
 withhold the first Enter in an isolated native session and verify one completed
 request and one returned result through the channel adapter.
+
+## Conversation-aware follow-ups (COD-514)
+
+OpenClaw remains the default for new topics. After a visible Brain response,
+a clear unquoted continuation such as `move to Tuesday` can stay with Brain.
+Explicit assistant names and known quoted replies take precedence. A new topic
+or `back to OpenClaw` returns to OpenClaw. Ambiguous messages get a short question:
+reply `Brain` or `OpenClaw` to forward the original message to that assistant.
+No task executes while clarification is pending.
+
+The router uses OpenClaw's direct, tool-free `runtime.llm.complete` capability with
+the configured default model and credentials. It classifies ownership only;
+it cannot execute tools or schedule meetings. A Brain decision must identify a
+known prior exchange. The selected exchange is supplied separately as a private
+context file; the original message stays byte-for-byte unchanged in its own file.
+Native questions are answered only when the classifier explicitly identifies an
+answer to one pending question, after the existing request API revalidates it.
+
+State is scoped to channel, account, private chat and sender. Recent exchange
+excerpts and frozen routing decisions are persisted mode 0600 in
+`codeman-assistant-routing.json` beside the outbox. Up to eight exchanges per chat
+are considered, within a seven-day retention horizon; decisions are retained up to seven
+days within a 2,000-decision bound. Accepted Brain requests remain protected by
+the durable outbox even beyond the routing cache. Background completions update
+their own exchange, never foreground ownership. Uncorrelated OpenClaw background
+notifications never change focus. Default-agent answers are included only when
+trusted run/session metadata proves which foreground request produced them.
+
+The inference budget is six seconds; invalid output, unknown parent IDs and
+classifier failures cannot silently select Brain. Classifier failures with relevant Brain context request clarification rather
+than silently sending the message to either assistant. Once chosen, routing stays fixed across duplicates and restart.
+Groups, topic threads, unauthorized senders and internal/tail dispatches retain
+the existing restrictions. No historical message is automatically replayed.
+Set plugin config `contextRouting: false` to restore explicit-only routing.
+
+Verification:
+
+- `node --test integrations/openclaw/connector.test.mjs integrations/openclaw/conversation-routing.test.mjs`
+- `node scripts/smoke-openclaw-assistant.mjs --whatsapp --context-routing` tests the
+  real native assistant with an isolated SDK adapter and deterministic classifier.
+- `openclaw gateway call codeman-assistant.routingCheck --json` tests the installed model's routing decisions
+  using harmless meeting/server-health fixtures; it sends no messages or tasks.

@@ -364,7 +364,7 @@ try {
       ...(whatsapp ? { whatsapp: { accountId: 'canary', allowFrom: [sender], mediaRoot } } : {}),
     },
     on: (name, handler) => {
-      assert.ok(['inbound_claim', 'reply_dispatch'].includes(name));
+      assert.ok(['inbound_claim', 'reply_dispatch', 'message_sent'].includes(name));
       if (name === 'reply_dispatch') ingress = handler;
     },
     registerService: (value) => {
@@ -372,6 +372,14 @@ try {
     },
     logger: { error: (message) => errors.push(message) },
     runtime: {
+      llm: {
+        complete: async params => {
+          const facts = JSON.parse(params.messages[0].content);
+          if (facts.message === 'purple' && facts.pendingQuestions.length === 1) return { text: JSON.stringify({route:'brain',parentId:facts.pendingQuestions[0].parentId,answerQuestion:true}) };
+          const parent = facts.exchanges.find(e => e.owner === 'brain' && e.user.includes('fictional meeting'));
+          return { text: JSON.stringify({ route: facts.message === 'move to Tuesday' ? 'brain' : facts.message.startsWith('do that') ? 'clarify' : 'openclaw', parentId: facts.message === 'move to Tuesday' ? parent?.id : null, answerQuestion:false }) };
+        },
+      },
       channel: {
         outbound: {
           loadAdapter: async (adapterChannel) => {
@@ -507,7 +515,7 @@ try {
     assert.equal(receipts[1].text.trim(), `${hiddenCode} FOLLOWUP_OK`);
     const replyRequests = (await api(`/assistants/${assistant.id}/requests`)).requests;
     assert.equal(replyRequests.length, 2);
-    assert.equal(replyRequests.find((r) => r.text === replyEvent.ctx.BodyForCommands)?.status, 'completed');
+    assert.equal(replyRequests.find((r) => (r.text.includes('UTF-8 file at') ? readFileSync(JSON.parse(/UTF-8 file at (\"[^\"\n]+\")/.exec(r.text)[1]), 'utf8') : r.text) === replyEvent.ctx.BodyForCommands)?.status, 'completed');
     const ackReply = {
       ...replyEvent,
       ctx: {
@@ -539,6 +547,37 @@ try {
     );
   }
 
+  if (process.argv.includes('--context-routing')) {
+    const before = (await api(`/assistants/${assistant.id}/requests`)).requests.length;
+    const startReceipts = receipts.length;
+    const offer = { ...event, ctx: { ...event.ctx, media:[], MessageSid:'51401',
+      BodyForCommands:'Brain, This is a fictional meeting with Craig. Tuesday 5 PM is available and Wednesday is booked. For this fictional exchange, a later request to move to Tuesday means reply exactly MOVED_TUESDAY, with no real scheduling or external actions. For now reply exactly: Craig is available Tuesday at 5 PM; Wednesday is still booked.' } };
+    assert.equal((await ingress(offer,context)).handled,true);
+    await until(() => receipts.length === startReceipts + 1,120000);
+    assert.equal(receipts.at(-1).text.trim(),'Craig is available Tuesday at 5 PM; Wednesday is still booked.');
+    await service.stop(); await service.start(serviceContext);
+    const followup = { ...offer, ctx:{ ...offer.ctx, MessageSid:'51402', BodyForCommands:'move to Tuesday' } };
+    assert.equal((await ingress(followup,context)).handled,true);
+    assert.equal((await ingress(followup,context)).handled,true);
+    await until(() => receipts.length === startReceipts + 2,120000);
+    assert.equal(receipts.at(-1).text.trim(),'MOVED_TUESDAY');
+    const all=(await api(`/assistants/${assistant.id}/requests`)).requests;
+    assert.equal(all.length,before+2);
+    const moved=all.at(-1);
+    const originalPath=JSON.parse(/UTF-8 file at ("[^"\n]+")/.exec(moved.text)[1]);
+    assert.equal(readFileSync(originalPath,'utf8'),'move to Tuesday');
+    assert.match(moved.text,/referenced exchange/);
+    const topic={...offer,ctx:{...offer.ctx,MessageSid:'51403',BodyForCommands:'What is the server health?'}};
+    assert.equal((await ingress(topic,context)).handled,false);
+    const ambiguous={...offer,ctx:{...offer.ctx,MessageSid:'51404',BodyForCommands:'do that\n\nplease'}};
+    assert.equal((await ingress(ambiguous,context)).handled,true);
+    assert.match(receipts.at(-1).text,/Continue with Brain/);
+    const selection={...offer,ctx:{...offer.ctx,MessageSid:'51405',BodyForCommands:'OpenClaw'}};
+    assert.equal((await ingress(selection,context)).handled,false);
+    assert.equal(selection.ctx.BodyForCommands,'do that\n\nplease');
+    assert.equal((await api(`/assistants/${assistant.id}/requests`)).requests.length,before+2);
+    checks.push('contextual unquoted follow-up routes to same native Brain conversation exactly once after restart; original text and parent exchange preserved; new topic defaults to OpenClaw; ambiguity clarified without executing');
+  }
   if (process.argv.includes('--tables')) {
     assert.equal(whatsapp, true);
     const before = receipts.length;
@@ -576,7 +615,7 @@ try {
   assert.equal(await page.locator('.assistant-tiles').count(), 1);
   assert.ok(!(await page.locator('.assistant-card').innerText()).includes(assistant.binding.conversationId));
   await page.screenshot({ path: join(root, 'desktop-assistants.png') });
-  if (process.argv.includes('--questions')) {
+  if (process.argv.includes('--questions') || process.argv.includes('--context-questions')) {
     assert.equal(mode, 'codex');
     const before = (await api(`/assistants/${assistant.id}/requests`)).requests.length;
     const startReceipts = receipts.length;
@@ -595,7 +634,7 @@ try {
     await service.stop();
     await service.start(serviceContext);
     const answer = { ...event, ctx: { ...event.ctx, media: [], MessageSid: '50702',
-      ReplyToId: String(questionReceipt), BodyForCommands: 'purple' } };
+      ReplyToId: process.argv.includes('--context-questions') ? undefined : String(questionReceipt), BodyForCommands: 'purple' } };
     assert.equal((await ingress(answer, context)).handled, true);
     assert.equal((await ingress(answer, context)).handled, true);
     const completed = await until(async () => {
