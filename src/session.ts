@@ -125,7 +125,7 @@ import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { getCli } from './config/cli-registry/registry.js';
 import { legacyResumeSlot } from './session-cli-registry-bridge.js';
-import { SubmitVerifier } from './session-submit-verifier.js';
+import { SubmitVerifier, exactPromptStillInComposer } from './session-submit-verifier.js';
 import { compileVersionRegex } from './config/cli-registry/patterns.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
@@ -863,6 +863,7 @@ export class Session extends EventEmitter {
   private _trustDialogTimer: NodeJS.Timeout | null = null; // Re-read after a keystroke (see below)
   /** Re-sends Enter while a programmatic prompt still sits in the composer (session-submit-verifier.ts). */
   private _submitVerifier: SubmitVerifier | null = null;
+  private _assistantSubmitVerifier: SubmitVerifier | null = null;
   private _interactiveStartedAt = 0; // When the interactive pane launched (bounds that scan)
   private _taskTracker: TaskTracker;
 
@@ -4974,6 +4975,7 @@ export class Session extends EventEmitter {
   private _clearAllTimers(): void {
     // Stop re-sending Enter for a prompt this session will never take now
     this._submitVerifier?.cancel();
+    this._assistantSubmitVerifier?.cancel();
     this._submitVerifier = null;
     // Clear the workspace-trust follow-up read
     if (this._trustDialogTimer) {
@@ -5401,7 +5403,27 @@ export class Session extends EventEmitter {
   }
   cancelAssistantSubmitVerification(): void {
     this._submitVerifier?.cancel();
+    this._assistantSubmitVerifier?.cancel();
   }
+  /** Enter-only recovery for a new, owned Codex request; never retypes its text. */
+  verifyAssistantSubmission(text: string, permit: string, beforeEnter: () => Promise<boolean>): void {
+    this._assistantSubmitVerifier?.cancel();
+    if (this.mode !== 'codex' || !this._mux?.capturePaneText || !this._muxSession) return;
+    this._assistantSubmitVerifier = new SubmitVerifier({
+      capture: () =>
+        this._isStopped || !this._muxSession ? null : this._mux?.capturePaneText?.(this._muxSession.muxName),
+      glyph: () => '›',
+      matches: exactPromptStillInComposer,
+      beforeEnter,
+      sendEnter: async () => {
+        if (this._isStopped || !this.assistantInputAllowed(permit)) return;
+        await this.writeViaMux('\r', { assistantPermit: permit });
+      },
+      log: (message) => console.log(`[Session ${this.id.slice(0, 8)}] assistant ${message}`),
+    });
+    this._assistantSubmitVerifier.arm(text);
+  }
+
   write(data: string, options: SessionWriteOptions = {}): boolean {
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
     this._assistantLastInputAt = Date.now();
