@@ -187,8 +187,8 @@ export default {
         try {
           for (const part of result.reply.parts ?? [result.reply.text]) {
             const receipt = await deliver(destination, part);
-            if (decision?.route === 'clarify') router?.clarified(destination, String(receipt?.messageId));
-            else if (decision?.route === 'brain') router?.acknowledged(destination, String(receipt?.messageId));
+            if (decision?.route === 'clarify') router?.clarified(destination, String(receipt?.messageId ?? ''));
+            else if (decision?.route === 'brain') router?.acknowledged(destination, String(receipt?.messageId ?? ''));
           }
           queuedFinal = true;
         } catch {
