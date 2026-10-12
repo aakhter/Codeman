@@ -5222,6 +5222,17 @@ export class Session extends EventEmitter {
           this._armExternalCliIdleTimer();
           return;
         }
+      } else if (wasWorking && getCli(this.mode)?.capabilities.workDetect?.workingLine) {
+        // A quiet stream is not the end of a turn: a CLI that declares a working line
+        // (opencode's footer spinner, gemini's spinner line) can sit silent between
+        // repaints while its turn still runs. Read the SCREEN before calling it idle,
+        // as _confirmIdle() does for the composer path.
+        // _probePaneWorking() reads the pane (throttled) for the declared working line or
+        // a hand-off to workers; null means it could not read, so the quiet timer stands.
+        if (this._probePaneWorking() === true) {
+          this._armExternalCliIdleTimer();
+          return;
+        }
       }
       if (wasWorking || isInitialReady) {
         this._isWorking = false;

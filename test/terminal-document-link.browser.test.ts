@@ -25,8 +25,8 @@ const [{ WebServer }, { TmuxManager }] = await Promise.all([
 // construction to the host's tmux probe (which test/setup intentionally mocks).
 vi.spyOn(TmuxManager, 'isTmuxAvailable').mockReturnValue(true);
 
-const PORT = 3188;
-const BASE_URL = `http://localhost:${PORT}`;
+// Ephemeral port (test-ports-guard): set once the server has bound.
+let BASE_URL = '';
 const SESSION_ID = '33333333-3333-4333-8333-333333333333';
 const WORKING_DIR = '/workspace/project';
 const FILE_PATH = 'out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
@@ -77,8 +77,9 @@ describe('COD-232 terminal document link activation in a real browser', () => {
   const requests: Request[] = [];
 
   beforeAll(async () => {
-    server = new WebServer(PORT, false, true);
+    server = new WebServer(0, false, true);
     await server.start();
+    BASE_URL = `http://localhost:${server.boundPort}`;
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 800 }, hasTouch: true });
     cdp = await page.context().newCDPSession(page);

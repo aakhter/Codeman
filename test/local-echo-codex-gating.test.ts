@@ -577,7 +577,9 @@ describe('local-echo prompt finders with the viewport parked above the bottom', 
     expect(find(parked)).toEqual({ row: 23, col: 2 });
   });
 
-  it('opencode: reads the border on the cursor screen row when parked', () => {
+  // Downstream runs opencode on predictive echo (policy 'predict'), so there is no
+  // buffer-overlay prompt finder for it to test.
+  it.skip('opencode: reads the border on the cursor screen row when parked', () => {
     const { find } = finderFor('opencode');
     const parked = terminal({ 83: '\u2503  hello' }, { viewportY: 47, baseY: 83, cursorY: 0 });
     expect(find(parked)).toEqual({ row: 36, col: 0 });

@@ -12675,7 +12675,8 @@ kbd {
 }
 
 .connection-line.lineage-line {
-  stroke: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  --lineage-effective-color: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  stroke: var(--lineage-effective-color);
   stroke-width: 1.5;
   stroke-dasharray: none;
   stroke-linecap: round;
@@ -12702,8 +12703,18 @@ kbd {
 .lineage-line-dot {
   --lineage-dot-r: 2.5px;
   r: var(--lineage-dot-r);
-  fill: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  --lineage-effective-color: var(--lineage-activity-color, var(--lineage-color, var(--session-blue, #2b8fd9)));
+  fill: var(--lineage-effective-color);
   filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+}
+
+/* Waiting on / checking its own agents: the child's line and dot take the purple
+   agent-activity colour (session-lineage.js adds the classes). */
+.connection-line.lineage-line--waiting-agents,
+.connection-line.lineage-line--checking-agents,
+.lineage-line-dot--waiting-agents,
+.lineage-line-dot--checking-agents {
+  --lineage-activity-color: var(--session-purple);
 }
 
 .lineage-family--focus .lineage-line-dot {

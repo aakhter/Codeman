@@ -164,6 +164,7 @@
     'Terminal not connected: its size is sent when it reconnects': '终端未连接：重新连接后会发送其尺寸',
     'Could not determine terminal size': '无法确定终端尺寸',
     'Failed to restore terminal size': '恢复终端尺寸失败',
+    'Terminal restore queued until connection recovers': '终端恢复已排队，连接恢复后执行',
     // A tile header's tooltip while tiles can move (with the state above it: a pattern below).
     'Drag to move the tile': '拖动可移动窗格',
     'Resize tile columns': '调整窗格列宽',

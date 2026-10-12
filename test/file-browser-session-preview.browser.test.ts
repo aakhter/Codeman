@@ -9,8 +9,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page, type Request } from 'playwright';
 import { WebServer } from '../src/web/server.js';
 
-const PORT = 3187;
-const BASE_URL = `http://localhost:${PORT}`;
+// Ephemeral port (test-ports-guard): set once the server has bound.
+let BASE_URL = '';
 const OWNER_SESSION_ID = '11111111-1111-4111-8111-111111111111';
 const ACTIVE_SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const FILE_PATH = 'out/airdc-fy27-roadmap-mapping/deliverables/fy27-airdc-messaging-market-story.docx';
@@ -33,8 +33,9 @@ describe('COD-231 Files preview session ownership in a real browser', () => {
   const requests: RequestRecord[] = [];
 
   beforeAll(async () => {
-    server = new WebServer(PORT, false, true);
+    server = new WebServer(0, false, true);
     await server.start();
+    BASE_URL = `http://localhost:${server.boundPort}`;
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 

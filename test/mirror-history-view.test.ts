@@ -40,7 +40,8 @@ describe('COD-187 live-mirror structural guards', () => {
 
   it('needsRefresh recovers mirror tabs via ?frame=1, not a history replay', () => {
     const start = appJs.indexOf('async _onSessionNeedsRefresh(');
-    const body = appJs.slice(start, start + 900);
+    // Upstream's tile-grid and refresh-owner guards now come first, so read further in.
+    const body = appJs.slice(start, start + 1600);
     expect(body).toContain('_isMirrorSession(this.activeSessionId)');
     expect(body).toContain('_refreshMirrorFrame');
   });

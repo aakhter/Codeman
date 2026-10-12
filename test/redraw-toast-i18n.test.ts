@@ -47,6 +47,8 @@ describe('the Redraw toasts in zh-CN', () => {
     expect(new Set(literals)).toEqual(
       new Set([
         'This session is sized by its own window',
+        // Downstream: viewer-ownership restore can be queued while the socket is down.
+        'Terminal restore queued until connection recovers',
         'Terminal not connected: its size is sent when it reconnects',
         'Could not determine terminal size',
         'Failed to restore terminal size',

@@ -99,7 +99,7 @@ describe('assign + find', () => {
 
 describe('the click delegate', () => {
   it('handles fragment links before anything that would let the browser follow them', () => {
-    const delegate = APP.slice(APP.indexOf('_bindResponseViewerInteractions(body) {'));
+    const delegate = APP.slice(APP.indexOf('_bindResponseViewerInteractions(body, responseSessionId = null) {'));
     const fragment = delegate.indexOf('a[href^="#"]');
     expect(fragment).toBeGreaterThan(-1);
     // After file-path links (their href is '#', they open the preview) and before the loopback/new-tab handling.

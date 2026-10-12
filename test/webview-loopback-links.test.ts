@@ -311,7 +311,7 @@ describe('callers consult the hook first', () => {
   it('response viewer links route through the hook and keep the file-path handler first', () => {
     // Downstream pins the viewer to a session id, so the signature has a 2nd param.
     const bind = APP_JS.indexOf('_bindResponseViewerInteractions(body, responseSessionId = null) {');
-    const section = APP_JS.slice(bind, bind + 2500);
+    const section = APP_JS.slice(bind, bind + 4000);
     const pathHandler = section.indexOf("closest('a.rv-path')");
     const urlHandler = section.indexOf("closest('a[href]')");
     expect(pathHandler).toBeGreaterThan(-1);

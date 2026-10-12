@@ -814,7 +814,9 @@ describe('floating windows whose parent row the search hid', () => {
   /** What the shared SVG pass drew: which window each line serves, and where it starts. */
   const lines = () =>
     [...document.querySelectorAll('#connectionLines path')].map((path) => ({
-      win: path.getAttribute('data-run-id') || path.getAttribute('data-agent-id'),
+      // Downstream keys subagent connectors by composite identity (COD-350): data-agent-key.
+      win:
+        path.getAttribute('data-run-id') || path.getAttribute('data-agent-id') || path.getAttribute('data-agent-key'),
       from: (path.getAttribute('d') || '').split(' C ')[0],
     }));
 
