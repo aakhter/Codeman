@@ -878,7 +878,7 @@
    *  - Anything else, or attempts exhausted, drops the batch and reports it; the
    *    caller re-reads so the rail shows the server's truth.
    *
-   * options: { initialLayout, put({ baseVersion, layout }) -> { ok, status,
+   * options: { initialLayout, put({ baseVersion, layout, operations }) -> { ok, status,
    *   layout }, fetchLayout?(), applyLayout(layout, meta), reportError?(message),
    *   onSettled?(), onFailure?(), schedule?(fn), cancel?(handle), maxAttempts? }
    */
@@ -921,7 +921,11 @@
             inFlight = [];
             break;
           }
-          const response = await options.put({ baseVersion: authoritative.version, layout: desired.layout });
+          const response = await options.put({
+            baseVersion: authoritative.version,
+            layout: desired.layout,
+            operations: inFlight,
+          });
           if (disposed) return;
           if (response?.ok && response.layout) {
             authoritative = normalizeLayout(response.layout);

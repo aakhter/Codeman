@@ -7000,8 +7000,17 @@ class CodemanApp {
     return parents;
   }
 
-  async _putTabLayout({ baseVersion, layout }) {
-    const body = { baseVersion, layout: { ...layout, updatedAt: layout.updatedAt || new Date().toISOString() } };
+  _tabLayoutWriteBody({ baseVersion, layout, operations }) {
+    // Legacy whole-layout writes preserve the server's Focus flags. A batch
+    // that changes Focus must carry its intent through the semantic API.
+    if (operations?.some((operation) => operation.type === 'setFocus' || operation.type === 'moveFocus')) {
+      return { baseVersion, operations };
+    }
+    return { baseVersion, layout: { ...layout, updatedAt: layout.updatedAt || new Date().toISOString() } };
+  }
+
+  async _putTabLayout(request) {
+    const body = this._tabLayoutWriteBody(request);
     const response = await this._api('/api/tab-layout', { method: 'PUT', body });
     if (!response) return { ok: false, status: 0, layout: null };
     let data = null;
@@ -7549,7 +7558,7 @@ class CodemanApp {
       void fetch('/api/tab-layout', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseVersion: editor.baseVersion(), layout: { ...layout, updatedAt: layout.updatedAt || new Date().toISOString() } }),
+        body: JSON.stringify(this._tabLayoutWriteBody({ baseVersion: editor.baseVersion(), layout, operations })),
         keepalive: true,
       }).catch(() => {});
     } catch {}

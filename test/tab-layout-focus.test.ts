@@ -18,6 +18,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
+import Fastify from 'fastify';
+import { TabLayoutService } from '../src/tab-layout-service.js';
+import { registerTabLayoutRoutes } from '../src/web/routes/tab-layout-routes.js';
+import type { TabLayout } from '../src/tab-layout.js';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const PUBLIC = join(process.cwd(), 'src/web/public');
@@ -291,6 +295,8 @@ beforeAll(async () => {
   });
   win = dom.window;
   document = win.document;
+  // The harness builds its own controller; suppress the page's automatic boot.
+  document.addEventListener('DOMContentLoaded', (event) => event.stopImmediatePropagation(), { once: true });
   win.setInterval = () => 0;
   win.requestAnimationFrame = () => 0;
   win.CSS = { escape: (value: string) => value };
@@ -315,10 +321,15 @@ beforeAll(async () => {
 
 function installFetch() {
   const puts: any[] = [];
+  let saved = focusLayout();
   win.fetch = vi.fn(async (_url: string, init: any) => {
     const body = init?.body ? JSON.parse(init.body) : null;
     if (init?.method === 'PUT') puts.push(body);
-    const payload = { success: true, data: { layout: { ...body?.layout, version: (body?.baseVersion ?? 0) + 1 } } };
+    const next = body?.operations
+      ? body.operations.reduce((layout: Layout, operation: any) => TL.applyOperation(layout, operation), saved)
+      : body?.layout;
+    saved = { ...next, version: (body?.baseVersion ?? 0) + 1 };
+    const payload = { success: true, data: { layout: saved } };
     return { ok: true, status: 200, json: async () => payload };
   });
   return puts;
@@ -401,6 +412,81 @@ afterEach(() => {
 });
 
 describe('Focus section on the rail (COD-509)', () => {
+  it('COD-515 keeps a session in Focus after the real save response and reload', async () => {
+    const api = Fastify();
+    let saved = focusLayout() as TabLayout;
+    let order = ['s1', 's2', 's3', 's4'];
+    const service = new TabLayoutService({
+      store: {
+        getTabLayout: () => saved,
+        getTabLayouts: () => ({ '@single': saved }),
+        getSessions: () => Object.fromEntries(order.map((id, index) => [id, { id, createdAt: index }])),
+        getSessionOrder: () => order,
+        commitTabLayoutProjection: (updates: Record<string, TabLayout>, project: (ids: string[]) => string[]) => {
+          saved = updates['@single'];
+          order = project(order);
+          return { layouts: updates, sessionOrder: order };
+        },
+      } as never,
+      sessions: new Map(),
+      readWebviews: async () => [{ id: 'w1' }],
+      broadcast: () => {},
+      broadcastSessionOrder: () => {},
+      now: () => '2026-10-12T00:00:00.000Z',
+    });
+    registerTabLayoutRoutes(api, { tabLayouts: service });
+    const statuses: number[] = [];
+    win.fetch = vi.fn(async (url: string, init: any) => {
+      const response = await api.inject({
+        method: init?.method || 'GET',
+        url,
+        payload: init?.body ? JSON.parse(init.body) : undefined,
+      });
+      statuses.push(response.statusCode);
+      expect([200, 409]).toContain(response.statusCode);
+      return { ok: response.statusCode === 200, status: response.statusCode, json: async () => response.json() };
+    });
+    const app = makeApp();
+    try {
+      // Another client changed the group while this browser held version 8.
+      saved = {
+        ...saved,
+        version: 9,
+        groups: saved.groups.map((group) => (group.id === 'gx' ? { ...group, name: 'Renamed elsewhere' } : group)),
+      };
+      openRowMenu(app, 's2');
+      clickMenu('Add to Focus');
+      await app._tabLayoutEditor.flush();
+      expect(statuses).toEqual([409, 200]);
+      expect(saved.groups[0].name).toBe('Renamed elsewhere');
+      expect(row('s2').closest('[data-tab-focus-group]')).not.toBeNull();
+      expect(saved.groups[0].refs[0].focus).toBe(true);
+      await app._loadTabLayout();
+      expect(row('s2').closest('[data-tab-focus-group]')).not.toBeNull();
+      app.moveFocusRefBy(s('s2'), -1);
+      await app._tabLayoutEditor.flush();
+      expect(saved.focusOrder).toEqual([s('s4'), s('s2'), w('w1')]);
+      openRowMenu(app, 's2');
+      clickMenu('Remove from Focus');
+      await app._tabLayoutEditor.flush();
+      expect(saved.groups[0].refs[0].focus).toBeUndefined();
+      expect(row('s2').closest('[data-tab-group-id="gx"]')).not.toBeNull();
+      // A page closing before its queued save flushes must persist the same intent.
+      openRowMenu(app, 's2');
+      clickMenu('Add to Focus');
+      app._persistPendingTabLayoutEdits();
+      app._tabLayoutEditor.dispose();
+      const keepaliveResponse = await win.fetch.mock.results.at(-1).value;
+      expect(keepaliveResponse.status).toBe(200);
+      expect(saved.groups[0].refs[0].focus).toBe(true);
+      makeApp(saved);
+      expect(row('s2').closest('[data-tab-focus-group]')).not.toBeNull();
+    } finally {
+      app._tabLayoutEditor?.dispose();
+      await api.close();
+    }
+  });
+
   it('renders Focus on top with a star on its rows, numbered first', () => {
     makeApp();
     const sections = [...document.querySelectorAll<HTMLElement>('.tab-layout-group')].map(
@@ -437,7 +523,7 @@ describe('Focus section on the rail (COD-509)', () => {
     expect(document.querySelector('.session-tab[data-webview-id="w1"]')).not.toBeNull();
   });
 
-  it('"Add to Focus" saves a layout with the flag, and keeps the existing Focus', async () => {
+  it('"Add to Focus" saves its semantic intent and keeps the existing Focus', async () => {
     const puts = installFetch();
     const app = makeApp();
     openRowMenu(app, 's1');
@@ -445,9 +531,10 @@ describe('Focus section on the rail (COD-509)', () => {
     clickMenu('Add to Focus');
     await flush();
     expect(puts).toHaveLength(1);
-    expect(puts[0].layout.ungrouped[0]).toEqual(s('s1', { focus: true }));
-    expect(puts[0].layout.groups[1].refs[0]).toEqual(s('s4', { focus: true }));
-    expect(puts[0].layout.focusOrder).toEqual([s('s4'), w('w1')]);
+    expect(puts[0]).toEqual({ baseVersion: 8, operations: [{ type: 'setFocus', ref: s('s1'), focused: true }] });
+    expect(app.tabLayout.ungrouped[0]).toEqual(s('s1', { focus: true }));
+    expect(app.tabLayout.groups[1].refs[0]).toEqual(s('s4', { focus: true }));
+    expect(app.tabLayout.focusOrder).toEqual([s('s4'), w('w1')]);
     expect(row('s1').closest('[data-tab-focus-group]')).not.toBeNull();
   });
 
@@ -466,7 +553,8 @@ describe('Focus section on the rail (COD-509)', () => {
     ]);
     clickMenu('Move down in Focus');
     await flush();
-    expect(puts[0].layout.focusOrder).toEqual([w('w1'), s('s4')]);
+    expect(puts[0].operations).toEqual([{ type: 'moveFocus', ref: s('s4'), index: 1 }]);
+    expect(app.tabLayout.focusOrder).toEqual([w('w1'), s('s4')]);
   });
 
   it('Alt+ArrowUp on a Focus row reorders Focus from the keyboard', async () => {
@@ -477,7 +565,8 @@ describe('Focus section on the rail (COD-509)', () => {
     web.focus();
     key(web, 'ArrowUp', { altKey: true });
     await flush();
-    expect(puts[0].layout.focusOrder).toEqual([w('w1'), s('s4')]);
+    expect(puts[0].operations).toEqual([{ type: 'moveFocus', ref: w('w1'), index: 0 }]);
+    expect(app.tabLayout.focusOrder).toEqual([w('w1'), s('s4')]);
     // A row outside Focus: the chord does nothing.
     key(row('s1'), 'ArrowUp', { altKey: true });
     await flush();

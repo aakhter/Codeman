@@ -237,7 +237,7 @@ describe('edit coordinator', () => {
     return { editor, applied };
   }
 
-  it('applies at once and PUTs exactly { baseVersion, layout } with the held version', async () => {
+  it('applies at once and supplies the layout and semantic intent with the held version', async () => {
     const { put, calls } = controlledPut();
     const { editor, applied } = makeEditor(put);
     editor.enqueue({ type: 'renameGroup', groupId: 'g1', name: 'Front' });
@@ -245,7 +245,8 @@ describe('edit coordinator', () => {
     expect(applied.at(-1).meta).toEqual({ optimistic: true });
     await settle();
     expect(calls).toHaveLength(1);
-    expect(Object.keys(calls[0].request).sort()).toEqual(['baseVersion', 'layout']);
+    expect(Object.keys(calls[0].request).sort()).toEqual(['baseVersion', 'layout', 'operations']);
+    expect(calls[0].request.operations).toEqual([{ type: 'renameGroup', groupId: 'g1', name: 'Front' }]);
     expect(calls[0].request.baseVersion).toBe(5);
     expect(calls[0].request.layout.groups[0].name).toBe('Front');
     calls[0].resolve({
