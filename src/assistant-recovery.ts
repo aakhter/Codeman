@@ -25,7 +25,7 @@ import type { AssistantDefinition } from './types/assistant.js';
 import type { AssistantExecutionSession, AssistantRequestManager } from './assistant-request-manager.js';
 import { AssistantStore } from './assistant-store.js';
 import { resolveAssistantBinding } from './assistant-registry.js';
-import { findAssistantConversation, assistantBindingMode } from './assistant-native.js';
+import { findAssistantConversation, assistantBindingMode, nativeAssistantProfile } from './assistant-native.js';
 
 const Profile = z
   .object({
@@ -343,7 +343,8 @@ export function assistantComposerEmpty(
   mode: 'codex' | 'claude' | 'opencode' = 'codex'
 ): boolean {
   if (!screen) return false;
-  if (mode === 'opencode') {
+  const profile = nativeAssistantProfile(mode);
+  if (profile === 'opencode') {
     const plain = screen.replace(/\x1b\[[0-9;]*m/g, '');
     // Inspect the last OpenTUI input box, never a placeholder in conversation
     // history. Resumed sessions draw blank input rows instead of a placeholder.
@@ -366,7 +367,7 @@ export function assistantComposerEmpty(
     line
       .replace(/\x1b\[[0-9;]*m/g, '')
       .trimStart()
-      .startsWith(mode === 'claude' ? '❯' : '›')
+      .startsWith(profile === 'claude' ? '❯' : '›')
   );
   const line = lines.at(-1);
   if (!line) return false;
@@ -384,11 +385,11 @@ export function assistantComposerEmpty(
     } else {
       let text = token;
       if (!after) {
-        if (!text.includes(mode === 'claude' ? '❯' : '›')) continue;
+        if (!text.includes(profile === 'claude' ? '❯' : '›')) continue;
         text = text
-          .split(mode === 'claude' ? '❯' : '›')
+          .split(profile === 'claude' ? '❯' : '›')
           .slice(1)
-          .join(mode === 'claude' ? '❯' : '›');
+          .join(profile === 'claude' ? '❯' : '›');
         after = true;
       }
       if (!dim) visible += text;

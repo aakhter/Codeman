@@ -350,6 +350,8 @@ export interface CliEnv {
  * Keeping them as separate fields makes that invariant structural rather than commented.
  */
 export interface CliCapabilities {
+  /** Named native conversation adapter used by Codeman assistant bindings. */
+  nativeAssistantProfile?: 'codex' | 'claude' | 'opencode';
   /**
    * Non-Claude run mode that uses its own TUI and output format (`isExternalCliMode`):
    * no Claude transcript, no hooks, no Claude-format token/BashTool parsing. An explicit

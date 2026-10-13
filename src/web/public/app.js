@@ -6414,10 +6414,12 @@ class CodemanApp {
     this.activeWorkflowRunId = null;
     this.activeWorkflowPhaseIndex = null;
     // Clean up mobile/keyboard handlers and re-init (prevents listener accumulation on reconnect)
+    this._destroyMobileImePreview?.();
     MobileDetection.cleanup();
     KeyboardHandler.cleanup();
     MobileDetection.init();
     KeyboardHandler.init();
+    this._initMobileImePreview?.();
     // Clear tab alerts
     this.tabAlerts.clear();
     this.attachmentHistoryCounts.clear();
@@ -9731,7 +9733,7 @@ class CodemanApp {
     // COD-213: when wrap state changes the header height changes, shrinking/growing the
     // terminal container. The ResizeObserver fires but with a 300ms debounce — call
     // fit() immediately so dimensions are correct the instant the layout settles.
-    if (shouldWrap !== wasWrapped) this.fitAddon?.fit();
+    if (shouldWrap !== wasWrapped) this.syncTerminalGeometry?.();
   }
 
   // COD-147: toggle `header--tabs-wrapped` so the right-side cluster wraps to a
@@ -11054,7 +11056,7 @@ class CodemanApp {
       if (userInitiated) {
         this.markIdleAlertSeen(sessionId);
         this.applyTerminalFontPolicy?.(this.sessions.get(sessionId)?.mode);
-        try { this.fitAddon?.fit(); } catch {}
+        try { this.syncTerminalGeometry?.(); } catch {}
         this._terminalViewerActivity?.activate('session-select');
       }
       return;
@@ -11271,6 +11273,20 @@ class CodemanApp {
       return;
     }
 
+    // The selected session owns this terminal now. Fit its geometry before the
+    // viewer claims sizing ownership so the activation and resize describe the
+    // shape this tab actually displays. Automatic selections fit locally but
+    // do not claim the shared PTY.
+    let dimsChanged = false;
+    if (document.visibilityState === 'visible') {
+      this._paneWidthRefused = false;
+      this.syncTerminalGeometry?.();
+    }
+    if (userInitiated && document.visibilityState === 'visible') {
+      this._terminalViewerActivity?.activate('session-select');
+      dimsChanged = (await this.sendResize(sessionId).catch(() => false)) === true;
+    }
+
     // Load terminal buffer for this session
     // Show cached content instantly while fetching fresh data in background.
     // Use tail mode for faster initial load (128KB is enough for recent visible content).
@@ -11298,23 +11314,6 @@ class CodemanApp {
     // blanked before the fetch, because only then is there nothing on screen.
     let clearedBeforeFresh = false;
     try {
-      // Fit terminal to container BEFORE writing any buffer data.
-      // If the browser was resized while viewing another session, the terminal
-      // canvas may be at stale dimensions — content would render at wrong width.
-      // A width refusal belonged to the PREVIOUS session's pane, and while it
-      // stands sendResize keeps the columns it last adopted; this pane's own
-      // report re-establishes it if another device holds this one too.
-      this._paneWidthRefused = false;
-      this.syncTerminalGeometry();
-
-      // Also push the new dimensions to the PTY. Without this, codex/codeman
-      // sees the size that was set the last time the throttled resize handler
-      // fired (often the size of a different session's container, or the
-      // initial tmux default). The visible symptom is codex rendering inside
-      // a small region with empty rows below the status bar.
-      // sendResize is a no-op on the server when dims haven't changed, so
-      // calling it every tab switch is cheap.
-      const dimsChanged = await this.sendResize(sessionId, { forceHttp: true }).catch(() => false);
       // The size the capture below will be taken against. The debounced resize
       // handler can move the terminal again while the load runs, so this is a
       // recorded value rather than a later read of `_lastResizeDims`.
@@ -11618,18 +11617,8 @@ class CodemanApp {
         });
       }
 
-      // Fire-and-forget resize to nudge Ink via SIGWINCH on real size changes.
-      // Previously we also sent Ctrl+L (\x0c) here to force a full Ink redraw,
-      // but Claude Code 2.x treats Ctrl+L as a two-step "clear conversation"
-      // command — if a page refresh or SSE reconnect ran selectSession twice
-      // within Claude's confirmation window, the second \x0c silently wiped the
-      // conversation. Stale Ink frames in the tailed buffer are a cosmetic
-      // annoyance that disappear on the user's next keypress; data loss is not
-      // acceptable. Do NOT re-introduce Ctrl+L here.
-      this.sendResize(sessionId);
-      // sendResize fits synchronously before its first await, so this reads the
-      // size that survived the load rather than the one the capture was taken
-      // at. The two differ whenever the terminal was still settling.
+      // Read the size that survived the load rather than the one the capture
+      // was taken at. The two differ whenever the terminal was still settling.
       const dimsAfterLoad = this.getTerminalDimensions?.();
       // Only a visible-frame capture positions its rows absolutely, and only
       // that frame can be damaged by a terminal of the wrong size. A `full=1`
@@ -11746,7 +11735,7 @@ class CodemanApp {
       this._scheduleTerminalRepaint();
       // COD-284b: tab-switch / multi-reload tear — second fit+refresh after buffer paint
       requestAnimationFrame(() => {
-        try { this.fitAddon?.fit(); } catch {}
+        try { this.syncTerminalGeometry?.(); } catch {}
         try { this.terminal?.refresh(0, Math.max(0, (this.terminal.rows || 24) - 1)); } catch {}
         this._syncTerminalTouchAction?.();
       });

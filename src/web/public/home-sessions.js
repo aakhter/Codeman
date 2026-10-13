@@ -179,6 +179,13 @@ Object.assign(CodemanApp.prototype, {
    * web tabs. Home is a complete tab list, never the rail's collapsed view.
    */
   _homeTabRefs() {
+    if (this._tabLayoutFirstPaintPending) return [];
+    const projected = this._refreshTabProjection?.()?.completeRefs;
+    if (Array.isArray(projected)) {
+      return projected.filter((ref) =>
+        ref.kind === 'session' ? this.sessions?.has(ref.id) : this.webviews?.has(ref.id)
+      );
+    }
     const sessions = Array.isArray(this.sessionOrder) ? [...this.sessionOrder] : [];
     for (const id of this.sessions?.keys() || []) if (!sessions.includes(id)) sessions.push(id);
     return [
@@ -275,6 +282,7 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Array<object>} row descriptors, ready to render
    */
   buildHomeSessionRows() {
+    if (this._tabLayoutFirstPaintPending) return [];
     const cases = Array.isArray(this.cases) ? this.cases : [];
     const order = Array.isArray(this.sessionOrder) ? this.sessionOrder : [];
     const ids = order.filter((id) => this.sessions?.has(id));
@@ -286,6 +294,7 @@ Object.assign(CodemanApp.prototype, {
       const session = this.sessions.get(id);
       const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
       const state = this._mobileOverviewState(session, this.pendingHooks?.get(id));
+      const activity = window.CodemanSessionActivity?.resolve(session);
       // Guarded: a stale cached mobile-overview.js may predate the helper.
       const exit = this._mobileOverviewExit ? this._mobileOverviewExit(state, session) : null;
       const mode = session.mode || 'claude';
@@ -298,10 +307,15 @@ Object.assign(CodemanApp.prototype, {
         caseName: matched ? matched.name : '',
         dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
         state,
+        activityStatusSince: Number(session.activityStatusSince) || 0,
         // What the row's dot, accent and pill show. It differs from `state` only
         // for an exited agent (Ark0N/Codeman#446), whose state still sorts it.
         display: exit ? 'exited' : state,
-        pill: exit ? 'exited' : HOME_SESSIONS_PILL_LABEL[state] || state,
+        pill: exit
+          ? 'exited'
+          : state === 'waiting_agents' || state === 'checking_agents'
+            ? activity?.compactLabel || state
+            : HOME_SESSIONS_PILL_LABEL[state] || state,
         // What the pane's footer says is still running in the background, straight off
         // the session payload. Same field, same meaning as on the phone overview.
         watching: typeof session.watching === 'string' ? session.watching : '',

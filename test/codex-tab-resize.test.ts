@@ -33,14 +33,16 @@ function loadPreservePredicate() {
 describe('Codex tab resize behavior', () => {
   it('selectSession does not skip resize because another tab had the same dimensions', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
-    const start = source.indexOf('Also push the new dimensions to the PTY');
-    const resizeCall = source.indexOf('this.sendResize(sessionId)', start);
-    const snapshotRestore = source.indexOf('xterm snapshot restore', start);
+    const start = source.indexOf('The selected session owns this terminal now.');
+    const geometryCall = source.indexOf('this.syncTerminalGeometry?.();', start);
+    const resizeCall = source.indexOf('await this.sendResize(sessionId)', geometryCall);
+    const snapshotRestore = source.indexOf('Load terminal buffer for this session', start);
 
     expect(start).toBeGreaterThan(-1);
-    expect(resizeCall).toBeGreaterThan(start);
+    expect(geometryCall).toBeGreaterThan(start);
+    expect(resizeCall).toBeGreaterThan(geometryCall);
     expect(resizeCall).toBeLessThan(snapshotRestore);
-    expect(source.slice(start, resizeCall)).not.toContain('_lastResizeDims');
+    expect(source.slice(start, snapshotRestore)).not.toContain('_lastResizeDims');
     expect(source.slice(start, snapshotRestore)).not.toContain('forceHttp');
   });
 
@@ -59,7 +61,7 @@ describe('Codex tab resize behavior', () => {
     expect(source.slice(cacheRestore, settleDelay)).toContain("session?.mode !== 'shell'");
   });
 
-  it('fetches full terminal history for shell session reloads', () => {
+  it('uses a bounded tail for shell session reloads', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
     const selectStart = source.indexOf('async selectSession(sessionId, options = {})');
     const fetchStart = source.indexOf("_crashDiag.log('FETCH_START')", selectStart);
@@ -67,10 +69,9 @@ describe('Codex tab resize behavior', () => {
 
     expect(selectStart).toBeGreaterThan(-1);
     expect(fetchStart).toBeGreaterThan(selectStart);
-    // #205 made shell take the SAME full-history path as every other mode
-    // (that fix is what restored shell scrollback), so shell must no longer be
-    // special-cased out of it.
-    expect(fetchBlock).not.toContain("session?.mode === 'shell'");
+    // Shell scrollback can be enormous, so ordinary tab selection loads a
+    // bounded tail and leaves full history for an explicit user request.
+    expect(fetchBlock).toContain("session?.mode !== 'shell'");
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?full=1`');
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
   });
@@ -253,10 +254,10 @@ describe('Codex tab resize behavior', () => {
       'this.chunkedTerminalWrite( cachedBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner, discardOptions )'
     );
     expect(selectBlockFlat).toContain(
-      'this.chunkedTerminalWrite( data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner, discardOptions )'
+      'this.chunkedTerminalWrite( data.terminalBuffer, TERMINAL_CHUNK_SIZE, bufferLoadOwner, finishOpts )'
     );
     expect(selectBlockFlat).toContain(
-      'this._finishBufferLoad(bufferLoadOwner, { flushQueued: bufferWasEmpty, ...discardOptions })'
+      'this._finishBufferLoad( bufferLoadOwner, bufferWasEmpty ? { flushQueued: true, since: 0 } : finishOpts )'
     );
     expect(catchBlock).toContain('this._finishBufferLoad(bufferLoadOwner)');
     expect(selectBlock).not.toContain('this._finishBufferLoad()');

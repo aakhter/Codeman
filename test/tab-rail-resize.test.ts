@@ -256,7 +256,7 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
   it('routes Settings width changes through the same settled resize coordinator', () => {
     expect(settingsJs).toContain('applyTabOrientation({ settleRailWidth: true })');
     expect(settingsJs).toContain('this.applyTabRailWidth?.({ settle: settleRailWidth })');
-    expect(settingsJs).toContain('if (!settleRailWidth) this.fitAddon?.fit()');
+    expect(settingsJs).toContain('if (!settleRailWidth) this.syncTerminalGeometry?.()');
   });
 
   it('closes detached rail menus before tab rebuilds and session cleanup', () => {

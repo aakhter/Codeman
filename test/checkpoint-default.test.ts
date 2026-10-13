@@ -60,7 +60,7 @@ describe('COD-257 checkpoint default', () => {
 
     expect(configPort).toContain('getCheckpointDefaultEnabled(): Promise<boolean>');
     expect(server).toContain('return settings.checkpointDefaultEnabled !== false;');
-    expect(systemRoutes).toContain('checkpointDefaultEnabled: settings.checkpointDefaultEnabled !== false');
+    expect(systemRoutes).toContain('const merged = { ...existing, ...settingsToStore };');
     expect(sessionRoutes.match(/getCheckpointDefaultEnabled\(\)/g)?.length).toBeGreaterThanOrEqual(3);
     expect(ralphRoutes).toContain('checkpointEnabled: await ctx.getCheckpointDefaultEnabled()');
     expect(planRoutes).toContain('checkpointEnabled: await ctx.getCheckpointDefaultEnabled()');

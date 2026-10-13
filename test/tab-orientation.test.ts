@@ -114,7 +114,7 @@ describe('vertical tab rail wiring (COD-286)', () => {
   });
 
   it('re-fits the terminal when the orientation changes', () => {
-    expect(applyTabOrientationBody()).toMatch(/fitAddon\?\.fit\(\)|restoreTerminalSize|fitTerminal/);
+    expect(applyTabOrientationBody()).toContain('this.syncTerminalGeometry?.();');
   });
 
   it('is applied on load alongside the other tab settings', () => {

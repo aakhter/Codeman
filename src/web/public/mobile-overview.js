@@ -91,6 +91,8 @@ const MOBILE_OVERVIEW_PILL_LABEL = {
   needs: 'needs you',
   error: 'error',
   waiting: 'waiting',
+  waiting_agents: 'AGENTS',
+  checking_agents: 'CHECKING',
   working: 'working',
   idle: 'idle',
   done: 'done',
@@ -265,6 +267,7 @@ Object.assign(CodemanApp.prototype, {
         // pair resolved for DISPLAY, and the two must not drift apart.
         lastActivityAt: Number(session.lastActivityAt) || 0,
         lastSubmitAt: Number(session.lastSubmitAt) || 0,
+        activityStatusSince: Number(session.activityStatusSince) || 0,
         since: exit ? exit.since : this._mobileOverviewSince(state, session),
         orderIndex: orderIndex === -1 ? Number.MAX_SAFE_INTEGER : orderIndex,
       };

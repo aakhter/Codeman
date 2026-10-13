@@ -207,6 +207,7 @@ const CLAUDE: CliEntry = {
     allowedKeys: ['CLAUDE_CONFIG_DIR'],
   },
   capabilities: {
+    nativeAssistantProfile: 'claude',
     // COD-101 checkpoint automation reads claude's `❯` composer and its animated working line
     // (`✻ Actualizing… (13m 23s · …)`). directPtyPromptTransition: claude is the only CLI
     // Codeman ever runs WITHOUT tmux, so it is the only one with a frameless readiness path.
@@ -518,6 +519,7 @@ const OPENCODE: CliEntry = {
     configContentVar: 'OPENCODE_CONFIG_CONTENT',
   },
   capabilities: {
+    nativeAssistantProfile: 'opencode',
     ...agentDefaults(),
     // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
     // which is why this is its own capability and not derived from `hooks`.
@@ -673,6 +675,7 @@ const CODEX: CliEntry = {
     allowedKeys: [],
   },
   capabilities: {
+    nativeAssistantProfile: 'codex',
     // COD-101 checkpoint automation reads codex's `›` composer and its `Working (2s • esc to
     // interrupt)` line. No directPtyPromptTransition: codex requires tmux, so a frame is
     // always available and there is no frameless fallback to declare.

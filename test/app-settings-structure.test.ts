@@ -34,9 +34,6 @@ function settingsModal(): string {
  */
 function referencedIds(): string[] {
   const ids = new Set<string>();
-  // openAppSettings is async downstream: it awaits _settingsSyncPromise so the modal
-  // never renders stale localStorage before the server sync lands (see
-  // settings-authoritative-gate.test.ts). Upstream has no such gate.
   for (const fn of ['async openAppSettings()', 'async saveAppSettings()']) {
     const start = settingsUi.indexOf(`\n  ${fn} {`);
     expect(start, `${fn} not found in settings-ui.js`).toBeGreaterThan(-1);

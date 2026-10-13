@@ -777,7 +777,9 @@ const KeyboardHandler = {
    */
   _sendTerminalResize() {
     if (typeof app === 'undefined' || !app.activeSessionId) return;
-    app.sendResize?.(app.activeSessionId)?.catch?.(() => {});
+    const sessionId = app.activeSessionId;
+    if (document.visibilityState === 'hidden' || app._isTerminalSessionGone?.(sessionId)) return;
+    app.sendResize?.(sessionId)?.catch?.(() => {});
   },
 
   /**

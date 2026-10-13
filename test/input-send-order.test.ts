@@ -445,6 +445,7 @@ describe('durable input delivery — persistence boundaries', () => {
     app._onWsInputAck(1);
 
     expect(app._pendingDeliveries.size).toBe(0);
-    expect(app._persistReliableNow).toHaveBeenCalledTimes(1);
+    // Persist the sequence before sending, then persist the empty queue after ACK.
+    expect(app._persistReliableNow).toHaveBeenCalledTimes(2);
   });
 });

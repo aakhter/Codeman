@@ -57,9 +57,9 @@ const SCANNED_FILES = [
  */
 const ALLOWED_BRANCHES: Record<string, { count: number; reason: string }> = {
   "session-ui.js::mode === 'shell'": {
-    count: 3,
+    count: 4,
     reason:
-      'run() dispatch, availability gating (shell needs no CLI probe at all), and the button-label ternary (pinned exact ' +
+      'run() mode normalization and dispatch, availability gating (shell needs no CLI probe at all), and the button-label ternary (pinned exact ' +
       "text — test/run-mode-ui.test.ts asserts e.g. 'Run OMP', which diverges from CliEntry.shortBadge " +
       "for at least omp ('OM' vs the displayed 'OMP'), so a catalogue-driven rewrite would silently " +
       'change user-visible text and break that pinned test; the maintainer confirmed leaving this ' +
@@ -67,20 +67,20 @@ const ALLOWED_BRANCHES: Record<string, { count: number; reason: string }> = {
   },
 
   "session-ui.js::mode === 'claude'": {
-    count: 3,
+    count: 4,
     reason:
-      'three claude-specific call sites, not one branch: run() dispatch (claude has its own ' +
-      'remote/docker branching and parallel-create path, unlike every RUN_MODE_LAUNCH entry), ' +
-      'runCustomModelEntry() (restart-vs-one-shot launch mechanism, not a preference — see ' +
-      "CLAUDE.md's Custom Model Endpoint Profiles section), the Respawn/Ralph section (claude-only " +
-      "by design, mirroring the backend capabilities.ralph gate), and the runMode setter's " +
-      'validity check',
+      'run() mode normalization and dispatch, runCustomModelEntry() (restart-vs-one-shot launch mechanism, not a preference — see ' +
+      "CLAUDE.md's Custom Model Endpoint Profiles section), and the Claude-only Respawn/Ralph section, " +
+      'which mirrors the backend capabilities.ralph gate',
   },
 
   // The 8 external CLIs remain in the button-label ternary only. The runMode
   // setter now validates custom entries through the injected registry catalog.
   "session-ui.js::mode === 'opencode'": { count: 1, reason: 'button-label ternary' },
-  "session-ui.js::mode === 'codex'": { count: 1, reason: 'button-label ternary' },
+  "session-ui.js::mode === 'codex'": {
+    count: 2,
+    reason: 'button-label ternary and applying the saved Codex profile to remote quick-start instances',
+  },
   "session-ui.js::mode === 'gemini'": { count: 1, reason: 'button-label ternary' },
   "session-ui.js::mode === 'antigravity'": {
     count: 1,

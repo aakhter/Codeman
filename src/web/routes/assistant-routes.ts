@@ -6,6 +6,7 @@ import { ApiErrorCode, createErrorResponse } from '../../types.js';
 import { getAuthUser, ownerFor, canAccessOwned, parseBody } from '../route-helpers.js';
 import type { AssistantRequestManager } from '../../assistant-request-manager.js';
 import type { AssistantDefinition } from '../../types/assistant.js';
+import { nativeAssistantProfile } from '../../assistant-native.js';
 
 const Params = z.object({ id: z.uuid() });
 const Create = z
@@ -55,7 +56,7 @@ export function registerAssistantRoutes(
   const expose = (a: AssistantDefinition) => ({
     ...a,
     capabilities: {
-      localCodex: a.mode === 'codex',
+      localCodex: nativeAssistantProfile(a.mode) === 'codex',
       supportedModes: ['codex', 'claude', 'opencode'],
       requestExecution: false,
       requiresDesktopHandoff: true,

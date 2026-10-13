@@ -190,7 +190,7 @@ describe('the geometry a capture reports back', () => {
     const write = methodBody.indexOf('opts.capturedGeometry = { cols: geometry.cols, rows: geometry.rows }');
     // Anchor on the REPLAY branch, not the earlier `if (fullHistory)` that only
     // sizes the exec buffer.
-    const replayBranch = methodBody.indexOf('if (!geometry) return normalizeScrollbackEol(');
+    const replayBranch = methodBody.indexOf('return formatFullHistoryCapture(trimmed, geometry);');
     const visibleReturn = methodBody.indexOf('if (geometry) return formatPaneSnapshot(');
     expect(write).toBeGreaterThan(-1);
     expect(replayBranch).toBeGreaterThan(-1);

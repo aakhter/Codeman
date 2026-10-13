@@ -113,8 +113,10 @@ import {
   renameRemoteWorkspacePath,
 } from '../../remote-sftp.js';
 import { dataPath } from '../../config/instance.js';
+import { RemoteFileAccessError, remoteProbePaths, type RemoteProbe } from '../../remote-files.js';
 import { registerGeneratedArtifactAttachment } from '../../generated-artifact-attachments.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
+import type { SessionRemote } from '../../types/session.js';
 import { FilesystemBrowseQuerySchema, FilesystemPreviewQuerySchema, FileWriteSchema } from '../schemas.js';
 import {
   MAX_EDITABLE_BYTES,
@@ -128,6 +130,30 @@ import {
 // the paste-image timeout (session-routes.ts) so both remote writes behave the same.
 const REMOTE_ATTACHMENT_SSH_TIMEOUT_MS = 15_000;
 export const MAX_XLSX_BROWSER_PREVIEW_BYTES = 10 * 1024 * 1024;
+
+async function probeRemoteWorkspacePath(
+  remote: SessionRemote,
+  relativePath: string,
+  expectedKind: RemoteProbe['kind']
+): Promise<RemoteProbe | null> {
+  const targetPath = remoteWorkspacePath(remote, relativePath);
+  const workspacePath = remoteWorkspacePath(remote);
+  const paths = targetPath === workspacePath ? [workspacePath] : [targetPath, workspacePath];
+  const probes = await remoteProbePaths(remote, paths);
+  const target = probes[0] ?? null;
+  const workspace = targetPath === workspacePath ? target : (probes[1] ?? null);
+  if (!target || target.kind !== expectedKind || !workspace || workspace.kind !== 'directory') return null;
+
+  const relativeToWorkspace = pathPosix.relative(workspace.realPath, target.realPath);
+  if (
+    pathPosix.isAbsolute(relativeToWorkspace) ||
+    relativeToWorkspace === '..' ||
+    relativeToWorkspace.startsWith(`..${pathPosix.sep}`)
+  ) {
+    return null;
+  }
+  return target;
+}
 
 const MIME_TYPES: Record<string, string> = {
   png: 'image/png',
@@ -3698,8 +3724,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       }
       try {
         const ext = filePath.split('.').pop()?.toLowerCase() || '';
+        const remoteInfo = await probeRemoteWorkspacePath(session.remote!, filePath, 'file');
+        if (!remoteInfo) {
+          reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
+          return;
+        }
         if (ext === 'xlsx' && preview === 'true' && download !== 'true') {
-          const remoteInfo = await getRemoteWorkspaceFileInfo(session.remote!, filePath);
           if (remoteInfo.size > MAX_XLSX_BROWSER_PREVIEW_BYTES) {
             reply
               .code(413)
@@ -3737,7 +3767,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         }
       } catch (err) {
         reply
-          .code(500)
+          .code(err instanceof RemoteFileAccessError ? 502 : 500)
           .send(
             createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read remote file: ${getErrorMessage(err)}`)
           );

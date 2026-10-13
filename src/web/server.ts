@@ -41,6 +41,7 @@ import {
   assistantSessionHome,
   findAssistantConversation,
   openCodeAssistantHome,
+  nativeAssistantProfile,
 } from '../assistant-native.js';
 import { resolveCodexRecoveryStrategy } from '../codex-command-profiles.js';
 import { canonicalizeCodexHome } from '../checkpoint-conversation-identity.js';
@@ -666,7 +667,7 @@ export class WebServer extends EventEmitter {
     } else {
       this.app = Fastify({ logger: false, rewriteUrl });
     }
-    this.mux = createMultiplexer();
+    this.mux = createMultiplexer(testMode);
     this.agentActivityCoordinator = new SessionAgentActivityCoordinator({
       inspect: (project, signal) => this.inspectAgentActivity(project, signal),
       onDerivedIdle: (coordinatorSession) => this.commitDerivedAgentIdle(coordinatorSession.id),
@@ -1995,7 +1996,8 @@ export class WebServer extends EventEmitter {
           )
             throw new Error('Session-scoped credentials require manual recovery');
           const tabGroupId = assistantRecoveryGroup(this.store.getTabLayout(session.owner ?? '@single'), session.id);
-          if (session.mode === 'claude') {
+          const assistantProfile = nativeAssistantProfile(session.mode);
+          if (assistantProfile === 'claude') {
             const envOverrides = session.getEnvOverridesForPersist();
             if (Object.keys(envOverrides ?? {}).some((k) => /TOKEN|KEY|AUTH|ENDPOINT|BASE_URL/i.test(k)))
               throw new Error('Private provider configuration requires manual recovery');
@@ -2015,7 +2017,7 @@ export class WebServer extends EventEmitter {
               },
             };
           }
-          if (session.mode === 'opencode') {
+          if (assistantProfile === 'opencode') {
             if (
               session.openCodeConfig?.configContent ||
               Object.keys(session.getEnvOverridesForPersist() ?? {}).length ||
@@ -2085,7 +2087,8 @@ export class WebServer extends EventEmitter {
           let envOverrides: Record<string, string> | undefined;
           let codexConfig = profile.codexConfig;
           const claudeConfig = profile.claudeConfig;
-          if (mode === 'codex') {
+          const assistantProfile = nativeAssistantProfile(mode);
+          if (assistantProfile === 'codex') {
             const gated = await _clampExternalCliBypassForOwner(assistant.owner, profile.codexConfig);
             envOverrides = await clampEnvOverridesForOwner(assistant.owner, { CODEX_HOME: binding.codexHome });
             if (
@@ -2109,7 +2112,7 @@ export class WebServer extends EventEmitter {
               strategy.kind === 'template'
                 ? { ...gated.codexConfig!, baseCommand: strategy.command }
                 : gated.codexConfig!;
-          } else if (mode === 'claude') {
+          } else if (assistantProfile === 'claude') {
             if (
               !claudeConfig ||
               (await resolveClaudeModeForUsername(claudeConfig.claudeMode, assistant.owner)) !== claudeConfig.claudeMode
@@ -2138,12 +2141,13 @@ export class WebServer extends EventEmitter {
             owner: assistant.owner,
             mux: this.mux,
             useMux: true,
-            codexConfig: mode === 'codex' ? { ...codexConfig, resumeSessionId: binding.conversationId } : undefined,
+            codexConfig:
+              assistantProfile === 'codex' ? { ...codexConfig, resumeSessionId: binding.conversationId } : undefined,
             openCodeConfig:
-              mode === 'opencode'
+              assistantProfile === 'opencode'
                 ? { ...profile.openCodeConfig, continueSession: binding.conversationId, forkSession: false }
                 : undefined,
-            ...(mode === 'claude' ? { ...claudeConfig, resumeSessionId: binding.conversationId } : {}),
+            ...(assistantProfile === 'claude' ? { ...claudeConfig, resumeSessionId: binding.conversationId } : {}),
             envOverrides,
             checkpointEnabled: false,
             truecolorEnabled: await this.getTruecolorEnabled(),
@@ -3732,8 +3736,14 @@ export class WebServer extends EventEmitter {
       'custom-model:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
-      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string }; username?: string };
-      const sessionId = d.sessionId ?? d.id ?? d.session?.id;
+      const d = (data ?? {}) as {
+        sessionId?: string;
+        codemanSessionId?: string;
+        id?: string;
+        session?: { id?: string };
+        username?: string;
+      };
+      const sessionId = d.codemanSessionId ?? d.sessionId ?? d.id ?? d.session?.id;
       const owner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
       // `remote:hostWaking` / `remote:hostWakeFailed` for a create/attach wake have no
       // session yet (nothing exists until the host is up), so the registry names the

@@ -43,6 +43,7 @@ function loadPaletteHarness(overrides: Record<string, any> = {}) {
       listeners[`list:${event}`] = handler;
     }),
   };
+  elements.sessionRecoveryList = { replaceChildren: vi.fn(), appendChild: vi.fn() };
   elements.quickStartCase = {
     value: 'plex-previews',
   };

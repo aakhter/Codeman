@@ -245,6 +245,7 @@ function makeMainSelectionApp(
     sendResize: vi.fn(async () => false),
     attachmentHistoryDrawerOpen: false,
   });
+  app.syncTerminalGeometry = vi.fn(() => app.fitAddon.fit());
   return app;
 }
 
@@ -770,6 +771,7 @@ describe('terminal viewer activity browser integration', () => {
       closeMobileHeaderUtilities: vi.fn(),
       markIdleAlertSeen: vi.fn(),
       fitAddon: { fit },
+      syncTerminalGeometry: vi.fn(() => fit()),
       _terminalViewerActivity: { activate },
     });
 
@@ -1005,8 +1007,8 @@ describe('terminal viewer activity browser integration', () => {
     );
     expect(selection).not.toContain('forceHttp');
     expect(selection).toMatch(/userInitiated[\s\S]*_terminalViewerActivity\?\.activate\('session-select'\)/);
-    expect(selection).toContain(
-      "if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);"
+    expect(selection).toMatch(
+      /if \(userInitiated && document\.visibilityState === 'visible'\)[\s\S]*this\.sendResize\(sessionId\)/
     );
   });
 

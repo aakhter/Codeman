@@ -376,7 +376,11 @@ Object.assign(CodemanApp.prototype, {
     return select?.value.trim() || '';
   },
 
-  openAppSettings() {
+  async openAppSettings() {
+    // The boot sync is the authoritative source for server-synced settings. If
+    // the modal is opened before it settles, stale localStorage can briefly
+    // overwrite a newer server value in the controls.
+    if (this._settingsSyncPromise) await this._settingsSyncPromise;
     // Load current settings
     const settings = this.loadAppSettingsFromStorage();
     document.getElementById('appSettingsDisplayName').value = settings.displayName || 'Codeman';

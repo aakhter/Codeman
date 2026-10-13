@@ -191,12 +191,15 @@ describe('selectSession acknowledgement gate', () => {
       // through the tab-layout projection (COD-306) rather than indexing
       // sessionOrder, so this asserts the UNTAGGED call at each site — pinning
       // the old inline literals is what let this guard go stale.
-      const altNumber = APP_SOURCE.slice(APP_SOURCE.indexOf('_activateVisibleTabNumber(number) {'));
-      expect(altNumber.slice(0, 400)).toContain('this.selectSession(ref.id);');
+      const altNumber = APP_SOURCE.slice(APP_SOURCE.indexOf('const target = this._tabAltRefs()[idx];'));
+      expect(altNumber.slice(0, 400)).toContain('this.selectSession(target.id);');
 
-      for (const method of ['nextSession() {', 'prevSession() {']) {
+      for (const [method, call] of [
+        ['nextSession() {', 'this.selectSession(this.sessionOrder[nextIndex]);'],
+        ['prevSession() {', 'this.selectSession(this.sessionOrder[prevIndex]);'],
+      ]) {
         const body = APP_SOURCE.slice(APP_SOURCE.indexOf(method));
-        expect(body.slice(0, 300)).toMatch(/this\.selectSession\((next|prev)Id\);/);
+        expect(body.slice(0, 500)).toContain(call);
       }
 
       // The negative half: no keyboard path may acquire the auto tag. Every

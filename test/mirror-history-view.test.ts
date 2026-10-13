@@ -77,7 +77,7 @@ describe('COD-187 live-mirror structural guards', () => {
     const start = termUi.indexOf('attachCustomKeyEventHandler');
     const body = termUi.slice(start, start + 1600);
     const gate = body.indexOf("this._viewMode === 'history'");
-    const esc = body.indexOf("ev.key === 'Escape'");
+    const esc = body.indexOf("ev.key === 'Escape'", gate);
     expect(gate).toBeGreaterThan(-1);
     expect(esc).toBeGreaterThan(gate); // Escape check is inside the history gate
     expect(body.slice(esc, esc + 200)).toContain('return false');

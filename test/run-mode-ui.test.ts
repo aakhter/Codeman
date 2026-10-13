@@ -718,7 +718,7 @@ describe('Codex quick start settings', () => {
 
     it('applies the gating from openAppSettings, not just in isolation', () => {
       const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/settings-ui.js'), 'utf8');
-      const open = src.slice(src.indexOf('\n  openAppSettings() {'));
+      const open = src.slice(src.indexOf('\n  async openAppSettings() {'));
       const body = open.slice(0, open.indexOf('\n  },'));
       expect(body).toContain('_applyCodexSettingsVisibility()');
     });

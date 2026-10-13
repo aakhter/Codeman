@@ -483,7 +483,7 @@ export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
       // ISO Base Media File Format: size + "ftyp" + major brand.
       if (u32be(4) !== 0x66747970) return false;
       const brand = data.subarray(8, 12).toString('ascii');
-      return ['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand);
+      return ['heic', 'heix', 'hevc', 'hevx', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand);
     }
     default:
       return false;
@@ -3488,7 +3488,7 @@ export function registerSessionRoutes(
     // COD-187 (history view lazy load): `lines=N` bounds the full-history
     // capture to the last N lines — the fast first page. The frontend expands
     // to the unbounded capture only when the user scrolls to the partial top.
-    const rawLines = query.lines ? parseInt(query.lines, 10) : 0;
+    const rawLines = query.lines && /^\d+$/.test(query.lines) ? Number(query.lines) : 0;
     const lastLines =
       Number.isFinite(rawLines) && rawLines > 0 ? Math.min(100_000, Math.max(100, rawLines)) : undefined;
     // COD-187 claude expansion: the history view's requests (`lines=N` first

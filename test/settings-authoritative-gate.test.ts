@@ -49,6 +49,8 @@ describe('App Settings authoritative checkpoint gate', () => {
       // earlier in the classic-script order) defines it. This vm loads settings-ui.js
       // alone, so it has to be supplied or openAppSettings throws a ReferenceError.
       DEFAULT_VOICE_KEYTERMS: 'Codeman, tmux, Claude',
+      DEFAULT_TOAST_DURATION_MS: 4000,
+      AUTO_CLOSE_NOTIFICATION_MS: 5000,
       MobileDetection: { getDeviceType: () => 'desktop', isHandheldDevice: () => false, isTouchDevice: () => false },
       VoiceInput: {
         _getDeepgramConfig: () => ({}),
@@ -78,6 +80,8 @@ describe('App Settings authoritative checkpoint gate', () => {
     });
 
     const app = new (CodemanApp as unknown as new () => Record<string, any>)();
+    app.$ = (id: string) => elements[id];
+    app.loadWebhook = async () => {};
     app._updatePushUI = () => {};
     app._refreshHeadroomStatus = () => {};
     app.renderShortcutSettingsList = () => {};

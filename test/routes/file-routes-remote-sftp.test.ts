@@ -14,6 +14,7 @@ const {
   readRemoteWorkspaceFile,
   downloadRemoteWorkspaceFile,
   remoteWorkspacePath,
+  remoteProbePaths,
 } = vi.hoisted(() => ({
   listRemoteWorkspaceDirectory: vi.fn(),
   getRemoteWorkspaceFileInfo: vi.fn(),
@@ -23,6 +24,7 @@ const {
     if (relativePath.startsWith('/') || relativePath.split('/').includes('..')) throw new Error('workspace-relative');
     return relativePath ? `${remote.remotePath}/${relativePath}` : remote.remotePath;
   }),
+  remoteProbePaths: vi.fn(),
 }));
 
 vi.mock('../../src/remote-sftp.js', () => ({
@@ -32,6 +34,11 @@ vi.mock('../../src/remote-sftp.js', () => ({
   downloadRemoteWorkspaceFile,
   remoteWorkspacePath,
 }));
+
+vi.mock('../../src/remote-files.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/remote-files.js')>();
+  return { ...actual, remoteProbePaths };
+});
 
 const REMOTE: SessionRemote = {
   hostId: 'host-1',
@@ -50,6 +57,14 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
     harness = await createRouteTestHarness(registerFileRoutes);
     harness.ctx._session.remote = REMOTE;
     stagingDir = await fs.mkdtemp(join(tmpdir(), 'codeman-remote-file-route-'));
+    remoteProbePaths.mockImplementation(async (_remote: SessionRemote, paths: string[]) =>
+      paths.length === 1
+        ? [{ realPath: REMOTE.remotePath, kind: 'directory', size: 0, mtimeMs: 1 }]
+        : [
+            { realPath: paths[0], kind: 'file', size: 1024, mtimeMs: 1 },
+            { realPath: REMOTE.remotePath, kind: 'directory', size: 0, mtimeMs: 1 },
+          ]
+    );
   });
 
   afterEach(async () => {
@@ -106,6 +121,22 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
 
     expect(res.statusCode).toBe(400);
     expect(listRemoteWorkspaceDirectory).not.toHaveBeenCalled();
+  });
+
+  it('refuses a remote symlink that resolves outside the workspace before staging it', async () => {
+    remoteProbePaths.mockResolvedValue([
+      { realPath: '/etc/passwd', kind: 'file', size: 10, mtimeMs: 1 },
+      { realPath: '/srv/project', kind: 'directory', size: 0, mtimeMs: 1 },
+    ]);
+
+    const res = await harness.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${harness.ctx._sessionId}/file-raw?path=inside.txt`,
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(remoteProbePaths).toHaveBeenCalledOnce();
+    expect(downloadRemoteWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('rejects remote server-side search rather than omitting nested matches', async () => {
@@ -200,7 +231,10 @@ describe('remote File Viewer SFTP routes (COD-252)', () => {
   });
 
   it('rejects an oversized remote XLSX preview before staging the file', async () => {
-    getRemoteWorkspaceFileInfo.mockResolvedValue({ size: 10 * 1024 * 1024 + 1, mtimeMs: 1 });
+    remoteProbePaths.mockResolvedValue([
+      { realPath: `${REMOTE.remotePath}/forecast.xlsx`, kind: 'file', size: 10 * 1024 * 1024 + 1, mtimeMs: 1 },
+      { realPath: REMOTE.remotePath, kind: 'directory', size: 0, mtimeMs: 1 },
+    ]);
 
     const res = await harness.app.inject({
       method: 'GET',

@@ -2169,35 +2169,7 @@ Object.assign(CodemanApp.prototype, {
               typeof MobileDetection !== 'undefined' && MobileDetection.getDeviceType
                 ? MobileDetection.getDeviceType()
                 : 'desktop';
-            let sentViaWs = false;
-            if (this._wsReady && this._wsSessionId === this.activeSessionId) {
-              try {
-                this._ws.send(JSON.stringify({ t: 'z', c: cols, r: rows, v: viewportType }));
-                sentViaWs = true;
-              } catch {
-                // Fall through to HTTP POST
-              }
-            }
-            if (!sentViaWs) {
-              // ⚠️ The reply carries the geometry that actually took, and this
-              // is the path where a declined resize is LEAST likely to be
-              // noticed: no socket means no `{"t":"zc"}` frame either, so
-              // discarding it here left the one transport that cannot hear the
-              // answer also not asking for it.
-              const resizedSessionId = this.activeSessionId;
-              fetch(`/api/sessions/${this.activeSessionId}/resize`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cols, rows, viewportType }),
-              })
-                .then(async (res) => {
-                  const applied = (await res.json())?.data ?? {};
-                  this._onPtyGeometryReport(resizedSessionId, applied.cols, applied.rows);
-                })
-                .catch(() => {
-                  /* a resize that never landed tells us nothing about the PTY */
-                });
-            }
+            this._sendOrQueueTerminalResize(this.activeSessionId, { t: 'z', c: cols, r: rows, v: viewportType });
           }
         }
         // Update subagent connection lines and local echo at new dimensions.
@@ -8411,16 +8383,18 @@ Object.assign(CodemanApp.prototype, {
       this.setTileFontSize(Math.max(this._tileGridFontSize() - 2, 10));
       return;
     }
-    const current = this.terminal.options.fontSize || 14;
     const policy = this.getTerminalFontPolicy();
+    const current = this.terminal.options.fontSize || policy.size;
     this.setFontSize(Math.max(current - 2, policy.min));
   },
 
   setFontSize(size) {
     this.terminal.options.fontSize = size;
     document.getElementById('fontSizeDisplay').textContent = size;
+    try {
+      localStorage.setItem(this.getTerminalFontPolicy().key, size);
+    } catch {}
     this._refitAfterCellSizeChange();
-    localStorage.setItem('codeman-font-size', size);
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
@@ -8730,7 +8704,7 @@ Object.assign(CodemanApp.prototype, {
    */
   _refitAfterCellSizeChange() {
     if (this.activeSessionId) {
-      this.sendResize(this.activeSessionId)?.catch?.(() => {});
+      this.sendResize(this.activeSessionId, { preserveFont: true })?.catch?.(() => {});
       return;
     }
     this.syncTerminalGeometry();
@@ -8796,6 +8770,8 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Promise<boolean|null>} Whether dimensions changed, or null when transport did not accept the frame
    */
   async sendResize(sessionId, options = {}) {
+    if (!sessionId || sessionId !== this.activeSessionId || document.visibilityState === 'hidden') return false;
+    if (this._isTerminalSessionGone?.(sessionId)) return false;
     // One PTY cannot hold two sizes. A detached session is owned by its own
     // window, and the dashboard's terminal is narrower than that window because
     // the session rail takes width the popup does not have — so both sizing it
@@ -8815,6 +8791,7 @@ Object.assign(CodemanApp.prototype, {
     // Backstop: while the tile grid owns the terminal, a tile sizes this PTY and
     // the parked main terminal measures nothing worth sending.
     if (this._tilesOwnTerminal?.()) return false;
+    if (!options.preserveFont) this.applyTerminalFontPolicyForActiveSession?.();
     // Fit, floor, and apply in one step so the numbers below are the numbers
     // xterm is actually holding (or, while another device holds the width,
     // the numbers this container would hold if the PTY followed).
@@ -8857,22 +8834,8 @@ Object.assign(CodemanApp.prototype, {
         return changed;
       } catch {}
     }
-    const body = { ...dims, viewportType };
-    if (options.force) body.force = true;
-    const res = await fetch(`/api/sessions/${sessionId}/resize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    // Same report the WS path gets as a {"t":"zc"} frame. An older server
-    // answers `{}`, which reconciles to a no-op rather than throwing.
-    try {
-      const applied = (await res.json())?.data ?? {};
-      this._onPtyGeometryReport(sessionId, applied.cols, applied.rows);
-    } catch {
-      /* a body that is not JSON tells us nothing about the PTY; keep our own geometry */
-    }
-    return changed;
+    this._queuePendingTerminalResize(sessionId, msg);
+    return null;
   },
 
   /**

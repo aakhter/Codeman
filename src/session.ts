@@ -5680,7 +5680,12 @@ export class Session extends EventEmitter {
   /** Enter-only recovery for a new, owned Codex request; never retypes its text. */
   verifyAssistantSubmission(text: string, permit: string, beforeEnter: () => Promise<boolean>): void {
     this._assistantSubmitVerifier?.cancel();
-    if (this.mode !== 'codex' || !this._mux?.capturePaneText || !this._muxSession) return;
+    if (
+      getCli(this.mode)?.capabilities.nativeAssistantProfile !== 'codex' ||
+      !this._mux?.capturePaneText ||
+      !this._muxSession
+    )
+      return;
     this._assistantSubmitVerifier = new SubmitVerifier({
       capture: () =>
         this._isStopped || !this._muxSession ? null : this._mux?.capturePaneText?.(this._muxSession.muxName),
@@ -5698,10 +5703,10 @@ export class Session extends EventEmitter {
 
   write(data: string, options: SessionWriteOptions = {}): boolean {
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
-    this._assistantLastInputAt = Date.now();
-    const submittedPrompt = this._trackSubmit(data, options);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
+    this._assistantLastInputAt = Date.now();
+    const submittedPrompt = this._trackSubmit(data, options);
     this._emitSubmittedPrompt(submittedPrompt);
     return true;
   }
@@ -5852,13 +5857,13 @@ export class Session extends EventEmitter {
    */
   async writeViaMux(data: string, options: SessionWriteOptions = {}): Promise<boolean> {
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
-    this._assistantLastInputAt = Date.now();
     this._assistantPendingWrites++;
     try {
-      const submittedPrompt = this._trackSubmit(data, options);
       if (this._mux && this._muxSession) {
         const sent = await this._mux.sendInput(this.id, data);
         if (sent) {
+          this._assistantLastInputAt = Date.now();
+          const submittedPrompt = this._trackSubmit(data, options);
           this._emitSubmittedPrompt(submittedPrompt);
           // Delegated delivery is observed through native acceptance, without autonomous Enter retries.
           if (!options.assistantPermit) this._verifySubmitted(data);
@@ -5867,6 +5872,8 @@ export class Session extends EventEmitter {
       }
       if (this.ptyProcess) {
         this.ptyProcess.write(data);
+        this._assistantLastInputAt = Date.now();
+        const submittedPrompt = this._trackSubmit(data, options);
         this._emitSubmittedPrompt(submittedPrompt);
         return true;
       }

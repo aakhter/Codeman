@@ -707,7 +707,7 @@ describe('file-routes', () => {
       expect(body.data.url).toContain('file-raw');
     });
 
-    it('flags known-binary extensions (e.g. xls) instead of dumping mojibake', async () => {
+    it('flags legacy XLS files as binary instead of dumping mojibake', async () => {
       mockedStat.mockResolvedValue({ size: 4096 } as never);
 
       const res = await harness.app.inject({
@@ -717,9 +717,7 @@ describe('file-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      // 'spreadsheet', not the generic 'binary': xlsx has a real viewer here
-      // (the downstream XLSX preview), and the type is what routes to it.
-      expect(body.data.type).toBe('spreadsheet');
+      expect(body.data.type).toBe('binary');
       expect(body.data.content).toBeUndefined();
     });
 
@@ -928,7 +926,7 @@ describe('file-routes', () => {
 
       const preview = await harness.app.inject({ method: 'GET', url: `${url}&preview=true` });
       expect(preview.statusCode).toBe(413);
-      expect(JSON.parse(preview.body).error).toMatch(/too large to preview/i);
+      expect(JSON.parse(preview.body).error).toMatch(/file too large/i);
 
       const download = await harness.app.inject({ method: 'GET', url: `${url}&preview=true&download=true` });
       expect(download.statusCode).toBe(200);

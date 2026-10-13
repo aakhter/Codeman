@@ -305,6 +305,7 @@ const capabilitiesSchema = z
     requiresMux: z.boolean(),
     hooks: z.enum(['none', 'always', 'supervised']),
     transcript: z.enum(['claude-jsonl', 'codex-rollout', 'deepseek-zstd', 'omp-jsonl', 'none']),
+    nativeAssistantProfile: z.enum(['codex', 'claude', 'opencode']).optional(),
     altScreen: z.enum(['strip-full', 'strip-mux-only', 'strip-mux-and-mouse', 'preserve']),
     echo: echoSchema,
     checkpoint: checkpointSchema.optional(),

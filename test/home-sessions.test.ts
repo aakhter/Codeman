@@ -59,6 +59,8 @@ function loadHomeSessionsApp(
   const context = vm.createContext({
     CodemanApp,
     console,
+    setInterval: () => 1,
+    clearInterval: () => {},
     window: { innerWidth },
     document: {
       documentElement: {

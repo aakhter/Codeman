@@ -639,7 +639,7 @@ describe('file-routes attachment path guard (COD-53)', () => {
 
       const preview = await harness.app.inject({ method: 'GET', url: `${base}?preview=true` });
       expect(preview.statusCode).toBe(413);
-      expect(JSON.parse(preview.body).error).toMatch(/too large to preview/i);
+      expect(JSON.parse(preview.body).error).toMatch(/file too large/i);
 
       mockedCreateReadStream.mockReturnValue(Readable.from([Buffer.from('PK')]) as never);
       const download = await harness.app.inject({ method: 'GET', url: `${base}?preview=true&download=true` });

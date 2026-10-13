@@ -14,7 +14,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { PassThrough, Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -23,7 +22,6 @@ import fastifyMultipart from '@fastify/multipart';
 import { registryFilePath, reloadCliRegistry } from '../../src/config/cli-registry/registry.js';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import fs, { mkdtemp, rm, mkdir, writeFile, readFile, readdir, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
@@ -1270,78 +1268,46 @@ and effort involved in moving workloads.
 
     function makeSessionRemote(remotePath = '/Users/saqebakhter/repos/projects/moneytrove'): void {
       harness.ctx._session.workingDir = remotePath;
-      vi.spyOn(harness.ctx._session, 'toState').mockReturnValue({
-        ...harness.ctx._session.toState(),
-        workingDir: remotePath,
-        remote: {
-          hostId: 'mac-mini',
-          label: 'mac-mini',
-          host: '192.168.21.109',
-          username: 'saqebakhter',
-          remotePath,
-        },
-      });
-    }
-
-    function mockSuccessfulSshUpload(): Buffer[] {
-      const stdinChunks: Buffer[] = [];
-      spawn.mockImplementation(() => {
-        const child = new PassThrough() as unknown as {
-          stdin: Writable;
-          stdout: PassThrough;
-          stderr: PassThrough;
-          on: (event: string, cb: (...args: unknown[]) => void) => unknown;
-          emit: (event: string, ...args: unknown[]) => boolean;
-        };
-        child.stdout = new PassThrough();
-        child.stderr = new PassThrough();
-        child.stdin = new Writable({
-          write(chunk, _encoding, callback) {
-            stdinChunks.push(Buffer.from(chunk));
-            callback();
-          },
-          final(callback) {
-            queueMicrotask(() => child.emit('close', 0));
-            callback();
-          },
-        });
-        return child;
-      });
-      return stdinChunks;
+      (harness.ctx._session as { remote?: unknown }).remote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.21.109',
+        username: 'saqebakhter',
+        remotePath,
+      };
     }
 
     it('converts HEIC paste images to JPEG attachments when browser-side normalization falls back', async () => {
-      makeSessionRemote();
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-heic-'));
+      harness.ctx._session.workingDir = workDir;
       heicConvert.mockClear();
-      const stdinChunks = mockSuccessfulSshUpload();
-
       const boundary = 'codeman-test-boundary';
       const heic = Buffer.from('00000034667479706865696300000000', 'hex');
-      const res = await harness.app.inject({
-        method: 'POST',
-        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
-        headers: {
-          host: 'codeman.test',
-          origin: 'http://codeman.test',
-          'content-type': `multipart/form-data; boundary=${boundary}`,
-        },
-        payload: imageUploadBody(boundary, 'IMG_4996.HEIC', 'image/heic', heic),
-      });
+      try {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          headers: {
+            host: 'codeman.test',
+            origin: 'http://codeman.test',
+            'content-type': `multipart/form-data; boundary=${boundary}`,
+          },
+          payload: imageUploadBody(boundary, 'IMG_4996.HEIC', 'image/heic', heic),
+        });
 
-      expect(res.statusCode).toBe(200);
-      const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(body.data.path).toMatch(
-        /^\/Users\/saqebakhter\/repos\/projects\/moneytrove\/\.claude-images\/paste-\d+-[a-f0-9]{8}\.jpg$/
-      );
-      const written = Buffer.concat(stdinChunks);
-      expect(written.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
-      expect(heicConvert).toHaveBeenCalledWith(heic);
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.success).toBe(true);
+        expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+        expect((await readFile(body.data.path)).subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+        expect(heicConvert).toHaveBeenCalledWith(heic);
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
     });
 
-    it('uploads paste images for remote sessions to the remote workspace over ssh', async () => {
+    it('rejects paste images for remote sessions before spawning SSH', async () => {
       makeSessionRemote();
-      const stdinChunks = mockSuccessfulSshUpload();
 
       const boundary = 'codeman-test-boundary';
       const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
@@ -1356,22 +1322,11 @@ and effort involved in moving workloads.
         payload: pngUploadBody(boundary, png),
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(body.data.path).toMatch(
-        /^\/Users\/saqebakhter\/repos\/projects\/moneytrove\/\.claude-images\/paste-\d+-[a-f0-9]{8}\.png$/
-      );
-      expect(spawn).toHaveBeenCalledTimes(1);
-      const [bin, argv] = spawn.mock.calls[0];
-      expect(bin).toBe('ssh');
-      expect(argv).toContain('BatchMode=yes');
-      expect(argv).toContain('ConnectTimeout=10');
-      expect(argv).toContain('saqebakhter@192.168.21.109');
-      expect(String(argv.at(-1))).toContain('mkdir "$dir"');
-      expect(Buffer.concat(stdinChunks)).toEqual(png);
-      expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
-      expect(heicConvert).toHaveBeenCalledWith(heic);
+      expect(body.success).toBe(false);
+      expect(body.error).toMatch(/not supported for remote/i);
+      expect(spawn).not.toHaveBeenCalled();
     });
 
     it('converts mislabeled HEIC (declared image/jpeg, HEIF bytes — the MIUI/Android case) via magic sniff', async () => {
@@ -2922,16 +2877,19 @@ and effort involved in moving workloads.
       // only afterwards. Absent or malformed, the limit itself, as before.
       const limit = (await harness.ctx.getTerminalHistoryConfig()).tmuxHistoryLimit;
       harness.ctx._session.mode = 'claude';
-      const captureSpy = vi.fn((_name: string, _opts?: { historyLimitLines?: number }) => 'captured frame');
+      const captureSpy = vi.fn(
+        (_name: string, _opts?: { historyLimitLines?: number; lastLines?: number }) => 'captured frame'
+      );
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
       const linesFor = async (query: string) => {
         captureSpy.mockClear();
         await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?${query}` });
-        return captureSpy.mock.calls[0]?.[1]?.historyLimitLines;
+        const options = captureSpy.mock.calls[0]?.[1];
+        return options?.lastLines ?? options?.historyLimitLines;
       };
 
       expect(await linesFor(`full=1&tail=${1024 * 1024}&lines=10040`)).toBe(10040);
-      expect(await linesFor('full=1&lines=1')).toBe(1);
+      expect(await linesFor('full=1&lines=1')).toBe(100);
       expect(await linesFor('full=1')).toBe(limit);
       expect(await linesFor(`full=1&lines=${limit + 5}`)).toBe(limit);
       for (const bad of ['0', '-5', 'abc', '1.5', '', '1e4', '9999999999']) {
@@ -2939,15 +2897,18 @@ and effort involved in moving workloads.
       }
     });
 
-    it('`lines=` leaves a visible-frame capture (no full=1) exactly as it was', async () => {
+    it('`lines=` requests bounded full history even without an explicit full flag', async () => {
       harness.ctx._session.mode = 'shell';
-      const captureSpy = vi.fn(() => 'only the visible frame');
+      const captureSpy = vi.fn(() => 'bounded pane history');
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
       await harness.app.inject({
         method: 'GET',
         url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=${1024 * 1024}&lines=500`,
       });
-      expect(captureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, {});
+      expect(captureSpy).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.objectContaining({ fullHistory: true, lastLines: 500 })
+      );
     });
 
     it('a capture bounded by `lines=` is still a full capture: rows kept, cursor restore last', async () => {

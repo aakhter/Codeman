@@ -351,7 +351,7 @@ describe('WebServer.renderIndexHtml', () => {
     try {
       const { server } = makeServer({});
       const html = await render(server);
-      expect(html.match(/<body>/g)).toHaveLength(1);
+      expect(html.match(/^\s*<body>/gm)).toHaveLength(1);
       const clis = JSON.parse(html.match(/window\.__codemanCustomModelClis=(\[.*?\]);/)![1]);
       expect(clis).toEqual([{ id: 'claude', label }]);
     } finally {
@@ -362,7 +362,7 @@ describe('WebServer.renderIndexHtml', () => {
   it("inserts a solo id containing $' verbatim, under the same replacer rule", async () => {
     const { server } = makeServer({});
     const html = await render(server, "sess$'x");
-    expect(html.match(/<body>/g)).toHaveLength(1);
+    expect(html.match(/^\s*<body>/gm)).toHaveLength(1);
     expect(html).toContain(`window.__CODEMAN_SOLO__="sess$'x"`);
   });
 

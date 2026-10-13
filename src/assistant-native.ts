@@ -15,19 +15,22 @@ import {
   observeOpenCodeAssistantTurn,
 } from './assistant-turn-observer.js';
 import type { TurnObservation } from './assistant-turn-observer.js';
+import { getCli } from './config/cli-registry/registry.js';
 
 export const ASSISTANT_MODES = ['codex', 'claude', 'opencode'] as const;
 export const assistantBindingMode = (binding: AssistantBinding) => binding.mode ?? 'codex';
+export const nativeAssistantProfile = (mode: string) => getCli(mode)?.capabilities.nativeAssistantProfile;
 export const openCodeAssistantHome = () =>
   canonicalizeCodexHome(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'));
 export function assistantSessionHome(session: AssistantSession): string {
-  if (session.mode === 'codex') return resolveEffectiveCodexHome(session.getCodexHomeOverride(), session.workingDir);
-  if (session.mode === 'claude')
+  const profile = nativeAssistantProfile(session.mode);
+  if (profile === 'codex') return resolveEffectiveCodexHome(session.getCodexHomeOverride(), session.workingDir);
+  if (profile === 'claude')
     return canonicalizeCodexHome(
       session.getClaudeConfigDirOverride?.() || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
       session.workingDir
     );
-  if (session.mode === 'opencode') return openCodeAssistantHome();
+  if (profile === 'opencode') return openCodeAssistantHome();
   throw new Error('Unsupported assistant provider');
 }
 export interface NativeConversation {
@@ -56,8 +59,9 @@ export async function findAssistantConversation(
   live?: AssistantSession
 ): Promise<NativeConversation | undefined> {
   const mode = assistantBindingMode(binding);
+  const profile = nativeAssistantProfile(mode);
   if (live && (live.mode !== mode || assistantSessionHome(live) !== binding.codexHome)) return undefined;
-  if (mode === 'codex')
+  if (profile === 'codex')
     return findExactCodexConversation({
       codexHome: binding.codexHome,
       workingDir: binding.workingDir,
@@ -65,7 +69,7 @@ export async function findAssistantConversation(
       nativeResumeId: live?.nativeResumeId ?? binding.conversationId,
       resumeSessionId: live?.codexConfig?.resumeSessionId,
     });
-  if (mode === 'claude') {
+  if (profile === 'claude') {
     const id = live?.claudeSessionId || live?.nativeResumeId || binding.conversationId || binding.sessionId;
     if (!/^[0-9a-f-]{36}$/i.test(id) || (binding.conversationId && id !== binding.conversationId)) return undefined;
     const projects = join(binding.codexHome, 'projects');
@@ -137,7 +141,7 @@ export async function resolveSessionAssistantConversation(
       codexHome: home,
       workingDir,
       generation: 1,
-      ...(session.mode !== 'codex' ? { mode: session.mode as 'claude' | 'opencode' } : {}),
+      ...(nativeAssistantProfile(session.mode) !== 'codex' ? { mode: session.mode as 'claude' | 'opencode' } : {}),
     },
     session
   );
