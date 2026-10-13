@@ -7558,7 +7558,7 @@ class CodemanApp {
       void fetch('/api/tab-layout', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this._tabLayoutWriteBody({ baseVersion: editor.baseVersion(), layout, operations })),
+        body: JSON.stringify(this._tabLayoutWriteBody({ baseVersion: editor.baseVersion(), layout, operations: editor.pendingWireOperations?.() || operations })),
         keepalive: true,
       }).catch(() => {});
     } catch {}

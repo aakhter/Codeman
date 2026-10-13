@@ -849,6 +849,39 @@
     return JSON.stringify([layout.groups, layout.ungrouped, orderedFocusRefs(layout)]);
   }
 
+  /**
+   * Operations as `PUT /api/tab-layout { operations }` accepts them, replayed
+   * from `base`. The server requires an explicit index on every moveRef, while
+   * the browser's "at the end" move carries none (so a rebase keeps meaning
+   * the end): fill it in with the destination's length at that step, counted
+   * after the moving block is taken out, as the server counts. `parents` is a
+   * browser-side hint and stays behind; the server uses its own lineage.
+   * Operations that no longer apply are dropped, as replayOperations() does.
+   */
+  function wireOperations(base, operations) {
+    let layout = normalizeLayout(base);
+    const result = [];
+    for (const operation of operations) {
+      let wire = operation;
+      if (operation?.type === 'moveRef' || operation?.type === 'followParent') {
+        const { parents: _parents, ...rest } = operation;
+        wire = rest;
+      }
+      try {
+        if (operation?.type === 'moveRef' && !Number.isInteger(operation.index)) {
+          const block = lineageBlock(layout, operation.ref, operation.parents);
+          const remaining = containerRefs(layout, operation.groupId ?? null).filter((ref) => !block.has(refKey(ref)));
+          wire = { ...wire, index: remaining.length };
+        }
+        layout = applyOperation(layout, operation);
+        result.push(wire);
+      } catch (_error) {
+        // Dropped: the same edit replayOperations() drops.
+      }
+    }
+    return result;
+  }
+
   /** Replay operations, dropping (and counting) the ones that no longer apply. */
   function replayOperations(base, operations) {
     let layout = normalizeLayout(base);
@@ -924,7 +957,7 @@
           const response = await options.put({
             baseVersion: authoritative.version,
             layout: desired.layout,
-            operations: inFlight,
+            operations: wireOperations(authoritative, inFlight),
           });
           if (disposed) return;
           if (response?.ok && response.layout) {
@@ -1014,6 +1047,8 @@
       hasPending: () => writing || pending.length > 0,
       /** Every operation not yet confirmed by the server, oldest first. */
       pendingOperations: () => JSON.parse(JSON.stringify([...inFlight, ...pending])),
+      /** The same, in the form the server's semantic PUT accepts (wireOperations). */
+      pendingWireOperations: () => wireOperations(authoritative, [...inFlight, ...pending]),
       baseVersion: () => authoritative.version,
       getLayout: () => normalizeLayout(optimistic),
       dispose() {
@@ -1038,6 +1073,7 @@
     dropOperation,
     contentKey,
     createEditCoordinator,
+    wireOperations,
     createLoadCoordinator,
     loadCollapsedGroupIds,
     saveCollapsedGroupIds,
