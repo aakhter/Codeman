@@ -1654,6 +1654,37 @@ class CodemanApp {
     });
   }
 
+  // A bare F1-F12 keydown that the registry may claim (F2 = Rename Tab, COD-450).
+  // Typing never produces a function key, so it cannot steal text; a focused
+  // text field keeps its own, while xterm's helper textarea is the terminal and
+  // does not count as one.
+  isFunctionKeyShortcut(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (!/^F([1-9]|1[0-2])$/.test(e.code || e.key || '')) return false;
+    const t = e.target;
+    if (t?.isContentEditable) return false;
+    const tag = String(t?.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA' && t.classList?.contains('xterm-helper-textarea')) return true;
+    return tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT';
+  }
+
+  // The registry entry the document capture handler should run for this keydown,
+  // or null. Every binding needs Ctrl/Cmd/Alt except a bare function key, so
+  // plain typing exits early without touching the registry.
+  documentShortcutFor(e) {
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !this.isFunctionKeyShortcut(e)) return null;
+    for (const shortcut of this.getShortcutRegistry()) {
+      // Smart copy (#211) is dispatched by shouldCopyTerminalSelectionFromShortcut()
+      // in terminal-ui.js, never from here: the caller preventDefaults on every
+      // match, so with no selection Ctrl+C would be swallowed and the user would
+      // lose the interrupt key. Upstream gets this by omitting the action from its
+      // SHORTCUT_ACTIONS map; we dispatch by method name, so the skip is explicit.
+      if (NON_DOCUMENT_SHORTCUT_ACTIONS.has(shortcut.action)) continue;
+      if (this.matchesShortcutEvent(e, shortcut)) return shortcut;
+    }
+    return null;
+  }
+
   shortcutEventKey(e) {
     const shiftedCodeKeys = {
       Slash: '?',
@@ -1861,22 +1892,11 @@ class CodemanApp {
       }
 
       // Match against the shortcut registry so user rebinds and per-shortcut
-      // disables (App Settings → Shortcuts) take effect. Every dispatchable
-      // binding requires Ctrl/Cmd/Alt (capture enforces the same), so plain
-      // typing exits early without touching the registry.
-      if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
-      for (const shortcut of this.getShortcutRegistry()) {
-        // Smart copy (#211) is dispatched by shouldCopyTerminalSelectionFromShortcut()
-        // in terminal-ui.js, never from here: this loop preventDefaults on every
-        // match, so with no selection Ctrl+C would be swallowed and the user would
-        // lose the interrupt key. Upstream gets this by omitting the action from its
-        // SHORTCUT_ACTIONS map; we dispatch by method name, so the skip is explicit.
-        if (NON_DOCUMENT_SHORTCUT_ACTIONS.has(shortcut.action)) continue;
-        if (this.matchesShortcutEvent(e, shortcut)) {
-          e.preventDefault();
-          this.runShortcutAction(shortcut);
-          return;
-        }
+      // disables (App Settings → Shortcuts) take effect.
+      const shortcut = this.documentShortcutFor(e);
+      if (shortcut) {
+        e.preventDefault();
+        this.runShortcutAction(shortcut);
       }
     }, true); // Use capture phase to handle before terminal
 

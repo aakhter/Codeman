@@ -1060,6 +1060,12 @@ Object.assign(CodemanApp.prototype, {
         return false;
       }
 
+      // A bare function key the registry claims (F2 = Rename Tab, COD-450): same
+      // reason as the palette chord, or F2 renames the tab AND writes ESC O Q.
+      if (ev.type === 'keydown' && this.isFunctionKeyShortcut?.(ev) && this.documentShortcutFor?.(ev)) {
+        return false;
+      }
+
       // Tile grid chords (Ctrl+Shift+G, Alt+Shift+Arrows): the capture handler
       // has already acted on one that applies, and its preventDefault() does not
       // stop xterm. Every event type, and BEFORE the Shift+Enter branch below.
