@@ -3055,6 +3055,9 @@ class CodemanApp {
         }
         return;
       }
+      // A streamed redraw means the last captured frame no longer describes
+      // the rendered screen; the next reconcile must be allowed to repaint it.
+      if (this._isMirrorSession(data.id)) this._lastMirrorFrame = null;
       if (data.data.length > 32768) _crashDiag.log(`TERMINAL: ${(data.data.length/1024).toFixed(0)}KB`);
 
       // Hard cap all app-owned render queues plus the one xterm chunk currently
@@ -4442,7 +4445,7 @@ class CodemanApp {
   _onSessionResized(data) {
     if (data.id !== this.activeSessionId || !this.terminal) return;
     const session = this.sessions.get(data.id);
-    if (session?.mode !== 'codex' && session?.mode !== 'gemini' && session?.mode !== 'antigravity') return;
+    if (!this._isMirrorSession(data.id) && session?.mode !== 'codex' && session?.mode !== 'gemini' && session?.mode !== 'antigravity') return;
     // Our own resize (or one that happens to match us) can't misalign our view.
     if (this.terminal.cols === data.cols && this.terminal.rows === data.rows) return;
     this._foreignResizeDirty = data.id;
@@ -4767,7 +4770,14 @@ class CodemanApp {
   _remoteReconcileTick() {
     const id = this.activeSessionId;
     if (!id || !this.terminal || this._isLoadingBuffer) return;
-    if (this._isMirrorSession(id)) return; // COD-187: superseded — the live screen self-heals every repaint
+    if (this._isMirrorSession(id)) {
+      // Nested remote redraws can lose cells without closing the WebSocket.
+      // Heal from the canonical frame even when the agent is idle.
+      if (this.sessions.get(id)?.remote && this._viewMode !== 'history') {
+        this._refreshMirrorFrame(id);
+      }
+      return;
+    }
     if (!this._isRemoteTuiSession(id)) return;
     // Deliberately NOT gated on busy status: remote codex sessions often never
     // flip to busy (their "Working (…)" frames arrive as partial cell updates
@@ -5273,7 +5283,7 @@ class CodemanApp {
         const wasReconnect = this._wsReconnectAttempts > 0;
         this._wsReconnectAttempts = 0;
         this._updateConnectionIndicator();
-        if (wasReconnect && this._isTuiSession(sessionId)) {
+        if (wasReconnect && (this._isTuiSession(sessionId) || this._isMirrorSession(sessionId))) {
           clearTimeout(this._foreignResizeTimer);
           this._foreignResizeTimer = setTimeout(() => {
             this._reconcileForeignResize(sessionId);
