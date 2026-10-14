@@ -338,3 +338,60 @@ describe('html-view routes', () => {
     }
   });
 });
+
+describe('html-view routes: multi-user spaces', () => {
+  // The capability serves the HTML file's directory recursively, so a regular user
+  // must not mint a page over another user's case folder (user spaces live inside
+  // the home directory). Same rule as the folder grid: own space or own workspace.
+  const saved = { multi: process.env.CODEMAN_MULTIUSER, spaces: process.env.CODEMAN_USER_SPACES_DIR };
+  let harness: RouteTestHarness;
+  let root: string;
+
+  beforeEach(async () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'html-view-mu-')));
+    process.env.CODEMAN_MULTIUSER = '1';
+    process.env.CODEMAN_USER_SPACES_DIR = join(root, 'spaces');
+    for (const user of ['alice', 'bob']) {
+      const dir = join(root, 'spaces', user, 'cases', 'proj');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'report.html'), `<p>${user}</p>`);
+    }
+    mkdirSync(join(root, 'ws'));
+    harness = await createRouteTestHarness(registerHtmlViewRoutes, {
+      authUser: { username: 'alice', role: 'user' },
+    });
+    const session = harness.ctx.sessions.get(harness.ctx._sessionId) as { workingDir: string; owner?: string };
+    session.workingDir = join(root, 'ws');
+    session.owner = 'alice';
+  });
+
+  afterEach(async () => {
+    await harness.app.close();
+    htmlViewCapabilities.revokeOwner('alice');
+    rmSync(root, { recursive: true, force: true });
+    for (const [key, value] of [
+      ['CODEMAN_MULTIUSER', saved.multi],
+      ['CODEMAN_USER_SPACES_DIR', saved.spaces],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const open = (path: string) =>
+    harness.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${harness.ctx._sessionId}/html-view`,
+      payload: { path },
+    });
+
+  it("refuses a page in another user's space", async () => {
+    const res = await open(join(root, 'spaces', 'bob', 'cases', 'proj', 'report.html'));
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body).error).toMatch(/outside your space/);
+  });
+
+  it("mints a page in the user's own space", async () => {
+    expect((await open(join(root, 'spaces', 'alice', 'cases', 'proj', 'report.html'))).statusCode).toBe(200);
+  });
+});

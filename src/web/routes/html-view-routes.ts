@@ -33,7 +33,15 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { ApiErrorCode, createErrorResponse } from '../../types.js';
 import { isBlockedAttachmentPath, isUnderTree, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
 import { HTML_VIEW_PREFIX, htmlViewCapabilities } from '../../html-view-capabilities.js';
-import { CASES_DIR, findSessionOrFail, ownerFor, parseBody, validateSessionFilePath } from '../route-helpers.js';
+import { folderAllowedForUser } from '../../folder-listing.js';
+import {
+  CASES_DIR,
+  findSessionOrFail,
+  getAuthUser,
+  ownerFor,
+  parseBody,
+  validateSessionFilePath,
+} from '../route-helpers.js';
 import { HtmlViewOpenSchema } from '../schemas.js';
 import { DOCKER_HOME_PATH_ERROR, sendFileBody } from './file-routes.js';
 import { getUserSpacesDir } from '../../config/multiuser.js';
@@ -192,6 +200,15 @@ export function registerHtmlViewRoutes(app: FastifyInstance, ctx: SessionPort): 
       const guard = await loadAttachmentGuardConfig();
       if (guard.confineToWorkspace || isBlockedAttachmentPath(resolvedPath, guard.blockedTrees)) {
         reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
+        return;
+      }
+      // Multi-user: the folder grid's rule. User spaces live inside `homedir()`, and
+      // the capability serves the file's directory recursively, so a regular user
+      // must not mint a page over another user's case folder. The serve route keeps
+      // every asset inside that root (realpath + isUnderTree), so checking the root
+      // here covers what the page can reach.
+      if (!folderAllowedForUser(resolvedPath, getAuthUser(req), { workingDir: session.workingDir })) {
+        reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File is outside your space'));
         return;
       }
     }
