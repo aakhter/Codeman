@@ -34,6 +34,11 @@ import { createUser, invalidateUsersCache } from '../../src/user-store.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
+const remoteImageWrite = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('../../src/remote-file-transfer.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/remote-file-transfer.js')>()),
+  writeRemoteFileBytes: remoteImageWrite,
+}));
 const heicConvert = vi.hoisted(() => vi.fn(async () => Buffer.from('ffd8ffe000104a4649460001', 'hex')));
 const remoteStore = vi.hoisted(() => ({
   hosts: [] as Array<{
@@ -1306,27 +1311,45 @@ and effort involved in moving workloads.
       }
     });
 
-    it('rejects paste images for remote sessions before spawning SSH', async () => {
+    it('transfers remote images over SSH without creating a local upload directory', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-remote-image-'));
+      makeSessionRemote(workDir);
+      remoteImageWrite.mockClear();
+      try {
+        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(200);
+        const { path, filename } = JSON.parse(res.body).data;
+        expect(path).toBe(`${workDir}/.claude-images/${filename}`);
+        expect(remoteImageWrite).toHaveBeenCalledWith(
+          harness.ctx._session.remote,
+          expect.objectContaining({
+            dir: `${workDir}/.claude-images`,
+            filePath: path,
+            bytes: jpeg,
+            transferLabel: 'remote image upload',
+          })
+        );
+        expect(await readdir(workDir)).toEqual([]);
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('surfaces SSH transfer errors without returning a successful attachment path', async () => {
       makeSessionRemote();
+      remoteImageWrite.mockRejectedValueOnce(new Error('remote image upload failed: Permission denied'));
+      const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+      expect(res.statusCode).toBe(500);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false });
+      expect(JSON.parse(res.body).data).toBeUndefined();
+    });
 
-      const boundary = 'codeman-test-boundary';
-      const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
-      const res = await harness.app.inject({
-        method: 'POST',
-        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
-        headers: {
-          host: 'codeman.test',
-          origin: 'http://codeman.test',
-          'content-type': `multipart/form-data; boundary=${boundary}`,
-        },
-        payload: pngUploadBody(boundary, png),
-      });
-
-      expect(res.statusCode).toBe(400);
-      const body = JSON.parse(res.body);
-      expect(body.success).toBe(false);
-      expect(body.error).toMatch(/not supported for remote/i);
-      expect(spawn).not.toHaveBeenCalled();
+    it('validates remote image bytes before attempting an SSH transfer', async () => {
+      makeSessionRemote();
+      remoteImageWrite.mockClear();
+      const res = await upload('shot.jpg', 'image/jpeg', Buffer.from('not a valid image'));
+      expect(res.statusCode).toBe(415);
+      expect(remoteImageWrite).not.toHaveBeenCalled();
     });
 
     it('converts mislabeled HEIC (declared image/jpeg, HEIF bytes — the MIUI/Android case) via magic sniff', async () => {
@@ -1425,7 +1448,7 @@ and effort involved in moving workloads.
       }
     });
 
-    it('refuses an upload for a remote session before touching disk', async () => {
+    it('refuses incomplete remote connection metadata before touching disk', async () => {
       const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
       harness.ctx._session.workingDir = workDir;
       // A remote session's workingDir is the REMOTE path: a file written here is unreadable there.

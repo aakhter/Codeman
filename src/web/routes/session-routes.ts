@@ -490,10 +490,8 @@ export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
   }
 }
 
-function getSessionRemote(session: { toState?: () => unknown }): SessionRemote | undefined {
-  const state = typeof session.toState === 'function' ? session.toState() : undefined;
-  if (!state || typeof state !== 'object') return undefined;
-  const remote = (state as { remote?: unknown }).remote;
+function getSessionRemote(session: { remote?: unknown }): SessionRemote | undefined {
+  const remote = session.remote;
   if (!remote || typeof remote !== 'object') return undefined;
   const candidate = remote as Partial<SessionRemote>;
   if (
@@ -5789,18 +5787,12 @@ export function registerSessionRoutes(
 
     const session = findSessionOrFail(ctx, id, req);
 
-    // The file lands on THIS host under the session's working directory, which
-    // for a remote (SSH) session is the remote path: the agent there could never
-    // read it, and the write would land in a same-named local directory or fail.
-    // An owned Docker case is fine, its workspace is bind-mounted at the same
-    // absolute path; an adopted container (owned: false) mounts nothing, so its
-    // agent reads the file only if the container exposes that host path.
-    if (session.remote) {
+    // Resolve SSH metadata before any filesystem access. Remote workspaces are
+    // paths on another host; never fall back to writing them on this host.
+    const remote = getSessionRemote(session);
+    if (session.remote && !remote) {
       reply.code(400);
-      return createErrorResponse(
-        ApiErrorCode.INVALID_INPUT,
-        'Prompt uploads are not supported for remote (SSH) sessions'
-      );
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid remote session connection metadata');
     }
 
     if (!req.isMultipart()) {
@@ -5902,7 +5894,6 @@ export function registerSessionRoutes(
     // Date.now() collides on same-ms uploads from two tabs (last-write wins
     // silently). Append 8 hex chars so concurrent pastes get distinct names.
     const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${ext}`;
-    const remote = getSessionRemote(session);
     // Remote sessions keep `.claude-images` (written over ssh by the shared
     // symlink-safe remote writer); local sessions use the self-ignoring
     // {workingDir}/.codeman-uploads/, see ensureUploadDir.
