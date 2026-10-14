@@ -101,7 +101,7 @@ describe('exact assistant session recovery', () => {
     expect(manager.availability(next)).toMatchObject({
       requestExecution: true,
       inputLocked: true,
-      recovery: { state: 'armed', attempts: 1 },
+      recovery: { state: 'armed', attempts: 0 },
     });
     expect(store.authenticate(issued.token)).toBeDefined();
     expect(writes).toEqual([]);
@@ -238,6 +238,21 @@ describe('exact assistant session recovery', () => {
     expect(adapter.create).not.toHaveBeenCalled();
     expect(recovery.status(a.id)?.state).toBe('blocked');
   });
+  it('resets the failure budget after every successful restart recovery', async () => {
+    for (let i = 0; i < 5; i++) {
+      const current = store.get(a.id)!;
+      const live = sessions.get(current.binding!.sessionId)!;
+      // A web restart changes the attaching PTY PID while native identity survives.
+      live.pid! += 1;
+      recovery = coordinator();
+      await manager.tick();
+      expect(recovery.status(a.id)).toMatchObject({ state: 'armed', attempts: 0 });
+      expect(manager.availability(store.get(a.id)!).requestExecution).toBe(true);
+    }
+    expect(adapter.create).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
   it('limits failed recovery across coordinator restarts to three attempts', async () => {
     let now = Date.now();
     vi.spyOn(Date, 'now').mockImplementation(() => now);

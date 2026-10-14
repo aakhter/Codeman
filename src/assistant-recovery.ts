@@ -308,6 +308,9 @@ export class AssistantRecovery {
         this.automaticHandoff = false;
       }
       r.state = 'armed';
+      // Bound consecutive failures, not the lifetime number of recoveries.
+      r.attempts = 0;
+      r.nextAt = 0;
       r.pid = candidate.pid;
       r.reason = undefined;
       r.candidateId = undefined;

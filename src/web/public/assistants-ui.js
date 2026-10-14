@@ -110,7 +110,7 @@ Object.assign(CodemanApp.prototype, {
       const shapes = {
         brain:
           'M12 4C8 1 5 4 5 7C1 8 2 13 4 14C2 18 7 22 10 19L12 20L14 19C17 22 22 18 20 14C22 13 23 8 19 7C19 4 16 1 12 4ZM12 4V20M5 7L8 9M4 14L8 13M19 7L16 9M20 14L16 13',
-        plane: 'M3 10L21 3L16 21L11 14L3 10ZM11 14L21 3',
+        messaging: 'M21 11.5a8.5 8.5 0 0 1-8.5 8.5H3l2.5-4A8.5 8.5 0 1 1 21 11.5Z',
         folder: 'M3 7V20H21V7H12L10 4H3V7Z',
         document: 'M5 3H14L19 8V21H5V3ZM14 3V8H19M8 12H16M8 16H16',
         image: 'M3 3H21V21H3V3ZM3 17L9 11L14 16L17 13L21 17M7 7H8',
@@ -245,8 +245,8 @@ Object.assign(CodemanApp.prototype, {
     }
     const tiles = element('div', undefined, 'assistant-tiles');
     const connection = element('section', undefined, 'assistant-tile');
-    const plane = element('span', undefined, 'assistant-channel-icon');
-    plane.append(icon('plane'));
+    const messaging = element('span', undefined, 'assistant-channel-icon');
+    messaging.append(icon('messaging'));
     const connectionText = element('div');
     connectionText.append(
       element('h4', 'Messaging'),
@@ -257,7 +257,7 @@ Object.assign(CodemanApp.prototype, {
         'assistant-secondary'
       )
     );
-    connection.append(plane, connectionText);
+    connection.append(messaging, connectionText);
     const sessionTile = element('section', undefined, 'assistant-tile');
     sessionTile.append(icon('folder'));
     const sessionText = element('div');
