@@ -840,6 +840,24 @@ describe('ws-routes', () => {
   // ========== Viewer activation ==========
 
   describe('viewer activation', () => {
+    it('reports confirmed asynchronous geometry after the immediate old-size ACK', async () => {
+      Object.defineProperty(ctx._session, 'ptyGeometry', {
+        configurable: true,
+        value: { cols: 55, rows: 30 },
+      });
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      try {
+        ws.send(JSON.stringify({ t: 'z', c: 160, r: 45, v: 'desktop' }));
+        expect(await nextMessage(ws)).toEqual({ t: 'zc', c: 55, r: 30 });
+        const confirmed = nextMessage(ws);
+        ctx._session.emit('resized', { cols: 160, rows: 45 });
+        expect(await confirmed).toEqual({ t: 'zc', c: 160, r: 45 });
+      } finally {
+        ws.close();
+      }
+      await vi.waitFor(() => expect(ctx._session.listenerCount('resized')).toBe(0));
+    });
+
     it('hands sizing to a phone activation while retaining passive dimensions for desktop input fallback', async () => {
       type Dimensions = { cols: number; rows: number; viewportType: 'mobile' | 'tablet' | 'desktop' };
       const remembered = new Map<symbol, Dimensions>();

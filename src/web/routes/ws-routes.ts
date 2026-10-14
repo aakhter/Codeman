@@ -418,6 +418,15 @@ export function registerWsRoutes(
         socket.close(4009, 'Session terminated');
       };
 
+      // The immediate z reply can precede an asynchronous tmux resize. Send
+      // its confirmed geometry too, so a viewer never stays at the old width.
+      const onResized = (geometry: { cols: number; rows: number }) => {
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ t: 'zc', c: geometry.cols, r: geometry.rows }));
+        }
+      };
+
+      session.on('resized', onResized);
       session.on('terminal', onTerminal);
       session.on('clearTerminal', onClearTerminal);
       session.on('needsRefresh', onNeedsRefresh);
@@ -451,6 +460,7 @@ export function registerWsRoutes(
         if (pongTimeout) clearTimeout(pongTimeout);
         if (batchTimer) clearTimeout(batchTimer);
         batchChunks = [];
+        session.off('resized', onResized);
         session.off('terminal', onTerminal);
         session.off('clearTerminal', onClearTerminal);
         session.off('needsRefresh', onNeedsRefresh);
