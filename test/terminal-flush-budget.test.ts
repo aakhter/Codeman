@@ -26,6 +26,7 @@ function loadTerminalUiHarness(mode: string) {
       this.postMessage = () => {};
     },
     DEC_SYNC_STRIP_RE: /\x1b\[\?2026[hl]/g,
+    OSC52_STRIP_RE: /\x1b\]52;[^\x07\x1b]*(?:\x07|\x1b\\)/g,
     TERMINAL_CHUNK_SIZE: 32 * 1024,
   });
 
@@ -116,6 +117,88 @@ function loadAppHarness() {
 }
 
 describe('terminal flush budget', () => {
+  it('counts incoming, loading, and xterm in-flight bytes before accepting live output', () => {
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const start = source.indexOf('_onSessionTerminal(data)');
+    const body = source.slice(start, source.indexOf('\n  // ═', start));
+
+    expect(body).toContain('this._loadBufferQueue?.reduce');
+    expect(body).toContain('this._terminalWriteInFlightBytes || 0');
+    expect(body).toContain('queued + data.data.length > 131072');
+  });
+
+  it('drops redundant SSE terminal events whenever WebSocket owns terminal I/O', () => {
+    const { CodemanApp } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+    app._wsReady = true;
+    app._onSessionTerminal = vi.fn();
+    app._onSessionNeedsRefresh = vi.fn();
+    app._onSessionClearTerminal = vi.fn();
+
+    app._onSSETerminal({ id: 'session-1', data: 'duplicate' });
+    app._onSSENeedsRefresh({});
+    app._onSSEClearTerminal({ id: 'session-1' });
+
+    expect(app._onSessionTerminal).not.toHaveBeenCalled();
+    expect(app._onSessionNeedsRefresh).not.toHaveBeenCalled();
+    expect(app._onSessionClearTerminal).not.toHaveBeenCalled();
+  });
+
+  it('runs at most one buffer recovery per session and ignores stale-session events', async () => {
+    const { CodemanApp, fetchMock } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+    app.activeSessionId = 'session-1';
+    app.sessions = new Map([['session-1', { mode: 'shell' }]]);
+    app.terminal = {};
+    app._isLoadingBuffer = false;
+    app._terminalRefreshOwner = null;
+
+    let releaseFetch!: () => void;
+    fetchMock.mockImplementation(
+      () =>
+        new Promise((resolveFetch) => {
+          releaseFetch = () => resolveFetch({ json: async () => ({ data: { terminalBuffer: '' } }) });
+        })
+    );
+
+    await app._onSessionNeedsRefresh({ id: 'stale-session' });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const first = app._onSessionNeedsRefresh({ id: 'session-1' });
+    const duplicate = app._onSessionNeedsRefresh({ id: 'session-1' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sessions/session-1/terminal?full=1&tail=1048576&alt=recording&lines=10000'
+    );
+
+    releaseFetch();
+    await Promise.all([first, duplicate]);
+    expect(app._terminalRefreshOwner).toBe(null);
+  });
+
+  it("reloads a cleared shell from tmux's rendered history and an agent from the byte recording", async () => {
+    const { CodemanApp, fetchMock } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+    app.sessions = new Map([
+      ['shell-1', { mode: 'shell' }],
+      ['agent-1', { mode: 'claude' }],
+    ]);
+    app._isLoadingBuffer = false;
+    app._resetTerminalForReplay = vi.fn();
+    app.sendResize = vi.fn();
+    fetchMock.mockResolvedValue({ json: async () => ({ data: { terminalBuffer: '' } }) });
+
+    app.activeSessionId = 'shell-1';
+    await app._onSessionClearTerminal({ id: 'shell-1' });
+    app.activeSessionId = 'agent-1';
+    await app._onSessionClearTerminal({ id: 'agent-1' });
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      '/api/sessions/shell-1/terminal?full=1&tail=1048576&alt=recording&lines=10000',
+      '/api/sessions/agent-1/terminal',
+    ]);
+  });
+
   it('drains a large final batch without waiting for unrelated terminal output', () => {
     const { app, writes } = loadTerminalUiHarness('codex');
     const scheduled: Array<() => void> = [];

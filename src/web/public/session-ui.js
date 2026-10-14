@@ -691,7 +691,12 @@ Object.assign(CodemanApp.prototype, {
     this._renderSessionTabsImmediate?.();
   },
 
-  /** Run using the selected mode (Claude Code, OpenCode, Codex, Gemini, or Antigravity) */
+  /**
+   * Run using the selected mode (Claude Code, OpenCode, Codex, Gemini, or Antigravity).
+   * `options` comes from the tab group menu's "New session": `count` overrides
+   * the instance steppers for this launch only, `tabGroupId` rides every create
+   * request so the server places the session in that group.
+   */
   async run(options = {}) {
     if (this._runInFlight) return;
 
@@ -1159,7 +1164,7 @@ Object.assign(CodemanApp.prototype, {
    *
    * Routes through run() itself, via a temporary `_runMode` swap, rather than a
    * parallel dispatch table: that is what gives this the same in-flight lock
-   * every other Run click gets (CLAUDE.md, Run launch synchronization — the lock
+   * every other Run click gets (src/web/CLAUDE.md, Run launch synchronization — the lock
    * exists so a double click cannot create duplicate sessions with the same
    * `w<n>-<case>` name, and it guards the OTHER direction too: without it, the
    * main Run button could start a second concurrent launch while this one was
@@ -1963,7 +1968,7 @@ Object.assign(CodemanApp.prototype, {
 
   async runClaude(options = {}) {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const tabCount = options.count ?? this._readTabCount();
+    const tabCount = this._readTabCount(options.count);
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} Claude session(s) in ${caseName}...`
@@ -2198,7 +2203,7 @@ Object.assign(CodemanApp.prototype, {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Run Shell reads the toolbar's one instance stepper, like every other run*();
     // its own second `− 1 +` group (#shellCount) was removed (#428).
-    const shellCount = Math.min(20, Math.max(1, options.count ?? this._readTabCount()));
+    const shellCount = this._readTabCount(options.count);
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${shellCount} Shell session(s) in ${caseName}...`,
@@ -2345,8 +2350,8 @@ Object.assign(CodemanApp.prototype, {
    * their try block, to put the count in the opening banner: `#tabCount` ships
    * unconditionally today, but a throw here would escape the launch-error path.
    */
-  _readTabCount() {
-    return Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount')?.value) || 1));
+  _readTabCount(override) {
+    return Math.min(20, Math.max(1, override ?? (parseInt(document.getElementById('tabCount')?.value) || 1)));
   },
 
   /**
@@ -2419,7 +2424,7 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const tabCount = options.count ?? this._readTabCount();
+    const tabCount = this._readTabCount(options.count);
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} ${entry.label} session(s) in ${caseName}...`
     );
@@ -2568,6 +2573,14 @@ Object.assign(CodemanApp.prototype, {
     if (tab) tab.classList.toggle('tab-show-detach', !!on);
   },
 
+  /** Copy the open session's working folder (Session Options > Session > Working folder). */
+  async copySessionPath() {
+    const session = this.sessions.get(this.editingSessionId);
+    if (!session?.workingDir) return;
+    const ok = await this._copyText(session.workingDir);
+    this.showToast(ok ? 'Path copied' : 'Copy failed', ok ? 'success' : 'error');
+  },
+
   openSessionOptions(sessionId) {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -2646,6 +2659,7 @@ Object.assign(CodemanApp.prototype, {
     // Populate auto-resume on usage limit (token pause control)
     document.getElementById('modalAutoResumeEnabled').checked = session.autoResumeEnabled ?? false;
     this.updateAutoResumeStatus(sessionId);
+    this.updatePromptCacheStatus(sessionId);
     document.getElementById('modalImageWatcherEnabled').checked = session.imageWatcherEnabled ?? true;
     document.getElementById('modalFlickerFilterEnabled').checked = session.flickerFilterEnabled ?? false;
 
@@ -2663,6 +2677,19 @@ Object.assign(CodemanApp.prototype, {
       document.getElementById('modalSessionName').value = session.name || '';
       document.getElementById('modalSessionName').placeholder = 'Auto (directory name)';
     }
+
+    // Working folder: the path the CLI was launched in on the Codeman host
+    const _pathEl = document.getElementById('modalSessionPath');
+    _pathEl.textContent = session.workingDir || '';
+    _pathEl.title = session.workingDir || '';
+    document.getElementById('modalSessionPathCopy').disabled = !session.workingDir;
+    // A remote session's workingDir is the REMOTE path; a docker session's is the
+    // host bind-mount source the container sees.
+    document.getElementById('modalSessionPathDesc').textContent = session.remote
+      ? "Where this session's CLI runs, on the remote host it reaches over SSH, not on this machine."
+      : session.docker
+        ? "On the machine hosting Codeman, mounted into the Docker container this session's CLI runs in."
+        : "Where this session's CLI runs, on the machine hosting Codeman.";
 
     // Initialize color picker with current session color
     const currentColor = session.color || 'default';
@@ -2945,6 +2972,27 @@ Object.assign(CodemanApp.prototype, {
       el.textContent = '';
       el.classList.remove('active');
     }
+  },
+
+  /**
+   * Session Options → Respawn → "Prompt cache": the main conversation's cache state as
+   * Claude Code reports it on the statusline (`session.promptCache`, v2.1.251+), worded by
+   * the pure `CodemanPromptCache.format` (constants.js). Refreshed on open and on the
+   * `session:promptCache` SSE event while the modal shows that session.
+   */
+  updatePromptCacheStatus(sessionId) {
+    const el = document.getElementById('promptCacheStatus');
+    if (!el || this.editingSessionId !== sessionId) return;
+    const session = this.sessions.get(sessionId);
+    el.textContent = window.CodemanPromptCache.format(session?.promptCache, Date.now(), session?.statusLineExporter);
+  },
+
+  _onSessionPromptCache(data) {
+    const { sessionId, ...promptCache } = data;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.promptCache = promptCache;
+    this.updatePromptCacheStatus(sessionId);
   },
 
   async toggleSessionImageWatcher() {

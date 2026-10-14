@@ -116,6 +116,7 @@ import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
 import { documentVersionStore } from '../document-version-store.js';
+import { folderGrants } from '../folder-listing.js';
 import { getCli, enabledClis, listClis } from '../config/cli-registry/registry.js';
 import { isCliEntryInstalled, probeStockCliAvailability } from '../utils/cli-installed-probes.js';
 import { readCustomModelHosts } from '../custom-model-hosts.js';
@@ -341,6 +342,7 @@ import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.j
 import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { MAX_PASTE_IMAGE_BYTES } from '../config/buffer-limits.js';
 import { SseEvent, approvalResolvedEventPayload } from './sse-events.js';
+import { MAX_ROUTE_PARAM_LENGTH } from './route-helpers.js';
 import { getLatestPlanUsage, setLatestCodexPlanUsage } from './plan-usage-latest.js';
 import { telemetrySignature } from '../usage-telemetry.js';
 import { readCodexPlanUsage, resolveCodexBinaryPath } from '../utils/codex-cli-resolver.js';
@@ -362,6 +364,7 @@ import {
   registerTeamRoutes,
   registerMuxRoutes,
   registerFileRoutes,
+  registerHtmlViewRoutes,
   registerScheduledRoutes,
   registerHookEventRoutes,
   registerApprovalRoutes,
@@ -663,9 +666,14 @@ export class WebServer extends EventEmitter {
     const rewriteUrl = (req: { url?: string }): string => rewriteApiV1Url(stripBasePath(this.basePath, req.url || ''));
     if (https) {
       const { key, cert } = getOrCreateSelfSignedCert();
-      this.app = Fastify({ logger: false, https: { key, cert }, rewriteUrl });
+      this.app = Fastify({
+        logger: false,
+        https: { key, cert },
+        rewriteUrl,
+        routerOptions: { maxParamLength: MAX_ROUTE_PARAM_LENGTH },
+      });
     } else {
-      this.app = Fastify({ logger: false, rewriteUrl });
+      this.app = Fastify({ logger: false, rewriteUrl, routerOptions: { maxParamLength: MAX_ROUTE_PARAM_LENGTH } });
     }
     this.mux = createMultiplexer(testMode);
     this.agentActivityCoordinator = new SessionAgentActivityCoordinator({
@@ -698,6 +706,9 @@ export class WebServer extends EventEmitter {
         this.cachedLightState = null;
         this.sse.broadcastSessionOrder(change);
       },
+      // Fresh, not the 2s cache: the settings PUT does not invalidate it, and a
+      // flip must apply to the very next spawn.
+      childrenFollowParent: async () => (await this.readSettings(true)).spawnedTabsFollowParent === true,
     });
     if (this.testMode) this.tabLayouts.markRestorationSkipped();
 
@@ -1933,6 +1944,7 @@ export class WebServer extends EventEmitter {
     registerTeamRoutes(this.app, ctx);
     registerMuxRoutes(this.app, ctx);
     registerFileRoutes(this.app, ctx);
+    registerHtmlViewRoutes(this.app, ctx);
     registerScheduledRoutes(this.app, ctx);
     registerHookEventRoutes(this.app, ctx);
     registerApprovalRoutes(this.app, ctx);
@@ -2571,6 +2583,7 @@ export class WebServer extends EventEmitter {
       fileStreamManager.closeSessionStreams(sessionId);
       // Drop live external attachment registrations for this session
       attachmentRegistry.clearSession(sessionId);
+      folderGrants.clearSession(sessionId);
       // Stop watching for images in this session's directory
       imageWatcher.unwatchSession(sessionId);
       // Clean up pasted images directory for this session. The dir belongs to the
@@ -2859,6 +2872,19 @@ export class WebServer extends EventEmitter {
     }
     const wheelForwardJson = escapeScriptJson(JSON.stringify(wheelForwardClis));
     html = html.replace('</head>', () => `<script>window.__codemanWheelForward=${wheelForwardJson};</script>\n</head>`);
+    // Which run modes page their own transcript on PageUp/PageDown, for the scroll
+    // fallback over a pane with no local history (`_maybePageCliTranscript`). Read off
+    // the `transcriptPageKeys` capability, never an id list here, and injected for a
+    // solo window too for the same reason as the gutter map: it scrolls a terminal.
+    // Ids only, which the registry schema bounds to kebab tokens, so JSON.stringify
+    // alone is enough.
+    const pageKeyClis = enabledClis()
+      .filter((entry) => entry.capabilities.transcriptPageKeys === true)
+      .map((entry) => entry.id);
+    html = html.replace(
+      '</head>',
+      () => `<script>window.__codemanTranscriptPageKeys=${JSON.stringify(pageKeyClis)};</script>\n</head>`
+    );
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
       html = html.replace('</head>', () => `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
       if (settings.gestureControlEnabled === true) {
@@ -3977,9 +4003,12 @@ export class WebServer extends EventEmitter {
       // Approvals Inbox item id: lets sw.js answer an Approve/Deny action
       // click directly (POST /api/approvals/:id/answer) with no tab open.
       // Gated on the opt-in setting together with the action buttons.
+      // Approve/Deny only when we also have an approvalId to answer with.
+      // Supervised-hook CLIs (DeepSeek) omit approvalId upstream so this also
+      // strips their action buttons — buttons without an id can never answer.
       approvalId: approvalsEnabled && typeof data.approvalId === 'string' ? data.approvalId : undefined,
       urgency: template.urgency,
-      actions: approvalsEnabled ? template.actions : undefined,
+      actions: approvalsEnabled && typeof data.approvalId === 'string' ? template.actions : undefined,
     });
 
     for (const sub of subscriptions) {
@@ -4694,6 +4723,7 @@ export class WebServer extends EventEmitter {
     this.stopTranscriptWatcher(sessionId);
     attachmentRegistry.clearSession(sessionId);
     documentVersionStore.clearSession(sessionId);
+    folderGrants.clearSession(sessionId);
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
@@ -4912,6 +4942,11 @@ export class WebServer extends EventEmitter {
               // tile header keeps naming it until the next report; an idle claude
               // session re-renders its statusline only on its next turn.
               displayModel: savedState?.displayModel,
+              // The last prompt-cache report, restored for the same reason: an idle claude
+              // session re-renders its statusline only on its next turn, so without this the
+              // Session Options readout would read "not reported yet" after every restart. The
+              // readout is time-aware, so a value past its expiry shows as cold, not stale-warm.
+              promptCache: savedState?.promptCache,
               // A record rebuilt from the socket has no provenance, so its
               // apparent locality is a guess (see `MuxSession.discovered`).
               discoveredMuxSession: muxSession.discovered,
@@ -5032,7 +5067,18 @@ export class WebServer extends EventEmitter {
               if (savedState.flickerFilterEnabled !== undefined) {
                 session.flickerFilterEnabled = savedState.flickerFilterEnabled;
               }
-              // Respawn controller (not supported for external CLI sessions)
+              // Tab colour, pin and the image watcher are user-set and persisted like the settings
+              // above, but this path never read them back: after a restart every surviving pane came
+              // back uncoloured and unpinned with its image watcher off, and the next persist
+              // overwrote the saved values. `reapplyPersistedSessionState()` (the reboot-restore
+              // path) already restores all three. The watcher flag has to be set before
+              // `setupSessionListeners()` below, which reads it to decide whether to start one.
+              if (savedState.color) session.setColor(savedState.color);
+              if (savedState.pinned) session.restorePin(true, savedState.pinnedAt);
+              if (savedState.imageWatcherEnabled !== undefined) {
+                session.imageWatcherEnabled = savedState.imageWatcherEnabled;
+              }
+              // Respawn controller (not supported for external-CLI sessions)
               if (!isExternalCliMode(session.mode) && savedState.respawnEnabled && savedState.respawnConfig) {
                 try {
                   this.restoreRespawnController(session, savedState.respawnConfig, 'state.json');

@@ -80,6 +80,15 @@ import {
 } from '../../document-text-extract.js';
 import { wordDiff } from '../../utils/word-diff.js';
 import { compileFileQuery } from '../../utils/file-query.js';
+import { describeUnknownPath, probePathKind } from '../../utils/bounded-path-probe.js';
+import {
+  FolderListingError,
+  folderFilePath,
+  folderGrants,
+  folderAllowedForUser,
+  listFolder,
+  validFolderFileName,
+} from '../../folder-listing.js';
 import { isMultiUserMode, userSpacePath } from '../../config/multiuser.js';
 import {
   CASES_DIR,
@@ -272,7 +281,7 @@ function sendRawStream(reply: FastifyReply, content: ReadStream, onClose?: () =>
  * 18MB mp4 before this existed). It also stops each seek from re-reading the
  * whole file into memory.
  */
-function sendFileBody(
+export function sendFileBody(
   reply: FastifyReply,
   resolvedPath: string,
   size: number,
@@ -781,6 +790,16 @@ function appendDownloadFlag(url: string): string {
  * persisted record so preview/thumbnail requests keep working for a session
  * that has since detached. Sends a 404 and returns undefined when unknown.
  */
+/**
+ * A Docker case is a LOCAL session for the file routes (the workspace is a
+ * bind mount, so its paths are host paths), but `~` inside the container is the
+ * container's own seeded home, not this host's. Expanding `~/x.png` against the
+ * host's home would open a different file than the one the agent printed, so
+ * the form is refused instead of guessed.
+ */
+export const DOCKER_HOME_PATH_ERROR =
+  'A ~/ path inside a Docker case is the container home, which this server cannot read; use the absolute path';
+
 function getKnownSessionWorkingDir(
   ctx: SessionPort & ConfigPort,
   sessionId: string,
@@ -2133,6 +2152,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     if (!body.path || typeof body.path !== 'string') {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing attachment path'));
+      return;
+    }
+    if (session.docker && body.path.startsWith('~/')) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, DOCKER_HOME_PATH_ERROR));
       return;
     }
 
@@ -3801,6 +3824,190 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         .code(500)
         .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read file: ${getErrorMessage(err)}`));
     }
+  });
+
+  // ===== Folder grid =====
+  // Grant + list a folder (absolute or `~/` on the session's host) for the preview
+  // grid. Same guard as a single external attachment; the grid then fetches files by
+  // `folderId + name`, so no browser request carries a path. See folder-listing.ts.
+  // Local and Docker sessions only on this fork: by-id attachment serving here is
+  // local-only, so a remote (SSH) folder could be listed but none of its files served.
+  const getFolderSessionScope = (
+    id: string,
+    reply: FastifyReply,
+    req: FastifyRequest
+  ): { workingDir: string; remote?: SessionRemote; docker: boolean } | undefined => {
+    const workingDir = getKnownSessionWorkingDir(ctx, id, reply, req);
+    if (!workingDir) return undefined;
+    const known = (ctx.sessions.get(id) ?? ctx.store.getSession(id)) as
+      | { remote?: SessionRemote; docker?: unknown }
+      | undefined;
+    return { workingDir, remote: known?.remote, docker: !!known?.docker };
+  };
+
+  app.post('/api/sessions/:id/folders', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const scope = getFolderSessionScope(id, reply, req);
+    if (!scope) return;
+    const body = (req.body || {}) as { path?: unknown };
+    if (!body.path || typeof body.path !== 'string') {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing folder path'));
+      return;
+    }
+    if (scope.remote) {
+      reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Folder grid is not available for a remote (SSH) case'));
+      return;
+    }
+    // A bare `~` expands to this host's home too, not the container's.
+    if (scope.docker && (body.path === '~' || body.path.startsWith('~/'))) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, DOCKER_HOME_PATH_ERROR));
+      return;
+    }
+    try {
+      const listing = await listFolder(id, body.path, {
+        sessionWorkingDir: scope.workingDir,
+        user: getAuthUser(req),
+      });
+      return { success: true, data: listing };
+    } catch (err) {
+      if (err instanceof FolderListingError) {
+        const code =
+          err.statusCode === 404
+            ? ApiErrorCode.NOT_FOUND
+            : err.statusCode >= 500
+              ? ApiErrorCode.OPERATION_FAILED
+              : ApiErrorCode.INVALID_INPUT;
+        reply.code(err.statusCode).send(createErrorResponse(code, err.message));
+        return;
+      }
+      return reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to list folder: ${getErrorMessage(err)}`));
+    }
+  });
+
+  /**
+   * One file of a granted folder, guard-checked like an attachment: the name is a
+   * bare file name of a supported type, and the joined path goes through the same
+   * {@link resolveServableAttachmentPath} (blocklist, workspace confinement, symlink
+   * re-resolution) an attachment by id does. The multi-user rule
+   * ({@link folderAllowedForUser}) runs again on the resolved file: a symlink inside
+   * the granted folder must not lead into another user's space.
+   */
+  async function resolveFolderFile(
+    req: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<{ record: AttachmentRecord; servePath: string; name: string; extension: string } | null> {
+    const { id, folderId, name } = req.params as { id: string; folderId: string; name: string };
+    const scope = getFolderSessionScope(id, reply, req);
+    if (!scope) return null;
+    const grant = folderGrants.get(id, folderId);
+    if (!grant) {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Folder not found'));
+      return null;
+    }
+    const fileName = validFolderFileName(name);
+    if (!fileName) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid file name'));
+      return null;
+    }
+    const filePath = folderFilePath(grant.dir, fileName);
+    // Bounded, like the folder itself: the grant may point at a mount that has stopped answering since.
+    const kind = await probePathKind(filePath, { pastCap: true });
+    if (kind === 'unknown') {
+      reply
+        .code(503)
+        .send(
+          createErrorResponse(ApiErrorCode.OPERATION_FAILED, describeUnknownPath('File', filePath, { pastCap: true }))
+        );
+      return null;
+    }
+    if (kind !== 'file') {
+      reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'File not found'));
+      return null;
+    }
+    const extension = extname(fileName).toLowerCase().replace(/^\./, '');
+    const record: AttachmentRecord = {
+      attachmentId: '',
+      sessionId: id,
+      filePath,
+      fileName,
+      extension,
+      attachmentType: getAttachmentType(extension),
+      size: 0,
+      mtimeMs: 0,
+      timestamp: 0,
+      source: 'external',
+    };
+    const servePath = await resolveServableAttachmentPath(reply, record, scope.workingDir);
+    if (!servePath) return null;
+    // The requested NAME only opens the door; registration judges the file a
+    // symlink resolves to (supported extension, regular file) and so does this.
+    // Without it `shot.png -> ../secret.bin` is served, and a FIFO or a device
+    // behind a supported name parks a worker on an open that never returns.
+    if (!isSupportedAttachmentExtension(extname(servePath))) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Unsupported attachment type'));
+      return null;
+    }
+    const isRegularFile = await fs.stat(servePath).then(
+      (stat) => stat.isFile(),
+      () => false
+    );
+    if (!isRegularFile) {
+      reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Attachment path is not a file'));
+      return null;
+    }
+    if (!folderAllowedForUser(servePath, getAuthUser(req), scope)) {
+      reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'File is outside your space'));
+      return null;
+    }
+    return { record, servePath, name: fileName, extension };
+  }
+
+  app.get('/api/sessions/:id/folders/:folderId/files/:name/raw', async (req, reply) => {
+    const file = await resolveFolderFile(req, reply);
+    if (!file) return;
+    const { download, preview } = req.query as { download?: string; preview?: string };
+    try {
+      const maxSizeBytes =
+        file.extension === 'xlsx' && preview === 'true' && download !== 'true'
+          ? MAX_XLSX_BROWSER_PREVIEW_BYTES
+          : maxServableAttachmentBytes(file.record);
+      await serveRawFile(
+        reply,
+        file.servePath,
+        file.name,
+        file.extension,
+        download === 'true',
+        req.headers.range,
+        maxSizeBytes
+      );
+    } catch (err) {
+      reply
+        .code(500)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to read file: ${getErrorMessage(err)}`));
+    }
+  });
+
+  app.get('/api/sessions/:id/folders/:folderId/files/:name/preview', async (req, reply) => {
+    const file = await resolveFolderFile(req, reply);
+    if (!file) return;
+    if (file.extension !== 'docx' && file.extension !== 'pptx') {
+      const { id, folderId } = req.params as { id: string; folderId: string };
+      reply.redirect(
+        `/api/sessions/${encodeURIComponent(id)}/folders/${encodeURIComponent(folderId)}/files/${encodeURIComponent(file.name)}/raw`
+      );
+      return;
+    }
+    await serveConvertedPreview(reply, file.servePath, file.name, file.extension);
+  });
+
+  app.get('/api/sessions/:id/folders/:folderId/files/:name/thumbnail', async (req, reply) => {
+    const file = await resolveFolderFile(req, reply);
+    if (!file) return;
+    await serveThumbnail(reply, file.servePath, file.extension);
   });
 
   // Serve converted document previews for a workspace-relative path. DOCX/PPTX

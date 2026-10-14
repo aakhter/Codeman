@@ -9,7 +9,8 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import { basename, extname, isAbsolute, relative, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, extname, isAbsolute, join, relative, sep } from 'node:path';
 import { isBlockedAttachmentPath, isUnderTree, loadAttachmentGuardConfig } from './config/attachment-guard.js';
 import { MAX_PASTE_IMAGE_BYTES } from './config/buffer-limits.js';
 import { EDITABLE_EXTENSIONS } from './config/file-editing.js';
@@ -175,6 +176,11 @@ class AttachmentRegistry {
 }
 
 export const attachmentRegistry = new AttachmentRegistry();
+
+/** Every extension {@link isSupportedAttachmentExtension} accepts (lowercase, no dot). */
+export function supportedAttachmentExtensions(): string[] {
+  return [...SUPPORTED_ATTACHMENT_EXTENSIONS];
+}
 
 export function isSupportedAttachmentExtension(extension: string): boolean {
   return SUPPORTED_ATTACHMENT_EXTENSIONS.has(extension.toLowerCase().replace(/^\./, ''));
@@ -441,13 +447,19 @@ export async function registerExternalAttachment(
   requestedPath: string,
   options: RegisterExternalAttachmentOptions = {}
 ): Promise<AttachmentRegistrationResult> {
-  if (!requestedPath || !isAbsolute(requestedPath)) {
+  // `~/…` is the home of the session's HOST: expanded here for a local session,
+  // and by the probe on the remote host for a remote one (`buildRemoteProbeCommand`),
+  // whose home this server does not know. A clicked terminal link sends it as is
+  // (Claude Code echoes attachments as `~/…`). Every guard below runs on the
+  // resolved absolute path either way.
+  const homeRelative = typeof requestedPath === 'string' && requestedPath.startsWith('~/');
+  if (!requestedPath || (!isAbsolute(requestedPath) && !homeRelative)) {
     throw new AttachmentRegistrationError('Attachment path must be an absolute local path');
   }
 
   const resolved = await (options.remote
     ? resolveRemoteAttachment(requestedPath, options.remote, options.sessionWorkingDir, options.remoteProbes)
-    : resolveLocalAttachment(requestedPath));
+    : resolveLocalAttachment(homeRelative ? join(homedir(), requestedPath.slice(2)) : requestedPath));
   const resolvedPath = resolved.resolvedPath;
   const stat = { size: resolved.size, mtimeMs: resolved.mtimeMs };
 

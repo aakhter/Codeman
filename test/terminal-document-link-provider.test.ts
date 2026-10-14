@@ -545,7 +545,9 @@ describe('COD-232 terminal document link provider', () => {
   });
 
   it('preserves standalone legacy text links outside the session workspace', () => {
-    const paths = ['/tmp/result.txt', '/tmp/result.json', '/tmp/result.md'];
+    // Markdown is a preview type since upstream 1.41.1 (FILE_PREVIEW_EXTENSIONS), so
+    // only plain text keeps the log viewer here.
+    const paths = ['/tmp/result.txt', '/tmp/result.json'];
     const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(paths.join(' '));
 
     const links = provide();

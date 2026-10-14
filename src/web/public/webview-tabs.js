@@ -457,6 +457,7 @@ Object.assign(CodemanApp.prototype, {
 
     return `<div class="session-tab session-tab--web ${isActive ? 'active' : ''}" data-webview-id="${escapeHtml(id)}"
           onclick="app.handleWebviewTabClick(event, ${jsonId})"
+          oncontextmenu="app.handleWebviewTabContextMenu(event, ${jsonId})"
           tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
           aria-label="${escapeHtml(webview.name)} web tab" title="${escapeHtml(webview.url)}">
           ${idx < 9 ? '<span class="tab-number">' + (idx + 1) + '</span>' : ''}
@@ -478,6 +479,16 @@ Object.assign(CodemanApp.prototype, {
   handleWebviewTabClick(event, id) {
     event?.preventDefault?.();
     return this.openWebview(id);
+  },
+
+  /**
+   * Right-click (or the menu key) on a web tab in the vertical rail opens its
+   * actions (Focus, group moves, settings), the flat rail included, where it is
+   * the only way in. Everywhere else the browser keeps its own menu.
+   */
+  handleWebviewTabContextMenu(event, id) {
+    if (!this._tabLayoutEditable?.()) return false;
+    return this.openTabWebviewMenu?.(event, id);
   },
 
   /** Mark exactly one tab active across BOTH tab kinds. */
@@ -506,6 +517,7 @@ Object.assign(CodemanApp.prototype, {
       tab.removeAttribute('aria-selected');
       tab.setAttribute('aria-current', 'false');
     }
+    this._syncTabTreeSelection?.(container);
   },
 
   // ── Opening / closing ─────────────────────────────────────────────────────

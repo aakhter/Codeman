@@ -99,21 +99,21 @@ export function registerApprovalRoutes(app: FastifyInstance, ctx: SessionPort): 
     // Throws 404 (not 403) for sessions the caller does not own, same
     // no-existence-leak rule as every other session route.
     const session = findSessionOrFail(ctx, item.sessionId, req);
-    if (!approvalsAvailableForMode(session.mode)) {
-      return createErrorResponse(ApiErrorCode.CONFLICT, 'Session mode cannot have pending approvals');
-    }
-    // A dsh approval is an ALERT, not an answerable card: the dialog belongs to
-    // a third-party TUI whose keystroke contract Codeman has not measured, the
-    // Claude-shaped option parser never reads options off its frames, and
-    // verifyStillAnswerable() can therefore never be conclusive for it — so the
-    // '1'/Esc below would be a blind keystroke into a foreign composer. The item
-    // still raises the red alert and clears on the harness's own working/stop
-    // reports; answering happens in the terminal.
-    if (session.mode === 'deepseek') {
+    // Alert-only items (supervised-hook CLIs such as DeepSeek Harness): the
+    // dialog belongs to a third-party TUI whose keystroke contract Codeman has
+    // not measured, so '1'/Esc would be a blind keystroke into a foreign
+    // composer. The item still raises the red alert and clears on the harness's
+    // own working/stop reports; answering happens in the terminal.
+    if (item.answerInTerminal) {
       return createErrorResponse(
         ApiErrorCode.INVALID_INPUT,
         'DeepSeek Harness approvals must be answered in the terminal: the dialog belongs to a third-party TUI whose keystrokes Codeman cannot verify.'
       );
+    }
+    // Checked after the alert-only refusal: a supervised-hook CLI (DeepSeek) has
+    // inbox items but no answerable approvals, and its item must say why.
+    if (!approvalsAvailableForMode(session.mode)) {
+      return createErrorResponse(ApiErrorCode.CONFLICT, 'Session mode cannot have pending approvals');
     }
 
     // Re-capture the pane before aiming keystrokes at it: if the dialog was

@@ -15,6 +15,12 @@ export interface TabRef {
   kind: TabRefKind;
   id: string;
   placement?: 'manual';
+  /**
+   * Pinned to the vertical rail's Focus section. The browser draws a SHORTCUT to
+   * the ref there; the ref itself stays in its group, so the flag never moves
+   * anything and nothing that moves a ref may drop it. Only `true` is stored:
+   * an unfocused ref carries no key at all.
+   */
   focus?: true;
 }
 

@@ -23,7 +23,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 const PUBLIC = join(process.cwd(), 'src/web/public');
 const read = (name: string) => readFileSync(join(PUBLIC, name), 'utf8');
 
-type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual' };
+type Ref = { kind: 'session' | 'webview'; id: string; placement?: 'manual'; focus?: true };
 type Layout = {
   version: number;
   updatedAt: string;
@@ -95,6 +95,38 @@ describe('operations', () => {
     expect(child.groups[1].refs[0]).toEqual({ kind: 'session', id: 'child', placement: 'manual' });
     // ...and manual placement survives normalization (it is written back whole).
     expect(h.normalizeLayout(child).groups[1].refs[0].placement).toBe('manual');
+  });
+});
+
+describe('child sessions: follow and hand placement', () => {
+  const h = loadHelper();
+  const lineage = (): Layout => ({
+    version: 5,
+    updatedAt: '',
+    groups: [
+      { id: 'g1', name: 'Core', refs: [s('p'), s('kid'), s('x')] },
+      { id: 'g2', name: 'Ops', refs: [{ kind: 'session', id: 'moved', placement: 'manual' }, s('moved-kid')] },
+    ],
+    ungrouped: [s('u'), { kind: 'session', id: 'orphan', placement: 'manual' }],
+  });
+  const parents = { kid: 'p', moved: 'p', 'moved-kid': 'moved', orphan: 'gone' };
+
+  it('describes each child: following, placed by hand, or with no parent to follow', () => {
+    const state = (id: string, extra = {}) => plain(h.placementState(lineage(), s(id), { ...parents, ...extra }));
+    expect(state('kid')).toEqual({ state: 'inherited', parentId: 'p', canFollow: false });
+    expect(state('moved')).toEqual({ state: 'manual', parentId: 'p', canFollow: true });
+    expect(state('orphan')).toEqual({ state: 'dangling', parentId: 'gone', canFollow: false });
+    expect(state('p')).toBeNull();
+    expect(state('x', { x: 'u', u: 'x' })).toMatchObject({ state: 'cycle', canFollow: false });
+  });
+
+  it('Follow parent again keeps a Focus pin: the whole layout is PUT, so a dropped field is erased', () => {
+    const pinned = lineage();
+    pinned.groups[1].refs[0] = { kind: 'session', id: 'moved', placement: 'manual', focus: true };
+    const next = h.applyOperation(pinned, { type: 'followParent', ref: s('moved'), parents });
+    const moved = next.groups[0].refs.find((ref: Ref) => ref.id === 'moved');
+    expect(moved.placement).toBeUndefined();
+    expect(moved.focus).toBe(true);
   });
 });
 
@@ -905,6 +937,248 @@ describe('group menu', () => {
       // No listener is left behind by any of the paths.
       expect(app._tabGroupMenuOutside).toBeNull();
     });
+  });
+});
+
+describe('new session in a group', () => {
+  it('expands a collapsed group and launches ONE session targeted at it', async () => {
+    installFetch();
+    const app = makeApp();
+    app.toggleTabGroupCollapsed('gx', true);
+    app.run = vi.fn(async () => {});
+    header('gx').focus();
+    key(header('gx'), 'F10', { shiftKey: true });
+    clickMenu('New session in group');
+    await flush();
+    expect(app.run).toHaveBeenCalledTimes(1);
+    expect(app.run).toHaveBeenCalledWith({ tabGroupId: 'gx' });
+    expect(app.collapsedTabGroupIds.has('gx')).toBe(false);
+    expect(JSON.parse(win.localStorage.getItem('codeman:tab-groups-collapsed'))).toEqual([]);
+    expect(document.querySelector('.tab-layout-group-action-menu')).toBeNull();
+  });
+
+  it('says so, and starts nothing, while another launch is in flight', async () => {
+    installFetch();
+    const app = makeApp();
+    app.toggleTabGroupCollapsed('gx', true);
+    app.run = vi.fn(async () => {});
+    app._runInFlight = true;
+    await app.createSessionInTabGroup('gx');
+    expect(app.run).not.toHaveBeenCalled();
+    expect(app.collapsedTabGroupIds.has('gx')).toBe(true);
+    expect(app.showToast).toHaveBeenCalledWith('A session is already starting.', 'info');
+    // A group that no longer exists starts nothing either.
+    app._runInFlight = false;
+    expect(await app.createSessionInTabGroup('deleted')).toBe(false);
+    expect(app.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('child session placement in the row menu', () => {
+  const lineageLayout = (): Layout => ({
+    version: 8,
+    updatedAt: '2026-10-01T00:00:00.000Z',
+    groups: [
+      { id: 'gx', name: 'Core', refs: [s('s1'), s('s2')] },
+      { id: 'gy', name: 'Later', refs: [{ kind: 'session', id: 's3', placement: 'manual' }] },
+    ],
+    ungrouped: [],
+  });
+  const openMenu = (app: Record<string, any>, id: string) =>
+    app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row(id) }, id);
+  /** The synced "Spawned tabs follow their parent" setting, ON. */
+  const following = (app: Record<string, any>) => {
+    app.loadAppSettingsFromStorage = () => ({ spawnedTabsFollowParent: true });
+    return app;
+  };
+  const note = () => document.querySelector<HTMLElement>('.tab-rail-action-menu .tab-rail-action-menu-note');
+
+  it('with the follow setting off (the default) shows no follow note and no Follow parent again', () => {
+    installFetch();
+    const app = makeApp(lineageLayout());
+    app.sessions.get('s2').parentSessionId = 's1';
+    app.sessions.get('s3').parentSessionId = 's1';
+    for (const id of ['s2', 's3']) {
+      openMenu(app, id);
+      expect(note()).toBeNull();
+      expect(menuLabels()).not.toContain('Follow parent again');
+      expect(menuLabels()[0]).toBe('Session options');
+      app.closeTabRailActionMenu();
+    }
+  });
+
+  it('a hand move makes a following child manual, so it stays when its parent moves', async () => {
+    const puts = installFetch();
+    const app = following(makeApp(lineageLayout()));
+    app.sessions.get('s2').parentSessionId = 's1';
+    openMenu(app, 's2');
+    clickMenu('Move to "Later"');
+    await flush();
+    expect(puts[0].layout.groups[1].refs).toEqual([
+      { kind: 'session', id: 's3', placement: 'manual' },
+      { kind: 'session', id: 's2', placement: 'manual' },
+    ]);
+    openMenu(app, 's1');
+    clickMenu('Move to Ungrouped');
+    await flush();
+    expect(puts[1].layout.ungrouped).toEqual([s('s1')]);
+    expect(keys(puts[1].layout.groups[1].refs)).toEqual(['session:s3', 'session:s2']);
+  });
+
+  it('adds nothing to the menu for a session without a parent, or outside a grouped rail', () => {
+    installFetch();
+    const app = following(makeApp(lineageLayout()));
+    openMenu(app, 's1');
+    // 'Add to Focus' is #582's Focus section, offered on every row.
+    expect(menuLabels()).toEqual([
+      'Session options',
+      'Add to Focus',
+      'Move down',
+      'Move to "Later"',
+      'Move to Ungrouped',
+      'Move to new group',
+      'Close session',
+    ]);
+  });
+});
+
+describe('the server places created and closed sessions; the browser never echoes them', () => {
+  const orderPuts = () =>
+    (win.fetch as any).mock.calls.filter(([url]: [string]) => url === '/api/session-order').length;
+  const stub = (app: Record<string, any>) => {
+    app._debounceTimers = {};
+    app.markSessionTabEntering = () => {};
+    app.markTerminalEntering = () => {};
+    app.markConnectionLineEntering = () => {};
+    app.renderSessionTabs = () => app._fullRenderSessionTabs();
+    app.updateCost = () => {};
+    app.startSystemStatsPolling = () => {};
+  };
+  /** Create then delete `kid`, with the server's order broadcast landing first. */
+  const createAndClose = async (app: Record<string, any>, serverOrder: string[]) => {
+    app._onSessionOrderChanged({ order: serverOrder });
+    app._onSessionCreated({ id: 'kid', name: 'Kid', status: 'idle', parentSessionId: 's2' });
+    const created = [...app.sessionOrder];
+    const drawn = [...tabs().querySelectorAll<HTMLElement>('.session-tab[data-id]')].map((el) => el.dataset.id);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const putsAfterCreate = orderPuts();
+    // The order bookkeeping runs first in _cleanupSessionData; the buffer and
+    // timer maps it clears afterwards are not part of this harness.
+    try {
+      app._cleanupSessionData('kid');
+    } catch {}
+    const closed = [...app.sessionOrder];
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    return { created, drawn, closed, putsAfterCreate, putsAfterClose: orderPuts() };
+  };
+
+  it('with groups: a spawned child is drawn after its parent and NOT echoed back as a hand order', async () => {
+    installFetch();
+    const app = makeApp();
+    stub(app);
+    const result = await createAndClose(app, ['s1', 's2', 'kid', 's3']);
+    expect(result).toMatchObject({
+      created: ['s1', 's2', 'kid', 's3'],
+      // Drawn inside the parent's group, right after it (the rail draws groups first).
+      drawn: ['s2', 'kid', 's1', 's3'],
+      closed: ['s1', 's2', 's3'],
+      putsAfterCreate: 0,
+      putsAfterClose: 0,
+    });
+  });
+
+  it('with no groups (the flat rail): the server broadcast decides the order, and nothing is echoed', async () => {
+    installFetch();
+    const app = makeApp({ ...serverLayout(), groups: [], ungrouped: [s('s1'), s('s2'), s('s3')] });
+    stub(app);
+    const result = await createAndClose(app, ['s1', 's2', 'kid', 's3']);
+    expect(result).toMatchObject({
+      created: ['s1', 's2', 'kid', 's3'],
+      closed: ['s1', 's2', 's3'],
+      putsAfterCreate: 0,
+      putsAfterClose: 0,
+    });
+    // The header strip and phones read the same sessionOrder the flat rail drew.
+    expect(result.drawn).toEqual(['s1', 's2', 'kid', 's3']);
+  });
+
+  it('with no layout read at all (the header strip): a session arriving before its order is appended, not saved', async () => {
+    installFetch();
+    const app = makeApp(null);
+    stub(app);
+    app._onSessionCreated({ id: 'late', name: 'Late', status: 'idle' });
+    expect(app.sessionOrder).toEqual(['s1', 's2', 's3', 'late']);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(orderPuts()).toBe(0);
+    // The server's broadcast then wins.
+    app._onSessionOrderChanged({ order: ['late', 's1', 's2', 's3'] });
+    expect(app.sessionOrder).toEqual(['late', 's1', 's2', 's3']);
+  });
+});
+
+describe('a session arriving inside a collapsed group', () => {
+  it('briefly marks the group header instead of arriving silently', async () => {
+    installFetch();
+    const app = makeApp();
+    app.toggleTabGroupCollapsed('gx', true);
+    // Collapsing alone hides rows that were already there: no mark.
+    expect(header('gx').classList.contains('tab-layout-group-arrived')).toBe(false);
+    app.sessions.set('kid', { id: 'kid', name: 'Kid', status: 'idle', parentSessionId: 's2' });
+    app.sessionOrder.push('kid');
+    app._fullRenderSessionTabs();
+    expect(row('kid')).toBeNull();
+    expect(header('gx').classList.contains('tab-layout-group-arrived')).toBe(true);
+    expect(header('gy').classList.contains('tab-layout-group-arrived')).toBe(false);
+    // It survives a re-render while it lasts, then goes.
+    app._fullRenderSessionTabs();
+    expect(header('gx').classList.contains('tab-layout-group-arrived')).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+    expect(header('gx').classList.contains('tab-layout-group-arrived')).toBe(false);
+    app._fullRenderSessionTabs();
+    expect(header('gx').classList.contains('tab-layout-group-arrived')).toBe(false);
+  });
+});
+
+describe('saved web tabs in groups (openness is per device)', () => {
+  const webLayout = (): Layout => ({
+    version: 8,
+    updatedAt: '2026-10-01T00:00:00.000Z',
+    groups: [{ id: 'gx', name: 'Dash', refs: [s('s1'), w('w1'), s('s2')] }],
+    ungrouped: [s('s3'), w('w2')],
+  });
+  const webRows = () =>
+    [...document.querySelectorAll<HTMLElement>('.session-tab[data-webview-id]')].map((el) => [
+      el.closest('.tab-layout-group')!.getAttribute('data-tab-group-id'),
+      el.dataset.webviewId,
+      el.querySelector('.tab-number')?.textContent ?? null,
+    ]);
+
+  it('shows a grouped web tab only while it is open here, and reopens it where the layout keeps it', () => {
+    installFetch();
+    const app = makeApp(null);
+    app.webviews = new Map([
+      ['w1', { id: 'w1', name: 'One', url: 'https://one.test' }],
+      ['w2', { id: 'w2', name: 'Two', url: 'https://two.test' }],
+    ]);
+    app.webviewOrder = ['w1'];
+    app._applyTabLayout(webLayout());
+    // w2 is saved and placed, but not open on this device: no row, no number.
+    expect(webRows()).toEqual([['gx', 'w1', '4']]);
+    expect(header('gx').querySelector('.tab-layout-group-count')!.textContent).toBe('3');
+
+    app.webviewOrder = [];
+    app._fullRenderSessionTabs();
+    expect(webRows()).toEqual([]);
+    // The group survives with its sessions; the layout still holds the web tab.
+    expect(header('gx').querySelector('.tab-layout-group-count')!.textContent).toBe('2');
+    expect(keys(app.tabLayout.groups[0].refs)).toEqual(['session:s1', 'webview:w1', 'session:s2']);
+
+    app.webviewOrder = ['w2', 'w1'];
+    app._fullRenderSessionTabs();
+    const order = [...tabs().querySelectorAll<HTMLElement>('.session-tab')].map(
+      (el) => el.dataset.webviewId || el.dataset.id
+    );
+    expect(order).toEqual(['s1', 'w1', 's2', 's3', 'w2']);
   });
 });
 

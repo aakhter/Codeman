@@ -1352,7 +1352,11 @@ describe('Virtual Keyboard', () => {
     });
 
     it('keeps terminal touch drag available for scrollback with the visible textarea enabled', async () => {
-      const calls = await page.evaluate(async () => {
+      // A Codex pane with REAL local scrollback (an older inline Codex, or any pane
+      // whose output scrolled lines into xterm's normal buffer). A blank pane is
+      // hollow and correctly pages the CLI instead (terminal-touch-paging.browser
+      // test), so the history is written first and checked before the drag.
+      const result = await page.evaluate(async () => {
         app.activeSessionId = 'mobile-touch-scroll-test';
         app.sessions.set('mobile-touch-scroll-test', {
           id: 'mobile-touch-scroll-test',
@@ -1360,6 +1364,10 @@ describe('Virtual Keyboard', () => {
           status: 'running',
         });
         app.hideWelcome();
+        const settings = app.loadAppSettingsFromStorage();
+        settings.cjkInputEnabled = true;
+        app.saveAppSettingsToStorage(settings);
+        app._serverCjkOverride = true;
         app._updateCjkInputState();
 
         // COD-187 routes a mirror tab's drag into _handleUserScrollIntent, which
@@ -1380,11 +1388,12 @@ describe('Virtual Keyboard', () => {
 
         const target =
           document.querySelector('#terminalContainer .xterm-screen') ?? document.getElementById('terminalContainer');
-        if (!target) return scrollCalls;
+        if (!target) return { before, scrollCalls, sentToCli, viewportAfter: -1 };
         const rect = target.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
-        const startY = rect.top + Math.min(180, rect.height - 20);
-        const endY = startY - 120;
+        // The finger moves DOWN the screen, so the content follows it back into history.
+        const startY = rect.top + 20;
+        const endY = startY + 120;
 
         function createTouch(y: number) {
           return new Touch({
@@ -1422,11 +1431,23 @@ describe('Virtual Keyboard', () => {
           })
         );
         await new Promise((resolve) => setTimeout(resolve, 50));
-        return scrollCalls;
+        app._flushWheelSgrQueue?.();
+        return { before, scrollCalls, sentToCli, viewportAfter: app.terminal.buffer.active.viewportY };
       });
 
-      expect(calls.length).toBeGreaterThan(0);
-      expect(calls.some((lines) => lines !== 0)).toBe(true);
+      // The scenario is real local scrollback with the visible textarea on.
+      expect(result.before.cjkVisible).toBe(true);
+      expect(result.before.type).toBe('normal');
+      expect(result.before.baseY).toBeGreaterThan(0);
+      expect(result.before.viewportY).toBe(result.before.baseY);
+      expect(result.before.hollow).toBe(false);
+      expect(result.before.forwards).toBe(false);
+
+      // The drag scrolled xterm's own history upward, and sent nothing to the CLI.
+      expect(result.scrollCalls.length).toBeGreaterThan(0);
+      expect(result.scrollCalls.some((lines) => lines < 0)).toBe(true);
+      expect(result.viewportAfter).toBeLessThan(result.before.viewportY);
+      expect(result.sentToCli).toEqual([]);
     });
 
     it('consumes terminal touch drag while keyboard is visible so Safari does not pan the viewport', async () => {

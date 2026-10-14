@@ -373,7 +373,9 @@ function makeApp(layout: unknown = focusLayout(), sessions?: Array<Record<string
   app.isSessionSidebarActive = () => false;
   app._startSidebarRichClock = () => {};
   app._stopSidebarRichClock = () => {};
-  app.loadAppSettingsFromStorage = () => ({});
+  // COD-510's placement badges and menu entries show only while spawned tabs follow
+  // their parent (the synced spawnedTabsFollowParent setting, off by default).
+  app.loadAppSettingsFromStorage = () => ({ spawnedTabsFollowParent: true });
   app.openSessionOptions = vi.fn();
   app.requestCloseSession = vi.fn();
   app.selectSession = vi.fn();

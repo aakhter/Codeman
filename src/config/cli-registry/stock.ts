@@ -78,6 +78,21 @@ function agentDefaults(): Pick<
   };
 }
 
+/**
+ * The agent skill in `<workspace>/.agents/skills/codeman`, the one project skills
+ * directory every CLI that spreads this scans. Measured per CLI on
+ * 2026-10-11 against the installed builds or their source: codex 0.162 (every dir from
+ * the git root down to cwd), gemini (cwd only, behind folder trust, which `--skip-trust`
+ * already answers), opencode 1.3 (cwd up to the worktree), agy 1.3.2 (its `.agents/`
+ * customization root), grok 1.0.5 (each tier from cwd up to the repo root), dsh 0.1.1
+ * (the git root, else cwd) and omp (cwd up to the git root). Claude Code does NOT read
+ * `.agents/skills`, so a case shared with a claude session lists each skill once there.
+ */
+const AGENTS_DIR_SKILL: Pick<CliEntry['capabilities'], 'agentSkillInjection' | 'agentSkillDir'> = {
+  agentSkillInjection: true,
+  agentSkillDir: '.agents/skills',
+};
+
 // `accent` on every entry below (except SHELL, which the frontend renders no
 // distinct color for) is measured from the actual `.btn-toolbar.btn-run.mode-<id>`
 // CSS rule's `border-color` on the OG skin (styles.css) — the single cleanest
@@ -285,6 +300,10 @@ const CLAUDE: CliEntry = {
       reversalDeadReports: 1,
       streak: { resetMs: 35, steps: [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6] },
     },
+    // A repaint-mode Claude pane keeps no local history, so when the wheel is not
+    // forwarded (older CLI, inline renderer, the local-scrollback opt-out) a scroll is
+    // turned into PageUp/PageDown, which Claude pages its transcript on (#205).
+    transcriptPageKeys: true,
     keyboardAccessory: 'agent',
     privilegedCommandGate: false,
     startMode: 'interactive',
@@ -293,6 +312,7 @@ const CLAUDE: CliEntry = {
     respawn: true,
     effort: true,
     agentSkillInjection: true,
+    agentSkillDir: '.claude/skills',
     statusLineTelemetry: true,
     // Claude's items arrive from the hook path (permission_prompt / idle_prompt).
     approvals: true,
@@ -524,8 +544,14 @@ const OPENCODE: CliEntry = {
     // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
     // which is why this is its own capability and not derived from `hooks`.
     approvals: true,
+    ...AGENTS_DIR_SKILL,
     altScreen: 'strip-mux-and-mouse',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' }, predictProfile: undefined },
+    // Pages its own transcript on PageUp/PageDown (`messages_page_up/down`) and ignores
+    // SGR wheel reports, and its TUI runs on the alternate screen (1.18.31: tmux
+    // `alternate_on=1`, `history_size=0`), so a pane keeps no local history and the
+    // wheel is turned into page keys or it does nothing at all (#555).
+    transcriptPageKeys: true,
     // Measured on a live opencode 1.3.0 pane (capture-pane every 250-300 ms through real
     // turns at 40, 60, 120 and 200 columns, plus the raw PTY stream, 2026-10-09). Every
     // composer row starts with a `┃` bar, and the submitted prompt lands in the transcript
@@ -566,6 +592,7 @@ const OPENCODE: CliEntry = {
     // opencode's global config dir is xdg-basedir's `$XDG_CONFIG_HOME/opencode`.
     mcpConfig: {
       path: '.config/opencode/opencode.json',
+      altPath: '.config/opencode/opencode.jsonc',
       format: 'opencode-json',
       relocation: { envVar: 'XDG_CONFIG_HOME', path: 'opencode/opencode.json' },
     },
@@ -684,6 +711,7 @@ const CODEX: CliEntry = {
     // COD-328: confirmed turn-end transitions, inferred rather than hook-reported —
     // which is why this is its own capability and not derived from `hooks`.
     approvals: true,
+    ...AGENTS_DIR_SKILL,
     // Codex draws `› Ask Codex to do anything` on its composer row and
     // `Working (2m 49s • esc to interrupt)` above it while a turn runs. It animates no
     // braille spinner, and it never prints `esc to interrupt` at rest, so that phrase
@@ -770,6 +798,11 @@ const CODEX: CliEntry = {
     // forwards ONLY while the pane has asked for mouse reports, so the older
     // versions keep the PageUp/local fallback by construction.
     wheelForward: { mode: 'mouse-tracking', rows: 3 },
+    // Codex also pages its transcript on PageUp/PageDown. Measured on 0.157.1 (local,
+    // alternate screen inside tmux, so xterm holds no history) and 0.160 (remote): PageUp
+    // moved the visible transcript. This is the page-key fallback for a hollow pane when
+    // the wheel is not forwarded (older codex without mouse tracking), not wheel forwarding.
+    transcriptPageKeys: true,
     maxFrameBytes: 32 * 1024,
     // codex's own bare-spawn default (no config sent) is already safe (no bypass flag), so
     // the multi-user clamp only needs to force an EXPLICITLY-SENT bypass back off.
@@ -903,6 +936,7 @@ const GEMINI: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    ...AGENTS_DIR_SKILL,
     altScreen: 'strip-full',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
     // Measured on a live Gemini CLI 0.63.0 pane (capture-pane every 300 ms through real
@@ -1015,6 +1049,7 @@ const ANTIGRAVITY: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    ...AGENTS_DIR_SKILL,
     altScreen: 'strip-mux-only',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
     // Like codex: an ABSENT config already defaults safe (no bypass flag), so only a
@@ -1114,6 +1149,11 @@ const PI: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    // No agent skill (agentSkillInjection stays false): any project-level `.agents/skills`
+    // or `.pi/skills` makes pi ask "Trust project folder?" at startup
+    // (hasTrustRequiringProjectResources, pi 1.1.0), which would stall a spawned worker on
+    // a dialog. pi reads the user-level `~/.agents/skills` without that prompt, so a pi
+    // user installs it there (`npx skills add Ark0N/Codeman --skill codeman -g`).
     altScreen: 'preserve', // pi's TUI renders into the main screen with terminal-owned scrollback
     echo: { policy: 'buffer', anchor: { kind: 'cursor' } },
     // Measured on a live pi 1.1.0 pane (capture-pane every 250 ms through a turn,
@@ -1264,6 +1304,7 @@ const GROK: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    ...AGENTS_DIR_SKILL,
     // Fullscreen alt-screen TUI with mouse support, same strip as antigravity until measured
     // (opencode's mouse strip is #443): only the tmux-attach-time smcup strip, not Ink's full
     // erase-scrollback+DECSET strip.
@@ -1436,6 +1477,7 @@ const DEEPSEEK: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    ...AGENTS_DIR_SKILL,
     // Definitive rather than inferred: the harness TUI reports idle/working/blocked to a
     // supervisor and Codeman is that supervisor. 'supervised' rather than 'always' because
     // the session can disarm the bridge, and docker/remote cannot reach it at all.
@@ -1601,6 +1643,7 @@ const OMP: CliEntry = {
   },
   capabilities: {
     ...agentDefaults(),
+    ...AGENTS_DIR_SKILL,
     // Fullscreen alt-screen TUI, same shape as antigravity/grok: only the
     // tmux-attach-time smcup strip, not Ink's full erase-scrollback+DECSET strip.
     altScreen: 'strip-mux-only',

@@ -71,7 +71,7 @@ describe('Codex tab resize behavior', () => {
     expect(fetchStart).toBeGreaterThan(selectStart);
     // Shell scrollback can be enormous, so ordinary tab selection loads a
     // bounded tail and leaves full history for an explicit user request.
-    expect(fetchBlock).toContain("session?.mode !== 'shell'");
+    expect(fetchBlock).toContain("const shellSession = session?.mode === 'shell';");
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?full=1`');
     expect(fetchBlock).toContain('`/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`');
   });
