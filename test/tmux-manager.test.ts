@@ -1661,6 +1661,54 @@ describe('TmuxManager (unit)', () => {
       }
     });
 
+    it.each([false, true])('checks missing cwd only for local respawn (remote=%s)', async (isRemote) => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      const remote = isRemote
+        ? {
+            hostId: 'worker',
+            label: 'worker',
+            host: '192.0.2.1',
+            username: 'ubuntu',
+            remotePath: '/remote-only/project',
+          }
+        : undefined;
+      nonTestManager.registerSession({
+        sessionId: 'cwd12345',
+        muxName: 'codeman-c0d51600',
+        pid: 1000,
+        createdAt: Date.now(),
+        workingDir: '/remote-only/project',
+        mode: 'shell',
+        attached: false,
+        remote,
+      });
+      vi.mocked(existsSync).mockImplementation((path) => path === '/remote-only');
+      vi.mocked(statSync).mockReturnValue({ isDirectory: () => true } as never);
+      const paneDead = vi.spyOn(nonTestManager, 'isPaneDead').mockResolvedValue(false);
+      try {
+        const pid = await nonTestManager.respawnPane({
+          sessionId: 'cwd12345',
+          workingDir: '/remote-only/project',
+          mode: 'shell',
+          remote,
+        });
+        expect(pid).toBe(isRemote ? 4242 : null);
+        const { exec: currentExec } = await import('node:child_process');
+        const respawnCalls = vi.mocked(currentExec).mock.calls.filter(([cmd]) => cmd.includes(' respawn-pane '));
+        expect(respawnCalls).toHaveLength(isRemote ? 1 : 0);
+        if (isRemote) {
+          expect(respawnCalls[0][0]).toContain('ssh');
+          expect(vi.mocked(statSync)).not.toHaveBeenCalledWith('/remote-only/project');
+        }
+      } finally {
+        paneDead.mockRestore();
+        vi.mocked(statSync).mockReset();
+        vi.mocked(existsSync).mockReturnValue(false);
+        nonTestManager.destroy();
+      }
+    });
+
     it('reconciles Codex Headroom config before capturing its successful respawn routing snapshot', async () => {
       const originalVitest = process.env.VITEST;
       vi.resetModules();

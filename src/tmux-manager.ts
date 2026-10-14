@@ -3153,15 +3153,16 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     if (!isValidMuxName(muxName) || !isValidPath(workingDir)) return null;
 
+    const local = !remote && !docker;
+
+    // Remote/container paths belong to their own filesystem, not this host.
     // Don't respawn into a working directory that no longer exists — `cd` into a
     // deleted cwd makes respawn-pane exit immediately and crash-loop (COD-43).
     // Fail clearly so callers can surface/prune the dead session.
-    if (!IS_TEST_MODE && !isUsableWorkingDir(workingDir)) {
+    if (local && !IS_TEST_MODE && !isUsableWorkingDir(workingDir)) {
       console.error(`[TmuxManager] Refusing to respawn ${muxName}: working directory missing: ${workingDir}`);
       return null;
     }
-
-    const local = !remote && !docker;
 
     // See createSession()'s identical resolution for rationale.
     const statusLineCommand =
