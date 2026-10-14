@@ -3464,14 +3464,12 @@ export function registerSessionRoutes(
       // its persistent SSH attachment. Browser mirrors can capture that locally
       // instead of opening an extra SSH channel on every selection/reconcile.
       // Canonical history and default frame callers still capture remotely.
-      if (
-        query.mirror === '1' &&
-        frameMuxName &&
-        session.remote &&
-        typeof ctx.mux.captureActivePaneBuffer === 'function' &&
-        !(await ctx.mux.isPaneDead(frameMuxName))
-      ) {
-        frame = ctx.mux.captureActivePaneBuffer(frameMuxName);
+      if (query.mirror === '1' && frameMuxName && session.remote) {
+        if (typeof ctx.mux.captureLivePaneFrame === 'function') {
+          frame = await ctx.mux.captureLivePaneFrame(frameMuxName);
+        } else if (typeof ctx.mux.captureActivePaneBuffer === 'function' && !(await ctx.mux.isPaneDead(frameMuxName))) {
+          frame = ctx.mux.captureActivePaneBuffer(frameMuxName);
+        }
       }
       if (
         (frame === null || frame.length === 0) &&

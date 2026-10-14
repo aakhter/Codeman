@@ -2625,6 +2625,7 @@ and effort involved in moving workloads.
         const remote = vi.fn(async () => 'REMOTE_FRAME');
         const local = vi.fn(() => 'LOCAL_FRAME');
         harness.ctx.mux.isPaneDead = vi.fn(async () => dead);
+        harness.ctx.mux.captureLivePaneFrame = vi.fn(async () => (dead ? null : 'LOCAL_FRAME'));
         (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remote;
         (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = local;
         const res = await harness.app.inject({
@@ -2635,6 +2636,8 @@ and effort involved in moving workloads.
         expect(data.terminalBuffer).toBe(dead ? 'REMOTE_FRAME' : 'LOCAL_FRAME');
         expect(data.source).toBe('mux-frame');
         expect(remote).toHaveBeenCalledTimes(dead ? 1 : 0);
+        expect(local).not.toHaveBeenCalled();
+        expect(harness.ctx.mux.isPaneDead).not.toHaveBeenCalled();
       });
 
       it('mirror with empty local wrapper still captures the remote frame', async () => {

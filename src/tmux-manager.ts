@@ -4874,6 +4874,37 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
+  async captureLivePaneFrame(muxName: string): Promise<string | null> {
+    if (!SAFE_TMUX_SOCKET_PATTERN.test(this.tmuxSocket) || !isValidMuxName(muxName)) return null;
+    const deadMarker = '__CODEMAN_PANE_DEAD__';
+    try {
+      const { stdout } = await this.paneTextExecutor(
+        'tmux',
+        [
+          '-L',
+          this.tmuxSocket,
+          'capture-pane',
+          '-p',
+          '-e',
+          '-t',
+          muxName,
+          ';',
+          'display-message',
+          '-p',
+          '-t',
+          muxName,
+          `${REMOTE_FRAME_GEOM_DELIM}\n#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}\n${deadMarker} #{pane_dead}`,
+        ],
+        { encoding: 'utf8', timeout: ASYNC_TEXT_CAPTURE_TIMEOUT_MS, maxBuffer: ASYNC_TEXT_CAPTURE_MAX_BUFFER }
+      );
+      if (Buffer.byteLength(stdout, 'utf8') > ASYNC_TEXT_CAPTURE_MAX_BUFFER || !stdout.endsWith(`${deadMarker} 0\n`))
+        return null;
+      return parseRemoteFrameCapture(stdout.slice(0, stdout.lastIndexOf(deadMarker)));
+    } catch {
+      return null; // The remote canonical capture remains the fallback.
+    }
+  }
+
   capturePaneBuffer(muxName: string, paneTarget?: string, opts?: PaneCaptureOptions): string | null {
     if (IS_TEST_MODE) return '';
     const target = resolveTmuxPaneTarget(muxName, paneTarget);
