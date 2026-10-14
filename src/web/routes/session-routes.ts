@@ -3439,7 +3439,14 @@ export function registerSessionRoutes(
   app.get('/api/sessions/:id/terminal', async (req, reply) => {
     const routeStartedAt = performance.now();
     const { id } = req.params as { id: string };
-    const query = req.query as { tail?: string; frame?: string; lines?: string; capture?: string; full?: string };
+    const query = req.query as {
+      tail?: string;
+      frame?: string;
+      mirror?: string;
+      lines?: string;
+      capture?: string;
+      full?: string;
+    };
     const session = findSessionOrFail(ctx, id, req);
 
     // COD-187 (live mirror): `frame=1` returns ONLY the current visible frame —
@@ -3453,7 +3460,25 @@ export function registerSessionRoutes(
     if (query.frame === '1') {
       const frameMuxName = session.muxName;
       let frame: string | null = null;
-      if (frameMuxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
+      // A live remote wrapper already receives the current visible screen over
+      // its persistent SSH attachment. Browser mirrors can capture that locally
+      // instead of opening an extra SSH channel on every selection/reconcile.
+      // Canonical history and default frame callers still capture remotely.
+      if (
+        query.mirror === '1' &&
+        frameMuxName &&
+        session.remote &&
+        typeof ctx.mux.captureActivePaneBuffer === 'function' &&
+        !(await ctx.mux.isPaneDead(frameMuxName))
+      ) {
+        frame = ctx.mux.captureActivePaneBuffer(frameMuxName);
+      }
+      if (
+        (frame === null || frame.length === 0) &&
+        frameMuxName &&
+        session.remote &&
+        typeof ctx.mux.captureRemotePaneBuffer === 'function'
+      ) {
         frame = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, frameMuxName, {
           visibleFrame: true,
           owner: ownerFor(req),

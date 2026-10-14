@@ -94,7 +94,7 @@ describe('COD-187 live-mirror structural guards', () => {
   });
 
   it('selectSession fetches ?frame=1 for mirror tabs and skips snapshot/cache restores', () => {
-    expect(appJs).toContain('? `/api/sessions/${sessionId}/terminal?frame=1`');
+    expect(appJs).toContain('? `/api/sessions/${sessionId}/terminal?frame=1&mirror=1`');
     expect(appJs).toContain('let snapshot = mirror ? null : this._xtermSnapshots?.get(sessionId);');
     expect(appJs).toContain('const cachedBuffer = mirror ? undefined : this.terminalBufferCache.get(sessionId);');
   });

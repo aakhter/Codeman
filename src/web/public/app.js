@@ -3032,7 +3032,7 @@ class CodemanApp {
    * @returns {{flushQueued: boolean, since: number}} Options for `_finishBufferLoad`.
    */
   _bufferLoadFinishOpts(payload, headersReceivedAt) {
-    const capturedFromMux = payload?.source === 'mux-visible' || payload?.source === 'mux-full-history';
+    const capturedFromMux = payload?.source === 'mux-visible' || payload?.source === 'mux-full-history' || payload?.source === 'mux-frame';
     return { flushQueued: capturedFromMux, since: headersReceivedAt };
   }
 
@@ -4558,7 +4558,7 @@ class CodemanApp {
     if (this._mirrorFrameInFlight) return false;
     this._mirrorFrameInFlight = true;
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/terminal?frame=1`);
+      const res = await fetch(`/api/sessions/${sessionId}/terminal?frame=1&mirror=1`);
       const data = (await res.json())?.data ?? {};
       this.noteRemoteCaptureState?.(sessionId, data);
       if (sessionId !== this.activeSessionId || this._viewMode === 'history' || this._isLoadingBuffer) return false;
@@ -11457,7 +11457,7 @@ class CodemanApp {
       // dimensions (a real SIGWINCH → Ink redraw); a same-size tab switch sent
       // no resize, so waiting would just add latency. Shell sessions never need
       // it, so terminal content can appear immediately when switching shells.
-      if (session?.mode !== 'shell' && dimsChanged) {
+      if (session?.mode !== 'shell' && dimsChanged && !mirror) {
         await new Promise((resolve) => setTimeout(resolve, TUI_REDRAW_SETTLE_MS));
         if (this._isStaleSelect(selectGen)) {
           this._clearTerminalLoadState(sessionId, selectGen);
@@ -11482,7 +11482,7 @@ class CodemanApp {
       let capture;
       try {
         const captureUrl = mirror
-          ? `/api/sessions/${sessionId}/terminal?frame=1`
+          ? `/api/sessions/${sessionId}/terminal?frame=1&mirror=1`
           : useFullHistory
             ? `/api/sessions/${sessionId}/terminal?full=1`
             : tailUrl;
