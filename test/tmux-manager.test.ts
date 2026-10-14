@@ -1661,6 +1661,40 @@ describe('TmuxManager (unit)', () => {
       }
     });
 
+    it.each([true, false])(
+      'captures recovered named remote sessions on the ownership socket (owned=%s)',
+      async (owned) => {
+        const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+        const nonTestManager = new NonTestTmuxManager();
+        const pool = (
+          nonTestManager as unknown as {
+            remoteFrameSshPool: { capture: (...args: unknown[]) => Promise<string> };
+          }
+        ).remoteFrameSshPool;
+        const capture = vi.spyOn(pool, 'capture').mockResolvedValue('live frame\n');
+        const remote = {
+          hostId: 'worker',
+          label: 'worker',
+          host: '192.0.2.1',
+          username: 'ubuntu',
+          remotePath: '/remote-only/project',
+          owned,
+          remoteSessionName: 'codeman-ssh-original',
+        };
+        try {
+          for (const options of [{ visibleFrame: true }, { fullHistory: true }]) {
+            await nonTestManager.captureRemotePaneBuffer(remote, 'new-id', 'codeman-c0d51600', options);
+            const command = capture.mock.calls.at(-1)?.[2];
+            expect(command).toContain(`tmux -L ${owned ? 'codeman-remote' : 'codeman'} capture-pane`);
+            expect(command).toContain("-t 'codeman-ssh-original'");
+          }
+        } finally {
+          capture.mockRestore();
+          nonTestManager.destroy();
+        }
+      }
+    );
+
     it.each([false, true])('checks missing cwd only for local respawn (remote=%s)', async (isRemote) => {
       const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
       const nonTestManager = new NonTestTmuxManager();

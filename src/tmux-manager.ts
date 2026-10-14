@@ -5019,9 +5019,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // socket/name holds the canonical scrollback, mirroring the launch/attach
     // logic in buildRemoteSessionCommand.
     const owned = remote.owned !== false;
-    const isOwnedRemoteTarget = owned && !remote.remoteSessionName;
     const target = remote.remoteSessionName || remoteTmuxSessionName(sessionId) || muxName;
-    const socket = isOwnedRemoteTarget ? REMOTE_TMUX_SOCKET : 'codeman';
+    const socket = owned ? REMOTE_TMUX_SOCKET : 'codeman';
     if (!isValidRemoteTmuxTarget(target)) {
       console.error('[TmuxManager] Invalid remote session name in captureRemotePaneBuffer:', target);
       return null;
