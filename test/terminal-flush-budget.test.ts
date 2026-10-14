@@ -384,6 +384,7 @@ describe('terminal flush budget', () => {
     const { CodemanApp } = loadAppHarness();
     const app = Object.create(CodemanApp.prototype) as any;
 
+    expect(app._bufferLoadFinishOpts({ source: 'mux-frame' }, 1234)).toEqual({ flushQueued: true, since: 1234 });
     expect(app._bufferLoadFinishOpts({ source: 'mux-full-history' }, 1234)).toEqual({
       flushQueued: true,
       since: 1234,

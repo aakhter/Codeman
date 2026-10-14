@@ -467,6 +467,9 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   captureActivePaneBuffer?(muxName: string, opts?: PaneCaptureOptions): string | null;
 
+  /** Current active frame plus liveness, captured in one nonblocking local command. */
+  captureLivePaneFrame?(muxName: string): Promise<string | null>;
+
   /**
    * Plain text of the visible frame: no styles, no cursor query, no repaint
    * reconstruction. Deliberately cheaper than `capturePaneBuffer` because idle

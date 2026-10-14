@@ -2981,6 +2981,50 @@ and effort involved in moving workloads.
         );
       });
 
+      it.each([false, true])('mirror captures local wrapper only when alive (dead=%s)', async (dead) => {
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'worker',
+          host: '192.0.2.1',
+          username: 'ubuntu',
+          remotePath: '/remote',
+        };
+        const remote = vi.fn(async () => 'REMOTE_FRAME');
+        const local = vi.fn(() => 'LOCAL_FRAME');
+        harness.ctx.mux.isPaneDead = vi.fn(async () => dead);
+        harness.ctx.mux.captureLivePaneFrame = vi.fn(async () => (dead ? null : 'LOCAL_FRAME'));
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remote;
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = local;
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1&mirror=1`,
+        });
+        const data = JSON.parse(res.body).data;
+        expect(data.terminalBuffer).toBe(dead ? 'REMOTE_FRAME' : 'LOCAL_FRAME');
+        expect(data.source).toBe('mux-frame');
+        expect(remote).toHaveBeenCalledTimes(dead ? 1 : 0);
+        expect(local).not.toHaveBeenCalled();
+        expect(harness.ctx.mux.isPaneDead).not.toHaveBeenCalled();
+      });
+
+      it('mirror with empty local wrapper still captures the remote frame', async () => {
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'worker',
+          host: '192.0.2.1',
+          username: 'ubuntu',
+          remotePath: '/remote',
+        };
+        harness.ctx.mux.isPaneDead = vi.fn(async () => false);
+        const remote = vi.fn(async () => 'REMOTE_FRAME');
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remote;
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => '');
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1&mirror=1`,
+        });
+        expect(JSON.parse(res.body).data.terminalBuffer).toBe('REMOTE_FRAME');
+        expect(remote).toHaveBeenCalledOnce();
+      });
+
       it('COD-441: scopes a remote frame connection to the authenticated viewer', async () => {
         const username = 'frameviewer';
         const cleanup = await useRegularUserHarness(username);
