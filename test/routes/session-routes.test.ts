@@ -1543,6 +1543,33 @@ and effort involved in moving workloads.
       expect(heicConvert).not.toHaveBeenCalled();
     });
 
+    it.each(['heis', 'hevm', 'hevs'])(
+      'rejects the %s brand, which heic-decode cannot convert, without invoking the converter',
+      async (brand) => {
+        heicConvert.mockClear();
+
+        const boundary = 'codeman-test-boundary';
+        const file = Buffer.concat([
+          Buffer.from('0000003466747970', 'hex'),
+          Buffer.from(brand, 'ascii'),
+          Buffer.from('00000000', 'hex'),
+        ]);
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          headers: {
+            host: 'codeman.test',
+            origin: 'http://codeman.test',
+            'content-type': `multipart/form-data; boundary=${boundary}`,
+          },
+          payload: imageUploadBody(boundary, 'IMG_4998.HEIC', 'image/heic', file),
+        });
+
+        expect(res.statusCode).toBe(415);
+        expect(heicConvert).not.toHaveBeenCalled();
+      }
+    );
+
     it('probes the session workspace past the stall cap before writing (#516)', async () => {
       const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
       harness.ctx._session.workingDir = workDir;

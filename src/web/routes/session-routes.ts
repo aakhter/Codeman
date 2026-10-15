@@ -502,7 +502,9 @@ export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
       // ISO Base Media File Format: size + "ftyp" + major brand.
       if (u32be(4) !== 0x66747970) return false;
       const brand = data.subarray(8, 12).toString('ascii');
-      return ['heic', 'heix', 'hevc', 'hevx', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand);
+      // Exactly the brands heic-decode's isHeic() accepts (upstream PR #151):
+      // anything else passes this check only to fail conversion.
+      return ['heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1'].includes(brand);
     }
     case '.mp4':
     case '.m4v':
