@@ -1010,6 +1010,13 @@ describe('terminal viewer activity browser integration', () => {
     expect(selection).toMatch(
       /if \(userInitiated && document\.visibilityState === 'visible'\)[\s\S]*this\.sendResize\(sessionId\)/
     );
+    // COD-370: the post-load SIGWINCH nudge is gated the same way, and it runs
+    // before dimsAfterLoad is read, since sendResize fits synchronously first.
+    const postLoad = selection.slice(selection.indexOf('Do NOT re-introduce Ctrl+L'));
+    expect(postLoad).toContain(
+      "if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);"
+    );
+    expect(postLoad.indexOf('this.sendResize(sessionId);')).toBeLessThan(postLoad.indexOf('const dimsAfterLoad'));
   });
 
   it('keeps ordinary browser resize observation off the unowned HTTP endpoint', () => {

@@ -11875,8 +11875,19 @@ class CodemanApp {
         });
       }
 
-      // Read the size that survived the load rather than the one the capture
-      // was taken at. The two differ whenever the terminal was still settling.
+      // Fire-and-forget resize to nudge Ink via SIGWINCH on real size changes.
+      // Previously we also sent Ctrl+L (\x0c) here to force a full Ink redraw,
+      // but Claude Code 2.x treats Ctrl+L as a two-step "clear conversation"
+      // command — if a page refresh or SSE reconnect ran selectSession twice
+      // within Claude's confirmation window, the second \x0c silently wiped the
+      // conversation. Stale Ink frames in the tailed buffer are a cosmetic
+      // annoyance that disappear on the user's next keypress; data loss is not
+      // acceptable. Do NOT re-introduce Ctrl+L here.
+      // COD-370: only a user-initiated selection may claim the shared PTY size.
+      if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);
+      // sendResize fits synchronously before its first await, so this reads the
+      // size that survived the load rather than the one the capture was taken
+      // at. The two differ whenever the terminal was still settling.
       const dimsAfterLoad = this.getTerminalDimensions?.();
       // Only a visible-frame capture positions its rows absolutely, and only
       // that frame can be damaged by a terminal of the wrong size. A `full=1`
