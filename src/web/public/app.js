@@ -1481,7 +1481,13 @@ class CodemanApp {
       isVisible: () => document.visibilityState === 'visible',
       isFocused: () => document.hasFocus(),
       activeSessionId: () => this.activeSessionId,
-      dimensions: () => this.getFittedTerminalDimensions?.() ?? null,
+      dimensions: () => {
+        // A capture/size ACK may have adopted another viewer's phone width.
+        // Explicit activation asks for this container, not that inherited grid.
+        const wanted = this.getTerminalDimensions?.();
+        const fitted = this.getFittedTerminalDimensions?.();
+        return wanted && fitted ? { ...wanted, viewportType: fitted.viewportType } : null;
+      },
       transportIdentity: () => {
         if (
           !this._wsReady ||
@@ -1500,6 +1506,9 @@ class CodemanApp {
         ) return false;
         try {
           this._ws.send(JSON.stringify(frame));
+          // va claims ownership; the ordered resize gets the authoritative size
+          // ACK so a previously refused/adopted grid can widen on the first try.
+          this.sendResize?.(this.activeSessionId, { preserveFont: true })?.catch?.(() => {});
           return true;
         } catch {
           return false;

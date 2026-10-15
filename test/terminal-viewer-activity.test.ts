@@ -1016,6 +1016,34 @@ describe('terminal viewer activity browser integration', () => {
     expect(terminalUiSource).not.toMatch(/fetch\(`\/api\/sessions\/\$\{[^}]+\}\/resize`/);
   });
 
+  it('activates with container size instead of an inherited phone grid and follows with resize ACK request', () => {
+    const h = loadAppHarness();
+    let deps: Record<string, (...args: unknown[]) => unknown> | undefined;
+    h.setTerminalTarget(new FakeTarget());
+    h.windowTarget.CodemanTerminalViewerActivity = {
+      create: vi.fn((value) => {
+        deps = value;
+        return { destroy: vi.fn() };
+      }),
+    };
+    const app = Object.create(h.CodemanApp.prototype);
+    const order: string[] = [];
+    app.activeSessionId = 's1';
+    app._wsReady = true;
+    app._wsSessionId = 's1';
+    app._ws = { readyState: 1, send: vi.fn(() => order.push('va')) };
+    app.getTerminalDimensions = vi.fn(() => ({ cols: 160, rows: 45 }));
+    app.getFittedTerminalDimensions = vi.fn(() => ({ cols: 55, rows: 30, viewportType: 'desktop' }));
+    app.sendResize = vi.fn(async () => {
+      order.push('resize');
+    });
+    app._initTerminalViewerActivity();
+    expect(deps!.dimensions()).toEqual({ cols: 160, rows: 45, viewportType: 'desktop' });
+    expect(deps!.send({ t: 'va', c: 160, r: 45, v: 'desktop' })).toBe(true);
+    expect(order).toEqual(['va', 'resize']);
+    expect(app.sendResize).toHaveBeenCalledWith('s1', { preserveFont: true });
+  });
+
   it('exposes fitted dimensions without fitting or sending and cleans the controller up', () => {
     const helperStart = terminalUiSource.indexOf('getFittedTerminalDimensions()');
     const helper = terminalUiSource.slice(helperStart, terminalUiSource.indexOf('\n  },', helperStart));
