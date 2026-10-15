@@ -635,11 +635,19 @@ session-create flow, or via the per-host **"Discover existing sessions"** button
 
 ### File Viewer (COD-252)
 
-The File Viewer lists remote workspaces and downloads remote files through the
-system OpenSSH `sftp` client. It reuses the saved host's identity, port, jump
-host, SOCKS proxy, and extra SSH options; no separate SFTP configuration is
-required. Directories load as they are expanded. Bounded text previews use the
-same SSH connection contract so a growing remote file cannot exhaust local disk.
+The File Viewer lists remote workspaces through the system OpenSSH `sftp` client,
+and the file manager's mkdir/rename/delete go over the same connection. It reuses
+the saved host's identity, port, jump host, SOCKS proxy, and extra SSH options; no
+separate SFTP configuration is required. Directories load as they are expanded.
+
+File **reads** (`file-content`, `file-raw`, previews, attachments) do not use SFTP.
+They go through `src/remote-files.ts` (#415, adopted downstream in COD-453): the
+realpath, the workspace-boundary check and the stat all run on the remote host, so
+a symlink inside the remote workspace cannot reach a file outside it; the size caps
+apply to the REMOTE size before a byte is read; bodies stream over ssh (Range-aware)
+and are never staged on this host; and every call is bounded by the shared ssh
+limiter. Remote files are read-only in the viewer, and Office previews/thumbnails
+are unavailable for them (conversion would need the bytes on local disk).
 
 ## Security notes
 

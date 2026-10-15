@@ -7,9 +7,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, posix as pathPosix } from 'node:path';
+import { posix as pathPosix } from 'node:path';
 import { buildSshConnectionArgv, remoteSshTarget, shellescape } from './remote-hosts.js';
 import type { SessionRemote } from './types/session.js';
 
@@ -28,11 +26,6 @@ export interface RemoteWorkspaceEntry {
   path: string;
   type: 'file' | 'directory';
   size?: number;
-}
-
-export interface StagedRemoteWorkspaceFile {
-  path: string;
-  cleanup: () => Promise<void>;
 }
 
 /** Minimal metadata needed to classify a remote File Viewer response safely. */
@@ -196,101 +189,6 @@ export async function getRemoteWorkspaceFileInfo(
   const entry = parseSftpLongListing(stdout, '').find((candidate) => candidate.type === 'file');
   if (!entry || entry.size === undefined) throw new Error('Remote file metadata was not returned by SFTP');
   return { size: entry.size };
-}
-
-/** Download a workspace-relative remote file into a private staging directory. */
-export async function downloadRemoteWorkspaceFile(
-  remote: SessionRemote,
-  relativePath: string,
-  options: RemoteSftpOptions = {}
-): Promise<StagedRemoteWorkspaceFile> {
-  const remotePath = remoteWorkspacePath(remote, relativePath);
-  const directory = await mkdtemp(join(tmpdir(), 'codeman-sftp-'));
-  const localPath = join(directory, 'download');
-  try {
-    await runSftpBatch(remote, `get ${quoteSftpPath(remotePath)} ${quoteSftpPath(localPath)}\n`, options);
-  } catch (error) {
-    await rm(directory, { recursive: true, force: true });
-    throw error;
-  }
-  return { path: localPath, cleanup: () => rm(directory, { recursive: true, force: true }) };
-}
-
-/**
- * Read a remote text file through SSH with a strict client-side bound.
- *
- * SFTP's `get` has no maximum-byte option: even a size-preflight may race a
- * growing file and write an unbounded local temporary file. `head -c N+1`
- * streams at most one sentinel byte beyond the caller's limit, and the client
- * retains no more than that bounded amount in memory. The remote hosts are
- * already POSIX targets (remote sessions use a POSIX shell/tmux), while the
- * local side remains cross-platform because it stages no filesystem data.
- */
-export async function readRemoteWorkspaceFile(
-  remote: SessionRemote,
-  relativePath: string,
-  maxBytes: number,
-  options: RemoteSftpOptions = {}
-): Promise<Buffer> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes >= Number.MAX_SAFE_INTEGER) {
-    throw new Error('Remote file read limit must be a non-negative safe integer');
-  }
-  const remotePath = remoteWorkspacePath(remote, relativePath);
-  const limitWithSentinel = maxBytes + 1;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const command = `head -c ${limitWithSentinel} < ${shellescape(remotePath)}`;
-  const args = [...buildSshConnectionArgv(remote), remoteSshTarget(remote), command];
-
-  return new Promise<Buffer>((resolve, reject) => {
-    const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout: Buffer[] = [];
-    const stderr = createCappedStderrCollector();
-    let total = 0;
-    let settled = false;
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      fn();
-    };
-    const timeout = setTimeout(() => {
-      finish(() => {
-        child.kill('SIGTERM');
-        reject(new Error(`Remote file read timed out connecting to ${remote.host}`));
-      });
-    }, timeoutMs);
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      total += chunk.length;
-      if (total > maxBytes) {
-        finish(() => {
-          child.kill('SIGTERM');
-          reject(new Error(`Remote file exceeds the ${maxBytes}-byte read limit`));
-        });
-        return;
-      }
-      stdout.push(Buffer.from(chunk));
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      if (!stderr.append(chunk)) {
-        finish(() => {
-          child.kill('SIGTERM');
-          reject(new Error(`Remote file read stderr exceeded the ${MAX_REMOTE_STDERR_BYTES}-byte diagnostic limit`));
-        });
-      }
-    });
-    child.on('error', (error) => finish(() => reject(error)));
-    child.on('close', (code) => {
-      if (code === 0) {
-        finish(() => resolve(Buffer.concat(stdout)));
-        return;
-      }
-      const message = stderr.text();
-      finish(() => reject(new Error(message || `Remote file read failed with exit code ${code ?? 'unknown'}`)));
-    });
-  });
 }
 
 export async function createRemoteWorkspaceDirectory(

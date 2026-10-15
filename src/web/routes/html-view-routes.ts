@@ -43,7 +43,7 @@ import {
   validateSessionFilePath,
 } from '../route-helpers.js';
 import { HtmlViewOpenSchema } from '../schemas.js';
-import { DOCKER_HOME_PATH_ERROR, sendFileBody } from './file-routes.js';
+import { DOCKER_HOME_PATH_ERROR, localFileSource, sendFileBody } from './file-routes.js';
 import { getUserSpacesDir } from '../../config/multiuser.js';
 import { exceedsDownloadLimit } from '../../config/buffer-limits.js';
 import type { SessionPort } from '../ports/index.js';
@@ -308,7 +308,7 @@ export function registerHtmlViewRoutes(app: FastifyInstance, ctx: SessionPort): 
     // The file routes' body sender: Content-Length, and `Range` answered with 206
     // (or 416), so a page's own <video>/<audio> can seek. It hijacks the reply, and
     // carries every header set above across to it.
-    sendFileBody(reply, resolvedPath, stat.size, req.headers.range);
+    sendFileBody(reply, stat.size, req.headers.range, localFileSource(resolvedPath));
     return reply;
   });
 }

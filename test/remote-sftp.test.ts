@@ -1,5 +1,4 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { access, readFile, writeFile } from 'node:fs/promises';
 import { PassThrough, Writable } from 'node:stream';
 
 const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -10,12 +9,10 @@ vi.mock('node:child_process', async (orig) => {
 
 import {
   buildSftpConnectionArgv,
-  downloadRemoteWorkspaceFile,
   getRemoteWorkspaceFileInfo,
   listRemoteWorkspaceDirectory,
   MAX_SFTP_BATCH_STDOUT_BYTES,
   MAX_REMOTE_STDERR_BYTES,
-  readRemoteWorkspaceFile,
   remoteWorkspacePath,
 } from '../src/remote-sftp.js';
 import type { SessionRemote } from '../src/types/session.js';
@@ -193,143 +190,5 @@ describe('getRemoteWorkspaceFileInfo', () => {
 
     await expect(getRemoteWorkspaceFileInfo(REMOTE, 'archive.zip')).resolves.toEqual({ size: 11534336 });
     expect(Buffer.concat(stdin).toString('utf8')).toBe('ls -l "/home/ann/proj/archive.zip"\n');
-  });
-});
-
-function mockSftpRead(bytes: Buffer): { batches: string[]; localPaths: string[] } {
-  const batches: string[] = [];
-  const localPaths: string[] = [];
-  spawn.mockImplementation(() => {
-    const child = new PassThrough() as unknown as {
-      stdin: Writable;
-      stdout: PassThrough;
-      stderr: PassThrough;
-      on: (event: string, cb: (...args: unknown[]) => void) => unknown;
-      emit: (event: string, ...args: unknown[]) => boolean;
-      kill: ReturnType<typeof vi.fn>;
-    };
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = vi.fn();
-    const chunks: Buffer[] = [];
-    child.stdin = new Writable({
-      write(chunk, _encoding, cb) {
-        chunks.push(Buffer.from(chunk));
-        cb();
-      },
-      final(cb) {
-        const batch = Buffer.concat(chunks).toString('utf8');
-        batches.push(batch);
-        const localPath = /^get "[^"]+" "([^"]+)"/.exec(batch)?.[1];
-        if (!localPath) throw new Error(`Unexpected SFTP batch: ${batch}`);
-        localPaths.push(localPath);
-        void writeFile(localPath, bytes).then(() => child.emit('close', 0));
-        cb();
-      },
-    });
-    return child;
-  });
-  return { batches, localPaths };
-}
-
-function mockBoundedSshRead(bytes: Buffer): void {
-  spawn.mockImplementation(() => {
-    const child = new PassThrough() as unknown as {
-      stdin: Writable;
-      stdout: PassThrough;
-      stderr: PassThrough;
-      on: (event: string, cb: (...args: unknown[]) => void) => unknown;
-      emit: (event: string, ...args: unknown[]) => boolean;
-      kill: ReturnType<typeof vi.fn>;
-    };
-    child.stdin = new Writable({
-      write(_chunk, _encoding, cb) {
-        cb();
-      },
-    });
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = vi.fn();
-    queueMicrotask(() => {
-      child.stdout.emit('data', bytes);
-      child.emit('close', 0);
-    });
-    return child;
-  });
-}
-
-function mockSshStderr(stderr: Buffer): { kill: ReturnType<typeof vi.fn> } {
-  const kill = vi.fn();
-  spawn.mockImplementation(() => {
-    const child = new PassThrough() as unknown as {
-      stdin: Writable;
-      stdout: PassThrough;
-      stderr: PassThrough;
-      on: (event: string, cb: (...args: unknown[]) => void) => unknown;
-      emit: (event: string, ...args: unknown[]) => boolean;
-      kill: ReturnType<typeof vi.fn>;
-    };
-    child.stdin = new Writable({
-      write(_chunk, _encoding, cb) {
-        cb();
-      },
-    });
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = kill;
-    queueMicrotask(() => {
-      child.stderr.emit('data', stderr);
-      child.emit('close', 1);
-    });
-    return child;
-  });
-  return { kill };
-}
-
-describe('readRemoteWorkspaceFile', () => {
-  beforeEach(() => spawn.mockReset());
-
-  it('rejects an oversized remote file without issuing an SFTP get or staging it locally', async () => {
-    mockBoundedSshRead(Buffer.alloc(101, 'x'));
-
-    await expect(readRemoteWorkspaceFile(REMOTE, 'too-large.txt', 100)).rejects.toThrow('100-byte read limit');
-
-    expect(spawn).toHaveBeenCalledTimes(1);
-    expect(spawn.mock.calls[0]?.[0]).toBe('ssh');
-  });
-
-  it('downloads to a private staging location and exposes explicit cleanup', async () => {
-    const { batches, localPaths } = mockSftpRead(Buffer.from('hello'));
-
-    const staged = await downloadRemoteWorkspaceFile(REMOTE, 'small.txt');
-    await expect(readFile(staged.path)).resolves.toEqual(Buffer.from('hello'));
-
-    expect(batches).toEqual([expect.stringMatching(/^get "\/home\/ann\/proj\/small\.txt" "\/tmp\/codeman-sftp-/)]);
-    await staged.cleanup();
-    await expect(access(localPaths[0])).rejects.toThrow();
-  });
-
-  it('hard-caps a file that grows beyond a prior metadata observation without staging it', async () => {
-    // A stale preflight could have observed 100 bytes; the live stream now has
-    // 101. The bounded SSH command returns a sentinel byte and never creates a
-    // local staging file, so this race cannot consume unbounded disk space.
-    mockBoundedSshRead(Buffer.alloc(101, 'x'));
-
-    await expect(readRemoteWorkspaceFile(REMOTE, 'growing.txt', 100)).rejects.toThrow('100-byte read limit');
-
-    expect(spawn).toHaveBeenCalledTimes(1);
-    expect(spawn).toHaveBeenCalledWith(
-      'ssh',
-      expect.arrayContaining(['BatchMode=yes', 'ann@10.0.0.9', expect.stringContaining('head -c 101')]),
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-  });
-
-  it('terminates and rejects an SSH text read whose stderr exceeds the diagnostic cap', async () => {
-    const { kill } = mockSshStderr(Buffer.alloc(MAX_REMOTE_STDERR_BYTES + 1, 'x'));
-
-    await expect(readRemoteWorkspaceFile(REMOTE, 'unreadable.txt', 100)).rejects.toThrow('stderr exceeded');
-
-    expect(kill).toHaveBeenCalledWith('SIGTERM');
   });
 });
