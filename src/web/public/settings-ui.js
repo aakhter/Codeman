@@ -4850,6 +4850,12 @@ Object.assign(CodemanApp.prototype, {
             merged[key] = value;
           }
         }
+        // GET /api/settings is a plain read, so a settings.json without this key
+        // sends nothing for it, and the server reads that absence as ON
+        // (getCheckpointDefaultEnabled). Resolve it the same way here, or a stale
+        // local false survives, the checkbox shows OFF, and the next save writes
+        // false to the server (COD-257).
+        if (!('checkpointDefaultEnabled' in appSettings)) merged.checkpointDefaultEnabled = true;
         this.saveAppSettingsToStorage(merged);
         this._applyLiveMirrorSetting?.(merged.liveMirrorEnabled); // COD-187
         if (merged.terminalScrollbackLines) {
