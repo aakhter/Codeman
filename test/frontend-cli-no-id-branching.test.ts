@@ -77,10 +77,7 @@ const ALLOWED_BRANCHES: Record<string, { count: number; reason: string }> = {
   // The 8 external CLIs remain in the button-label ternary only. The runMode
   // setter now validates custom entries through the injected registry catalog.
   "session-ui.js::mode === 'opencode'": { count: 1, reason: 'button-label ternary' },
-  "session-ui.js::mode === 'codex'": {
-    count: 2,
-    reason: 'button-label ternary and applying the saved Codex profile to remote quick-start instances',
-  },
+  "session-ui.js::mode === 'codex'": { count: 1, reason: 'button-label ternary' },
   "session-ui.js::mode === 'gemini'": { count: 1, reason: 'button-label ternary' },
   "session-ui.js::mode === 'antigravity'": {
     count: 1,

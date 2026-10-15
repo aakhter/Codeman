@@ -42,6 +42,10 @@ const RUN_MODE_LAUNCH = {
     label: 'Codex',
     installHint: 'Codex CLI not found. Install with: npm install -g @openai/codex',
     supportsCustomModel: true,
+    // COD-446: the saved Codex profile (approvals, animations, render mode)
+    // also applies to a REMOTE quick-start instance; every other CLI's config
+    // is local-only.
+    applyConfigOnRemote: true,
     buildConfig: (globalSettings) => ({
       codexConfig: {
         dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
@@ -2462,7 +2466,7 @@ Object.assign(CodemanApp.prototype, {
           caseName,
           mode,
           sessionName,
-          ...(_runLoc === 'remote' && mode === 'codex' ? (entry.buildConfig(globalSettings) || {}) : {}),
+          ...(_runLoc === 'remote' && entry.applyConfigOnRemote ? (entry.buildConfig(globalSettings) || {}) : {}),
           ...(isRemote ? {} : {
             ...(entry.buildConfig(globalSettings) || {}),
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
