@@ -11731,7 +11731,10 @@ class CodemanApp {
       // and its next partial redraw then lands on a frame the terminal never
       // received. `since` keeps the pre-capture events dropped, because the
       // capture does hold those and replaying them would duplicate output.
-      const finishOpts = this._bufferLoadFinishOpts(data, headersReceivedAt);
+      // discardOptions rides along so a load that is NOT captured from tmux,
+      // which discards its queued live output, still schedules the COD-405
+      // refresh below.
+      const finishOpts = { ...this._bufferLoadFinishOpts(data, headersReceivedAt), ...discardOptions };
       _crashDiag.log(`FETCH_DONE: ${data.terminalBuffer ? (data.terminalBuffer.length/1024).toFixed(0) + 'KB' : 'empty'} truncated=${data.truncated}`);
 
       let freshResetAndParseMs = 0;

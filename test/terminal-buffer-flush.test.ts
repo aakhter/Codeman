@@ -421,6 +421,20 @@ describe('buffer-load flush (COD-144)', () => {
     expect(source).toContain('this._onSessionNeedsRefresh({ id: sessionId });');
   });
 
+  it('the fresh-load finish options carry the discard callback too, not only the cache replay', () => {
+    // A load that is not captured from tmux (source 'history', e.g. a failed or
+    // empty capture) finishes without flushQueued, so its queued live output is
+    // discarded. COD-405's refresh only fires if the callback reaches that finish.
+    // The v1.31 merge took upstream's bare finishOpts and dropped it there.
+    const body = methodBody(
+      readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8'),
+      'selectSession'
+    ).replace(/\s+/g, ' ');
+    expect(body).toContain(
+      'const finishOpts = { ...this._bufferLoadFinishOpts(data, headersReceivedAt), ...discardOptions };'
+    );
+  });
+
   it('reconciles the capture-to-first-WS-output gap once the matching selection load has cleared', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8').replace(/\s+/g, ' ');
     expect(source).toContain('_queueTransportActivationReconcile(sessionId, selectGen);');
