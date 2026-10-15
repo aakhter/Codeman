@@ -4254,6 +4254,15 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .se
   padding: 0.4rem 0.5rem;
 }
 
+/* On handhelds the collapsed sidebar is a full-width drawer, not an icon
+   rail: restore the regular marker slot when that drawer is opened. */
+html[data-session-list='sidebar'][data-sidebar='collapsed'] .session-sidebar .session-tab > .tab-active-indicator {
+  position: static;
+  width: 8px;
+  height: 8px;
+  transform: none;
+}
+
 /* Undo the rail's content trimming: these rows are full-width drawer rows, just
    currently off screen. Same specificity as the styles.css rail rules and later
    in the cascade, which is why this file must stay loaded after styles.css. */

@@ -107,6 +107,31 @@ describe('session tab harness logo (app.js)', () => {
     document.body.innerHTML = '';
   });
 
+  it('reserves a decorative active marker on every session and keeps selection semantics current', () => {
+    const app = makeApp([
+      { id: 'one', name: 'One', mode: 'claude' },
+      { id: 'two', name: 'Two', mode: 'codex' },
+    ]);
+    app._fullRenderSessionTabs();
+    const markers = ['one', 'two'].map((id) => {
+      const marker = tab(id).querySelector('.tab-active-indicator');
+      expect(marker).not.toBeNull();
+      expect(marker!.getAttribute('aria-hidden')).toBe('true');
+      expect(marker!.textContent).toBe('');
+      expect(marker!.hasAttribute('tabindex')).toBe(false);
+      return marker;
+    });
+
+    app.activeSessionId = 'two';
+    app._renderSessionTabsImmediate();
+    expect(tab('one').classList.contains('active')).toBe(false);
+    expect(tab('two').classList.contains('active')).toBe(true);
+    expect(tab('one').getAttribute('aria-selected')).toBe('false');
+    expect(tab('two').getAttribute('aria-selected')).toBe('true');
+    expect(tab('one').querySelector('.tab-active-indicator')).toBe(markers[0]);
+    expect(tab('two').querySelector('.tab-active-indicator')).toBe(markers[1]);
+  });
+
   it('draws the logo slot for every agent CLI, claude included, and no text pill', () => {
     const agents = STOCK_CLIS.map((c) => c.id).filter((id) => id !== 'shell');
     makeApp(agents.map((mode) => ({ id: `s-${mode}`, name: `w1-${mode}`, mode })))._fullRenderSessionTabs();
@@ -118,6 +143,22 @@ describe('session tab harness logo (app.js)', () => {
       expect(logo!.textContent, mode).toBe('');
       expect(tab(`s-${mode}`).querySelector('.tab-mode'), mode).toBeNull();
     }
+  });
+
+  it('keeps the marker first when loading starts on a numberless row or a shortcut is added', () => {
+    const app = makeApp(Array.from({ length: 10 }, (_, i) => ({ id: `s${i}`, name: `Session ${i}` })));
+    app._fullRenderSessionTabs();
+    const row = tab('s9');
+    expect(row.querySelector('.tab-number')).toBeNull();
+    app.terminalLoadStates.set('s9', { phase: 'connecting' });
+    app._renderSessionTabsImmediate();
+    expect(row.firstElementChild?.className).toBe('tab-active-indicator');
+    expect(row.children[1].className).toBe('tab-load-spinner');
+
+    tab('s0').querySelector('.tab-number')!.remove();
+    app._renderSessionTabsImmediate();
+    expect(tab('s0').firstElementChild?.className).toBe('tab-active-indicator');
+    expect(tab('s0').children[1].className).toBe('tab-number');
   });
 
   it('treats a session with no mode as claude', () => {

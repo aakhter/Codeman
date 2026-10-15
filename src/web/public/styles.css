@@ -1484,6 +1484,40 @@ body.split-pane-resizing * {
   transition: background var(--transition-smooth), border-color var(--transition-smooth), color var(--transition-smooth), box-shadow var(--transition-smooth);
 }
 
+/* COD-522: reserve a separate marker slot on every row. Row pseudo-elements
+   belong to loading/attention effects; selection must survive those effects. */
+.session-tab > .tab-active-indicator {
+  display: block;
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  align-self: center;
+  background: var(--text);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.session-tab.active > .tab-active-indicator {
+  visibility: visible;
+}
+
+html[data-tab-orientation='vertical'] .session-tab > .tab-active-indicator,
+html[data-session-list='sidebar'] .session-sidebar .session-tab > .tab-active-indicator {
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+
+/* The collapsed sidebar is only 44px wide: keep the centered status/badges
+   in their existing column and use the otherwise empty leading inset. */
+html[data-session-list='sidebar'][data-sidebar='collapsed'] .session-sidebar .session-tab > .tab-active-indicator {
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 4px;
+  height: 6px;
+  transform: translateY(-50%);
+}
+
 .session-tab:hover {
   background: rgba(34, 197, 94, 0.06);
   color: var(--text);
@@ -22587,7 +22621,8 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .se
   align-content: center;
   flex-wrap: wrap;
   row-gap: 2px;
-  padding: 0.4rem 0;
+  /* Reserve the absolute active marker's gutter even when badges wrap. */
+  padding: 0.4rem 0 0.4rem 8px;
 }
 
 html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-info,

@@ -9575,6 +9575,7 @@ class CodemanApp {
         } else if (!isActive && tab.classList.contains('active')) {
           tab.classList.remove('active');
         }
+        tab.setAttribute('aria-selected', String(isActive));
 
         tab.classList.toggle('tab-loading', !!loadState);
         if (loadState) {
@@ -9584,9 +9585,9 @@ class CodemanApp {
             const spinner = document.createElement('span');
             spinner.className = 'tab-load-spinner';
             spinner.setAttribute('aria-hidden', 'true');
-            const numberEl = tab.querySelector('.tab-number');
-            if (numberEl) {
-              numberEl.insertAdjacentElement('afterend', spinner);
+            const anchor = tab.querySelector('.tab-number') || tab.querySelector('.tab-active-indicator');
+            if (anchor) {
+              anchor.insertAdjacentElement('afterend', spinner);
             } else {
               tab.insertBefore(spinner, tab.firstChild);
             }
@@ -9617,7 +9618,9 @@ class CodemanApp {
             const numSpan = document.createElement('span');
             numSpan.className = 'tab-number';
             numSpan.textContent = String(idx + 1);
-            tab.insertBefore(numSpan, tab.firstChild);
+            const marker = tab.querySelector('.tab-active-indicator');
+            if (marker) marker.insertAdjacentElement('afterend', numSpan);
+            else tab.insertBefore(numSpan, tab.firstChild);
           }
         }
 
@@ -10104,6 +10107,7 @@ class CodemanApp {
       const tabAria = `${paneExitAriaLabel(name, paneExitBadge)}${placement ? `, ${placement.description}` : ''}, ${activity.ariaPhrase}`;
       const rowTooltip = placement ? (tabTooltip ? `${tabTooltip}\n${placement.description}` : placement.description) : tabTooltip;
       rowHtml.set(id, `<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}${this._tileGrid?.has(id) ? ' in-tiles' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" data-activity-status="${escapeHtml(status)}"${placement ? ` data-placement-description="${escapeHtml(placement.description)}"` : ''} ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(tabAria)}" data-aria-source="${escapeHtml(tabAria)}" ${rowTooltip ? `title="${escapeHtml(rowTooltip)}"` : ''}>
+          <span class="tab-active-indicator" aria-hidden="true"></span>
           ${altSlot < 9 ? '<span class="tab-number">' + (altSlot + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${escapeHtml(activity.cssState)}" aria-hidden="true"></span>
