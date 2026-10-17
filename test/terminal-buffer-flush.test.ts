@@ -116,7 +116,6 @@ function makeScrollApp() {
     _isLoadingBuffer: false,
     _loadBufferQueue: null as { at: number; data: string }[] | null,
     _scheduleTerminalWriteFlush: vi.fn(),
-    _queuePendingTerminalWrite: mixin._queuePendingTerminalWrite as (data: string, epoch: number) => void,
     batchTerminalWrite: mixin.batchTerminalWrite as (data: string) => void,
     isTerminalAtBottom: mixin.isTerminalAtBottom as () => boolean,
     _syncStickyScrollBaseline: mixin._syncStickyScrollBaseline as () => void,
