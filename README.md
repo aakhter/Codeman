@@ -274,7 +274,7 @@ Hit start — Codeman spawns the CLI via a real PTY and streams it to your brows
 ### 4. Talk to the agent
 
 - **Type prompts** straight into the terminal — input is delivered exactly-once even across reconnects (a dropped link never loses or double-sends a prompt).
-- **Paste, drop or attach images and videos** directly into the session. They are saved in a hidden `.codeman-uploads/` folder in the workspace (it ignores itself in git and is swept after 7 days), and the file's path lands on your prompt, unsent.
+- **Paste, drop or attach images, videos and documents** (PDF, Office files, zip and plain text) directly into the session. They are saved in a hidden `.codeman-uploads/` folder in the workspace (it ignores itself in git and is swept after 7 days), and the file's path lands on your prompt, unsent.
 - **Voice input** — `Ctrl+Shift+V` (Deepgram Nova-3, or this machine's Claude Code login with no API key; auto-silence stop).
 - **Attachments** — register external files/docs and preview Office/PDF inline; any file path an agent prints is clickable, in the terminal and in the chat view, including `~/` and relative paths and paths broken across lines. An `.html` report opens as a real page, Markdown opens rendered, and a folder opens as a grid of its files.
 - **When it needs you** — the tab turns yellow (waiting for input) or red (a question is blocking). The **Approvals Inbox** _(opt-in)_ queues every pending prompt across sessions, answerable from the header bell or the phone home screen, and 🧠 **Read My Mind** _(opt-in)_ drafts your next prompt from the case's goals and recent work.
@@ -776,7 +776,7 @@ For AI agents and automation that control Codeman without a browser: an agent th
 
 ### The agent skill (start here)
 
-Everything in this section also ships as an **agent skill**, [`skills/codeman`](skills/codeman/SKILL.md), in the `SKILL.md` format Claude Code, Codex, Gemini CLI, OpenCode, Grok, OMP and most other agent CLIs read. Install it once and you never paste API docs into a prompt again. You ask for what you want in plain English, and the agent already sitting inside a Codeman session loads the recipes and drives the API itself.
+Everything in this section also ships as an **agent skill**, [`skills/codeman`](skills/codeman/SKILL.md), in the `SKILL.md` format Claude Code, Codex, Gemini CLI, OpenCode, Grok, OMP and most other agent CLIs read. Install it once and you never paste API docs into a prompt again. You ask for what you want in plain English, and the agent already sitting inside a Codeman session loads the recipes and drives the API itself. Full guide, with every install route, the recordings and what it will and will not do on its own: [The Codeman Skill](https://github.com/Ark0N/Codeman/wiki/Codeman-Skill).
 
 <p align="center">
   <a href="docs/images/codeman-skill-crt-20261010.png"><img src="docs/images/codeman-skill-crt-20261010.gif" alt="A real codeman skill run: one short prompt typed into Claude Code, the tile grid powering on, then a DeepSeek Harness worker on a local qwen model and a Claude Code worker powering on as new tiles, with lineage lines from the lead to both" width="900"></a>
@@ -806,9 +806,19 @@ That is the entire interface. No curl, no endpoint names, no session ids. These 
 | _"Have a claude worker on `refactor-auth` summarize `src/session.ts`, then close it."_     | Spawns, runs the readiness ladder (first-run trust dialog included), send-and-wait, reads the clean transcript answer, deletes. |
 | _"Watch session w4 and tell me if it gets stuck on a permission prompt."_                  | Blocks on the `blocked` signal and surfaces the question to **you**. It never answers another session's prompt itself. |
 
+One short line is enough. Here a Claude Code lead gets `use codeman to start 5 claude workers, one per TODO item`, and five real Claude Code workers power on, shown side by side in the tile grid:
+
+<p align="center">
+  <img src="docs/images/codeman-skill-grid-20261015.gif" alt="A real codeman skill run in the tile grid: the lead Claude Code session powers on as the only tile, the prompt use codeman to start 5 claude workers, one per TODO item is typed, then five Claude Code worker sessions power on as new tiles one after another with the CRT animation, and all six agents work at once" width="900">
+</p>
+
 #### Step 3: nothing
 
-The agent deletes every session it started. Watch the tabs appear and disappear in the dashboard while it works.
+The agent deletes every session it started. Watch the tabs appear and disappear in the dashboard while it works. With eight workers, each one gets its own tab, and a lineage line runs back to the lead that spawned it:
+
+<p align="center">
+  <img src="docs/images/codeman-skill-tabs-20261015.gif" alt="A real codeman skill run in the normal view: the prompt use codeman to start 8 claude workers, one per TODO item is typed, eight worker tabs power on left to right while lineage lines draw from the lead to each one, then clicking a worker tab shows a live Claude Code worker receiving its task" width="900">
+</p>
 
 #### A real run, start to finish
 
@@ -870,7 +880,7 @@ When a CLI runs in a Codeman-managed session, these environment variables are se
 4. **Response envelope.** Most endpoints return `{ "success": true, "data": … }` (errors: `{ "success": false, "error", "errorCode" }`). A few legacy GETs return bare bodies — **handle both** (`body.data ?? body`).
 5. **`/api/v1/*`** is a stable alias of `/api/*`.
 6. **Wait instead of polling, and don't treat a timeout as an error.** The wait endpoints answer with HTTP `200` and `wait.timedOut: true` when nothing happened in time, so loop over short waits (60s is the default) rather than issuing one long call, because tunnels cut idle connections. `wait.timeoutMs` tells you the timeout the server actually applied after clamping (600s ceiling).
-7. **Only `claude` and `deepseek` sessions emit `stop` and `blocked`.** Those two come from hooks (Claude Code's own, and the DeepSeek Harness status bridge); `shell` and the other external CLIs (opencode/codex/gemini/antigravity/pi/grok/omp) accept only `idle`, `working` and `exit`. Asking for `stop` explicitly on those is a `400`; omitting `until` is always safe. ⚠️ On a `shell` session `idle` fires **once**, at startup, and never again, so send-and-wait there can only time out; synchronize hook-less sessions with a `wait-output` marker.
+7. **Only `claude` and `deepseek` sessions emit `stop`; `codex` emits `blocked` too.** Those come from hooks (Claude Code's own, and the DeepSeek Harness status bridge), except codex's `blocked`, which Codeman reads off its screen while an approval, question or trust dialog is up (answer it in the terminal). `shell` and the other external CLIs (opencode/gemini/antigravity/pi/grok/omp) accept only `idle`, `working` and `exit`, and codex adds `blocked`. Asking for `stop` explicitly on those is a `400`; omitting `until` is always safe. ⚠️ On a `shell` session `idle` fires **once**, at startup, and never again, so send-and-wait there can only time out; synchronize hook-less sessions with a `wait-output` marker.
 8. **Nothing reports "ready", so wait for it explicitly.** A new session answers `{"signal":"exit","immediate":true}` (that means *not started*, not *crashed*) until its PID exists, and a `claude` worker in a fresh case then sits on the CLI's trust dialog. Prompt it there and the wait resolves on `idle` in ~2s looking exactly like a finished turn, while the text sits stuck in the dialog. Recipe 2b below is the sequence that avoids it.
 
 ### Recipes

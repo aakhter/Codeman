@@ -2284,7 +2284,9 @@ describe('COD-334 cliNotFoundMessage', () => {
     antigravity: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
     pi: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
     grok: 'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash',
-    deepseek: 'DeepSeek CLI not found. Install with: npm install -g @deepseek-ai/dsh',
+    // Upstream #616 installs pnpm alongside dsh when none is on PATH.
+    deepseek:
+      'DeepSeek CLI not found. Install with: npm install -g @deepseek-ai/dsh && (command -v pnpm >/dev/null || npm install -g pnpm)',
     omp: 'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh',
   } satisfies Record<AgentCliMode, string>;
   const agentMessages = Object.entries(installHints) as Array<[AgentCliMode, string]>;

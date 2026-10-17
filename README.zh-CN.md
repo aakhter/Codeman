@@ -276,7 +276,7 @@ codeman service install           # systemd/launchd 服务：重启后自动回�
 ### 4. 与智能体对话
 
 - **直接在终端输入提示** —— 即使跨越重连，输入也是精确一次送达（连接中断绝不会丢失或重复发送提示）。
-- **粘贴、拖放或附加图片和视频**，直接进入会话。它们保存在工作区里一个隐藏的 `.codeman-uploads/` 文件夹中（它在 git 里会忽略自己，7 天后被清理），文件路径会落在你的提示里，但不会自动发送。
+- **粘贴、拖放或附加图片、视频和文档**（PDF、Office 文件、zip 和纯文本），直接进入会话。它们保存在工作区里一个隐藏的 `.codeman-uploads/` 文件夹中（它在 git 里会忽略自己，7 天后被清理），文件路径会落在你的提示里，但不会自动发送。
 - **语音输入** —— `Ctrl+Shift+V`（Deepgram Nova-3，或者直接用这台机器的 Claude Code 登录、不需要任何 API key；自动静音停止）。
 - **附件** —— 注册外部文件/文档，并内联预览 Office/PDF；智能体打印出的任何文件路径都可以点击，终端里和对话视图里都行，包括 `~/` 路径、相对路径和被折成多行的路径。`.html` 报告会以真实网页打开，Markdown 会渲染后打开，文件夹则以其文件的网格打开。
 - **需要你的时候** —— 标签会变黄（等待输入）或变红（有个问题挡住了它）。**审批收件箱（Approvals Inbox）**（可选启用）把所有会话里等着你的提示排成一个队列，可以从页头的铃铛或手机首页直接作答；🧠 **Read My Mind**（可选启用）会根据这个 case 的目标和最近的工作替你起草下一条提示。
@@ -755,7 +755,7 @@ Web UI 仍是主要界面；完整指南见 **[docs/tui.md](docs/tui.md)**（英
 
 ### 智能体技能（从这里开始）
 
-这一节的所有内容也打包成了一个**智能体技能**，位于 [`skills/codeman`](skills/codeman/SKILL.md)，采用 Claude Code、Codex、Gemini CLI、OpenCode、Grok、OMP 以及大多数其他智能体 CLI 都能读取的 `SKILL.md` 格式。装一次，就再也不用把 API 文档粘进提示词。你用大白话说想要什么，已经坐在 Codeman 会话里的智能体会自己加载配方并驱动 API。
+这一节的所有内容也打包成了一个**智能体技能**，位于 [`skills/codeman`](skills/codeman/SKILL.md)，采用 Claude Code、Codex、Gemini CLI、OpenCode、Grok、OMP 以及大多数其他智能体 CLI 都能读取的 `SKILL.md` 格式。装一次，就再也不用把 API 文档粘进提示词。你用大白话说想要什么，已经坐在 Codeman 会话里的智能体会自己加载配方并驱动 API。完整说明（所有安装方式、录屏，以及它会自己做什么、不会做什么）：[The Codeman Skill](https://github.com/Ark0N/Codeman/wiki/Codeman-Skill)（英文）。
 
 <p align="center">
   <a href="docs/images/codeman-skill-crt-20261010.png"><img src="docs/images/codeman-skill-crt-20261010.gif" alt="一次真实的 codeman 技能运行：在 Claude Code 里输入一句简短的提示，平铺网格开机，然后一个跑在本地 qwen 模型上的 DeepSeek Harness 工作会话和一个 Claude Code 工作会话作为新窗格开机，主会话到两者之间画出派生连线" width="900"></a>
@@ -785,9 +785,19 @@ Web UI 仍是主要界面；完整指南见 **[docs/tui.md](docs/tui.md)**（英
 | _「让一个 claude 工作会话在 `refactor-auth` 上总结 `src/session.ts`，然后关掉它。」_  | 拉起、走完就绪阶梯（包括首次运行的信任对话框）、发送并等待、读取干净的 transcript 答案、删除。 |
 | _「盯着会话 w4，如果它卡在权限提示上就告诉我。」_                                      | 阻塞在 `blocked` 信号上，并把问题交给**你**。它绝不会替另一个会话回答提示。                    |
 
+一句简短的话就够了。下面这个 Claude Code 主会话收到 `use codeman to start 5 claude workers, one per TODO item`，五个真实的 Claude Code 工作会话依次开机，并排显示在平铺网格里：
+
+<p align="center">
+  <img src="docs/images/codeman-skill-grid-20261015.gif" alt="一次真实的 codeman 技能运行（平铺网格）：主 Claude Code 会话作为唯一的窗格开机，输入提示 use codeman to start 5 claude workers, one per TODO item，然后五个 Claude Code 工作会话以 CRT 动画依次作为新窗格开机，六个智能体同时工作" width="900">
+</p>
+
 #### 第 3 步：没有了
 
-智能体会删掉它启动的每一个会话。你可以在仪表盘里看着标签出现又消失。
+智能体会删掉它启动的每一个会话。你可以在仪表盘里看着标签出现又消失。起八个工作会话时，每个都有自己的标签，还有一条派生连线连回启动它的主会话：
+
+<p align="center">
+  <img src="docs/images/codeman-skill-tabs-20261015.gif" alt="一次真实的 codeman 技能运行（普通视图）：输入提示 use codeman to start 8 claude workers, one per TODO item，八个工作会话标签从左到右依次开机，主会话到每个标签之间画出派生连线，然后点开一个工作会话标签，看到一个正在接收任务的真实 Claude Code 工作会话" width="900">
+</p>
 
 #### 一次真实的运行，从头到尾
 
@@ -849,7 +859,7 @@ deleted 9f2d8e5f, aff9c691, be9f1f15    标签消失
 4. **响应信封。** 多数端点返回 `{ "success": true, "data": … }`（错误：`{ "success": false, "error", "errorCode" }`）。少数遗留 GET 返回裸响应体 —— **两种都要处理**（`body.data ?? body`）。
 5. **`/api/v1/*`** 是 `/api/*` 的稳定别名。
 6. **用等待代替轮询，别把超时当成错误。** 等待类端点在没等到事情发生时也以 HTTP `200` 加 `wait.timedOut: true` 应答，所以要循环调用短等待（默认 60 秒），而不是发一个超长的调用：隧道会掐断空闲连接。`wait.timeoutMs` 告诉你服务端钳制之后真正采用的超时（上限 600 秒）。
-7. **只有 `claude` 与 `deepseek` 会话会发出 `stop` 与 `blocked`。** 这两个来自 hook（Claude Code 自己的，以及 DeepSeek Harness 的状态桥接）；`shell` 与其他外部 CLI（opencode/codex/gemini/antigravity/pi/grok/omp）只接受 `idle`、`working` 与 `exit`。在这些模式上显式索要 `stop` 会得到 `400`；不传 `until` 则永远安全。⚠️ `shell` 会话的 `idle` 只在启动时触发**一次**，此后再也不会，所以在那里用「发送并等待」只能等到超时：没有 hook 的会话请用 `wait-output` 标记来同步。
+7. **只有 `claude` 与 `deepseek` 会话会发出 `stop`；`codex` 还会发出 `blocked`。** 它们来自 hook（Claude Code 自己的，以及 DeepSeek Harness 的状态桥接），codex 的 `blocked` 除外：批准、提问或信任对话框出现时，Codeman 从它的屏幕上读出这个信号（请在终端里回答）。`shell` 与其他外部 CLI（opencode/gemini/antigravity/pi/grok/omp）只接受 `idle`、`working` 与 `exit`，codex 另外接受 `blocked`。在这些模式上显式索要 `stop` 会得到 `400`；不传 `until` 则永远安全。⚠️ `shell` 会话的 `idle` 只在启动时触发**一次**，此后再也不会，所以在那里用「发送并等待」只能等到超时：没有 hook 的会话请用 `wait-output` 标记来同步。
 8. **没有任何东西会报告「就绪」，得自己显式等。** 新会话在 PID 出现之前一律回答 `{"signal":"exit","immediate":true}`（意思是*还没启动*，不是*崩了*），而全新 case 里的 `claude` 工作会话接着会停在 CLI 的信任对话框上。此时给它发提示，等待会在约 2 秒后因 `idle` 解除，看上去和一个跑完的回合一模一样，而文本其实卡在对话框里。下面的配方 2b 就是避开它的顺序。
 
 ### 常用配方

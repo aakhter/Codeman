@@ -1416,7 +1416,7 @@ and effort involved in moving workloads.
     });
 
     const jpeg = Buffer.from('ffd8ffe000104a46494600010100', 'hex');
-    const upload = (name: string, mime: string, bytes: Buffer) =>
+    const uploadImage = (name: string, mime: string, bytes: Buffer) =>
       harness.app.inject({
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
@@ -1432,14 +1432,14 @@ and effort involved in moving workloads.
       const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
       harness.ctx._session.workingDir = workDir;
       try {
-        const first = await upload('shot.jpg', 'image/jpeg', jpeg);
+        const first = await uploadImage('shot.jpg', 'image/jpeg', jpeg);
         expect(first.statusCode).toBe(200);
         expect(JSON.parse(first.body).data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
         expect(await readdir(workDir)).toEqual(['.codeman-uploads']);
         expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('*\n');
 
         await writeFile(join(workDir, '.codeman-uploads', '.gitignore'), 'theirs\n');
-        expect((await upload('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
+        expect((await uploadImage('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
         expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('theirs\n');
       } finally {
         await rm(workDir, { recursive: true });
@@ -1456,9 +1456,9 @@ and effort involved in moving workloads.
         throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
       });
       try {
-        expect((await upload('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(500);
+        expect((await uploadImage('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(500);
         expect(existsSync(ignoreFile)).toBe(false);
-        expect((await upload('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
+        expect((await uploadImage('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
         expect(await readFile(ignoreFile, 'utf8')).toBe('*\n');
       } finally {
         spy.mockRestore();
@@ -1472,7 +1472,7 @@ and effort involved in moving workloads.
       harness.ctx._session.workingDir = workDir;
       await symlink(elsewhere, join(workDir, '.codeman-uploads'));
       try {
-        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        const res = await uploadImage('shot.jpg', 'image/jpeg', jpeg);
         expect(res.statusCode).toBe(403);
         expect(JSON.parse(res.body).error).toBe('.codeman-uploads is not a regular directory');
         expect(await readdir(elsewhere)).toEqual([]);
@@ -1488,7 +1488,7 @@ and effort involved in moving workloads.
       // A remote session's workingDir is the REMOTE path: a file written here is unreadable there.
       (harness.ctx._session as unknown as { remote: unknown }).remote = { hostId: 'gpu-box' };
       try {
-        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        const res = await uploadImage('shot.jpg', 'image/jpeg', jpeg);
         expect(res.statusCode).toBe(400);
         expect(JSON.parse(res.body).error).toMatch(/remote/);
         expect(await readdir(workDir)).toEqual([]);
@@ -1682,9 +1682,9 @@ and effort involved in moving workloads.
         headers: movHeaders,
         payload: imageUploadBody(boundary, 'IMG_0001.MOV', 'video/quicktime', qtMov),
       });
-      // The image path falls back to .png for an unknown type and fails its magic check.
-      expect(res.statusCode).toBe(415);
-      expect(JSON.parse(res.body).error).toMatch(/do not match declared type/);
+      // Named as a type the image path does not take: once the sniff fails, refused by name.
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toMatch(/Unsupported file type: \.mov/);
     });
 
     it('refuses an image declared under ?kind=video, so nothing rides the video cap through memory', async () => {
@@ -1847,6 +1847,117 @@ and effort involved in moving workloads.
       } finally {
         await rm(workDir, { recursive: true });
       }
+    });
+
+    // Documents: admitted by the name's extension, judged on the bytes, buffered
+    // like an image, saved with a sanitized stem of the original name.
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n%'), Buffer.alloc(16)]);
+    const zip = Buffer.concat([Buffer.from('504b0304140000000800', 'hex'), Buffer.alloc(16)]);
+    const upload = (name: string, mime: string, bytes: Buffer) =>
+      harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, name, mime, bytes),
+      });
+
+    it('accepts a PDF, an OOXML document and a text file into .codeman-uploads with the name kept', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      for (const [name, mime, bytes, saved] of [
+        ['Q3 report.pdf', 'application/pdf', pdf, /\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}-Q3-report\.pdf$/],
+        ['notes.docx', 'application/octet-stream', zip, /-notes\.docx$/], // no usable MIME: the name decides
+        ['todo.md', 'text/markdown', Buffer.from('# héllo\n- [ ] one\n'), /-todo\.md$/],
+        ['data.csv', 'application/octet-stream', Buffer.from('a,b\n1,2\n'), /-data\.csv$/],
+        ['archive.zip', 'application/zip', zip, /-archive\.zip$/],
+      ] as const) {
+        const res = await upload(name, mime, bytes);
+        expect(res.statusCode, name).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.path, name).toMatch(saved);
+        expect(await readFile(body.data.path), name).toEqual(bytes);
+      }
+      // The workspace-side convention: the dir ignores itself, the old dir is not created.
+      expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('*\n');
+      expect(await readdir(workDir)).toEqual(['.codeman-uploads']);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('keeps only [A-Za-z0-9._-] of the original stem, capped at 40 chars', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      const res = await upload('../..\\ (final) ' + 'x'.repeat(60) + '.v2.PDF', 'application/pdf', pdf);
+      expect(res.statusCode).toBe(200);
+      const { filename } = JSON.parse(res.body).data;
+      expect(filename).toMatch(/^paste-\d+-[a-f0-9]{8}-final-x{34}\.pdf$/);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('refuses a script or an HTML page by name, with a message that says so', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      for (const [name, mime] of [
+        ['run.sh', 'text/x-shellscript'],
+        ['page.html', 'text/html'],
+        ['app.py', 'text/x-python'],
+      ] as const) {
+        const res = await upload(name, mime, Buffer.from('#!/bin/sh\necho hi\n'));
+        expect(res.statusCode, name).toBe(400);
+        expect(JSON.parse(res.body).error, name).toMatch(/Unsupported file type/);
+      }
+      expect(await readdir(workDir)).toEqual([]);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('keeps the image path for an image MIME under a document name and for HEIC under a generic name', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      heicConvert.mockClear();
+      const gif = Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(10)]);
+      const heic = Buffer.from('00000034667479706865696300000000', 'hex');
+      for (const [name, mime, bytes, ext] of [
+        ['animation.txt', 'image/gif', gif, '.gif'], // the MIME type wins over the name, as on the client
+        ['camera.pdf', 'image/heic', heic, '.jpg'],
+        ['camera.bin', 'application/octet-stream', heic, '.jpg'], // sniffed, as it was before documents
+      ] as const) {
+        const res = await upload(name, mime, bytes);
+        expect(res.statusCode, name).toBe(200);
+        expect(JSON.parse(res.body).data.filename.endsWith(ext), name).toBe(true);
+      }
+      expect(heicConvert).toHaveBeenCalledTimes(2);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('logs why a text upload was refused without printing its bytes', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const secret = Buffer.from('token=SECRET\u0000');
+        expect((await upload('notes.txt', 'text/plain', secret)).statusCode).toBe(415);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.includes('declaredExt=.txt'));
+        expect(line).toMatch(/reason=nul-byte/);
+        expect(line).not.toContain(secret.toString('hex'));
+        expect(line).not.toContain('SECRET');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('refuses document bytes that do not match the declared type', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(24)]);
+      for (const [name, bytes] of [
+        ['fake.pdf', png], // PNG bytes under a PDF name
+        ['fake.docx', pdf], // a PDF under an OOXML name
+        ['binary.txt', Buffer.from('hello\u0000world')], // a NUL byte is never text
+        ['latin1.csv', Buffer.from([0x61, 0x2c, 0xe9, 0x0a])], // not UTF-8
+      ] as const) {
+        const res = await upload(name, 'application/octet-stream', bytes);
+        expect(res.statusCode, name).toBe(415);
+        expect(JSON.parse(res.body).error, name).toMatch(/do not match declared type/);
+      }
+      expect(await readdir(workDir)).toEqual([]);
+      await rm(workDir, { recursive: true });
     });
   });
 

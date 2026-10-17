@@ -64,7 +64,8 @@ describe('COD-257 checkpoint default', () => {
     // GET /api/settings is a plain read (it must never write), so the absent-key
     // default is resolved by the client when it merges server settings. The
     // behaviour is pinned in settings-authoritative-gate.test.ts.
-    expect(systemRoutes).toContain("return readJsonConfig(SETTINGS_PATH, 'settings', {});");
+    // (Upstream v1.42.0 hides admin-only keys from a non-admin before returning it.)
+    expect(systemRoutes).toContain("const settings = await readJsonConfig<unknown>(SETTINGS_PATH, 'settings', {});");
     expect(settingsUi).toContain(
       "if (!('checkpointDefaultEnabled' in appSettings)) merged.checkpointDefaultEnabled = true;"
     );

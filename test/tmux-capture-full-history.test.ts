@@ -99,6 +99,7 @@ describe('tmux full-history pane capture (COD-47)', () => {
     const cursorQuery = methodBody.indexOf('queryPaneCursor(');
     expect(cursorQuery).toBeGreaterThan(-1);
     expect(cursorQuery).toBeLessThan(methodBody.indexOf('if (fullHistory) {\n        // COD-190'));
+    expect(methodBody).toContain("const trimmed = rawCapture.replace(/\\n+$/g, '')");
   });
 
   it('defers to the byte history when the pane holds nothing visible', () => {
@@ -210,7 +211,7 @@ describe('the geometry a capture reports back', () => {
     const write = methodBody.indexOf('opts.capturedGeometry = { cols: geometry.cols, rows: geometry.rows }');
     // Anchor on the REPLAY branch, not the earlier `if (fullHistory)` that only
     // sizes the exec buffer.
-    const replayBranch = methodBody.indexOf('return formatFullHistoryCapture(trimmed, geometry);');
+    const replayBranch = methodBody.indexOf('if (!geometry) {');
     const visibleReturn = methodBody.indexOf('if (geometry) return formatPaneSnapshot(');
     expect(write).toBeGreaterThan(-1);
     expect(replayBranch).toBeGreaterThan(-1);
