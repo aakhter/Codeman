@@ -1043,10 +1043,6 @@ class CodemanApp {
 
     // Terminal write batching with DEC 2026 sync support
     this.pendingWrites = [];
-    this._pendingWriteAcceptanceEpochs = [];
-    this._pendingWritesMaxAcceptanceEpoch = 0;
-    this._terminalOutputAcceptanceEpoch = 0;
-    this._mobileImeCommitOwnership = null;
     this.writeFrameScheduled = false;
     // xterm.write() parses asynchronously. Keep at most one live-output chunk
     // inside xterm so its private WriteBuffer cannot bypass our 128KB cap.
@@ -1056,7 +1052,6 @@ class CodemanApp {
     this.syncWaitTimeout = null; // Timeout for incomplete sync blocks
     this._isLoadingBuffer = false; // true during chunkedTerminalWrite — blocks live SSE writes
     this._loadBufferQueue = null;  // queued SSE events during buffer load
-    this._loadBufferQueueAcceptanceEpochs = null;
     this._bufferLoadSeq = 0;
     this._bufferLoadOwner = null;
     // Single-flight token for terminal buffer recovery. The identity check also
@@ -1066,8 +1061,6 @@ class CodemanApp {
     // Flicker filter state (buffers output after screen clears)
     this.flickerFilterBuffer = '';
     this.flickerFilterActive = false;
-    this._flickerFilterEpochSegments = [];
-    this._flickerFilterMaxAcceptanceEpoch = 0;
     this.flickerFilterTimeout = null;
 
     // Render debounce timers (managed by _debouncedCall)
@@ -5462,12 +5455,6 @@ class CodemanApp {
         at: new Date().toISOString(),
       };
       this._stopMobileResizeRetry();
-      try {
-        this._mobileImePreview?.reset?.();
-      } catch {
-        // The preview is visual-only; reconnect policy must continue.
-      }
-      this._mobileImeCommitOwnership = null;
 
       // Decide what to do next from the close code + how many consecutive
       // reconnects we've already made (pure policy in constants.js):
@@ -5571,12 +5558,6 @@ class CodemanApp {
     const preserveGone = this._isTerminalSessionGone(this._wsSessionId || this.activeSessionId);
     if (!preserveGone) this._wsState = 'disconnected';
     this._stopMobileResizeRetry();
-    try {
-      this._mobileImePreview?.reset?.();
-    } catch {
-      // The preview is visual-only; disconnect must continue.
-    }
-    this._mobileImeCommitOwnership = null;
     if (this._ws) {
       this._ws.onclose = null; // Prevent re-entrant cleanup
       this._ws.close();
@@ -6487,14 +6468,10 @@ class CodemanApp {
     this._clearTimer('flickerFilterTimeout');
     this.flickerFilterBuffer = '';
     this.flickerFilterActive = false;
-    this._flickerFilterEpochSegments = [];
-    this._flickerFilterMaxAcceptanceEpoch = 0;
     // Clear pending terminal writes
     this._clearTimer('syncWaitTimeout');
     this._clearTimer('_clientDropRecoveryTimer');
     this.pendingWrites = [];
-    this._pendingWriteAcceptanceEpochs = [];
-    this._pendingWritesMaxAcceptanceEpoch = 0;
     this.writeFrameScheduled = false;
     // Release the one-chunk-in-flight gate with the rest of the write queue.
     // flushPendingWrites() early-returns while this is set, so a reset that
@@ -6506,7 +6483,6 @@ class CodemanApp {
     this._terminalWriteInFlightBytes = 0;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
-    this._loadBufferQueueAcceptanceEpochs = null;
     this._bufferLoadOwner = null;
     this._terminalRefreshOwner = null;
     // Abort any in-flight chunkedTerminalWrite (SSE reconnect reloads buffers)
@@ -6544,12 +6520,10 @@ class CodemanApp {
     this.activeWorkflowRunId = null;
     this.activeWorkflowPhaseIndex = null;
     // Clean up mobile/keyboard handlers and re-init (prevents listener accumulation on reconnect)
-    this._destroyMobileImePreview?.();
     MobileDetection.cleanup();
     KeyboardHandler.cleanup();
     MobileDetection.init();
     KeyboardHandler.init();
-    this._initMobileImePreview?.();
     // Clear tab alerts
     this.tabAlerts.clear();
     this.attachmentHistoryCounts.clear();
@@ -10786,8 +10760,6 @@ class CodemanApp {
     this._clearTimer('flickerFilterTimeout');
     this.flickerFilterBuffer = '';
     this.flickerFilterActive = false;
-    this._flickerFilterEpochSegments = [];
-    this._flickerFilterMaxAcceptanceEpoch = 0;
 
     // Clear tab completion detection flag — don't carry across sessions
     this._tabCompletionSessionId = null;
@@ -10800,8 +10772,6 @@ class CodemanApp {
     // Clean up pending terminal writes to prevent old session data from appearing in new session
     this._clearTimer('syncWaitTimeout');
     this.pendingWrites = [];
-    this._pendingWriteAcceptanceEpochs = [];
-    this._pendingWritesMaxAcceptanceEpoch = 0;
     this.writeFrameScheduled = false;
     // Release the one-chunk-in-flight gate with the rest of the write queue.
     // flushPendingWrites() early-returns while this is set, so a reset that
@@ -10813,7 +10783,6 @@ class CodemanApp {
     this._terminalWriteInFlightBytes = 0;
     this._isLoadingBuffer = false;
     this._loadBufferQueue = null;
-    this._loadBufferQueueAcceptanceEpochs = null;
     this._bufferLoadOwner = null;
     // Abort any in-flight chunkedTerminalWrite from the previous session.
     // Without this, old rAF-scheduled chunks continue writing stale data
@@ -11316,15 +11285,12 @@ class CodemanApp {
       this.terminalBufferCache?.delete(sessionId);
       this._clearTimer('syncWaitTimeout');
       this.pendingWrites = [];
-      this._pendingWriteAcceptanceEpochs = [];
-      this._pendingWritesMaxAcceptanceEpoch = 0;
       this.writeFrameScheduled = false;
       this._terminalWriteInFlight = false;
       this._terminalWriteInFlightBytes = 0;
       this._isLoadingBuffer = false;
       this._loadBufferQueue = null;
-      this._loadBufferQueueAcceptanceEpochs = null;
-      this._terminalRefreshOwner = null;
+        this._terminalRefreshOwner = null;
       this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
       // Anything typed but not yet submitted lives in the local-echo overlay and
       // has never reached the PTY. `_cleanupPreviousSession` below flushes it,
