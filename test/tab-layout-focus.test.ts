@@ -159,14 +159,43 @@ describe('describePlacements', () => {
 describe('Focus projection', () => {
   const live = ['s1', 's2', 's3', 's4'];
 
-  it('draws Focus first, in Focus order, and each focused row only there', () => {
+  it('COD-525 keeps a focused row in its own group; Focus is a shortcut list in no section', () => {
+    for (const focusCollapsed of [false, true]) {
+      const projection = TL.project(focusLayout(), {
+        liveSessionIds: live,
+        openWebviewIds: ['w1'],
+        focusCollapsed,
+        activeSessionId: 's2',
+      });
+      // The rows stay exactly where the layout stores them, at their position.
+      expect(projection.sections.map((section: any) => section.id)).toEqual(['gx', 'gy', null]);
+      expect(keys(projection.sections[0].refs)).toEqual(['session:s2', 'webview:w1']);
+      expect(keys(projection.sections[1].refs)).toEqual(['session:s4']);
+      expect(projection.sectionByRef['session:s4']).toBe('gy');
+      expect(projection.sectionByRef['webview:w1']).toBe('gx');
+      expect(projection.hiddenTabGroupByRef).toEqual({});
+      // Focus is the shortcut list, in Focus order, and in none of the section fields.
+      expect(keys(projection.focusRefs)).toEqual(['session:s4', 'webview:w1']);
+      expect(projection.sections.some((section: any) => section.focus || section.id === TL.FOCUS_SECTION_ID)).toBe(
+        false
+      );
+      expect(Object.values(projection.sectionByRef)).not.toContain(TL.FOCUS_SECTION_ID);
+      // One row per tab.
+      const rows = keys(projection.sections.flatMap((section: any) => [...section.refs, ...section.hidden]));
+      expect(new Set(rows).size).toBe(rows.length);
+      expect(keys(projection.visibleRefs).filter((key) => key === 'session:s4')).toHaveLength(1);
+    }
+  });
+
+  it('lists the Focus shortcuts in Focus order, not stored position order', () => {
+    // Stored order is gx (w1) before gy (s4); the Focus order puts s4 first.
     const projection = TL.project(focusLayout(), { liveSessionIds: live, openWebviewIds: ['w1'] });
-    expect(projection.sections.map((section: any) => section.id)).toEqual([':focus', 'gx', 'gy', null]);
-    expect(keys(projection.sections[0].refs)).toEqual(['session:s4', 'webview:w1']);
-    expect(keys(projection.sections[1].refs)).toEqual(['session:s2']);
-    expect(projection.sections[2].count).toBe(0);
     expect(keys(projection.focusRefs)).toEqual(['session:s4', 'webview:w1']);
-    expect(projection.sectionByRef['session:s4']).toBe(':focus');
+    const reordered = TL.project(
+      { ...focusLayout(), focusOrder: [w('w1'), s('s4')] },
+      { liveSessionIds: live, openWebviewIds: ['w1'] }
+    );
+    expect(keys(reordered.focusRefs)).toEqual(['webview:w1', 'session:s4']);
   });
 
   it('skips a focused web tab that is not open here', () => {
@@ -174,30 +203,34 @@ describe('Focus projection', () => {
     expect(keys(projection.focusRefs)).toEqual(['session:s4']);
   });
 
-  it('a collapsed Focus hides its rows except the selection', () => {
+  it('a collapsed Focus hides no row: collapse is the shortcut list only (COD-525)', () => {
     const projection = TL.project(focusLayout(), {
       liveSessionIds: live,
       openWebviewIds: ['w1'],
       focusCollapsed: true,
       activeSessionId: 's4',
     });
-    expect(keys(projection.sections[0].refs)).toEqual(['session:s4']);
-    expect(keys(projection.sections[0].hidden)).toEqual(['webview:w1']);
-    expect(projection.hiddenTabGroupByRef).toEqual({ 'webview:w1': ':focus' });
+    expect(keys(projection.sections[0].refs)).toEqual(['session:s2', 'webview:w1']);
+    expect(projection.sections.every((section: any) => section.hidden.length === 0)).toBe(true);
+    expect(projection.hiddenTabGroupByRef).toEqual({});
+    expect(keys(projection.focusRefs)).toEqual(['session:s4', 'webview:w1']);
   });
 
   it('Focus alone (no named group) still projects, with no Ungrouped divider', () => {
     const layout: Layout = { version: 2, updatedAt: 'x', groups: [], ungrouped: [s('s1'), s('s2', { focus: true })] };
     const projection = TL.project(layout, { liveSessionIds: ['s1', 's2'], openWebviewIds: [] });
-    expect(projection.sections.map((section: any) => section.id)).toEqual([':focus', null]);
-    expect(projection.sections[1].headless).toBe(true);
+    expect(projection.sections.map((section: any) => section.id)).toEqual([null]);
+    expect(projection.sections[0].headless).toBe(true);
+    expect(keys(projection.sections[0].refs)).toEqual(['session:s1', 'session:s2']);
+    expect(keys(projection.focusRefs)).toEqual(['session:s2']);
     const html = TL.renderProjection(
       projection,
       (ref: Ref) => `<i data-ref="${ref.id}"></i>`,
       (v: string) => v
     );
     expect(html).not.toContain('Ungrouped');
-    expect(html).toContain('data-tab-group-header=":focus"');
+    // Focus is drawn by the caller as shortcuts, never as a section of rows.
+    expect(html).not.toContain(':focus');
     // Nothing focused and no group: the flat rail, as before.
     expect(TL.project({ ...layout, ungrouped: [s('s1'), s('s2')] }, { liveSessionIds: ['s1'] })).toBeNull();
   });
@@ -214,18 +247,28 @@ describe('Focus projection', () => {
     expect(keys(TL.altRefs(null, ['s1', 's2'], ['w1']))).toEqual(['session:s1', 'session:s2', 'webview:w1']);
   });
 
-  it('the Focus header is a treeitem with collapse wiring and no group menu', () => {
+  it('renderProjection draws no Focus section: the rail starts with the first group', () => {
     const projection = TL.project(focusLayout(), { liveSessionIds: live, openWebviewIds: ['w1'] });
     const html = TL.renderProjection(
       projection,
-      () => '',
+      (ref: Ref) => `<i data-ref="${ref.id}"></i>`,
       (v: string) => v
     );
-    const focusSection = html.slice(0, html.indexOf('data-tab-group-id="gx"'));
-    expect(focusSection).toContain('role="treeitem"');
-    expect(focusSection).toContain('aria-expanded="true"');
-    expect(focusSection).toContain('app.toggleTabGroupCollapsed');
-    expect(focusSection).not.toContain('openTabGroupMenu');
+    expect(html).not.toContain(':focus');
+    expect(html).not.toContain('data-tab-focus-group');
+    expect(html.indexOf('data-tab-group-id="gx"')).toBeLessThan(html.indexOf('data-tab-group-id="gy"'));
+    // Each focused row is drawn once, in its own group.
+    expect(html.match(/data-ref="s4"/g)).toHaveLength(1);
+    expect(html.indexOf('data-ref="s4"')).toBeGreaterThan(html.indexOf('data-tab-group-id="gy"'));
+  });
+
+  it('a Focus pin is structural (row star and Alt+N badges follow it)', () => {
+    const before = TL.project(focusLayout(), { liveSessionIds: live, openWebviewIds: ['w1'] });
+    const after = TL.project(TL.applyOperation(focusLayout(), { type: 'setFocus', ref: s('s1'), focused: true }), {
+      liveSessionIds: live,
+      openWebviewIds: ['w1'],
+    });
+    expect(TL.structureKey(null, after, [])).not.toBe(TL.structureKey(null, before, []));
   });
 });
 
@@ -254,26 +297,46 @@ describe('dropOperation and Focus', () => {
     ]);
   });
 
-  it('a Focus row dropped on another Focus row reorders Focus', () => {
+  it('a shortcut dropped on another shortcut reorders Focus (COD-430)', () => {
+    for (const source of [
+      { type: 'ref', ref: w('w1'), fromFocus: true },
+      // The focused row itself, dragged from its group onto a shortcut: the same.
+      { type: 'ref', ref: w('w1') },
+    ]) {
+      expect(
+        TL.dropOperation(layout, source, { type: 'ref', ref: s('s4'), groupId: ':focus', placement: 'before' })
+      ).toEqual({ type: 'moveFocus', ref: w('w1'), index: 0 });
+    }
+    // Onto itself: nothing to do.
     expect(
       TL.dropOperation(
         layout,
-        { type: 'ref', ref: w('w1') },
-        { type: 'ref', ref: s('s4'), groupId: ':focus', placement: 'before' }
+        { type: 'ref', ref: s('s4'), fromFocus: true },
+        { type: 'ref', ref: s('s4'), groupId: ':focus', placement: 'after' }
       )
-    ).toEqual({ type: 'moveFocus', ref: w('w1'), index: 0 });
+    ).toBeNull();
   });
 
-  it('a Focus row dragged out leaves Focus and lands where dropped', () => {
+  it('COD-525 a shortcut dropped outside Focus does nothing: its row never moves', () => {
+    for (const target of [
+      { type: 'ungrouped' },
+      { type: 'group', groupId: 'gx' },
+      { type: 'group', groupId: 'gy' },
+      { type: 'ref', ref: s('s1'), groupId: null, placement: 'before' },
+      { type: 'ref', ref: s('s2'), groupId: 'gx', placement: 'after' },
+    ]) {
+      expect(TL.dropOperation(layout, { type: 'ref', ref: s('s4'), fromFocus: true }, target)).toBeNull();
+    }
+  });
+
+  it('COD-525 a focused row moved between groups keeps its Focus pin', () => {
     const operation = TL.dropOperation(layout, { type: 'ref', ref: s('s4') }, { type: 'ungrouped' });
-    expect(operation[0]).toEqual({ type: 'setFocus', ref: s('s4'), focused: false });
-    expect(operation[1]).toMatchObject({ type: 'moveRef', ref: s('s4'), groupId: null });
-    // Dropped on its own (stored) group: only leaves Focus.
-    expect(TL.dropOperation(layout, { type: 'ref', ref: s('s4') }, { type: 'group', groupId: 'gy' })).toEqual({
-      type: 'setFocus',
-      ref: s('s4'),
-      focused: false,
-    });
+    expect(operation).toMatchObject({ type: 'moveRef', ref: s('s4'), groupId: null });
+    const next = TL.applyOperation(layout, operation);
+    expect(next.ungrouped.at(-1)).toEqual(s('s4', { focus: true }));
+    expect(keys(TL.orderedFocusRefs(next))).toEqual(['session:s4', 'webview:w1']);
+    // Dropped on its own (stored) group: nothing to do.
+    expect(TL.dropOperation(layout, { type: 'ref', ref: s('s4') }, { type: 'group', groupId: 'gy' })).toBeNull();
   });
 
   it('the Focus header is not a draggable group and takes no group', () => {
@@ -389,6 +452,13 @@ function makeApp(layout: unknown = focusLayout(), sessions?: Array<Record<string
 }
 
 const row = (id: string) => document.querySelector<HTMLElement>(`.session-tab[data-id="${id}"]`)!;
+// COD-525: Focus entries are shortcut buttons above the list, never rows.
+const shortcut = (key: string) =>
+  document.querySelector<HTMLElement>(`#tabFocus .tab-focus-item[data-focus-key="${key}"]`);
+const shortcutKeys = () =>
+  [...document.querySelectorAll<HTMLElement>('#tabFocus .tab-focus-item')].map((el) => el.dataset.focusKey);
+const openShortcutMenu = (app: Record<string, any>, key: string) =>
+  app.openTabFocusMenu({ preventDefault() {}, stopPropagation() {}, type: 'contextmenu' }, key, shortcut(key));
 const menuLabels = () => [...document.querySelectorAll('.tab-rail-action-menu button')].map((b) => b.textContent);
 const clickMenu = (label: string) =>
   [...document.querySelectorAll<HTMLElement>('.tab-rail-action-menu button')]
@@ -461,10 +531,12 @@ describe('Focus section on the rail (COD-509)', () => {
       await app._tabLayoutEditor.flush();
       expect(statuses).toEqual([409, 200]);
       expect(saved.groups[0].name).toBe('Renamed elsewhere');
-      expect(row('s2').closest('[data-tab-focus-group]')).not.toBeNull();
+      expect(shortcut('session:s2')).not.toBeNull();
+      expect(row('s2').closest('[data-tab-group-id="gx"]')).not.toBeNull();
       expect(saved.groups[0].refs[0].focus).toBe(true);
       await app._loadTabLayout();
-      expect(row('s2').closest('[data-tab-focus-group]')).not.toBeNull();
+      expect(shortcut('session:s2')).not.toBeNull();
+      expect(row('s2').closest('[data-tab-group-id="gx"]')).not.toBeNull();
       app.moveFocusRefBy(s('s2'), -1);
       await app._tabLayoutEditor.flush();
       expect(saved.focusOrder).toEqual([s('s4'), s('s2'), w('w1')]);
@@ -472,6 +544,7 @@ describe('Focus section on the rail (COD-509)', () => {
       clickMenu('Remove from Focus');
       await app._tabLayoutEditor.flush();
       expect(saved.groups[0].refs[0].focus).toBeUndefined();
+      expect(shortcut('session:s2')).toBeNull();
       expect(row('s2').closest('[data-tab-group-id="gx"]')).not.toBeNull();
       // A page closing before its queued save flushes must persist the same intent.
       openRowMenu(app, 's2');
@@ -482,23 +555,35 @@ describe('Focus section on the rail (COD-509)', () => {
       expect(keepaliveResponse.status).toBe(200);
       expect(saved.groups[0].refs[0].focus).toBe(true);
       makeApp(saved);
-      expect(row('s2').closest('[data-tab-focus-group]')).not.toBeNull();
+      expect(shortcut('session:s2')).not.toBeNull();
+      expect(row('s2').closest('[data-tab-group-id="gx"]')).not.toBeNull();
     } finally {
       app._tabLayoutEditor?.dispose();
       await api.close();
     }
   });
 
-  it('renders Focus on top with a star on its rows, numbered first', () => {
+  it('renders Focus shortcuts on top, rows starred in their own groups, numbered first', () => {
     makeApp();
     const sections = [...document.querySelectorAll<HTMLElement>('.tab-layout-group')].map(
       (el) => el.dataset.tabGroupId
     );
-    expect(sections).toEqual([':focus', 'gx', 'gy', '']);
-    const focusRows = [...document.querySelectorAll<HTMLElement>('[data-tab-focus-group] .session-tab')];
-    expect(focusRows.map((el) => el.dataset.id || el.dataset.webviewId)).toEqual(['s4', 'w1']);
-    expect(focusRows.every((el) => el.querySelector('.tab-focus-marker'))).toBe(true);
-    // One row per tab: a focused row is not drawn in its group as well.
+    expect(sections).toEqual(['gx', 'gy', '']);
+    // The Focus section sits just above the list and holds shortcuts, in Focus order.
+    const host = document.getElementById('tabFocus')!;
+    expect(host.hidden).toBe(false);
+    expect(host.nextElementSibling).toBe(document.getElementById('sessionTabs'));
+    expect(shortcutKeys()).toEqual(['session:s4', 'webview:w1']);
+    expect(host.querySelectorAll('.session-tab')).toHaveLength(0);
+    expect([...host.querySelectorAll('.tab-focus-number')].map((el) => el.textContent)).toEqual(['1', '2']);
+    // Each focused row stays in its own group, at its position, starred.
+    expect(row('s4').closest('[data-tab-group-id="gy"]')).not.toBeNull();
+    const web = document.querySelector<HTMLElement>('.session-tab[data-webview-id="w1"]')!;
+    expect(web.closest('[data-tab-group-id="gx"]')).not.toBeNull();
+    expect(row('s4').querySelector('.tab-focus-marker')).not.toBeNull();
+    expect(web.querySelector('.tab-focus-marker')).not.toBeNull();
+    expect(row('s1').querySelector('.tab-focus-marker')).toBeNull();
+    // One row per tab.
     expect(document.querySelectorAll('.session-tab[data-id="s4"]')).toHaveLength(1);
     const badge = (el: Element | null) => el?.querySelector('.tab-number')?.textContent;
     expect(badge(row('s4'))).toBe('1');
@@ -513,16 +598,37 @@ describe('Focus section on the rail (COD-509)', () => {
     expect(app._tabAltRefs().slice(0, 3)).toEqual([s('s4'), w('w1'), s('s1')]);
   });
 
-  it('collapses Focus per device, keeping the selection visible', () => {
+  it('collapses Focus per device, hiding only the shortcuts', () => {
     const app = makeApp();
     app.activeSessionId = 's4';
+    app.tabAlerts.set('s4', 'action');
     app.toggleTabGroupCollapsed(':focus');
     expect(win.localStorage.getItem('codeman:focus-group-collapsed')).toBe('true');
+    const toggle = document.getElementById('tabFocusToggle')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.getElementById('tabFocusList')!.hidden).toBe(true);
+    // The collapsed toggle stands in for the alert of a shortcut it hides.
+    expect(toggle.classList.contains('tab-alert-action')).toBe(true);
+    // Rows are untouched by Focus's collapse.
     expect(row('s4')).not.toBeNull();
-    expect(document.querySelector('.session-tab[data-webview-id="w1"]')).toBeNull();
-    expect(document.querySelector('[data-tab-group-header=":focus"]')!.getAttribute('aria-expanded')).toBe('false');
-    app.toggleTabGroupCollapsed(':focus');
     expect(document.querySelector('.session-tab[data-webview-id="w1"]')).not.toBeNull();
+    app.toggleTabGroupCollapsed(':focus');
+    expect(document.getElementById('tabFocusList')!.hidden).toBe(false);
+    expect(document.getElementById('tabFocusToggle')!.classList.contains('tab-alert-action')).toBe(false);
+  });
+
+  it('a shortcut selects its tab and shows its alert, as the row does', () => {
+    const app = makeApp();
+    app.handleSessionTabClick = vi.fn();
+    app.tabAlerts.set('s4', 'idle');
+    app._renderSessionTabsImmediate?.();
+    app._renderTabFocus();
+    expect(shortcut('session:s4')!.classList.contains('tab-alert-idle')).toBe(true);
+    shortcut('session:s4')!.click();
+    expect(app.handleSessionTabClick).toHaveBeenCalledWith(expect.anything(), 's4');
+    app.activeSessionId = 's4';
+    app._updateActiveTabImmediate('s4');
+    expect(shortcut('session:s4')!.getAttribute('aria-current')).toBe('true');
   });
 
   it('"Add to Focus" saves its semantic intent and keeps the existing Focus', async () => {
@@ -537,40 +643,65 @@ describe('Focus section on the rail (COD-509)', () => {
     expect(app.tabLayout.ungrouped[0]).toEqual(s('s1', { focus: true }));
     expect(app.tabLayout.groups[1].refs[0]).toEqual(s('s4', { focus: true }));
     expect(app.tabLayout.focusOrder).toEqual([s('s4'), w('w1')]);
-    expect(row('s1').closest('[data-tab-focus-group]')).not.toBeNull();
+    // COD-525: a shortcut appears, the row stays first in Ungrouped.
+    expect(shortcutKeys()).toEqual(['session:s4', 'webview:w1', 'session:s1']);
+    expect(row('s1').closest('[data-tab-group-id=""]')).not.toBeNull();
+    expect(row('s1').closest('[data-tab-group-id=""]')!.querySelector('.session-tab')).toBe(row('s1'));
   });
 
-  it('a Focus row offers removal and Focus moves, not group moves', async () => {
+  it('a focused row keeps its group moves; Focus moves live on the shortcut menu', async () => {
     const puts = installFetch();
     const app = makeApp();
     openRowMenu(app, 's4');
     expect(menuLabels()).toEqual([
       'Session options',
       'Remove from Focus',
-      'Move down in Focus',
       'Move to "Core"',
       'Move to Ungrouped',
       'Move to new group',
       'Close session',
     ]);
+    document.querySelectorAll('.tab-rail-action-menu').forEach((menu) => menu.remove());
+    app.closeTabRailActionMenu?.();
+    openShortcutMenu(app, 'session:s4');
+    expect(menuLabels()).toEqual(['Move down in Focus', 'Remove from Focus']);
     clickMenu('Move down in Focus');
     await flush();
     expect(puts[0].operations).toEqual([{ type: 'moveFocus', ref: s('s4'), index: 1 }]);
     expect(app.tabLayout.focusOrder).toEqual([w('w1'), s('s4')]);
+    expect(shortcutKeys()).toEqual(['webview:w1', 'session:s4']);
+    // The row never moved.
+    expect(row('s4').closest('[data-tab-group-id="gy"]')).not.toBeNull();
   });
 
-  it('Alt+ArrowUp on a Focus row reorders Focus from the keyboard', async () => {
+  it('"Remove from Focus" on a shortcut removes only the shortcut', async () => {
+    const puts = installFetch();
+    const app = makeApp();
+    openShortcutMenu(app, 'session:s4');
+    clickMenu('Remove from Focus');
+    await flush();
+    expect(puts[0].operations).toEqual([{ type: 'setFocus', ref: s('s4'), focused: false }]);
+    expect(shortcutKeys()).toEqual(['webview:w1']);
+    expect(row('s4').closest('[data-tab-group-id="gy"]')).not.toBeNull();
+    expect(row('s4').querySelector('.tab-focus-marker')).toBeNull();
+  });
+
+  it('Alt+ArrowUp on a Focus shortcut reorders Focus from the keyboard', async () => {
     const puts = installFetch();
     const app = makeApp();
     app.setupTabKeyboardNavigation(document.getElementById('sessionTabs'));
-    const web = document.querySelector<HTMLElement>('.session-tab[data-webview-id="w1"]')!;
+    const web = shortcut('webview:w1')!;
     web.focus();
     key(web, 'ArrowUp', { altKey: true });
     await flush();
     expect(puts[0].operations).toEqual([{ type: 'moveFocus', ref: w('w1'), index: 0 }]);
     expect(app.tabLayout.focusOrder).toEqual([w('w1'), s('s4')]);
-    // A row outside Focus: the chord does nothing.
+    expect(shortcutKeys()).toEqual(['webview:w1', 'session:s4']);
+    // The keyboard stays on the shortcut that moved.
+    expect(document.activeElement).toBe(shortcut('webview:w1'));
+    // A row (focused or not) is not a shortcut: the chord does nothing there.
     key(row('s1'), 'ArrowUp', { altKey: true });
+    key(row('s4'), 'ArrowUp', { altKey: true });
     await flush();
     expect(puts).toHaveLength(1);
   });
@@ -650,7 +781,7 @@ describe('first-paint hold (COD-512)', () => {
     app._renderSessionTabsImmediate();
     expect(document.querySelectorAll('.session-tab')).toHaveLength(0);
     app._applyTabLayout(focusLayout());
-    expect(document.querySelector('[data-tab-focus-group]')).not.toBeNull();
+    expect(shortcutKeys()).toEqual(['session:s4', 'webview:w1']);
     expect(app._tabLayoutFirstPaintPending).toBe(false);
   });
 

@@ -168,13 +168,14 @@ describe('vertical tab rail row order', () => {
     };
     const saved = JSON.stringify(app.tabLayout);
     const ids = ['a', 'c', 'starred', 'quiet', 'blocked'];
-    // Grouped and Focus rows carry no sort position at all: they paint in
-    // their saved order. Ungrouped ranks as before.
-    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
+    // Grouped rows carry no sort position at all: they paint in their saved
+    // order. Ungrouped ranks as before, a Focus-pinned row included: Focus is
+    // a list of shortcuts (COD-525), so that row is an ordinary Ungrouped row.
+    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1, starred: 2 });
     app.activeSessionId = 'c';
     app.sessions.get('c')!.lastActivityAt = NOW;
     app.sessions.get('c')!.status = 'busy';
-    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1 });
+    expect(positions(app, ids)).toEqual({ blocked: 0, quiet: 1, starred: 2 });
     expect(JSON.stringify(app.tabLayout)).toBe(saved);
     // Without a layout (the flat rail) every row is ranked, as before.
     app.tabLayout = null;

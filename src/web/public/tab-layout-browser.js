@@ -62,9 +62,9 @@
   };
 
   /**
-   * The Focus section's header id. Not a stored group: it rides the group-header
-   * plumbing (keyboard tree, collapse, alert dot) under an id the client's
-   * UUID group ids never take.
+   * The Focus list's id in drag targets (dropOperation) and in the collapse
+   * toggle's routing. Not a stored group: an id the client's UUID group ids
+   * never take. Focus itself is a list of shortcuts (COD-525), never a section.
    */
   const FOCUS_SECTION_ID = ':focus';
   const FOCUS_COLLAPSED_STORAGE_KEY = 'codeman:focus-group-collapsed';
@@ -347,24 +347,11 @@
       return { shown, hidden, count };
     };
 
-    // Focus leads the rail. A focused row is drawn there INSTEAD of in its
-    // group (one row per tab, so per-row DOM lookups stay unambiguous); the
-    // server keeps its stored group position for when it leaves Focus.
+    // Focus is a list of SHORTCUTS (COD-525), drawn by the caller above the
+    // rail from `focusRefs`: a focused row stays in its own group at its own
+    // position, so nothing is placed here and Focus is in no section field.
     const focusRefs = orderedFocusRefs(layout, renderable);
     if (!hasGroups(layout) && focusRefs.length === 0) return null;
-    if (focusRefs.length) {
-      const focusCollapsed = options.focusCollapsed === true;
-      const { shown, hidden, count } = place(focusRefs, FOCUS_SECTION_ID, focusCollapsed);
-      sections.push({
-        id: FOCUS_SECTION_ID,
-        focus: true,
-        name: 'Focus',
-        refs: shown,
-        hidden,
-        count,
-        collapsed: focusCollapsed,
-      });
-    }
     for (const group of layout.groups) {
       const isCollapsed = collapsed.has(group.id);
       const { shown, hidden, count } = place(withFollowers(group.refs), group.id, isCollapsed);
@@ -508,6 +495,8 @@
     if (!projection) return null;
     return JSON.stringify({
       collapsed: stableIds(collapsedGroupIds).sort(),
+      // Focus moves no row, but a row's star and its Alt+N badge follow it.
+      focus: (projection.focusRefs || []).map(refKey),
       sections: projection.sections.map((section) => [
         section.id,
         section.name,
@@ -554,22 +543,6 @@
         }
         const id = escapeHtml(section.id);
         const refsId = `tab-layout-group-refs-${index}`;
-        if (section.focus) {
-          const nameId = `tab-layout-group-name-${index}`;
-          const expanded = !section.collapsed;
-          // Same header shape as a named group (so the tree keys, collapse and
-          // the hidden-alert dot all apply), minus the group menu: Focus is not
-          // renamed, moved or deleted, only emptied.
-          return (
-            `<section class="tab-layout-group tab-layout-focus-group${section.collapsed ? ' tab-layout-group--collapsed' : ''}" role="presentation" data-tab-group-id="${id}" data-tab-focus-group>` +
-            `<div class="tab-layout-group-header tab-layout-group-toggle tab-layout-focus-header" role="treeitem" tabindex="-1" data-tab-group-header="${id}" aria-expanded="${expanded ? 'true' : 'false'}"${expanded ? ` aria-owns="${refsId}"` : ''} onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)">` +
-            '<span class="tab-layout-group-chevron" aria-hidden="true"></span>' +
-            '<span class="tab-layout-focus-star" aria-hidden="true">&#x2605;</span>' +
-            `<span class="tab-layout-group-name" id="${nameId}">Focus</span>` +
-            `<span class="tab-layout-group-count">${section.count}</span></div>` +
-            `<div class="tab-layout-group-refs" id="${refsId}" ${expanded ? `role="group" aria-labelledby="${nameId}"` : 'role="presentation"'}>${rows}</div></section>`
-          );
-        }
         const nameId = `tab-layout-group-name-${index}`;
         const leaf = section.count === 0;
         const expanded = !section.collapsed && !leaf;
@@ -762,14 +735,21 @@
    * Map a finished drag to ONE operation (or null for a drop that changes
    * nothing). Pure, so the drop -> PUT mapping is testable without a pointer.
    *
-   * source: { type: 'ref', ref } | { type: 'group', groupId }
+   * source: { type: 'ref', ref, fromFocus? } | { type: 'group', groupId }
+   *   (`fromFocus`: the drag started on a Focus SHORTCUT, not on the row)
    * target: { type: 'ref', ref, groupId, placement: 'before' | 'after' }
    *       | { type: 'group', groupId }   (a named group's header or empty body)
    *       | { type: 'ungrouped' }
+   *   (groupId FOCUS_SECTION_ID: the Focus list, or one of its shortcuts)
    *
    * A group dropped on another group (or any row in it) takes that group's slot;
    * dropped on the Ungrouped section it goes last. A row dropped on a row lands
    * before/after it, on a header it is appended to that group.
+   *
+   * Focus is a list of shortcuts (COD-525), so a drag never moves a row out of
+   * its group on Focus's account: a row dropped on Focus joins it and stays
+   * put; a row moved between groups keeps its Focus pin; a shortcut dropped
+   * inside Focus reorders Focus, and dropped anywhere else does nothing.
    */
   function dropOperation(layoutInput, source, target, parents) {
     const layout = normalizeLayout(layoutInput);
@@ -790,8 +770,9 @@
     const ref = bareRef(source.ref);
     const focused = location.ref.focus === true;
     if (intoFocus) {
-      // Onto the Focus header: join Focus (at its end). Onto a Focus row: join
-      // if needed, then take that row's slot in the Focus order.
+      // Onto the Focus list: join Focus (at its end). Onto a shortcut: join
+      // if needed, then take that shortcut's slot in the Focus order. The
+      // row itself stays where it is stored.
       const operations = focused ? [] : [{ type: 'setFocus', ref, focused: true }];
       if (target.type === 'ref' && validRef(target.ref) && refKey(target.ref) !== refKey(ref)) {
         const others = orderedFocusRefs(layout).filter((candidate) => refKey(candidate) !== refKey(ref));
@@ -803,12 +784,10 @@
       if (contentKey(result) === contentKey(layout)) return null;
       return operations.length === 1 ? operations[0] : operations;
     }
-    // A Focus row dragged out leaves Focus, then lands where it was dropped.
-    const leaveFocus = focused ? { type: 'setFocus', ref, focused: false } : null;
-    const withLeave = (operation) => {
-      if (!leaveFocus) return operation;
-      return operation ? [leaveFocus, operation] : leaveFocus;
-    };
+    // A shortcut dropped outside Focus does nothing (upstream's rule): the
+    // shortcut stands for the row, it is not the row, so the row never moves,
+    // and leaving Focus stays a deliberate "Remove from Focus".
+    if (source.fromFocus === true) return null;
     let groupId;
     let anchor = null;
     let placement = 'before';
@@ -820,10 +799,10 @@
       placement = target.placement === 'after' ? 'after' : 'before';
     } else if (target.type === 'group') {
       groupId = target.groupId ?? null;
-      if (groupId === location.groupId) return withLeave(null);
+      if (groupId === location.groupId) return null;
     } else if (target.type === 'ungrouped') {
       groupId = null;
-      if (location.groupId === null) return withLeave(null);
+      if (location.groupId === null) return null;
     } else return null;
     if (groupId !== null && !layout.groups.some((group) => group.id === groupId)) return null;
     const destination = moveDestination(layout, source.ref, groupId, anchor, placement, parents);
@@ -834,9 +813,7 @@
       ...(destination.index === undefined ? {} : { index: destination.index }),
       parents: parents || {},
     };
-    return contentKey(applyOperation(layout, operation)) === contentKey(layout)
-      ? withLeave(null)
-      : withLeave(operation);
+    return contentKey(applyOperation(layout, operation)) === contentKey(layout) ? null : operation;
   }
 
   /**

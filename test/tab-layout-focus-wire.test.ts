@@ -78,26 +78,28 @@ function harness(initial: TabLayout) {
 const asList = (operation: unknown) => (Array.isArray(operation) ? operation : [operation]);
 
 describe('Focus drops reach the server in a form it accepts', () => {
-  it('a Focus row dropped on another group header leaves Focus and lands at that group end', async () => {
+  it('a focused row dropped on another group header keeps Focus and lands at that group end', async () => {
+    // COD-525: Focus is a list of shortcuts, so moving the row keeps its pin.
     const drop = TL.dropOperation(layout(), { type: 'ref', ref: s('s1') }, { type: 'group', groupId: 'gb' }, {});
+    expect(asList(drop)).toHaveLength(1);
     // The browser's own move carries no index (it means "the end").
-    expect(asList(drop)[1]).not.toHaveProperty('index');
+    expect(asList(drop)[0]).not.toHaveProperty('index');
     const wire = TL.wireOperations(layout(), asList(drop));
-    expect(wire[1]).toEqual({ type: 'moveRef', ref: s('s1'), groupId: 'gb', index: 2 });
+    expect(wire[0]).toEqual({ type: 'moveRef', ref: s('s1'), groupId: 'gb', index: 2 });
 
     const result = await harness(layout()).putOperations('@single', wire, 7);
     expect(result.status).toBe('updated');
     expect(keys(result.layout.groups[1].refs)).toEqual(['session:s3', 'session:s4', 'session:s1']);
-    expect(result.layout.groups[1].refs[2]).not.toHaveProperty('focus');
+    expect(result.layout.groups[1].refs[2]).toHaveProperty('focus', true);
     // The server agrees with what the browser painted optimistically.
     const optimistic = asList(drop).reduce((current: unknown, op: unknown) => TL.applyOperation(current, op), layout());
     expect(keys(optimistic.groups[1].refs)).toEqual(keys(result.layout.groups[1].refs));
   });
 
-  it('a Focus row dropped on the Ungrouped section lands at its end', async () => {
+  it('a focused row dropped on the Ungrouped section lands at its end', async () => {
     const drop = TL.dropOperation(layout(), { type: 'ref', ref: s('s1') }, { type: 'ungrouped' }, {});
     const wire = TL.wireOperations(layout(), asList(drop));
-    expect(wire[1]).toMatchObject({ type: 'moveRef', groupId: null, index: 1 });
+    expect(wire[0]).toMatchObject({ type: 'moveRef', groupId: null, index: 1 });
     const result = await harness(layout()).putOperations('@single', wire, 7);
     expect(keys(result.layout.ungrouped)).toEqual(['session:s5', 'session:s1']);
   });
@@ -135,7 +137,7 @@ describe('Focus drops reach the server in a form it accepts', () => {
 });
 
 describe('the editor sends wire operations', () => {
-  it('a coordinator flush of a Focus drag-out carries an indexed moveRef', async () => {
+  it('a coordinator flush of a Focus edit batched with a row move carries an indexed moveRef', async () => {
     const puts: any[] = [];
     const editor = TL.createEditCoordinator({
       initialLayout: layout(),
@@ -146,6 +148,8 @@ describe('the editor sends wire operations', () => {
       applyLayout: () => {},
       schedule: (fn: () => void) => setTimeout(fn, 0),
     });
+    // A Focus change and a drag queued in one flush go out as one semantic batch.
+    editor.enqueue({ type: 'setFocus', ref: s('s2'), focused: true });
     const drop = TL.dropOperation(layout(), { type: 'ref', ref: s('s1') }, { type: 'group', groupId: 'gb' }, {});
     for (const op of asList(drop)) editor.enqueue(op);
     expect(editor.pendingWireOperations()[1]).toMatchObject({ type: 'moveRef', index: 2 });

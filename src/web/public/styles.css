@@ -864,23 +864,6 @@ html[data-tab-orientation='vertical'] .session-tab[role='treeitem']:focus-visibl
   pointer-events: none;
 }
 
-html[data-tab-orientation='vertical'] .tab-layout-focus-group {
-  padding-bottom: 6px;
-  margin-bottom: 2px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
-
-html[data-tab-orientation='vertical'] .tab-layout-focus-header {
-  color: var(--text);
-}
-
-html[data-tab-orientation='vertical'] .tab-layout-focus-star {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font-size: 0.7rem;
-  line-height: 1;
-}
-
 /* COD-510: where a child session sits relative to its parent. */
 .session-tab .tab-placement-state {
   display: inline-flex;
@@ -1357,6 +1340,17 @@ html[data-tab-orientation='vertical'] .tab-rail .tab-focus-item[aria-current='tr
   flex-shrink: 0;
   background: var(--green);
 }
+/* COD-525: the shortcut's Alt+N slot (Focus leads the numbering), and the
+   collapsed toggle standing in for the alerts of the shortcuts it hides. */
+.tab-focus-item .tab-focus-number {
+  flex: 0 0 auto;
+  min-width: 14px;
+  color: var(--text-muted);
+  font: 700 0.6rem/1 monospace;
+  text-align: center;
+}
+html[data-tab-orientation='vertical'] .tab-rail .tab-focus-toggle.tab-alert-action { box-shadow: inset 0 0 0 2px var(--red); }
+html[data-tab-orientation='vertical'] .tab-rail .tab-focus-toggle.tab-alert-idle { box-shadow: inset 0 0 0 2px var(--yellow); }
 .tab-focus-item .tab-status.error { background: var(--red); }
 .tab-focus-item .tab-status.ended { background: var(--text-muted); opacity: 0.5; }
 .tab-focus-item.tab-alert-action .tab-status { background: var(--red); box-shadow: 0 0 6px rgba(239, 68, 68, 0.7); }
