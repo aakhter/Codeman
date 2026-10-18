@@ -749,7 +749,7 @@
    * Focus is a list of shortcuts (COD-525), so a drag never moves a row out of
    * its group on Focus's account: a row dropped on Focus joins it and stays
    * put; a row moved between groups keeps its Focus pin; a shortcut dropped
-   * inside Focus reorders Focus, and dropped anywhere else does nothing.
+   * inside Focus reorders Focus, and dropped anywhere else leaves Focus.
    */
   function dropOperation(layoutInput, source, target, parents) {
     const layout = normalizeLayout(layoutInput);
@@ -784,10 +784,10 @@
       if (contentKey(result) === contentKey(layout)) return null;
       return operations.length === 1 ? operations[0] : operations;
     }
-    // A shortcut dropped outside Focus does nothing (upstream's rule): the
-    // shortcut stands for the row, it is not the row, so the row never moves,
-    // and leaving Focus stays a deliberate "Remove from Focus".
-    if (source.fromFocus === true) return null;
+    // A shortcut dragged out of Focus unpins it (owner decision, COD-525):
+    // the shortcut stands for the row, it is not the row, so the row never
+    // moves; only the pin goes.
+    if (source.fromFocus === true) return focused ? { type: 'setFocus', ref, focused: false } : null;
     let groupId;
     let anchor = null;
     let placement = 'before';

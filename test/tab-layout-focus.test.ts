@@ -317,7 +317,7 @@ describe('dropOperation and Focus', () => {
     ).toBeNull();
   });
 
-  it('COD-525 a shortcut dropped outside Focus does nothing: its row never moves', () => {
+  it('COD-525 a shortcut dragged out of Focus unpins it; its row never moves', () => {
     for (const target of [
       { type: 'ungrouped' },
       { type: 'group', groupId: 'gx' },
@@ -325,7 +325,15 @@ describe('dropOperation and Focus', () => {
       { type: 'ref', ref: s('s1'), groupId: null, placement: 'before' },
       { type: 'ref', ref: s('s2'), groupId: 'gx', placement: 'after' },
     ]) {
-      expect(TL.dropOperation(layout, { type: 'ref', ref: s('s4'), fromFocus: true }, target)).toBeNull();
+      const operation = TL.dropOperation(layout, { type: 'ref', ref: s('s4'), fromFocus: true }, target);
+      expect(operation).toEqual({ type: 'setFocus', ref: s('s4'), focused: false });
+      const next = TL.applyOperation(layout, operation);
+      expect(keys(TL.orderedFocusRefs(next))).toEqual(['webview:w1']);
+      // The row stays where it is stored: same group, same slot.
+      expect(next.groups.map((group: any) => keys(group.refs))).toEqual(
+        layout.groups.map((group: any) => keys(group.refs))
+      );
+      expect(keys(next.ungrouped)).toEqual(keys(layout.ungrouped));
     }
   });
 
