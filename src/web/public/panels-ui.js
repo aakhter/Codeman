@@ -5225,6 +5225,7 @@ Object.assign(CodemanApp.prototype, {
     // before it ever reveals controls.
     void this._loadFilePreviewNavigation(previewState);
     this._annotations = [];
+    this._annotationTargetSessionId = null;
     this._closeAnnotationTray();
 
     // HTML renders as a page: the server mints a sandboxed /html-view URL for the
@@ -6670,6 +6671,111 @@ Object.assign(CodemanApp.prototype, {
     this._closeAnnotationTray();
   },
 
+  // ── Comment target (COD-528) ─────────────────────────────────────────────
+  // A preview belongs to the session it was opened for (filePreviewState.sessionId),
+  // which is often NOT the tab on screen: the attachment card stack is global and
+  // shows every session's cards, and search, history and link taps all pass their
+  // own session. Comments used to go to that owning session silently, so the tray
+  // now names its target and offers the tab on screen when the two differ.
+
+  /** Whether a session is visible right now: the active tab, the split's Pane B, or a tile. */
+  _annotationSessionOnScreen(sessionId) {
+    if (!sessionId) return false;
+    if (sessionId === this.activeSessionId) return true;
+    if (this._splitPane && this._splitSessionId === sessionId) return true;
+    return !!(this._tileGrid?.open && this._tileGrid.tiles?.has(sessionId));
+  },
+
+  _annotationSessionLabel(sessionId) {
+    const session = this.sessions?.get(sessionId);
+    return session?.name || String(sessionId || '').substring(0, 8);
+  },
+
+  /**
+   * The sessions comments can go to: the preview's own session, plus the active tab
+   * and the pinned pick when those are other live sessions. The default is the owning session when it
+   * is on screen (a link tapped in Pane B or a tile), else the active tab, since a
+   * card from a background session is not where the user is looking.
+   */
+  _annotationTargetChoices() {
+    const ownerId = this.filePreviewState?.sessionId || null;
+    const activeId = this.activeSessionId || null;
+    const pickedId = this._annotationTargetSessionId || null;
+    const choices = [];
+    if (ownerId) choices.push({ id: ownerId, role: 'owner' });
+    for (const id of [pickedId, activeId]) {
+      if (id && !choices.some((c) => c.id === id) && this.sessions?.has(id)) {
+        choices.push({ id, role: id === activeId ? 'active' : 'other' });
+      }
+    }
+    let defaultId = ownerId;
+    if (activeId && activeId !== ownerId && this.sessions?.has(activeId) && !this._annotationSessionOnScreen(ownerId)) {
+      defaultId = activeId;
+    }
+    return { choices, defaultId };
+  },
+
+  /** The session comments will be sent to: the pinned pick if still offered, else the default. */
+  _resolveAnnotationTarget() {
+    const { choices, defaultId } = this._annotationTargetChoices();
+    const picked = this._annotationTargetSessionId;
+    if (picked && choices.some((c) => c.id === picked)) return picked;
+    return defaultId;
+  },
+
+  setAnnotationTarget(sessionId) {
+    this._annotationTargetSessionId = sessionId || null;
+  },
+
+  /**
+   * How the prompt names the document. The owning session's agent knows it by its
+   * workspace-relative name; another session's agent needs the full path, built from
+   * the owner's working directory when the preview has a real path (an attachment
+   * opened by id carries only a bare file name, so that stays a name).
+   */
+  _annotationDocumentRef(targetId) {
+    const st = this.filePreviewState;
+    const filePath = st?.filePath || '';
+    const fileName = filePath.split('/').pop() || 'the document';
+    if (!st || targetId === st.sessionId) return fileName;
+    if (typeof st.displayPath === 'string' && st.displayPath.startsWith('/')) return st.displayPath;
+    if (filePath.startsWith('/')) return filePath;
+    const workingDir = this.sessions?.get(st.sessionId)?.workingDir;
+    if (!st.attachmentId && workingDir) return `${workingDir.replace(/\/+$/, '')}/${filePath}`;
+    return fileName;
+  },
+
+  /** A workspace-relative path in the owning session's workspace, made absolute for another session. */
+  _annotationOwnerPath(relPath, targetId) {
+    const st = this.filePreviewState;
+    if (!relPath || !st || targetId === st.sessionId || String(relPath).startsWith('/')) return relPath;
+    const workingDir = this.sessions?.get(st.sessionId)?.workingDir;
+    return workingDir ? `${workingDir.replace(/\/+$/, '')}/${relPath}` : relPath;
+  },
+
+  _renderAnnotationTargetRow() {
+    const { choices } = this._annotationTargetChoices();
+    const targetId = this._resolveAnnotationTarget();
+    if (!targetId) return '';
+    // Pin what the tray shows, so switching tabs afterwards cannot move the send.
+    this._annotationTargetSessionId = targetId;
+    if (choices.length < 2) {
+      return `<div class="annotation-tray-target">Send to <strong data-i18n-skip>${escapeHtml(
+        this._annotationSessionLabel(targetId)
+      )}</strong></div>`;
+    }
+    const options = choices
+      .map((c) => {
+        const suffix = c.role === 'owner' ? ' (opened from)' : c.role === 'active' ? ' (current tab)' : '';
+        const selected = c.id === targetId ? ' selected' : '';
+        return `<option value="${escapeHtml(c.id)}"${selected}>${escapeHtml(this._annotationSessionLabel(c.id))}${suffix}</option>`;
+      })
+      .join('');
+    return `<label class="annotation-tray-target">Send to
+        <select class="annotation-tray-target-select" data-i18n-skip onchange="app.setAnnotationTarget(this.value)">${options}</select>
+      </label>`;
+  },
+
   _renderAnnotationTray() {
     this._closeAnnotationTray();
     const items = this._annotations || [];
@@ -6691,6 +6797,7 @@ Object.assign(CodemanApp.prototype, {
     tray.innerHTML = `
       <div class="annotation-tray-title">Review comments (${items.length})</div>
       <ul class="annotation-tray-list">${rows}</ul>
+      ${this._renderAnnotationTargetRow()}
       <div class="annotation-tray-actions">
         <button type="button" class="btn-icon-sm" onclick="app.clearAnnotations()">Clear</button>
         <button type="button" class="btn-icon-sm" onclick="app.saveAnnotationsToReviewFile()">Save to review file</button>
@@ -6709,16 +6816,21 @@ Object.assign(CodemanApp.prototype, {
     const st = this.filePreviewState;
     const items = this._annotations || [];
     if (!st || !items.length) return;
-    const fileName = (st.filePath || '').split('/').pop() || 'the document';
+    const targetId = this._resolveAnnotationTarget();
+    if (!targetId) return;
+    const docRef = this._annotationDocumentRef(targetId);
     const list = items
       .map((a, i) => {
         const p = a.passage.length > 160 ? `${a.passage.slice(0, 160)}…` : a.passage;
         return `(${i + 1}) "${p}" — ${a.note}`;
       })
       .join('; ');
-    const message = `Please apply these edits to ${fileName}: ${list}`.replace(/\s+/g, ' ').trim();
-    if (await this._postSessionInput(st.sessionId, message)) {
-      this.showToast?.(`Sent ${items.length} comment${items.length === 1 ? '' : 's'} to the session`, 'success');
+    const message = `Please apply these edits to ${docRef}: ${list}`.replace(/\s+/g, ' ').trim();
+    if (await this._postSessionInput(targetId, message)) {
+      this.showToast?.(
+        `Sent ${items.length} comment${items.length === 1 ? '' : 's'} to ${this._annotationSessionLabel(targetId)}`,
+        'success'
+      );
       this.clearAnnotations();
     }
   },
@@ -6728,7 +6840,11 @@ Object.assign(CodemanApp.prototype, {
     const st = this.filePreviewState;
     const items = this._annotations || [];
     if (!st || !items.length) return;
+    const targetId = this._resolveAnnotationTarget();
+    if (!targetId) return;
     try {
+      // The review file is written beside the document, in the OWNING session's
+      // workspace; only the prompt goes to the chosen target.
       const res = await fetch(`/api/sessions/${st.sessionId}/documents/review`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -6739,10 +6855,14 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
       const reviewPath = (await res.json()).data?.path;
-      const fileName = (st.filePath || '').split('/').pop() || 'the document';
-      const message = `Please apply the review comments in ${reviewPath} to ${fileName}.`;
-      if (await this._postSessionInput(st.sessionId, message)) {
-        this.showToast?.(`Saved ${items.length} comments to ${reviewPath} and asked the agent to apply them`, 'success');
+      const reviewRef = this._annotationOwnerPath(reviewPath, targetId);
+      const docRef = this._annotationDocumentRef(targetId);
+      const message = `Please apply the review comments in ${reviewRef} to ${docRef}.`;
+      if (await this._postSessionInput(targetId, message)) {
+        this.showToast?.(
+          `Saved ${items.length} comments to ${reviewPath} and asked ${this._annotationSessionLabel(targetId)} to apply them`,
+          'success'
+        );
         this.clearAnnotations();
         // COD-74: close the preview window and surface the prompt to the user.
         this.closeFilePreview();

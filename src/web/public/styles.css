@@ -14665,6 +14665,28 @@ kbd {
   justify-content: flex-end;
   gap: 8px;
 }
+/* Which session the comments go to (COD-528). */
+.annotation-tray-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted, #aaa);
+}
+.annotation-tray-target strong {
+  color: var(--text, #ddd);
+  font-weight: 600;
+}
+.annotation-tray-target-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 2px 4px;
+  color: var(--text, #ddd);
+  background: var(--bg-input, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 
 /* Inline comment highlight — COD-95. Marks text that has a review comment and is
    click-to-edit. Subtle background + pointer cursor; must NOT block normal text
