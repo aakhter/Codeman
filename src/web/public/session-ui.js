@@ -490,11 +490,32 @@ Object.assign(CodemanApp.prototype, {
     const picker = document.getElementById('quickStartCasePicker');
     if (!select || !input || !list || !picker || input.dataset.listenerAdded) return;
 
+    // COD-527: a touch tap opens or closes the list WITHOUT focusing the box.
+    // Focus selected its text (Android then floats its Copy / Web search menu)
+    // and let KeyboardHandler's focusin scrollInputIntoView() centre this
+    // bottom-toolbar box, shifting the whole screen up until it blurred.
+    // Cancelling pointerdown suppresses the tap's focus; the click that follows
+    // is then skipped. Mouse and keyboard still focus, select and filter.
+    input.addEventListener('pointerdown', event => {
+      this._casePickerTouchTap = event.pointerType === 'touch';
+      if (!this._casePickerTouchTap) return;
+      event.preventDefault();
+      if (this._casePickerOpen) {
+        this.updateCasePickerInput(select.value);
+        this.closeCasePicker();
+      } else {
+        this.openCasePicker('');
+      }
+    });
     input.addEventListener('focus', () => {
       input.select?.();
       this.openCasePicker('');
     });
-    input.addEventListener('click', () => {
+    input.addEventListener('click', event => {
+      if (event?.pointerType === 'touch' || this._casePickerTouchTap) {
+        this._casePickerTouchTap = false;
+        return;
+      }
       input.select?.();
       this.openCasePicker('');
     });
