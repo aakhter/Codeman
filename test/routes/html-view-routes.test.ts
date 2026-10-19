@@ -15,6 +15,7 @@ import { createRouteTestHarness, type RouteTestHarness } from './_route-test-uti
 import { HTML_VIEW_CSP, isBroadHtmlViewRoot, registerHtmlViewRoutes } from '../../src/web/routes/html-view-routes.js';
 import { registerSecurityHeaders } from '../../src/web/middleware/auth.js';
 import { capabilityFromHtmlViewPath, htmlViewCapabilities } from '../../src/html-view-capabilities.js';
+import { attachmentRegistry, registerExternalAttachment } from '../../src/attachment-registry.js';
 
 describe('html-view routes', () => {
   let harness: RouteTestHarness;
@@ -42,6 +43,7 @@ describe('html-view routes', () => {
   afterEach(async () => {
     await harness.app.close();
     htmlViewCapabilities.revokeOwner(undefined);
+    attachmentRegistry.clearSession(sid);
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -93,6 +95,96 @@ describe('html-view routes', () => {
       expect(JSON.parse(res.body).success).toBe(false);
     }
     expect(JSON.parse((await post({})).body).error).toBe('Missing path parameter');
+  });
+
+  it('refuses a body naming both a path and an attachment id, or a malformed id', async () => {
+    const post = (payload: unknown) =>
+      harness.app.inject({ method: 'POST', url: `/api/sessions/${sid}/html-view`, payload: payload as object });
+    for (const payload of [
+      { path: 'index.html', attachmentId: 'att_x' },
+      { attachmentId: '' },
+      { attachmentId: '../etc' },
+    ]) {
+      expect((await post(payload)).statusCode, JSON.stringify(payload)).toBe(400);
+    }
+  });
+
+  describe('by attachment id (COD-526)', () => {
+    async function openAttachment(attachmentId: string) {
+      return harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/html-view`,
+        payload: { attachmentId },
+      });
+    }
+
+    it('mints a page for a published HTML attachment, by its registered path', async () => {
+      const site = join(root, 'published');
+      mkdirSync(site);
+      writeFileSync(join(site, 'report.html'), '<h1>report</h1>');
+      const { attachmentId } = await registerExternalAttachment(sid, join(site, 'report.html'), {
+        sessionWorkingDir: workspace,
+      });
+
+      const res = await openAttachment(attachmentId);
+      expect(res.statusCode).toBe(200);
+      const url = JSON.parse(res.body).data.url as string;
+      expect(url).toMatch(/^\/html-view\/[A-Za-z0-9_-]{16,}\/report\.html$/);
+      // The capability serves the attachment's own folder, out of the workspace.
+      const cap = htmlViewCapabilities.resolve(capabilityFromHtmlViewPath(url)!);
+      expect(cap?.rootDir).toBe(realpathSync(site));
+      expect(cap?.outsideWorkspace).toBe(true);
+      expect((await harness.app.inject({ method: 'GET', url })).body).toBe('<h1>report</h1>');
+    });
+
+    it('mints an in-workspace attachment as an in-workspace page', async () => {
+      const { attachmentId } = await registerExternalAttachment(sid, join(workspace, 'index.html'), {
+        sessionWorkingDir: workspace,
+      });
+      const res = await openAttachment(attachmentId);
+      expect(res.statusCode).toBe(200);
+      const cap = htmlViewCapabilities.resolve(capabilityFromHtmlViewPath(JSON.parse(res.body).data.url)!);
+      expect(cap?.outsideWorkspace).toBe(false);
+    });
+
+    it("refuses an unknown id, another session's id, and a non-HTML attachment", async () => {
+      expect((await openAttachment('att_missing')).statusCode).toBe(404);
+
+      const { attachmentId: jsonId } = await registerExternalAttachment(sid, join(workspace, 'data.json'), {
+        sessionWorkingDir: workspace,
+      });
+      expect((await openAttachment(jsonId)).statusCode).toBe(400);
+
+      const { attachmentId: foreignId } = await registerExternalAttachment(
+        'other-session',
+        join(workspace, 'index.html'),
+        {
+          sessionWorkingDir: workspace,
+        }
+      );
+      try {
+        expect((await openAttachment(foreignId)).statusCode).toBe(404);
+      } finally {
+        attachmentRegistry.clearSession('other-session');
+      }
+    });
+
+    it('applies the same guards as a typed path: a blocked tree is refused', async () => {
+      const site = join(root, 'blocked-site');
+      mkdirSync(site);
+      writeFileSync(join(site, 'page.html'), '<p>x</p>');
+      const { attachmentId } = await registerExternalAttachment(sid, join(site, 'page.html'), {
+        sessionWorkingDir: workspace,
+      });
+      const saved = process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS;
+      process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS = site;
+      try {
+        expect((await openAttachment(attachmentId)).statusCode).toBe(403);
+      } finally {
+        if (saved === undefined) delete process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS;
+        else process.env.CODEMAN_ATTACHMENT_BLOCKED_PATHS = saved;
+      }
+    });
   });
 
   it('refuses non-HTML files and missing files', async () => {

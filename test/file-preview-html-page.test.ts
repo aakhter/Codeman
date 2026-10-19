@@ -16,6 +16,8 @@
  *  4. The pill flips between page and source and persists
  *     `codeman:filePreviewHtmlRendered` per device; with it off the preview
  *     opens as source without asking the server for a page at all.
+ *  5. A published attachment (COD-526) mints by its registry id, never by the
+ *     bare card name, and the pill keeps the id across the flip.
  *
  * Loaded via `vm` with a jsdom document injected, like
  * file-preview-markdown.test.ts: constants.js + panels-ui.js only.
@@ -54,6 +56,12 @@ function makeFetch(mint: 'ok' | 'refuse') {
       return mint === 'ok'
         ? jsonResponse({ success: true, data: { url: PAGE_URL } })
         : jsonResponse({ success: false, error: 'This folder is too broad to render a page from' }, 403);
+    }
+    if (url.includes('/attachments/')) {
+      return jsonResponse({
+        success: true,
+        data: { type: 'text', content: HTML_SOURCE, size: HTML_SOURCE.length, fileName: 'report.html' },
+      });
     }
     if (url.includes('/file-content')) {
       return jsonResponse({
@@ -166,5 +174,32 @@ describe('file viewer HTML page', () => {
     expect(page.getAttribute('aria-pressed')).toBe('true');
     // A page has no text for Edit to act on.
     expect(edit.hidden).toBe(true);
+  });
+
+  it('renders a published attachment as a page, minting by its id (COD-526)', async () => {
+    const { app, fetchMock, body, page } = loadApp('ok');
+
+    await app.openFilePreview('report.html', 's1', 'att_abc', { displayPath: '/srv/out/report.html' });
+
+    expect(mintCalls(fetchMock)).toEqual([
+      { url: '/api/sessions/s1/html-view', method: 'POST', body: { attachmentId: 'att_abc' } },
+    ]);
+    expect(body.querySelector('iframe')!.getAttribute('src')).toBe(PAGE_URL);
+    expect(page.hidden).toBe(false);
+    expect(app.filePreviewPage).toMatchObject({ attachmentId: 'att_abc', displayPath: '/srv/out/report.html' });
+  });
+
+  it('keeps the attachment id when the Page pill flips an attachment page to source', async () => {
+    const { app, fetchMock } = loadApp('ok');
+    await app.openFilePreview('report.html', 's1', 'att_abc', { displayPath: '/srv/out/report.html' });
+    const open = vi.spyOn(app, 'openFilePreview');
+
+    await app.toggleFilePreviewPage();
+
+    expect(open).toHaveBeenCalledWith('report.html', 's1', 'att_abc', { displayPath: '/srv/out/report.html' });
+    // Source view reads the attachment's metadata route, never file-content by the bare name.
+    const urls = fetchMock.mock.calls.map(([url]) => url);
+    expect(urls.some((u) => u.includes('/attachments/att_abc'))).toBe(true);
+    expect(urls.some((u) => u.includes('/file-content'))).toBe(false);
   });
 });

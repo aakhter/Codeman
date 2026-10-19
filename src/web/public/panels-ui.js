@@ -5232,18 +5232,18 @@ Object.assign(CodemanApp.prototype, {
     // resolve, and the page runs in an opaque origin that cannot reach Codeman.
     // The Page pill switches to the source view below (with its Edit button), and
     // a refused mint (remote case, broad folder, hidden directory) falls through
-    // to that source view on its own.
+    // to that source view on its own. A published attachment (COD-526) mints by its
+    // registry id: the card carries only a bare name, never the real path.
     if (
-      !attachmentId &&
       !folderFile &&
       window.CodemanFilePaths?.rendersAsPage?.(filePath) &&
       this._filePreviewPref?.('htmlRendered')
     ) {
-      const pageUrl = await this._mintHtmlViewUrl(filePath, sessionId);
+      const pageUrl = await this._mintHtmlViewUrl(filePath, sessionId, attachmentId);
       if (this.filePreviewState !== previewState) return;
       if (pageUrl) {
         footerEl.textContent = 'HTML';
-        this.filePreviewPage = { filePath, sessionId };
+        this.filePreviewPage = { filePath, sessionId, attachmentId, displayPath: options.displayPath };
         this.filePreviewDetachUrl = pageUrl;
         bodyEl.innerHTML = `<iframe src="${escapeHtml(pageUrl)}" title="${escapeHtml(filePath)}" sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads"></iframe>`;
         this._updateFilePreviewToolbar?.('page');
@@ -5329,7 +5329,7 @@ Object.assign(CodemanApp.prototype, {
         this.filePreviewContent = shown;
         // A folder file has no workspace-relative directory, so the markdown rebase
         // pass degrades its refs like an attachment card's.
-        this.filePreviewText = { ext, sessionId, filePath, attachmentId: folderFile.folderId };
+        this.filePreviewText = { ext, sessionId, filePath, attachmentId: folderFile.folderId, folder: true };
         this._renderFilePreviewText();
       } catch (err) {
         if (this.filePreviewState !== previewState) return;
@@ -7727,25 +7727,29 @@ Object.assign(CodemanApp.prototype, {
     const isMarkdown = view !== 'none' && MARKDOWN_EXTS.has(this.filePreviewText?.ext || '');
     set('filePreviewMdBtn', isMarkdown, view === 'markdown');
     // Page: shown on a rendered HTML page, and on its source view when that view
-    // can be re-rendered (a bare attachment-card name has no path to mint from).
+    // can be re-rendered (an attachment mints by its id, COD-526; a folder-grid
+    // file by its absolute path only, its id is the folder's).
     const text = this.filePreviewText;
     const htmlSource =
       view === 'text' &&
       !this.filePreviewPageRefused &&
       rendersAsPage(text?.filePath) &&
-      (!text.attachmentId || text.filePath.startsWith('/'));
+      (!text.folder || text.filePath.startsWith('/'));
     set('filePreviewPageBtn', view === 'page' || htmlSource, view === 'page');
     set('filePreviewLinesBtn', view === 'text', this._filePreviewPref('lineNumbers'));
     set('filePreviewWrapBtn', view === 'text', this._filePreviewPref('wrap'));
   },
 
-  /** Mint the sandboxed page URL for an HTML file; null when the server refuses. */
-  async _mintHtmlViewUrl(filePath, sessionId) {
+  /**
+   * Mint the sandboxed page URL for an HTML file, by path or by attachment id;
+   * null when the server refuses.
+   */
+  async _mintHtmlViewUrl(filePath, sessionId, attachmentId = null) {
     try {
       const res = await fetch(`/api/sessions/${sessionId}/html-view`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath }),
+        body: JSON.stringify(attachmentId ? { attachmentId } : { path: filePath }),
       });
       const result = await res.json().catch(() => ({}));
       return res.ok && result.success ? CodemanBase.url(result.data.url) : null;
@@ -7759,7 +7763,13 @@ Object.assign(CodemanApp.prototype, {
     const target = this.filePreviewPage || this.filePreviewText;
     if (!target) return;
     this._setFilePreviewPref('htmlRendered', !this._filePreviewPref('htmlRendered'));
-    return this.openFilePreview(target.filePath, target.sessionId);
+    const displayPath = target.displayPath || this.filePreviewState?.displayPath;
+    return this.openFilePreview(
+      target.filePath,
+      target.sessionId,
+      (!target.folder && target.attachmentId) || null,
+      displayPath ? { displayPath } : {}
+    );
   },
 
   toggleFilePreviewMd() {

@@ -3,8 +3,8 @@
  * page instead of as source text.
  *
  * Routes:
- * - `POST /api/sessions/:id/html-view` (authenticated) — `{ path }` of an `.html` file;
- *   returns `{ url }`, an `/html-view/<cap>/<file>` URL for that file.
+ * - `POST /api/sessions/:id/html-view` (authenticated) — `{ path }` of an `.html` file,
+ *   or `{ attachmentId }` of a registered HTML attachment (COD-526); returns `{ url }`, an `/html-view/<cap>/<file>` URL for that file.
  * - `GET /html-view/:cap/*` (capability) — the HTML file and its sibling assets.
  *
  * ⚠️ Every response carries `Content-Security-Policy: sandbox ...` WITHOUT
@@ -33,6 +33,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { ApiErrorCode, createErrorResponse } from '../../types.js';
 import { isBlockedAttachmentPath, isUnderTree, loadAttachmentGuardConfig } from '../../config/attachment-guard.js';
 import { HTML_VIEW_PREFIX, htmlViewCapabilities } from '../../html-view-capabilities.js';
+import { attachmentRegistry, resolveGeneratedArtifactReadPath } from '../../attachment-registry.js';
 import { folderAllowedForUser } from '../../folder-listing.js';
 import {
   CASES_DIR,
@@ -164,14 +165,33 @@ export function registerHtmlViewRoutes(app: FastifyInstance, ctx: SessionPort): 
         .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'HTML pages in a remote (SSH) case cannot be rendered'));
       return;
     }
-    if (!HTML_VIEW_EXTENSIONS.has(extensionOf(body.path))) {
+    // A published attachment (COD-526) is named by its registry id, since its path
+    // is server-private. It resolves to the path the attachment routes would serve
+    // (a boundary-confined generated artifact or upload through its own read-path
+    // check), and from there takes every check below exactly as a typed path does.
+    let requestedPath: string;
+    if (body.attachmentId !== undefined) {
+      const record = attachmentRegistry.get(id, body.attachmentId);
+      if (!record) {
+        reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Attachment not found'));
+        return;
+      }
+      try {
+        requestedPath = (await resolveGeneratedArtifactReadPath(record)) ?? record.filePath;
+      } catch {
+        reply.code(403).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Access to this file is blocked'));
+        return;
+      }
+    } else {
+      requestedPath = body.path as string;
+    }
+    if (!HTML_VIEW_EXTENSIONS.has(extensionOf(requestedPath))) {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Not an HTML file'));
       return;
     }
     // A `~/` link (the terminal passes a home-relative path through, since only
     // the server knows the home) is this host's home, as the attachment route
     // expands it. A Docker case's `~` is the container's, so it is refused there.
-    let requestedPath = body.path;
     if (requestedPath.startsWith('~/')) {
       if (session.docker) {
         reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, DOCKER_HOME_PATH_ERROR));

@@ -129,7 +129,8 @@ export const FileWriteSchema = z
 
 /**
  * Body validation for `POST /api/sessions/:id/html-view` (render a local HTML file
- * as a sandboxed page). `path` is absolute or relative to the session workspace;
+ * as a sandboxed page). Exactly one of `path` (absolute or relative to the session
+ * workspace) or `attachmentId` (a registered attachment of the session);
  * the extension, containment, guard and broad-root checks are the route's
  * (html-view-routes.ts), after parsing.
  */
@@ -141,9 +142,21 @@ export const HtmlViewOpenSchema = z
       .max(4096)
       .refine((p) => !p.includes('\0') && !p.includes('\n') && !p.includes('\r'), {
         message: 'Invalid path',
-      }),
+      })
+      .optional(),
+    // A registered attachment (COD-526): its real path is server-private, so a
+    // published file is named by its registry id and resolved by the route.
+    attachmentId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9_-]+$/, 'Invalid attachment id')
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine((b) => (b.path === undefined) !== (b.attachmentId === undefined), {
+    message: 'Missing path parameter',
+  });
 
 /**
  * The run-mode ids the API currently accepts: every ENABLED registry entry.
