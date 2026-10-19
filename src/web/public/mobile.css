@@ -4319,7 +4319,7 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab .tab-close {
 
 /* Mobile session switcher. Keep these rules outside the phone media query:
    the sheet and scrim are appended directly to body. */
-.mobile-tab-scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .22s;z-index:1205}
+.mobile-tab-scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .22s;z-index:1205}
 .mobile-tab-scrim.open{opacity:1;pointer-events:auto}
 .mobile-tab-sheet{position:fixed;left:0;right:0;bottom:0;z-index:1206;background:#1b222c;border-radius:16px 16px 0 0;border-top:1px solid #2b333f;max-height:72vh;display:flex;flex-direction:column;transform:translateY(100%);transition:transform .28s cubic-bezier(.32,.72,0,1);box-shadow:0 -16px 48px rgba(0,0,0,.5)}
 .mobile-tab-sheet.open{transform:translateY(0)}

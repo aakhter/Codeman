@@ -8710,6 +8710,17 @@ html[data-skin="og"] .welcome-primary:hover {
 }
 
 
+/* Phone tab sheet (mobile-tabs.js) - Base Styles. The module appends the scrim
+   and sheet to body on EVERY device, but their real styles live in mobile.css,
+   which only loads under 1024px. Without this rule they rendered unstyled, in
+   flow, below the app at desktop width: the page doubled in height and a touch
+   tap on the Case picker scrolled that stray tab list into view (COD-527).
+   mobile.css loads later at the same specificity and restores the display. */
+.mobile-tab-sheet,
+.mobile-tab-scrim {
+  display: none;
+}
+
 /* Mobile Case Picker - Base Styles */
 .mobile-case-picker-sheet {
   position: fixed;
