@@ -554,6 +554,7 @@ describe('mobile overview run picker (CLI availability gating)', () => {
       'grok',
       'deepseek',
       'omp',
+      'copilot',
       'shell',
     ]);
   });

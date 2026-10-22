@@ -61,6 +61,7 @@ import {
   type AntigravityConfig,
   type PiConfig,
   type GrokConfig,
+  type CopilotConfig,
   type DeepSeekConfig,
   type OmpConfig,
   type SessionRemote,
@@ -756,6 +757,8 @@ export class Session extends EventEmitter {
 
   private _name: string;
   private _nameSource: SessionNameSource;
+  /** `pinCliSessionName` as of the last spawn (see {@link _refreshCliNamePin}). */
+  private _pinEveryCliName = false;
   /**
    * Reconstructs the composer draft from USER keystrokes so the first real
    * prompt can name the tab. Fed only when a write says `fromUser`, and never
@@ -1061,6 +1064,8 @@ export class Session extends EventEmitter {
   private _piConfig: PiConfig | undefined;
   // Grok configuration (only for mode === 'grok')
   private _grokConfig: GrokConfig | undefined;
+  // GitHub Copilot configuration (only for mode === 'copilot')
+  private _copilotConfig: CopilotConfig | undefined;
 
   // DeepSeek Harness configuration (only for mode === 'deepseek')
   private _deepSeekConfig: DeepSeekConfig | undefined;
@@ -1205,6 +1210,7 @@ export class Session extends EventEmitter {
       piConfig?: PiConfig;
       /** Grok configuration (only for mode === 'grok') */
       grokConfig?: GrokConfig;
+      copilotConfig?: CopilotConfig;
       /** DeepSeek Harness configuration (only for mode === 'deepseek') */
       deepSeekConfig?: DeepSeekConfig;
       /** OMP configuration (only for mode === 'omp') */
@@ -1408,6 +1414,11 @@ export class Session extends EventEmitter {
     // Apply Grok configuration
     if (config.grokConfig) {
       this._grokConfig = config.grokConfig;
+    }
+
+    // Apply GitHub Copilot configuration
+    if (config.copilotConfig) {
+      this._copilotConfig = config.copilotConfig;
     }
 
     // Apply env overrides (exported at spawn, not persisted to disk).
@@ -2390,16 +2401,31 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * The name to pin on the Claude CLI as `--name`, or undefined to let Claude
-   * title the conversation itself. `--name` is the prompt-box label, the
-   * `/resume` picker entry and the terminal title all at once, and a pinned
-   * title stops Claude generating its own, so only a name the user chose is
-   * worth pinning. Pinning the `w1-myapp` placeholder gave every conversation
-   * in a case the same `/resume` entry; an auto name is a cut of the first
-   * prompt, which Claude's own generated title already beats.
+   * The name to pin on the Claude CLI as `--name`, or undefined to let Claude title the
+   * conversation itself. `--name` is the prompt-box label, the `/resume` picker entry and the
+   * terminal title all at once, and a pinned title stops Claude generating its own.
+   *
+   * By default only a name the user chose is pinned. Pinning the `w1-myapp` placeholder gave
+   * every conversation in a case the same `/resume` entry (the tab number restarts once a
+   * case's tabs are closed), and an auto name is a cut of the first prompt, which Claude's
+   * own generated title already beats.
+   *
+   * With the opt-in `pinCliSessionName` setting every non-blank tab name is pinned, so the
+   * CLI's labels read the same as the tabs, at the cost of those generated titles. A rename
+   * in Codeman then holds only until the next turn: a process started with `--name`
+   * re-appends its in-memory title (see claude-session-title.ts). The setting is re-read
+   * at each spawn and respawn by {@link _refreshCliNamePin}.
    */
   get cliPinnedName(): string | undefined {
-    return this._nameSource === 'manual' ? this._name : undefined;
+    if (!this._pinEveryCliName) return this._nameSource === 'manual' ? this._name : undefined;
+    return this._name.trim() ? this._name : undefined;
+  }
+
+  /** Re-read `pinCliSessionName` so `cliPinnedName` decides per launch, with no server restart. */
+  private async _refreshCliNamePin(): Promise<void> {
+    // Dynamic: hooks-config -> route-helpers imports Session, so a static import would be a cycle.
+    const { readPinCliSessionNameEnabled } = await import('./hooks-config.js');
+    this._pinEveryCliName = await readPinCliSessionNameEnabled();
   }
 
   setAutoClear(enabled: boolean, threshold?: number): void {
@@ -2871,6 +2897,7 @@ export class Session extends EventEmitter {
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
       grokConfig: this._grokConfig,
+      copilotConfig: this._copilotConfig,
       deepSeekConfig: this._deepSeekConfig,
       ompConfig: this._ompConfig,
       resumeSessionId: this._resumeSessionId,
@@ -3327,6 +3354,7 @@ export class Session extends EventEmitter {
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
       grokConfig: this._grokConfig,
+      copilotConfig: this._copilotConfig,
       deepSeekConfig: this._deepSeekConfig,
       // OMP resolution/pinning does NOT happen here. This object is built
       // EAGERLY — including on every boot-recovery reattach, before anyone
@@ -3422,6 +3450,7 @@ export class Session extends EventEmitter {
    * still inside it and renders no local `--session-id` to collide.
    */
   private async _buildRespawnPaneOptionsWithResumePin(): Promise<import('./mux-interface.js').RespawnPaneOptions> {
+    await this._refreshCliNamePin();
     const options = this._buildRespawnPaneOptions();
     if (this._remote || this._docker) return options;
     const entry = getCli(this.mode);
@@ -3749,6 +3778,8 @@ export class Session extends EventEmitter {
     // resume only after the new PTY has all synchronous listeners installed.
     this._suspendTerminalViewerSizing();
 
+    await this._refreshCliNamePin();
+
     // Bounds the workspace-trust scan (see _maybeAcceptTrustDialog). Stamped here
     // rather than at PTY spawn so a slow mux attach still counts as startup.
     this._interactiveStartedAt = Date.now();
@@ -3884,6 +3915,7 @@ export class Session extends EventEmitter {
             antigravityConfig: this._antigravityConfig,
             piConfig: this._piConfig,
             grokConfig: this._grokConfig,
+            copilotConfig: this._copilotConfig,
             deepSeekConfig: this._deepSeekConfig,
             ompConfig: this._ompConfig,
             resumeSessionId: this._resumeSessionId,
@@ -4516,6 +4548,7 @@ export class Session extends EventEmitter {
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
       grokConfig: this._grokConfig,
+      copilotConfig: this._copilotConfig,
       deepSeekConfig: this._deepSeekConfig,
       ompConfig: this._ompConfig,
     };
@@ -6239,7 +6272,7 @@ export class Session extends EventEmitter {
           : this._mux.capturePaneText?.(this._muxSession.muxName),
       sendEnter: () => (this.assistantInputAllowed() ? this._mux?.sendInput(this.id, '\r') : undefined),
       // ⚠ NO fallback glyph here, unlike the screen-reading probe elsewhere in this file.
-      // Only claude, codex, pi, opencode, omp and gemini declare a promptGlyph; the other modes would fall back
+      // Only claude, codex, pi, opencode, omp, gemini and antigravity declare a promptGlyph; the other modes would fall back
       // to claude's `❯`, which is ALSO starship's default shell prompt (and pure's, and
       // spaceship's, and p10k lean's). On a shell session the line `❯ npm run build` sits
       // on screen for as long as the command runs, promptStillInComposer() reads that as

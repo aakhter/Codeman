@@ -217,7 +217,7 @@ runs no agent, and the external CLIs render their own TUIs and post no hooks
 is `blocked` on `codex`: Codeman reads codex's approval, question and trust dialogs off
 its screen and raises `blocked` for them (see [Signals](#signals)). For every other mode
 only `idle`, `working` and `exit` are accepted. `exit` is dependable everywhere; `idle` and
-`working` are screen-checked for `opencode`, `gemini`, `pi` and `omp` (as for `claude` and
+`working` are screen-checked for `opencode`, `gemini`, `pi`, `omp` and `antigravity` (as for `claude` and
 `codex`) and not guaranteed elsewhere: see the caveats under [Signals](#signals) before
 building on `idle`.
 Requesting a signal the session can never emit **explicitly** is a `400` (`stop` on
@@ -246,8 +246,8 @@ contract is a **marker unique to each call** (`MARK="DONE_$RANDOM"`, send
 
 | Signal | Source | Actually fires for |
 |--------|--------|--------------------|
-| `idle` | the session's own `idle` event | `claude`: yes, on ❯-prompt detection after activity. `codex`, `opencode`, `gemini`, `pi`, `omp`: yes, the same screen check through the prompt marker and working line each declares (`capabilities.workDetect`). `shell`: **once only**, ~500 ms after start, and never again. Other external CLIs (`antigravity`, `grok`, `deepseek`): not guaranteed (they render their own TUIs and readiness is output stabilization) |
-| `working` | the session's own `working` event | `claude`, plus `codex`, `opencode`, `gemini`, `pi` and `omp` through the working line each declares. Elsewhere not guaranteed: it rests on generic output heuristics such as a braille spinner glyph |
+| `idle` | the session's own `idle` event | `claude`: yes, on ❯-prompt detection after activity. `codex`, `opencode`, `gemini`, `pi`, `omp`, `antigravity`: yes, the same screen check through the prompt marker and working line each declares (`capabilities.workDetect`); an `antigravity` session waiting on a shell-command approval stays `working` until it is answered. `shell`: **once only**, ~500 ms after start, and never again. Other external CLIs (`grok`, `deepseek`): not guaranteed (they render their own TUIs and readiness is output stabilization) |
+| `working` | the session's own `working` event | `claude`, plus `codex`, `opencode`, `gemini`, `pi`, `omp` and `antigravity` through the working line each declares. Elsewhere not guaranteed: it rests on generic output heuristics such as a braille spinner glyph |
 | `stop` | the Claude Code `stop` hook, the definitive end-of-turn signal | `claude` (and `deepseek`) only |
 | `blocked` | a `permission_prompt` or `elicitation_dialog` hook; on `codex`, a dialog read off its screen | `claude`, `deepseek` and `codex`; on `claude` rarer than it looks: see below |
 | `exit` | no process is behind the session | every mode |
@@ -626,7 +626,9 @@ or `.csv` is unreliable): the office formats `.pdf`, `.docx`, `.pptx`, `.xlsx`,
 `.zip` and the text family `.txt`, `.md`, `.csv`, `.tsv`, `.json`, `.log`,
 `.yaml`, `.yml`, `.xml`. A document is buffered under the same 50 MB image cap,
 its bytes are checked against the extension (a magic-number signature, or UTF-8
-with no NUL byte for text) and answered 415 on a mismatch, and it is saved under
+with no NUL byte for text) and answered 415 on a mismatch (for text, an `error`
+saying the file is not UTF-8 text, or UTF-16 text when it opens with a UTF-16
+byte order mark, and to save it as UTF-8), and it is saved under
 a sanitized stem of its name, so `Q3 report.pdf` is findable as
 `paste-<ms>-<hex>-Q3-report.pdf`. A named type that is neither an image nor a
 document (a script, an HTML page, a `.sh`) is refused 400 `Unsupported file
@@ -1028,7 +1030,7 @@ The target is judged before anything is written:
 
 - It must be absolute with no `..` and none of the shell metacharacters a session working directory is rejected for (spaces are fine). `400 INVALID_INPUT` otherwise.
 - It must not be a system directory (`/etc`, `/usr`, `/proc`, ...), the home folder itself, Codeman's own data folder, or a credential/config tree (`~/.ssh`, `~/.aws`, `~/.claude`, ...). Judged on the path as typed and on its symlink-resolved form, against both the given and the symlink-resolved roots. `400`.
-- It must not be, or be inside, the cases directory (the caller's own and the shared one): a case there is a plain create without `path`. `400`.
+- It must not be the cases directory (the caller's own or the shared one) or a direct child of it, since those are what `GET /api/cases` lists as local cases: a case there is a plain create without `path`. A folder further down is allowed. `400`.
 - Its parent must already exist (one folder is created, never a chain): `404 NOT_FOUND`. A parent that does not answer (an unreachable network mount) or cannot be read is `422 OPERATION_FAILED`, checked through the bounded path probe before anything else touches it.
 - The folder must not exist, or must be an **empty** directory; a folder with contents is Link Existing's job: `409 ALREADY_EXISTS`. A symlink or a plain file at the target is `400`.
 - `409 ALREADY_EXISTS` also for a case name already in use (in the cases dir or the registry) and for a folder that is already a case.
@@ -1149,7 +1151,7 @@ Copies MCP servers between the agent CLIs' own user-level config files (`docs/cl
 Result (`data`):
 
 - `applied` — `false` for the dry run.
-- `targets[]` — one per enabled CLI that declares an MCP config, plus GitHub Copilot CLI (`id: "copilot"`, a sync-only target that is not a run mode): `id`, `label`, `file`, `status`, `error?`, `servers` (names it already has), `added` (names added, or that would be), `skipped` (names its dialect cannot express, e.g. SSE for Codex and Antigravity).
+- `targets[]` — one per enabled CLI that declares an MCP config, including GitHub Copilot CLI (`id: "copilot"`; it is a run mode that declares its own `mcpConfig`, and a sync-only target takes its place only while that run mode is disabled): `id`, `label`, `file`, `status`, `error?`, `servers` (names it already has), `added` (names added, or that would be), `skipped` (names its dialect cannot express, e.g. SSE for Codex and Antigravity).
   - `status`: `ok`; `absent` (not installed and no config file, so not read or created); `skipped` (the CLI's relocation env var, e.g. `CODEX_HOME`, is set to a relative path in the server's environment, so its file cannot be located safely and is neither read nor written); `unreadable` (the file exists but cannot be parsed safely, so it is not written); `failed` (a read or write error, the file may be unchanged).
   - `error` says why a target is not `ok`. A parse failure is reported by position only (`not valid TOML (line 3, column 21)`, `not valid JSON`), never with text from the file.
   - `file` honours each CLI's own relocation env var as the server process sees it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME`, and `COPILOT_HOME` for the sync-only Copilot CLI); see `docs/cli-registry.md`.

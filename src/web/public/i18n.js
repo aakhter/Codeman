@@ -255,6 +255,7 @@
     'Run Grok': '运行 Grok',
     'Run DeepSeek': '运行 DeepSeek',
     'Run OMP': '运行 OMP',
+    'Run GitHub Copilot': '运行 GitHub Copilot',
     'Run Shell': '运行 Shell',
     'More tools': '更多工具',
     'Select AI backend': '选择 AI 后端',
@@ -690,6 +691,9 @@
     'Claude Model': 'Claude 模型',
     '1M Opus Context': 'Opus 100 万上下文',
     'Remote auto-reconnect': '远程自动重连',
+    'Pin tab names on the CLI': '在 CLI 上固定标签名',
+    "Launch every Claude session with its tab name, so the CLI's prompt label and /resume list match your tabs. Claude then stops generating its own titles for those sessions, and a rename in Codeman holds only until the next turn. Applies from the next session start or respawn, no server restart needed.":
+      '以标签名启动每个 Claude 会话，让 CLI 的提示框标签和 /resume 列表与你的标签一致。Claude 随后不再为这些会话生成自己的标题，在 Codeman 中的重命名也只保留到下一轮。从下一次会话启动或重新生成时生效，无需重启服务器。',
     'Thinking Effort': '思考强度',
     Low: '低',
     Medium: '中',
@@ -856,6 +860,9 @@
     'Settings saved': '设置已保存',
     // The once-per-release toast (settings-ui.js checkWhatsNew); its highlights stay English.
     "See what's new": '查看更新内容',
+    // The security-notice cards' own eyebrow (panels-ui.js showSecurityNotice/showUpdateNotice);
+    // each notice's title, message and link label carry their own zh-CN text and are skipped.
+    'Security notice': '安全提示',
     'Settings applied': '设置已应用',
     'Save and keep Settings open': '保存并保持设置打开',
     'Settings saved locally': '设置已保存到本机',
@@ -1332,6 +1339,8 @@
       [/^Worktree (\S+) and branch (\S+) removed$/, (_m, wt, branch) => `已移除工作树 ${wt} 和分支 ${branch}`],
       [/^Worktree (\S+) removed$/, (_m, wt) => `已移除工作树 ${wt}`],
       [/^Worktree (\S+) was kept: ([\s\S]+)$/, (_m, wt, why) => `工作树 ${wt} 已保留：${why}`],
+      // A pick, drop or paste that mixed admitted files with refused ones (image-input.js).
+      [/^(\d+) files? skipped: unsupported type$/, (_m, n) => `已跳过 ${n} 个不支持类型的文件`],
       // Group names are user text: they pass through untranslated.
       [/^Move to "(.+)"$/, (_m, group) => `移到“${group}”`],
       // Session names are user text too.

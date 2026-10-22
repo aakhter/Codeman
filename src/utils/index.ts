@@ -81,6 +81,12 @@ export {
 export type { DeepSeekProfile, DeepSeekProfileKind } from './deepseek-cli-resolver.js';
 export { resolveOmpDir, isOmpAvailable, getOmpNotFoundMessage, getOmpCliVersion } from './omp-cli-resolver.js';
 export {
+  resolveCopilotDir,
+  isCopilotAvailable,
+  getCopilotNotFoundMessage,
+  getCopilotCliVersion,
+} from './copilot-cli-resolver.js';
+export {
   boundedPathExists,
   describeUnknownPath,
   probePath,

@@ -28,6 +28,7 @@ import {
   type AntigravityConfig,
   type PiConfig,
   type GrokConfig,
+  type CopilotConfig,
   type DeepSeekConfig,
   type OmpConfig,
   type RemoteHost,
@@ -187,6 +188,7 @@ import { MAX_PASTE_IMAGE_BYTES, MAX_PASTE_VIDEO_BYTES } from '../../config/buffe
 import { VIDEO_ATTACHMENT_EXTENSIONS } from '../../attachment-registry.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
 import {
+  transcriptNeedsScreenCapture,
   getLastTranscriptResponse,
   isExternalCliTranscriptMode,
   parseExternalCliTranscript,
@@ -472,6 +474,23 @@ export function stripInkRedrawBloat(buffer: string): string {
  * (valid UTF-8, no NUL byte) rather than on a signature, since plain text has none.
  */
 const TEXT_UPLOAD_EXTS = new Set(['.txt', '.md', '.csv', '.tsv', '.json', '.log', '.yaml', '.yml', '.xml']);
+
+/**
+ * Documents a user hands an agent to read: the office formats plus the text
+ * family. Curated on purpose, never SUPPORTED_ATTACHMENT_EXTENSIONS or
+ * EDITABLE_EXTENSIONS, which carry sh/py/js/html; a prompt upload is a thing
+ * to read, not a thing to run or serve. Each is judged on its bytes by
+ * imageMagicMatchesExt (signature, or UTF-8 without NUL for text). The browser
+ * keeps its own copies (test/upload-document-list-parity.test.ts pins them).
+ */
+export const ALLOWED_DOCUMENT_EXTS: ReadonlySet<string> = new Set([
+  '.pdf',
+  '.docx',
+  '.pptx',
+  '.xlsx',
+  '.zip',
+  ...TEXT_UPLOAD_EXTS,
+]);
 
 /**
  * Validate upload bytes against a declared extension. Sniffs the first ~12 bytes
@@ -836,7 +855,8 @@ export async function _clampExternalCliBypassForOwner(
   antigravityConfig?: AntigravityConfig,
   piConfig?: PiConfig,
   grokConfig?: GrokConfig,
-  deepSeekConfig?: DeepSeekConfig
+  deepSeekConfig?: DeepSeekConfig,
+  copilotConfig?: CopilotConfig
 ): Promise<{
   codexConfig: CodexConfig | undefined;
   geminiConfig: GeminiConfig | undefined;
@@ -844,6 +864,7 @@ export async function _clampExternalCliBypassForOwner(
   piConfig: PiConfig | undefined;
   grokConfig: GrokConfig | undefined;
   deepSeekConfig: DeepSeekConfig | undefined;
+  copilotConfig: CopilotConfig | undefined;
 }> {
   const out = await clampExternalCliBypassForOwner(owner, {
     codexConfig,
@@ -852,6 +873,7 @@ export async function _clampExternalCliBypassForOwner(
     piConfig,
     grokConfig,
     deepSeekConfig,
+    copilotConfig,
   });
   return out as {
     codexConfig: CodexConfig | undefined;
@@ -860,6 +882,7 @@ export async function _clampExternalCliBypassForOwner(
     piConfig: PiConfig | undefined;
     grokConfig: GrokConfig | undefined;
     deepSeekConfig: DeepSeekConfig | undefined;
+    copilotConfig: CopilotConfig | undefined;
   };
 }
 
@@ -1631,6 +1654,7 @@ export function registerSessionRoutes(
       piConfig: gatedPiConfig,
       grokConfig: gatedGrokConfig,
       deepSeekConfig: gatedDeepSeekConfig,
+      copilotConfig: gatedCopilotConfig,
     } = await _clampExternalCliBypassForOwner(
       owner,
       launchBody.codexConfig,
@@ -1638,7 +1662,8 @@ export function registerSessionRoutes(
       launchBody.antigravityConfig,
       launchBody.piConfig,
       launchBody.grokConfig,
-      launchBody.deepSeekConfig
+      launchBody.deepSeekConfig,
+      launchBody.copilotConfig
     );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
@@ -1664,6 +1689,7 @@ export function registerSessionRoutes(
       antigravityConfig: mode === 'antigravity' ? gatedAntigravityConfig : undefined,
       piConfig: mode === 'pi' ? gatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? gatedGrokConfig : undefined,
+      copilotConfig: mode === 'copilot' ? gatedCopilotConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? gatedDeepSeekConfig : undefined,
       ompConfig: resolveOmpConfigForCreate(mode, workingDir, launchBody.ompConfig),
       resumeSessionId: validatedResumeId,
@@ -3282,7 +3308,14 @@ export function registerSessionRoutes(
     // where a real rollout file is the better source.
     if (isExternalCliTranscriptMode(session.mode)) {
       const externalQuery = req.query as { context?: string };
-      const blocks = parseExternalCliTranscript(session.terminalBuffer, session.mode);
+      // A repainting full-screen TUI (copilot) streams absolute cursor moves, not lines, so the
+      // buffer cannot be segmented; read the pane's visible screen instead, and fall back to the
+      // buffer when there is no tmux pane to ask (direct PTY, tests).
+      const screen =
+        transcriptNeedsScreenCapture(session.mode) && session.muxName
+          ? (ctx.mux.capturePaneText?.(session.muxName) ?? null)
+          : null;
+      const blocks = parseExternalCliTranscript(screen ?? session.terminalBuffer, session.mode);
       return {
         text: getLastTranscriptResponse(blocks),
         timestamp: '',
@@ -4229,6 +4262,7 @@ export function registerSessionRoutes(
       antigravityConfig,
       piConfig,
       grokConfig,
+      copilotConfig,
       deepSeekConfig,
       ompConfig,
       envOverrides,
@@ -4308,6 +4342,7 @@ export function registerSessionRoutes(
         antigravityConfig ||
         piConfig ||
         grokConfig ||
+        copilotConfig ||
         deepSeekConfig ||
         ompConfig ||
         openCodeConfig ||
@@ -4375,6 +4410,7 @@ export function registerSessionRoutes(
         antigravityConfig ||
         piConfig ||
         grokConfig ||
+        copilotConfig ||
         deepSeekConfig ||
         ompConfig ||
         openCodeConfig ||
@@ -4492,6 +4528,7 @@ export function registerSessionRoutes(
             antigravityConfig,
             piConfig,
             grokConfig,
+            copilotConfig,
             deepSeekConfig,
           } as unknown as Record<string, unknown>)
         );
@@ -4690,6 +4727,7 @@ export function registerSessionRoutes(
       antigravityConfig,
       piConfig,
       grokConfig,
+      copilotConfig,
       deepSeekConfig,
       ompConfig,
     };
@@ -4719,6 +4757,7 @@ export function registerSessionRoutes(
       piConfig: qsGatedPiConfig,
       grokConfig: qsGatedGrokConfig,
       deepSeekConfig: qsGatedDeepSeekConfig,
+      copilotConfig: qsGatedCopilotConfig,
     } = await _clampExternalCliBypassForOwner(
       owner,
       qsLaunchConfigs.codexConfig,
@@ -4726,7 +4765,8 @@ export function registerSessionRoutes(
       qsLaunchConfigs.antigravityConfig,
       qsLaunchConfigs.piConfig,
       qsLaunchConfigs.grokConfig,
-      qsLaunchConfigs.deepSeekConfig
+      qsLaunchConfigs.deepSeekConfig,
+      qsLaunchConfigs.copilotConfig
     );
     // Same owner clamp for env overrides as POST /api/sessions (upstream 74194e4f).
     const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
@@ -4907,6 +4947,7 @@ export function registerSessionRoutes(
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
       piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
+      copilotConfig: mode === 'copilot' ? qsGatedCopilotConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
       ompConfig: qsResolvedOmpConfig,
       envOverrides: qsCustomModelEnvOverrides,
@@ -6002,12 +6043,6 @@ export function registerSessionRoutes(
   // so an uploaded video is a type that previews. 3gp/mkv are deliberately out: they
   // would upload but not preview, and a phone's camera roll produces neither.
   const ALLOWED_VIDEO_EXTS = new Set([...VIDEO_ATTACHMENT_EXTENSIONS].map((e) => `.${e}`));
-  // Documents a user hands an agent to read: the office formats plus the text
-  // family. Curated on purpose, never SUPPORTED_ATTACHMENT_EXTENSIONS or
-  // EDITABLE_EXTENSIONS, which carry sh/py/js/html; a prompt upload is a thing
-  // to read, not a thing to run or serve. Each is judged on its bytes by
-  // imageMagicMatchesExt (signature, or UTF-8 without NUL for text).
-  const ALLOWED_DOCUMENT_EXTS = new Set(['.pdf', '.docx', '.pptx', '.xlsx', '.zip', ...TEXT_UPLOAD_EXTS]);
   const VIDEO_MIME_EXT: Record<string, string> = {
     mp4: '.mp4',
     quicktime: '.mov',
@@ -6262,14 +6297,24 @@ export function registerSessionRoutes(
       if (!imageMagicMatchesExt(imageBytes, origExt)) {
         // The first bytes of a text file are user content, so for text the log
         // names the failure and never the bytes; a signature is safe to print.
-        const detail = TEXT_UPLOAD_EXTS.has(origExt)
-          ? `reason=${imageBytes.includes(0) ? 'nul-byte' : 'not-utf8'}`
+        // A text refusal names the encoding, since an Excel or Notepad export
+        // (UTF-16 with a BOM, or Windows-1252) is not a corrupt file.
+        const isText = TEXT_UPLOAD_EXTS.has(origExt);
+        const bom = imageBytes.length >= 2 ? imageBytes.readUInt16BE(0) : 0;
+        const utf16 = bom === 0xfffe || bom === 0xfeff;
+        const detail = isText
+          ? `reason=${utf16 ? 'utf16-bom' : imageBytes.includes(0) ? 'nul-byte' : 'not-utf8'}`
           : `magic=${imageBytes.subarray(0, 12).toString('hex')}`;
         console.warn(
           `[paste-image] document mismatch: filename=${JSON.stringify(part.filename)} mime=${JSON.stringify(part.mimetype)} declaredExt=${origExt} size=${imageBytes.length} ${detail}`
         );
         reply.code(415);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, `File bytes do not match declared type ${origExt}`);
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          isText
+            ? `This ${origExt} file is ${utf16 ? 'UTF-16 text, not UTF-8' : 'not UTF-8 text'}; save it as UTF-8 and attach it again`
+            : `File bytes do not match declared type ${origExt}`
+        );
       }
       const saved = await writeSessionUpload(
         session.workingDir,
