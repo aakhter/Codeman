@@ -108,12 +108,14 @@ Object.assign(CodemanApp.prototype, {
       // over the same drop event (a second competing listener would double-toast a
       // doc-only drop). _isAllowedDocumentFile is defined in document-input.js
       // (also mixed onto CodemanApp.prototype).
+      // Everything that is not a COD-241 document goes through the shared admission
+      // filter, so a drop says what it skipped the same way Attach and paste do.
       const all = Array.from(e.dataTransfer.files);
-      const mediaFiles = all.filter((f) => this._promptAttachKind(f));
-      const docFiles = all.filter((f) => !this._promptAttachKind(f) && this._isAllowedDocumentFile(f));
-      if (mediaFiles.length === 0 && docFiles.length === 0) {
-        this.showToast('Unsupported file type', 'error');
-        return;
+      const docFiles = all.filter((f) => !this._promptAttachKind(f) && this._isAllowedDocumentFile?.(f));
+      const rest = all.filter((f) => !docFiles.includes(f));
+      const mediaFiles = this._admitPromptAttachments(rest, { textPasted: docFiles.length > 0 });
+      if (docFiles.length > 0 && mediaFiles.length === 0 && rest.length > 0) {
+        this.showToast(`${rest.length} file${rest.length > 1 ? 's' : ''} skipped: unsupported type`, 'info');
       }
       if (mediaFiles.length > 0) this._uploadAndInsertImages(mediaFiles);
       if (docFiles.length > 0) this._uploadAndInsertDocuments(docFiles);

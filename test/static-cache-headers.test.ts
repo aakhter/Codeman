@@ -81,7 +81,8 @@ describe('static asset Cache-Control headers', () => {
     for (const file of ['security-notices.json', 'whats-new.json', 'manifest.json']) {
       const res = await get(`${baseUrl}/${file}`);
       expect(res.status, file).toBe(200);
-      expect(res.headers.get('cache-control'), file).toBe('no-cache');
+      // manifest.json is server-rendered here with `no-cache, must-revalidate`; either revalidates.
+      expect(res.headers.get('cache-control'), file).toMatch(/^no-cache(, must-revalidate)?$/);
     }
   });
 

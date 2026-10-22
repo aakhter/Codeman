@@ -2978,6 +2978,14 @@ export function registerSessionRoutes(
     if (!isExternalCliTranscriptMode(session.mode)) return session.terminalBuffer;
 
     const muxName = session.muxName;
+    // A repainting full-screen TUI (copilot) streams absolute cursor moves, not lines, so
+    // neither the byte buffer nor the scrollback can be segmented; read the pane's visible
+    // screen instead, falling through when there is no tmux pane to ask.
+    if (transcriptNeedsScreenCapture(session.mode) && muxName) {
+      const screen = ctx.mux.capturePaneText?.(muxName) ?? null;
+      if (screen !== null) return screen;
+    }
+
     let liveMuxBuffer: string | null = null;
 
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
