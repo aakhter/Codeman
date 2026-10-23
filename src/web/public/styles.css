@@ -7356,6 +7356,16 @@ html[data-skin="og"] .welcome-primary:hover {
   max-width: 100%;
 }
 
+#caseEditDefaultGroup option {
+  color: var(--text);
+  background-color: var(--bg-card);
+}
+
+#caseEditDefaultGroup option:checked {
+  color: var(--accent-ink);
+  background-color: var(--accent);
+}
+
 /* Case Management List (Manage tab) */
 .case-manage-list {
   display: flex;
