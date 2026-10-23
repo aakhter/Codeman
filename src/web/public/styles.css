@@ -1340,6 +1340,25 @@ html[data-tab-orientation='vertical'] .tab-rail .tab-focus-item[aria-current='tr
   flex-shrink: 0;
   background: var(--green);
 }
+
+.tab-focus-item .tab-status.busy {
+  position: relative;
+  background: var(--green);
+  animation: pulse 1.5s infinite;
+  will-change: opacity;
+}
+
+.tab-focus-item .tab-status.busy::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border: 1.5px solid color-mix(in srgb, var(--green) 25%, transparent);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: tab-load-spin 0.7s linear infinite;
+  pointer-events: none;
+}
+
 /* COD-525: the shortcut's Alt+N slot (Focus leads the numbering), and the
    collapsed toggle standing in for the alerts of the shortcuts it hides. */
 .tab-focus-item .tab-focus-number {
@@ -20856,6 +20875,7 @@ html[data-tab-orientation='vertical'] .home-sessions {
 
 @media (prefers-reduced-motion: reduce) {
   .session-tab .tab-status.busy::after,
+  .tab-focus-item .tab-status.busy::after,
   .home-sessions-row,
   .home-sessions-dot,
   .home-sessions-dot::after {
@@ -26135,4 +26155,73 @@ html[data-header-stats='tiles'] .header-plan-usage:not(:has(.pu-row)) {
   background: var(--control-bg);
   border: 1px solid var(--control-border);
   color: var(--text-muted);
+}
+
+/* Vertical rail hierarchy: keep session labels consistent, make group counts
+   secondary, and give the active-session chevron its own color from group carets. */
+html[data-tab-orientation='vertical'] .tab-rail .tab-layout-group-name,
+html[data-tab-orientation='vertical'] .tab-rail .tab-focus-toggle {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: normal;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .tab-layout-group-count,
+html[data-tab-orientation='vertical'] .tab-rail .tab-focus-count {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  opacity: 1;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .tab-focus-item {
+  font-size: var(--session-sidebar-name-font-size, 14px);
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .session-tab .tab-name {
+  font-size: var(--session-sidebar-name-font-size, 14px);
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .tab-layout-group-chevron {
+  color: var(--text-muted);
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .tab-layout-group--empty {
+  display: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab > .tab-active-indicator {
+  background: var(--accent);
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab.active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-card)) !important;
+  border-color: var(--accent) !important;
+  box-shadow: none !important;
+}
+
+/* Number boxes duplicate the ordered list and compete with session names in a
+   narrow rail. Alt+1–9 shortcuts continue to work without the visual badges. */
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-number {
+  display: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .tab-focus-number {
+  display: none;
+}
+
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-harness {
+  opacity: 0.7;
+}
+
+/* Keep one action affordance in the row; the overflow menu retains the
+   settings, detach, and close actions without crowding the active label. */
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-actions > .tab-gear,
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-actions > .tab-detach,
+html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-actions > .tab-close {
+  display: none;
 }

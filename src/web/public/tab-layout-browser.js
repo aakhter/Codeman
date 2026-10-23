@@ -548,7 +548,7 @@
         const expanded = !section.collapsed && !leaf;
         const expandedAttr = leaf ? '' : ` aria-expanded="${expanded ? 'true' : 'false'}"`;
         return (
-          `<section class="tab-layout-group${section.collapsed ? ' tab-layout-group--collapsed' : ''}" role="presentation" data-tab-group-id="${id}">` +
+          `<section class="tab-layout-group${section.collapsed ? ' tab-layout-group--collapsed' : ''}${leaf ? ' tab-layout-group--empty' : ''}" role="presentation" data-tab-group-id="${id}">` +
           `<div class="tab-layout-group-header tab-layout-group-toggle" role="treeitem" tabindex="-1" data-tab-group-header="${id}"${expandedAttr}${expanded ? ` aria-owns="${refsId}"` : ''} onclick="app.toggleTabGroupCollapsed(this.dataset.tabGroupHeader)" oncontextmenu="event.preventDefault(); app.openTabGroupMenu(event, this.dataset.tabGroupHeader)">` +
           '<span class="tab-layout-group-chevron" aria-hidden="true"></span>' +
           `<span class="tab-layout-group-name" id="${nameId}" data-i18n-skip>${escapeHtml(section.name)}</span>` +

@@ -8094,7 +8094,7 @@ class CodemanApp {
     const items = [];
     for (const section of container.querySelectorAll('.tab-layout-group')) {
       // A group the search emptied is hidden whole, header included.
-      if (section.classList.contains('tab-filtered-out')) continue;
+      if (section.classList.contains('tab-filtered-out') || section.classList.contains('tab-layout-group--empty')) continue;
       const header = section.querySelector(':scope > [role="treeitem"]');
       if (header) items.push(header);
       const rows = [...section.querySelectorAll('.session-tab[role="treeitem"]:not(.tab-filtered-out)')];
