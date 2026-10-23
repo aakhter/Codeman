@@ -823,21 +823,35 @@ export class StateStore {
     return { layouts: structuredClone(validated), sessionOrder: [...sessionOrder] };
   }
 
-  /** Returns an owner's case default, distinguishing unset from intentional Ungrouped. */
+  /**
+   * An owner's default session group for a case: a group id, `null` for an
+   * intentional Ungrouped choice, or `undefined` when unset. state.json is read
+   * unvalidated, so anything but a string or null reads as unset.
+   */
   getCaseDefaultGroup(owner: string, caseName: string): string | null | undefined {
-    const defaults = this.state.caseDefaultGroups;
-    if (!defaults || !Object.hasOwn(defaults, owner)) return undefined;
-
-    const ownerDefaults = defaults[owner];
-    return Object.hasOwn(ownerDefaults, caseName) ? ownerDefaults[caseName] : undefined;
+    const all = this.state.caseDefaultGroups;
+    if (!all || typeof all !== 'object' || !Object.hasOwn(all, owner)) return undefined;
+    const forOwner = all[owner];
+    if (!forOwner || typeof forOwner !== 'object' || !Object.hasOwn(forOwner, caseName)) return undefined;
+    const value = forOwner[caseName];
+    return typeof value === 'string' || value === null ? value : undefined;
   }
 
-  /** Persists an owner-and-case scoped default session group. */
+  /** Persist an owner's default session group for a case (`null` = Ungrouped). */
   setCaseDefaultGroup(owner: string, caseName: string, groupId: string | null): void {
-    const defaults = this.state.caseDefaultGroups;
-    const existing = defaults && Object.hasOwn(defaults, owner) ? defaults[owner] : {};
-    const ownerDefaults = { ...existing, [caseName]: groupId };
-    this.state.caseDefaultGroups = { ...(defaults ?? {}), [owner]: ownerDefaults };
+    const all = this.state.caseDefaultGroups ?? {};
+    const forOwner = Object.hasOwn(all, owner) ? all[owner] : {};
+    this.state.caseDefaultGroups = { ...all, [owner]: { ...forOwner, [caseName]: groupId } };
+    this.save();
+  }
+
+  /** Forget an owner's default session group for a case (unset, not Ungrouped). */
+  deleteCaseDefaultGroup(owner: string, caseName: string): void {
+    if (this.getCaseDefaultGroup(owner, caseName) === undefined) return;
+    const all = this.state.caseDefaultGroups ?? {};
+    const forOwner = { ...all[owner] };
+    delete forOwner[caseName];
+    this.state.caseDefaultGroups = { ...all, [owner]: forOwner };
     this.save();
   }
 
@@ -851,20 +865,6 @@ export class StateStore {
     delete ownerDefaults[fromCase];
     const renamedDefaults = { ...ownerDefaults, [toCase]: current };
     this.state.caseDefaultGroups = { ...(defaults ?? {}), [owner]: renamedDefaults };
-    this.save();
-  }
-
-  /** Removes an owner's default when its case is deleted. */
-  deleteCaseDefaultGroup(owner: string, caseName: string): void {
-    const defaults = this.state.caseDefaultGroups;
-    if (!defaults || !Object.hasOwn(defaults, owner)) return;
-
-    const existing = defaults[owner];
-    if (!Object.hasOwn(existing, caseName)) return;
-
-    const ownerDefaults = { ...existing };
-    delete ownerDefaults[caseName];
-    this.state.caseDefaultGroups = { ...defaults, [owner]: ownerDefaults };
     this.save();
   }
 

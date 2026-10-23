@@ -1,6 +1,6 @@
 # Codeman session inspection and guarded submission
 
-Approved scope: implement both bounded inspection with incremental cursors and guarded stage/submit; prepare for Bitbucket review. Upstream Ark0N/Codeman submission remains prohibited by repository guidance.
+Approved scope: implement both bounded inspection with incremental cursors and guarded stage/submit. On 2026-10-23 the user authorized direct commit, merge and push for their own Bitbucket repositories; no PR is required. Upstream Ark0N/Codeman submission remains prohibited by repository guidance.
 
 ## Current state
 
@@ -43,3 +43,7 @@ Final full gate: 14,767 passed, one outdated checkpoint-call assertion failed, 1
 Rebased onto Bitbucket local 82876341c. Its new private-notes input path needed the same guarded-input lease, pending-write and lifecycle checks. An ephemeral draft fence prevents notes from implicitly submitting an acknowledged or ambiguous staged draft. Independent review found that focus/mouse reports could clear that fence; the fix preserves the fence and revision for pure reports and empty frames while explicit keyboard input still invalidates it. Unknown/mixed sequences remain keyboard-bearing. The original reproduction now refuses notes, keeps the draft unchanged and emits no Enter. No open Critical or Important review findings remain.
 
 Final expanded verification: 968 tests across 27 suites passed, plus typecheck, lint, formatting, lockfile and plugin synchronization. The earlier post-rebase combined run reproduced the known unrelated COD-523 environment-isolation strip-list failure in untouched test/test-env-isolation.test.ts; that file was left unchanged. The full 14,000-test gate was not rerun after this notes integration.
+
+## Direct delivery integration (2026-10-23)
+
+Merged Bitbucket local 9f71941f into the feature worktree. Conflict resolution preserves the newer input runner, multiline transport and keep-alive tracking alongside conditional guarded Enter, checkpoint, notes and terminal-report protections. A real input-runner regression failed before the merge fix and passes after it. Expanded verification passed 1,191 relevant tests across 38 files; the unchanged environment-isolation suite still has its known strip-list drift. Typecheck, lint, format, lockfile and skill/plugin parity checks passed. Independent integration review found no actionable Critical or Important issues. The full rerun completed in 649.70 seconds: 15,470 passed, 12 failed, 15 skipped (802 files passed, 8 failed, 1 skipped). All failures are baseline/environment issues in unchanged sources: seven stale menu expectations omit the existing Notes entry; one environment strip-list drift; one remote-wake importer allowlist drift; one mock-context drift omits notes methods; one fixed-port guard flags the existing notes-server fixture; one config-backup fixture expects 0644 despite inherited umask 077 (passes under 022). Isolated reproductions and blob comparisons against incoming local distinguish these from COD-529. Log: /tmp/cod529-merged-full.log. The full gate is not green; no unrelated source fixes were included. The root checkout remains untouched.

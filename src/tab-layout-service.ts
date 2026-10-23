@@ -49,13 +49,7 @@ export interface TabLayoutSessionLike {
 interface TabLayoutServiceDeps {
   store: Pick<
     StateStore,
-    | 'getTabLayout'
-    | 'getTabLayouts'
-    | 'getSessions'
-    | 'getSessionOrder'
-    | 'commitTabLayoutProjection'
-    | 'getCaseDefaultGroup'
-    | 'setCaseDefaultGroup'
+    'getTabLayout' | 'getTabLayouts' | 'getSessions' | 'getSessionOrder' | 'commitTabLayoutProjection'
   >;
   sessions: ReadonlyMap<string, TabLayoutSessionLike>;
   readWebviews(): Promise<readonly TabLayoutWebviewRecord[]>;
@@ -67,6 +61,11 @@ interface TabLayoutServiceDeps {
    * from then on; on, it keeps following its parent until moved by hand.
    */
   childrenFollowParent?(): boolean | Promise<boolean>;
+  /**
+   * Where per-case default session groups live (StateStore). Optional so a
+   * harness without it simply never applies a case default.
+   */
+  caseDefaults?: Pick<StateStore, 'getCaseDefaultGroup' | 'setCaseDefaultGroup' | 'deleteCaseDefaultGroup'>;
   now?: () => string;
 }
 
@@ -94,6 +93,12 @@ export interface SessionOrderProjectionChange {
 
 export interface LegacyOrderPutResult extends SessionOrderProjectionChange {
   order: string[];
+}
+
+/** A case's default session group plus the owner's current named groups to choose from. */
+export interface CaseDefaultGroupView {
+  groupId: string | null;
+  groups: Array<{ id: string; name: string }>;
 }
 
 interface OwnerProjectionPublication {
@@ -138,6 +143,10 @@ export interface SessionPlacementHints {
 }
 
 export type RegisterTabLayoutSession = () => void | (() => void);
+
+/** Upstream's names for the same creation hint and register callback. */
+export type SessionPlacementHint = SessionPlacementHints;
+export type RegisterCreatedSession = RegisterTabLayoutSession;
 
 export interface RemovedTabLayoutSession {
   id: string;
@@ -767,7 +776,10 @@ export class TabLayoutService {
   ): Promise<TabLayoutSnapshot> {
     return this.withOwner(owner, async () => {
       const follow = (await this.deps.childrenFollowParent?.()) === true;
+      const caseName = options.caseName;
+      let staleCaseDefault = false;
       let rollback: (() => void) | void = undefined;
+      let result: TabLayoutSnapshot;
       try {
         rollback = register?.();
         const prepared = await this.prepareUnlocked(owner);
@@ -796,13 +808,13 @@ export class TabLayoutService {
             )
           : false;
         let defaultGroup: (typeof candidate.groups)[number] | undefined;
-        if (options.caseName) {
-          const defaultGroupId = this.deps.store.getCaseDefaultGroup(owner, options.caseName);
+        if (caseName) {
+          const defaultGroupId = this.deps.caseDefaults?.getCaseDefaultGroup(owner, caseName);
           if (typeof defaultGroupId === 'string') {
             defaultGroup = candidate.groups.find((group) => group.id === defaultGroupId);
-            if (!defaultGroup) {
-              this.deps.store.setCaseDefaultGroup(owner, options.caseName, null);
-            }
+            // A deleted or foreign id never fails a spawn; it is forgotten only after
+            // the creating write lands (below, outside the rollback).
+            if (!defaultGroup) staleCaseDefault = true;
           }
         }
         let targetGroup = explicitGroup;
@@ -886,11 +898,58 @@ export class TabLayoutService {
         if (layoutChanged || !sameOrder(normalizeSessionOrder(latestOrder), projectedOrder)) {
           this.publish(layoutChanged ? { [owner]: layout } : {}, [publication]);
         }
-        return { layout, placements, ...(placementSource ? { placementSource } : {}) };
+        result = { layout, placements, ...(placementSource ? { placementSource } : {}) };
       } catch (error) {
         rollback?.();
         throw error;
       }
+      // A default whose group was deleted is ignored above and forgotten here, only once the
+      // creation's own write has landed, and outside the rollback: the session is committed by now,
+      // and nothing this cleanup does may drop it from the live map.
+      if (staleCaseDefault && caseName) this.deps.caseDefaults?.deleteCaseDefaultGroup(owner, caseName);
+      return result;
+    });
+  }
+
+  /**
+   * A case's default session group and the owner's named groups to choose from.
+   * A stored id that is no longer one of this owner's groups is reported as
+   * `null` (Ungrouped), which is also where creation would put it. Read-only:
+   * the next creation for the case forgets the stale id.
+   */
+  async caseDefaultGroup(owner: string, caseName: string): Promise<CaseDefaultGroupView> {
+    return this.withOwner(owner, async () => {
+      const { authoritative } = await this.prepareUnlocked(owner);
+      const groups = authoritative.groups.map((group) => ({ id: group.id, name: group.name }));
+      const stored = this.deps.caseDefaults?.getCaseDefaultGroup(owner, caseName);
+      const known = typeof stored === 'string' && groups.some((group) => group.id === stored);
+      return { groupId: known ? stored : null, groups };
+    });
+  }
+
+  /**
+   * Set a case's default session group: one of this owner's current groups, or
+   * `null` for Ungrouped. Only future creations read it; nothing is moved.
+   * Throws {@link TabLayoutValidationError} for an id not in the owner's layout.
+   */
+  async setCaseDefaultGroup(owner: string, caseName: string, groupId: string | null): Promise<CaseDefaultGroupView> {
+    return this.withOwner(owner, async () => {
+      const caseDefaults = this.deps.caseDefaults;
+      if (!caseDefaults) throw new Error('Case default groups are not available');
+      const { authoritative } = await this.prepareUnlocked(owner);
+      const groups = authoritative.groups.map((group) => ({ id: group.id, name: group.name }));
+      if (groupId !== null && !groups.some((group) => group.id === groupId)) {
+        throw new TabLayoutValidationError('Unknown tab group');
+      }
+      caseDefaults.setCaseDefaultGroup(owner, caseName, groupId);
+      return { groupId, groups };
+    });
+  }
+
+  /** Forget a case's default session group (the case was deleted or unlinked). */
+  async forgetCaseDefaultGroup(owner: string, caseName: string): Promise<void> {
+    await this.withOwner(owner, async () => {
+      this.deps.caseDefaults?.deleteCaseDefaultGroup(owner, caseName);
     });
   }
 

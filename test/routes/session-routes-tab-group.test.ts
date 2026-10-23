@@ -107,7 +107,8 @@ describe('create routes: tabGroupId', () => {
     });
     expect(res.statusCode).toBe(200);
     const data = body(res.body);
-    // This fork also hands quick-start's case name on, for case default groups (COD-343).
+    // quick-start always names its case too, for the case's default group (the
+    // explicit group still wins inside TabLayoutService).
     expect(ctx.addSession.mock.calls[0][1]).toEqual({ caseName: 'tabgroupcase', tabGroupId: 'g1' });
     expect(data.tabLayout.groups[0].refs).toEqual([{ kind: 'session', id: data.sessionId }]);
 

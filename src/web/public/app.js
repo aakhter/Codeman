@@ -247,6 +247,7 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.SESSION_CLI_INFO, '_onSessionCliInfo'],
   [SSE_EVENTS.SESSION_STATUS_TELEMETRY, '_onSessionStatusTelemetry'],
   [SSE_EVENTS.SESSION_PROMPT_CACHE, '_onSessionPromptCache'],
+  [SSE_EVENTS.SESSION_KEEP_WARM, '_onSessionKeepWarm'],
 
   // Scheduled runs
   [SSE_EVENTS.SCHEDULED_CREATED, '_onScheduledCreated'],
@@ -753,6 +754,14 @@ const DEFAULT_SHORTCUTS = [
     label: 'Rename Tab',
     bindings: [{ modifiers: [], key: 'F2', code: 'F2' }],
     action: 'renameActiveTab',
+  },
+  // Handled by the File Viewer's own capture-phase listener while it is open
+  // (_bindFilePreviewChrome, panels-ui.js), never through the registry.
+  {
+    id: 'file-preview-history',
+    group: 'Panels',
+    label: 'File Viewer Back / Forward',
+    displayBindings: ['Alt/Option+ArrowLeft', 'Alt/Option+ArrowRight'],
   },
 ];
 
@@ -2892,10 +2901,14 @@ class CodemanApp {
 
     const effectiveStatus = session.activityStatus || session.status;
     const timer = this.idleTimers?.get(incoming.id);
+    // Codeman's own keep-alive turn (prompt-cache keep-warm, `keepAlive` on the
+    // working/idle events) is no sign of life from the agent and no new idle period:
+    // it neither clears nor starts the stuck detection timer.
+    const keepAlive = data?.keepAlive === true;
     if (
       effectiveStatus === 'waiting_agents' ||
       effectiveStatus === 'checking_agents' ||
-      transition === 'working' ||
+      (transition === 'working' && !keepAlive) ||
       transition === 'output' ||
       transition === 'restart' ||
       transition === 'parked' ||
@@ -2904,7 +2917,13 @@ class CodemanApp {
     ) {
       if (timer) clearTimeout(timer);
       this.idleTimers?.delete(incoming.id);
-    } else if (transition === 'idle' && effectiveStatus === 'idle' && !timer && !this.respawnStatus?.[incoming.id]?.enabled) {
+    } else if (
+      transition === 'idle' &&
+      !keepAlive &&
+      effectiveStatus === 'idle' &&
+      !timer &&
+      !this.respawnStatus?.[incoming.id]?.enabled
+    ) {
       const threshold = this.notificationManager?.preferences?.stuckThresholdMs || 600000;
       this.idleTimers?.set(
         incoming.id,
@@ -3606,7 +3625,7 @@ class CodemanApp {
         const sessionId = pathLink.dataset.sessionId || this.activeSessionId;
         const target = pathLink.dataset.linkified ? this._resolveLinkedFilePath?.(filePath, sessionId) : filePath;
         if (filePath && pathLink.dataset.folder) this.openFolderGrid(target || filePath, sessionId);
-        else if (filePath && this._isExternalPreviewPath(target || filePath, sessionId)) {
+        else if (filePath && this._isExternalPreviewPath?.(target || filePath, sessionId)) {
           this.openExternalPathPreview(target || filePath, sessionId)?.catch?.((err) => console.error('External path preview failed:', err));
         } else if (filePath) this.openFilePreview(target || filePath, sessionId);
         return;
@@ -4097,12 +4116,48 @@ class CodemanApp {
    * output. Subtrees already inside an `<a>` are skipped so an autolinked URL
    * is never re-cut, and the anchor's textContent is the path verbatim, so
    * "copy code" still yields exactly what the agent printed.
+   *
+   * Before that walk it also rewrites an existing anchor whose href is a path
+   * (no scheme, not `//host`, not a bare `#fragment`) into the same `a.rv-path`
+   * shape, on purpose WITHOUT `FILE_PATH_LINK_PATTERN`'s root and extension
+   * filter: the agent chose that href as a link target, and left alone it opens
+   * as a same-origin URL (a 404 page in a new tab).
    */
   _linkifyFilePaths(root) {
     if (!root || typeof document === 'undefined') return;
     // Guarded: a stale cached constants.js must degrade to plain text, not throw
     // out of the middle of rendering a message.
     if (typeof findFilePathLinks !== 'function') return;
+
+    // A markdown link whose destination is a path (`[report](/home/me/run/x.json)`,
+    // Codex's usual way of citing a file) resolved against Codeman's own origin
+    // and opened a 404 in a new tab. Give it the linkified-path shape instead;
+    // links with a scheme or `//host` keep their own behaviour.
+    for (const a of root.querySelectorAll('a[href]')) {
+      // The URL parser drops tabs and newlines, so `http&#9;://` is still http.
+      const href = (a.getAttribute('href') || '').replace(/[\t\n\r]/g, '');
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) continue;
+      // `#L42`, `?plain=1` and a `:42:7` suffix name a spot in the file, not the
+      // file. The suffix is cut before decoding, so an encoded `%3A` stays a name.
+      let path = href.split('#')[0].split('?')[0].replace(/:\d+(?::\d+)?$/, '');
+      try {
+        path = decodeURIComponent(path);
+      } catch {
+        /* malformed escape: keep the path as written */
+      }
+      // A bare `#fragment` (and every `.rv-path`, whose href is `#`) ends up empty.
+      if (!path) continue;
+      // rv-path-link keeps the label in the prose font (styles.css): it is a label,
+      // not a path, and break-all would split it mid-word on a phone.
+      a.className = 'rv-path rv-path-link';
+      a.dataset.path = path;
+      a.dataset.linkified = '1';
+      if (path.endsWith('/') || findFilePathLinks(path).some((f) => f.folder && f.path === path)) a.dataset.folder = '1';
+      a.title = path;
+      a.setAttribute('href', '#');
+      a.removeAttribute('target');
+      a.removeAttribute('rel');
+    }
 
     // Collect first: replacing a node while the walker is positioned on it
     // invalidates the traversal.
@@ -5069,7 +5124,7 @@ class CodemanApp {
     }
   }
 
-  // Claude + Codex plan usage limits — account-global, so the latest sample
+  // Claude, Codex and Copilot plan usage limits — account-global, so the latest sample
   // drives the shared header chip.
   _onSessionStatusTelemetry(data) {
     this.updatePlanUsageChip(data);
@@ -5129,19 +5184,27 @@ class CodemanApp {
     };
     // The provider label only earns its space when there is more than one
     // provider to tell apart: a machine with Claude alone shows bare windows.
-    const hasWindows = (usage) => pct(usage?.fiveHour) !== null || pct(usage?.sevenDay) !== null;
-    const labelled = hasWindows(data) && hasWindows(data.codex);
+    const hasWindows = (usage) =>
+      pct(usage?.fiveHour) !== null || pct(usage?.sevenDay) !== null || pct(usage?.monthly) !== null;
+    const labelled = [data, data.codex, data.copilot].filter(hasWindows).length > 1;
     const row = (provider, usage, idle) => {
       // hasWindows() gates the row, so a placeholder can only ever appear
       // ALONGSIDE a real reading — a provider reporting nothing still renders
       // nothing, never a row of em dashes.
       if (!hasWindows(usage)) return '';
-      const windows = [seg('5h', pct(usage?.fiveHour), idle), seg('7d', pct(usage?.sevenDay), idle)].filter(Boolean);
+      // `mo` is Copilot's calendar-month premium-request quota; it is the only window that provider has.
+      const windows = [
+        seg('5h', pct(usage?.fiveHour), idle),
+        seg('7d', pct(usage?.sevenDay), idle),
+        seg('mo', pct(usage?.monthly), false),
+      ].filter(Boolean);
       if (!windows.length) return '';
       const label = labelled ? `<span class="pu-provider">${provider}</span>` : '';
       return `<span class="pu-row">${label}<span class="pu-windows">${windows.join('<span class="pu-sep">·</span>')}</span></span>`;
     };
-    const rows = [row('Claude', data, true), row('Codex', data.codex, false)].filter(Boolean);
+    const rows = [row('Claude', data, true), row('Codex', data.codex, false), row('Copilot', data.copilot, false)].filter(
+      Boolean
+    );
     chip.innerHTML = rows.length ? rows.join('') : '—';
     const resetStr = (w) => (w && w.resetAt ? new Date(w.resetAt).toLocaleString() : '—');
     const details = (provider, usage, idle) => {
@@ -5151,10 +5214,20 @@ class CodemanApp {
       if (five !== null) lines.push(`5-hour limit: ${five}% used (resets ${resetStr(usage.fiveHour)})`);
       else if (idle && seven !== null) lines.push('5-hour limit: no active session window');
       if (seven !== null) lines.push(`Weekly limit: ${seven}% used (resets ${resetStr(usage.sevenDay)})`);
+      const month = pct(usage?.monthly);
+      if (month !== null) {
+        // Counts are coerced finite numbers, so interpolating them stays XSS-safe like the rest.
+        const m = usage.monthly;
+        const counts =
+          Number.isFinite(m.used) && Number.isFinite(m.limit) ? `${Math.round(m.used)} of ${Math.round(m.limit)} requests, ` : '';
+        lines.push(`Premium requests this month: ${month}% used (${counts}resets ${resetStr(m)})`);
+      }
       return lines.length ? `${provider} plan usage\n${lines.join('\n')}` : '';
     };
     chip.title =
-      [details('Claude', data, true), details('Codex', data.codex, false)].filter(Boolean).join('\n\n') ||
+      [details('Claude', data, true), details('Codex', data.codex, false), details('Copilot', data.copilot, false)]
+        .filter(Boolean)
+        .join('\n\n') ||
       'Plan usage limits';
   }
 
@@ -5629,8 +5702,8 @@ class CodemanApp {
     // Both transports refuse a frame over the server's limit (issue #484), and a
     // refused frame used to sit at the head of the durable queue for good. So an
     // oversized paste goes out as several in-limit frames, delivered in seq order
-    // as one contiguous stream. A mux write is line-oriented (it strips newlines
-    // and sends Enter on its own), so it is never split: refuse it instead.
+    // as one contiguous stream. A mux write is one paste that sends Enter on its
+    // own, so it is never split: refuse it instead.
     const limit = window.CodemanInputLimit;
     if (limit && input.length > limit.FRAME_MAX_CHARS) {
       if (useMux || input.length > limit.PASTE_MAX_CHARS) {
@@ -6955,6 +7028,8 @@ class CodemanApp {
       this._tabLayoutEditor = null;
     }
     this.tabLayout = next;
+    // An open Case settings popover lists the groups as its Default session group options.
+    this._refreshCaseDefaultGroupOptions?.(next);
     // The first read settled (a fallback included): the rail may paint now.
     const released = this._releaseTabLayoutFirstPaint({ render: false });
     const storage = this._getTabCollapseStorage();
