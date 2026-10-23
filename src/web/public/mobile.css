@@ -746,7 +746,8 @@ html.mobile-init .file-browser-panel {
      shown by VoiceInput._showButtons() clearing the inline display */
   /* The Attach button shares the mic's box; its toolbar slot is on its wrapper below. */
   .btn-voice-mobile,
-  .btn-attach-mobile {
+  .btn-attach-mobile,
+  .btn-notes-mobile {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -764,7 +765,8 @@ html.mobile-init .file-browser-panel {
      WRAPPER takes it (the button inside is not a toolbar flex item), and at an
      equal order source order keeps Attach on the left of the mic. */
   .btn-voice-mobile,
-  .btn-attach-mobile-wrap {
+  .btn-attach-mobile-wrap,
+  .btn-notes-mobile {
     order: 5;
   }
 
@@ -790,12 +792,14 @@ html.mobile-init .file-browser-panel {
   }
 
   .btn-voice-mobile svg,
-  .btn-attach-mobile svg {
+  .btn-attach-mobile svg,
+  .btn-notes-mobile svg {
     width: 13px;
     height: 13px;
   }
 
   .btn-voice-mobile:active,
+  .btn-notes-mobile:active,
   .btn-attach-mobile:active,
   /* The input above the button swallows the press, so the wrapper is what goes
      :active. Without this the only phone button with no press feedback is Attach. */

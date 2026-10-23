@@ -1,6 +1,7 @@
 {
   "version": "1.44.0",
   "highlights": [
+    "Private session notebooks",
     "Config backups (#661)",
     "Keep an idle Claude session's prompt cache warm (#666, opt-in)",
     "A default tab group per case (#676)",
