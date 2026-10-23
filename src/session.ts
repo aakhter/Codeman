@@ -1701,6 +1701,8 @@ export class Session extends EventEmitter {
 
   /** Set the owning username (used by recovery to restore ownership). */
   set owner(username: string | undefined) {
+    // Ownership changes permanently fence in-flight input, including change-and-restore.
+    if (this._owner !== username) this._guardedPaneRevision++;
     this._owner = username;
   }
 
@@ -5955,6 +5957,8 @@ export class Session extends EventEmitter {
   private _guardedPaneRevision = 0;
   private _guardedInputRevision = 0;
   private _guardedSubmitInFlight = false;
+  /** No content: notes must not implicitly submit a draft, even after a lost stage ACK. */
+  private _guardedDraftGeneration: string | undefined;
   /** Ephemeral identity; never persisted or derived from a possibly reused pid alone. */
   get inspectionGeneration(): string {
     return `${this._inspectionInstance}:${this._guardedPaneRevision}:${this.owner ?? ''}`;
@@ -5993,11 +5997,21 @@ export class Session extends EventEmitter {
   /** Type a guarded draft without leaving an earlier Enter verifier armed. */
   async stageGuardedInput(message: string): Promise<boolean> {
     if (/[\r\n]/.test(message)) return false;
+    if (this._assistantPendingWrites || this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      return false;
+    }
+    if (!this.assistantInputAllowed()) return false;
     // A verifier armed by an earlier send must not submit a same-prefix staged
     // draft before its receipt is explicitly confirmed.
     this.cancelAssistantSubmitVerification();
     this.cancelCheckpoint('guarded-stage');
-    return this.writeViaMux(message, { fromUser: true });
+    const generation = this.inspectionGeneration;
+    const writing = this.writeViaMux(message, { fromUser: true });
+    // writeViaMux enters its pending window synchronously. Keep the fence even
+    // if delivery fails: an unacknowledged transport may already have typed it.
+    this._guardedDraftGeneration = generation;
+    return writing;
   }
   /** One conditional Enter, with no automatic submit verifier or replay on failure. */
   async submitGuardedInput(expected: GuardedInputSnapshot): Promise<boolean> {
@@ -6019,6 +6033,7 @@ export class Session extends EventEmitter {
         },
       });
       if (sent && dispatched) {
+        this._guardedDraftGeneration = undefined;
         this._assistantLastInputAt = Date.now();
         this._emitSubmittedPrompt(this._trackSubmit('\r', { fromUser: true }));
       }
@@ -6050,6 +6065,7 @@ export class Session extends EventEmitter {
       throw new Error('Guarded submission in progress');
     }
     if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
+    this._guardedDraftGeneration = undefined;
     this._guardedInputRevision++;
     this._assistantLastInputAt = Date.now();
     this._assistantPendingWrites++;
@@ -6093,6 +6109,7 @@ export class Session extends EventEmitter {
       return false;
     }
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._guardedDraftGeneration = undefined;
     this._guardedInputRevision++;
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
@@ -6142,6 +6159,7 @@ export class Session extends EventEmitter {
    * separator. Reports submissions like a write would (a line feed never is one).
    */
   trackUserInput(data: string): void {
+    this._guardedDraftGeneration = undefined;
     this._guardedInputRevision++;
     if (!this._acceptsPrompts) return;
     this._emitSubmittedPrompt(this._submittedPromptTracker.feed(data));
@@ -6160,6 +6178,7 @@ export class Session extends EventEmitter {
    * `lastSubmitAt` stayed 0 for its whole life.
    */
   markPromptSubmitted(): void {
+    this._guardedDraftGeneration = undefined;
     this._guardedInputRevision++;
     this._lastSubmitAt = Date.now();
   }
@@ -6234,11 +6253,41 @@ export class Session extends EventEmitter {
 
   /** Explicit private-note submission preserves literal multiline content using bracketed paste. */
   async writeNotesInput(text: string, canWrite: () => boolean = () => true): Promise<boolean> {
+    if (this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      return false;
+    }
     if (this._isStopped || !canWrite()) return false;
     if (this._notesInputInFlight) throw new SessionNotesInputBusyError();
+    // A note includes Enter. It cannot take over an outstanding guarded draft;
+    // only explicit edits/submission or a new lifecycle release that fence.
+    if (this._guardedDraftGeneration === this.inspectionGeneration) {
+      this._guardedInputRevision++;
+      return false;
+    }
+    if (this._closing || this.paneLifecycleInFlight || this.paneExit || !this.assistantInputAllowed()) return false;
+    if (this._assistantPendingWrites) return false;
+    const operationRevision = ++this._guardedInputRevision;
+    const operationGeneration = this.inspectionGeneration;
+    const mux = this._mux;
+    const muxSession = this._muxSession;
     this._notesInputInFlight = true;
+    this._assistantPendingWrites++;
     try {
-      const eligible = () => !this._isStopped && canWrite();
+      // The transport checks synchronously immediately before paste and Enter.
+      // Revalidate after every await, including a pane/owner change-and-restore.
+      const eligible = () =>
+        !this._isStopped &&
+        !this._closing &&
+        !this.paneLifecycleInFlight &&
+        !this.paneExit &&
+        !this._guardedSubmitInFlight &&
+        this.assistantInputAllowed() &&
+        this._guardedInputRevision === operationRevision &&
+        this.inspectionGeneration === operationGeneration &&
+        this._mux === mux &&
+        this._muxSession === muxSession &&
+        canWrite();
       const paste = '\x1b[200~' + text + '\x1b[201~';
       if (this._mux && this._muxSession) {
         if (!this._mux.sendNotesInput) return false;
@@ -6248,6 +6297,7 @@ export class Session extends EventEmitter {
       }
       if (!this.ptyProcess) return false;
       const transport = this.ptyProcess;
+      if (!eligible()) return false;
       transport.write(paste);
       await new Promise((resolve) => setTimeout(resolve, 50));
       if (this.ptyProcess !== transport || !eligible()) return false;
@@ -6255,6 +6305,7 @@ export class Session extends EventEmitter {
       this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
       return true;
     } finally {
+      this._assistantPendingWrites--;
       this._notesInputInFlight = false;
     }
   }
@@ -6281,6 +6332,7 @@ export class Session extends EventEmitter {
       return false;
     }
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._guardedDraftGeneration = undefined;
     this._guardedInputRevision++;
     this._assistantPendingWrites++;
     try {
@@ -6319,6 +6371,7 @@ export class Session extends EventEmitter {
     }
     if (!this.assistantInputAllowed())
       return { ok: false, stage: 'text', error: 'Assistant owns session input', attempt: 1 };
+    this._guardedDraftGeneration = undefined;
     const operationRevision = ++this._guardedInputRevision;
     const operationGeneration = this.inspectionGeneration;
     this._assistantPendingWrites++;

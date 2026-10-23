@@ -625,6 +625,12 @@ only hashes/ephemeral identities in a bounded in-memory store (1024 live receipt
 never persisted prompt content. A receipt acknowledges typing; a delayed screen
 paint can still make submit refuse until exact verification becomes possible.
 
+Private-note delivery shares the same input revision, pending-write and lease
+guards, rechecking eligibility before its literal paste and Enter. Notes refuse
+while a guarded draft is outstanding, including an unacknowledged stage attempt;
+only explicit input/recovery, an acknowledged guarded submit or a new pane/owner
+generation releases that in-memory fence. No prompt content is stored for it.
+
 Submit consumes an owned receipt before awaited delivery, verifies the caller,
 confirmation hash, expiry, lifecycle/input revisions and exact composer/caret,
 then uses a session-level conditional Enter dispatch with a temporary input lease.
