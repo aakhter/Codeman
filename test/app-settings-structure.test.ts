@@ -218,26 +218,30 @@ describe('App Settings modal structure', () => {
 });
 
 describe('Case Management default group structure', () => {
-  it('keeps one accessible default-group control in the Edit Case surface', () => {
-    expect(html).toContain('id="caseEditDefaultGroupRow"');
-    expect(html).toContain('for="caseEditDefaultGroup"');
-    expect(html).toContain('id="caseEditDefaultGroup"');
-    expect(html).toContain('<option value="">Ungrouped</option>');
-    expect(html).toContain('Place future sessions for this case in this group');
-    // Upstream #676 adds its own Case settings selector (caseDefaultGroup / caseDefaultGroupMobile,
-    // pinned by test/case-default-group-ui.test.ts); the Edit Case control stays the ONE in this surface.
-    expect(html.match(/id="caseEditDefaultGroup"/g) ?? []).toHaveLength(1);
+  // COD-544: the per-case default group has ONE writer, upstream's Case settings popover
+  // (caseDefaultGroup / caseDefaultGroupMobile, pinned by test/case-default-group-ui.test.ts).
+  // The COD-343 Edit Case control that wrote the same stored value is gone.
+  it('has no default-group control in the Edit Case surface', () => {
+    expect(html).not.toContain('caseEditDefaultGroup');
+    const createCaseModal = html.slice(
+      html.indexOf('id="createCaseModal"'),
+      html.indexOf('id="remoteHostConfigModal"')
+    );
+    expect(createCaseModal.length).toBeGreaterThan(0);
+    expect(createCaseModal).not.toContain('Default session group');
+    expect(html.match(/id="caseDefaultGroup"/g) ?? []).toHaveLength(1);
+    expect(html.match(/id="caseDefaultGroupMobile"/g) ?? []).toHaveLength(1);
+    const css = readFileSync(resolve(publicDir, 'styles.css'), 'utf8');
+    expect(css).not.toContain('caseEditDefaultGroup');
   });
 
-  it('loads the Edit Case control from the server and saves it through the case update', () => {
-    expect(sessionUi).toContain('async loadCaseEditDefaultGroup(caseName)');
-    expect(sessionUi).toContain('this.loadCaseEditDefaultGroup(name)');
-    expect(sessionUi).toContain('const defaultGroupId = this._caseEditDefaultGroupId()');
-    expect(sessionUi).toContain('updatePayload = { ...updatePayload, defaultGroupId }');
-    expect(sessionUi).not.toContain('async onCaseDefaultGroupChanged(isMobile)');
+  it('neither loads nor saves the default group from Edit Case', () => {
+    expect(sessionUi).not.toContain('caseEditDefaultGroup');
+    expect(sessionUi).not.toContain('loadCaseEditDefaultGroup');
+    expect(sessionUi).not.toContain('defaultGroupId');
   });
 
-  it('opens Docker cases in the Docker Edit Case panel before loading the shared control', () => {
+  it('opens Docker cases in the Docker Edit Case panel', () => {
     expect(sessionUi).toContain("this.caseEditOriginalLocation === 'docker'");
     expect(sessionUi).toContain("this.switchCaseModalTab('case-docker')");
     expect(sessionUi).toContain("originalLocation === 'docker'");

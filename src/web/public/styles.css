@@ -7364,31 +7364,22 @@ html[data-skin="og"] .welcome-primary:hover {
   border-radius: 6px;
 }
 
-.case-settings-popover .form-hint {
-  margin-top: 0.2rem;
-  font-size: 0.6rem;
-}
-
-.case-settings-popover .case-setting-field,
-.case-settings-popover-mobile .case-setting-field {
-  display: grid;
-  gap: 4px;
-  margin-top: 8px;
-}
-
-.case-setting-field select {
-  min-width: 180px;
-  max-width: 100%;
-}
-
-#caseEditDefaultGroup option {
+/* COD-540 (moved here by COD-544): the open option list draws with the
+   platform's own colors otherwise, which left low-contrast options on the
+   dark skins. */
+.case-default-group-select option {
   color: var(--text);
   background-color: var(--bg-card);
 }
 
-#caseEditDefaultGroup option:checked {
+.case-default-group-select option:checked {
   color: var(--accent-ink);
   background-color: var(--accent);
+}
+
+.case-settings-popover .form-hint {
+  margin-top: 0.2rem;
+  font-size: 0.6rem;
 }
 
 /* Case Management List (Manage tab) */

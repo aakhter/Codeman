@@ -2081,19 +2081,6 @@ export function registerCaseRoutes(
     if (!validatePathWithinBase(nextName, casesDir)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
     }
-    if (update.defaultGroupId !== undefined) {
-      const snapshot = await ctx.tabLayouts.getSnapshot(owner);
-      if (
-        update.defaultGroupId !== null &&
-        !snapshot.layout.groups.some((group) => group.id === update.defaultGroupId)
-      ) {
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Default group does not exist');
-      }
-    }
-    const persistDefaultGroupUpdate = () => {
-      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
-      if (update.defaultGroupId !== undefined) ctx.store.setCaseDefaultGroup(owner, nextName, update.defaultGroupId);
-    };
     const persistLocalSelectionUpdate = () => {
       ctx.store.renameCaseCodexCommandSelection(codexProfileOwner(ownerFor(req)), originalName, nextName);
     };
@@ -2160,7 +2147,7 @@ export function registerCaseRoutes(
           codexCommandSelection: selectionMetadata(nextRemoteCase, nextRemoteCase.owner, ownerFor(req)),
         },
       };
-      persistDefaultGroupUpdate();
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: remotePath, type: 'remote-updated' });
       return { success: true, data: { case: caseInfo } };
     }
@@ -2197,7 +2184,7 @@ export function registerCaseRoutes(
           network: host.network ?? 'bridge',
         },
       };
-      persistDefaultGroupUpdate();
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
       ctx.broadcast(SseEvent.CaseLinked, {
         name: nextName,
         path: nextDockerCase.hostWorkspacePath,
@@ -2228,7 +2215,7 @@ export function registerCaseRoutes(
         location: 'linked-local',
         codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), nextName),
       };
-      persistDefaultGroupUpdate();
+      ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
       ctx.broadcast(SseEvent.CaseLinked, { name: nextName, path: nextPath, type: 'updated' });
       return { success: true, data: { case: caseInfo } };
     }
@@ -2257,7 +2244,7 @@ export function registerCaseRoutes(
       location: 'local',
       codexCommandSelection: localSelectionMetadata(ownerFor(req), ownerFor(req), nextName),
     };
-    persistDefaultGroupUpdate();
+    ctx.store.renameCaseDefaultGroup(owner, originalName, nextName);
     ctx.broadcast(SseEvent.CaseCreated, { name: nextName, path: nextPath, type: 'updated' });
     return { success: true, data: { case: caseInfo } };
   });

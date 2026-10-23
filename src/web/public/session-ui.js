@@ -4087,7 +4087,6 @@ Object.assign(CodemanApp.prototype, {
     this.caseEditOriginalName = null;
     this.caseEditOriginalLocation = null;
     this.caseEditOriginalHostId = null;
-    this._resetCaseEditDefaultGroup();
     const title = document.getElementById('caseModalTitle');
     if (title) title.textContent = 'Add Case';
     const remoteHostId = document.getElementById('remoteHostId');
@@ -6048,61 +6047,6 @@ Object.assign(CodemanApp.prototype, {
     }
 
     modal.classList.add('active');
-    void this.loadCaseEditDefaultGroup(name);
-  },
-
-  _resetCaseEditDefaultGroup() {
-    const row = document.getElementById('caseEditDefaultGroupRow');
-    const select = document.getElementById('caseEditDefaultGroup');
-    if (row) row.classList.add('hidden');
-    if (!select) return;
-    const ungrouped = document.createElement('option');
-    ungrouped.value = '';
-    ungrouped.textContent = 'Ungrouped';
-    select.replaceChildren(ungrouped);
-    select.value = '';
-    select.disabled = true;
-  },
-
-  _caseEditDefaultGroupId() {
-    const select = document.getElementById('caseEditDefaultGroup');
-    if (!select || select.disabled) return undefined;
-    return select.value || null;
-  },
-
-  async loadCaseEditDefaultGroup(caseName) {
-    const token = (this._caseEditDefaultGroupLoadToken || 0) + 1;
-    this._caseEditDefaultGroupLoadToken = token;
-    this._resetCaseEditDefaultGroup();
-    const row = document.getElementById('caseEditDefaultGroupRow');
-    if (row) row.classList.remove('hidden');
-    try {
-      const res = await fetch(`/api/cases/${encodeURIComponent(caseName)}/default-group`);
-      const json = await res.json();
-      if (!res.ok || json.success === false) throw new Error(json.error || 'Failed to load default group');
-      if (token !== this._caseEditDefaultGroupLoadToken || this.caseEditOriginalName !== caseName) return;
-      const select = document.getElementById('caseEditDefaultGroup');
-      if (!select) return;
-      const groups = Array.isArray(json.data?.groups) ? json.data.groups : [];
-      const selected = typeof json.data?.groupId === 'string' && groups.some((group) => group.id === json.data.groupId)
-        ? json.data.groupId
-        : '';
-      const ungrouped = document.createElement('option');
-      ungrouped.value = '';
-      ungrouped.textContent = 'Ungrouped';
-      const options = groups.map((group) => {
-        const option = document.createElement('option');
-        option.value = group.id;
-        option.textContent = group.name;
-        return option;
-      });
-      select.replaceChildren(ungrouped, ...options);
-      select.value = selected;
-      select.disabled = false;
-    } catch (err) {
-      if (token !== this._caseEditDefaultGroupLoadToken || this.caseEditOriginalName !== caseName) return;
-      this.showToast?.('Failed to load default session group: ' + err.message, 'error');
-    }
   },
 
   async updateCase() {
@@ -6181,13 +6125,6 @@ Object.assign(CodemanApp.prototype, {
         }
         updatePayload = { name: nextName, ...this._readCaseCodexCommandFromForm('local') };
       }
-
-      const defaultGroupId = this._caseEditDefaultGroupId();
-      if (defaultGroupId === undefined) {
-        this.showToast('Wait for the default session group to load before saving.', 'error');
-        return;
-      }
-      updatePayload = { ...updatePayload, defaultGroupId };
 
       const res = await fetch(`/api/cases/${encodeURIComponent(originalName)}`, {
         method: 'PUT',
