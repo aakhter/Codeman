@@ -1050,17 +1050,10 @@ export const UpdateCaseSchema = z
     remotePath: remoteWorkspacePathSchema.optional(),
     commands: RemoteCommandOverridesSchema.optional(),
     codexCommandSelection: CodexCommandSelectionSchema.optional(),
-    defaultGroupId: z.string().min(1).max(100).nullable().optional(),
   })
   .refine(
     (value) =>
-      value.name ||
-      value.path ||
-      value.hostId ||
-      value.remotePath ||
-      value.commands ||
-      value.codexCommandSelection ||
-      value.defaultGroupId !== undefined,
+      value.name || value.path || value.hostId || value.remotePath || value.commands || value.codexCommandSelection,
     {
       message: 'At least one case parameter must be provided',
     }

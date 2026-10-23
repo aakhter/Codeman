@@ -1236,7 +1236,10 @@ describe('case-routes', () => {
   });
 
   describe('case default group settings', () => {
-    it('saves an Edit Case default group under the renamed case name', async () => {
+    // COD-544: PUT /api/cases/:name no longer writes the default group (its one writer is
+    // PUT /api/cases/:name/default-group). UpdateCaseSchema is a plain (non-strict) z.object,
+    // so a stray defaultGroupId is STRIPPED, not rejected: it never reaches the store.
+    it('migrates the stored default on rename and ignores a stray defaultGroupId', async () => {
       mockedExistsSync.mockImplementation((path) => String(path).endsWith('/nzbdav'));
 
       const res = await harness.app.inject({
@@ -1247,21 +1250,36 @@ describe('case-routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav', 'nzbdav-next');
-      expect(harness.ctx.store.setCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav-next', 'group-tcc');
+      expect(harness.ctx.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+      expect(harness.ctx.tabLayouts.setCaseDefaultGroup).not.toHaveBeenCalled();
     });
 
-    it('rejects an unknown Edit Case default group before changing the case', async () => {
+    it('migrates the stored default on a plain rename', async () => {
+      mockedExistsSync.mockImplementation((path) => String(path).endsWith('/nzbdav'));
+
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: '/api/cases/nzbdav',
+        payload: { name: 'nzbdav-renamed' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.store.renameCaseDefaultGroup).toHaveBeenCalledWith('@single', 'nzbdav', 'nzbdav-renamed');
+    });
+
+    it('refuses a case update that only carries defaultGroupId', async () => {
       mockedExistsSync.mockReturnValue(true);
 
       const res = await harness.app.inject({
         method: 'PUT',
         url: '/api/cases/nzbdav',
-        payload: { defaultGroupId: 'group-missing' },
+        payload: { defaultGroupId: 'group-tcc' },
       });
 
       expect(res.statusCode).toBe(400);
       expect(res.json()).toMatchObject({ success: false, errorCode: ApiErrorCode.INVALID_INPUT });
       expect(harness.ctx.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+      expect(harness.ctx.store.renameCaseDefaultGroup).not.toHaveBeenCalled();
     });
 
     // Upstream #676 replaced the local COD-343 GET/PUT routes: they answer through
