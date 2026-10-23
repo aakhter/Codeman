@@ -251,7 +251,10 @@ describe('WS state lifecycle — real _connectWs/onopen/onclose transitions', ()
     expect(clearSession).toHaveBeenCalledOnce();
     expect(clearSession).toHaveBeenCalledWith('s1');
     expect(persistReliableNow).toHaveBeenCalledOnce();
-    expect(timers.filter((timer) => !timer.cleared)).toEqual([]);
+    // No retry or reconnect is scheduled. The one timer allowed is the WS pill's
+    // backlog hold (#647): s2's input is still queued, so the pill re-renders later.
+    const live = timers.filter((timer) => !timer.cleared);
+    expect(live.filter((timer) => timer.id !== internal._backlogHoldTimer)).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(app._wsState).toBe('gone');
     expect(els.connectionText.textContent).toBe('Ended');

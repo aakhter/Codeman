@@ -342,7 +342,8 @@ if (isGlobalInstall) {
 }
 
 // ----------------------------------------------------------------------------
-// 4a. Prepare local-only XLSX preview bundles for dev mode.
+// 4a. Copy the XLSX preview's browser bundles (exceljs, fflate) into
+//     src/web/public/vendor/ for dev mode. The build does the same into dist/.
 // ----------------------------------------------------------------------------
 
 if (!isGlobalInstall) {

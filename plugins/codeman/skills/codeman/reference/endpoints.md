@@ -237,7 +237,7 @@ minutes, never retry the credential.
 flushed slightly *after* the `stop` hook fires, so a read taken the instant the wait
 returns is too early (verified live: empty on the first call, full prose seconds later).
 It is also `""` before the worker's first completed turn, and permanently `""` for
-`shell`, `opencode`, `gemini`, `antigravity`, `pi`, `grok` and `omp`, which write no transcript at
+`shell`, `opencode`, `gemini`, `antigravity`, `pi`, `grok`, `omp` and `copilot`, which write no transcript at
 all. `deepseek` is NOT one of those — it is read from `$DSH_HOME/sessions/**` and lags
 for the same reason claude does (the harness finalizes the assistant message just after
 it reports `idle`), so poll it the same way.
@@ -289,10 +289,10 @@ than into an existing checkout.
 | full tmux scrollback (context bomb; post-mortems only) | `GET /api/v1/sessions/:id/terminal?full=1` |
 | background agents, one session | `GET /api/v1/sessions/:id/subagents` |
 | background agents, global list | `GET /api/v1/subagents` (admin-only in multi-user mode) |
-| the case's intent profile (Read My Mind: user goals + recent real prompts) | `GET /api/v1/sessions/:id/intent` → `.data.intent.{goals,recentPrompts}` (empty with `updatedAt: 0` until something is recorded) |
+| the case's intent profile (Read My Mind: user goals + durable Claude prompt history) | `GET /api/v1/sessions/:id/intent` → `.data.intent.{goals,recentPrompts}` (empty with `updatedAt: 0` until something is recorded; Codex rollout prompts are read on demand for prediction and are never persisted) |
 | replace the user-goals text on the case's intent profile | `PUT /api/v1/sessions/:id/intent` body `{"goals":"…"}` (≤ 8192 chars, strict schema; REPLACES the text, read + merge first) |
 | forget the case's intent profile (only when the user asks) | `DELETE /api/v1/sessions/:id/intent` → `.data.deleted` |
-| predict the user's next prompt (Read My Mind; claude-mode only, 5-90 s, costs real tokens) | `POST /api/v1/sessions/:id/readmymind` body `{}` (rethink: `{"steer":"…","rejected":["…"]}`) → `.data.suggestions[].{prompt,why,kind}`, suggestions are PROPOSALS; never send one to a session unless the user asked. 409 = one already running; 400 = non-claude mode |
+| predict the user's next prompt (Read My Mind; Claude or local Codex, 5-90 s, costs real tokens) | `POST /api/v1/sessions/:id/readmymind` body `{}` (rethink: `{"steer":"…","rejected":["…"]}`) → `.data.suggestions[].{prompt,why,kind}`. The session fixes provider/model/environment and the endpoint returns text only; any separate input call requires explicit user authorization. 409 = one already running; 400 = unsupported mode (including remote/Docker Codex). |
 | server status / version | `GET /api/v1/status` → `.data.version` |
 | delete one session (yours only, via `delete_session`) | `DELETE /api/v1/sessions/:id`, never call it bare; the fail-closed helper in SKILL.md is the only self-protection that exists. Answers `{"success":true,"data":{}}`: an **empty** body is the success signal, there is nothing to read back |
 
@@ -341,17 +341,24 @@ ESC=$(printf '\033')
 
 `POST /api/v1/quick-start` body (all optional):
 `{"caseName":"worker-1","mode":"claude","sessionName":"auth-worker","effort":"high"}`
-,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi|grok|deepseek|omp`; response is
+,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi|grok|deepseek|omp|copilot`; response is
 `.data.{sessionId, caseName, casePath}`. Creates the case directory (a real directory
 on the user's disk) if missing, do not retry it in a loop, and remember the name.
+
+A claude worker also takes `"advisorModel":"opus"` (`fable`, `opus`, `sonnet` or a full
+model id): Claude Code's advisor tool, a stronger model the worker consults before
+committing to an approach, on a recurring error and before declaring the task done. It is
+a soft default the worker can change with `/advisor`. Remote and docker cases refuse it
+(400), as they refuse `effort`. `spawn_worker` and `spawn_workers` send it for you when
+`CODEMAN_WORKER_ADVISOR` is set.
 
 ⚠️ A `mode` whose CLI is **not installed on the server** fails the spawn with
 `OPERATION_FAILED`; it never falls back to claude. Probe first whenever you did not pick
 the mode yourself: `GET /api/v1/claude/status`, `GET /api/v1/opencode/status`,
 `GET /api/v1/codex/status`, `GET /api/v1/gemini/status`, `GET /api/v1/antigravity/status`, `GET /api/v1/grok/status`, `GET /api/v1/deepseek/status`,
-`GET /api/v1/pi/status` and `GET /api/v1/omp/status` each return `.data.{available, path}` (no session needed).
-Pi's, grok's and OMP's also carry `.data.version`, because `pi` is a short generic name,
-`grok` is a name with npm squatters, and `omp` is a similarly short name, so an unrelated
+`GET /api/v1/pi/status`, `GET /api/v1/omp/status` and `GET /api/v1/copilot/status` each return `.data.{available, path}` (no session needed).
+Pi's, grok's, OMP's and Copilot's also carry `.data.version`, because `pi` is a short generic name,
+`grok` is a name with npm squatters, and `omp` is a similarly short name, and `copilot` is a generic one, so an unrelated
 binary on `$PATH` can shadow any of them: the resolver rejects one whose `--version` is
 not version-shaped, so `available:false` there can mean "a different program of the same
 name is in front" rather than "nothing is installed". `shell` has no CLI to probe.
@@ -384,17 +391,18 @@ every claude create path installs them, so a linked case and a raw path both get
 
 **The two-step alternative, `POST /api/v1/sessions`.** Use it when you need a session in
 a directory that is not a case (body takes `workingDir`, `mode`, `name`, `effort`,
-`envOverrides`). Three differences that break copied code:
+`advisorModel`, `envOverrides`, and for claude a per-session `model` passed as `--model`). Three
+differences that break copied code:
 
 - The id is at **`.data.session.id`**, not quick-start's `.data.sessionId`
-  (`session-routes.ts:878` returns `{ session: lightState }`).
+  (the `POST /api/sessions` handler in `session-routes.ts` returns `{ session: lightState }`).
 - **It spawns no PTY.** The session exists with `pid:null` and nothing running, so
   `wait?until=exit` answers `exit` immediately. Follow it with
   `POST /api/v1/sessions/:id/interactive` (claude and the other agent CLIs) or
   `POST /api/v1/sessions/:id/shell` (shell mode) to actually start the worker.
 - Its capacity failure is **`OPERATION_FAILED` (422)**, not quick-start's
   `SESSION_BUSY` (409), from the same global-50 / per-user-25 caps
-  (`session-routes.ts:648`).
+  (`sessionCapacityMessage()` in `route-helpers.ts`).
 
 ⚠️ `POST .../interactive` accepts `{"clearBreaker":true}`, which resets the **PTY-exit
 circuit breaker**. That breaker exists to stop a session that keeps crashing on spawn
@@ -478,7 +486,7 @@ Quirks that will bite you:
 - ⚠️ **`active-tools` proves presence, never absence.** It is fed by the BashToolParser,
   which reads Claude's rendered `● Bash(…)` lines, and `_processExpensiveParsers`
   returns early for every external CLI mode (`session.ts:~2225`), so it is permanently
-  `[]` on `opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`deepseek`/`omp`. ⚠️ **`shell` is NOT one of those**
+  `[]` on `opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`deepseek`/`omp`/`copilot`. ⚠️ **`shell` is NOT one of those**
   (`isExternalCliMode`, `session.ts:176-187`, lists only those seven), so the parser does
   run on a shell worker, and `TEXT_COMMAND_PATTERN` (`bash-tool-parser.ts:89`) matches
   bare `tail|cat|head|less|grep|watch|multitail <path>` lines with no `● Bash(` wrapper:
@@ -626,8 +634,8 @@ Three bounded long-polls. Shared semantics:
 |--------|---------|---------------|
 | `idle` | output stabilized + prompt detected, heuristic, can flap mid-turn | every mode |
 | `working` | session started producing output | every mode |
-| `stop` | Claude Code `stop` hook, the definitive end-of-turn | `claude` only |
-| `blocked` | `permission_prompt` / `elicitation_dialog` hook, the worker needs an answer | `claude` only |
+| `stop` | Claude Code `stop` hook, the definitive end-of-turn | `claude`; also `deepseek`, whose harness reports its own end of turn while its status bridge is on |
+| `blocked` | `permission_prompt` / `elicitation_dialog` hook, the worker needs an answer | `claude`; also `deepseek` (its harness reports its dialogs, same condition), and `codex`, whose approval, question and trust dialogs Codeman reads off its screen (answer both in the terminal, never through the inbox) |
 | `exit` | PTY exited or session deleted | every mode |
 
 ⚠️ **`claude` mode is necessary for `stop`/`blocked`, not sufficient. The real

@@ -87,6 +87,18 @@ describe('buildServiceEnv', () => {
     expect(Object.keys(env)).not.toContain('CODEMAN_PASSWORD');
   });
 
+  it('preserves an operator workspace mapping through service regeneration', () => {
+    const previous = process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
+    const mapping = JSON.stringify({ '/work/project': '/data/attachments' });
+    process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = mapping;
+    try {
+      expect(buildServiceEnv('/usr/bin', '/usr/bin', '/home/u').CODEMAN_ATTACHMENT_WORKSPACE_ROOTS).toBe(mapping);
+    } finally {
+      if (previous === undefined) delete process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
+      else process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = previous;
+    }
+  });
+
   it('carries an operator-configured trusted attachment root into the service environment', () => {
     const previous = process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
     process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = '/mnt/c/kb-data/runtime/codeman-attachments';

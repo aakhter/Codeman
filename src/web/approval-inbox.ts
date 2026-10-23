@@ -14,9 +14,12 @@
  * - Module-level singleton in the style of `session-wait-registry.ts`: no
  *   `Session` import, no IO; the server injects emit callbacks (`onPending`/
  *   `onUpdated`/`onResolved`), which keeps this unit-testable and cycle-free.
- * - Items are in-memory only. A server restart drops them; the next prompt or
- *   detected Codex turn-end creates another item. Claude prompts are hook-fed;
- *   Codex idle prompts are session-transition-fed.
+ * - Items are in-memory only. A server restart drops them; the next prompt
+ *   re-fires the hook, or a detected Codex turn-end creates another item.
+ *   Claude prompts are hook-fed; Codex idle prompts are session-transition-fed
+ *   (COD-328). Answerable dialog items are Claude's alone; the DeepSeek status
+ *   bridge and the screen-read dialogs of a hook-less CLI (codex, see
+ *   `web/screen-blocked.ts`) open alert-only items (`answerInTerminal`).
  * - Answer flow is take-then-write: `take()` removes the item BEFORE keystrokes
  *   are sent so a double-tap cannot double-send; `restore()` re-inserts on a
  *   failed write unless a newer prompt arrived meanwhile.
@@ -25,7 +28,8 @@
  *
  * @dependencies utils (stripAnsi, CLAUDE_WORKING_LINE_PATTERN)
  * @consumedby web/routes/hook-event-routes (notePrompt/resolve), web/routes/approval-routes,
- *   web/session-listener-wiring (working/exit resolution), web/server (emit callbacks + stop)
+ *   web/session-listener-wiring (working/exit resolution), web/screen-blocked (screen-read
+ *   dialogs), web/server (emit callbacks + stop)
  *
  * @module web/approval-inbox
  */
@@ -91,6 +95,13 @@ export interface ApprovalItem {
    * answer endpoint accepts; absent → only approve('1')/deny(Esc) are allowed.
    */
   options?: ApprovalOption[];
+  /**
+   * When true the dialog belongs to a third-party TUI whose keystrokes Codeman
+   * cannot verify (today: DeepSeek Harness / `hooks: 'supervised'`). The item
+   * is an ALERT only: the answer route refuses keystrokes, push omits Approve/
+   * Deny actions, and the UI offers "Open session" instead of answer buttons.
+   */
+  answerInTerminal?: boolean;
 }
 
 export interface ApprovalResolvedInfo {
@@ -118,8 +129,20 @@ interface NotePromptArgs {
    * opens ALREADY acknowledged: see `notePrompt()`.
    */
   watching?: string | null;
+  /**
+   * Alert-only item: answer in the terminal, not via Approve/Deny. See
+   * `ApprovalItem.answerInTerminal`.
+   */
+  answerInTerminal?: boolean;
   /** Returns the raw (ANSI-bearing) pane frame, or null when unavailable. */
   capture?: () => string | null;
+  /**
+   * A frame the caller already read, kept as the card's context when there is no
+   * `capture`. Never parsed for options and never re-read: an item raised from the
+   * screen (`web/screen-blocked.ts`) belongs to the session that keeps reading it, and
+   * the option parser and staleness sweep here are shaped for Claude's dialogs.
+   */
+  context?: string;
 }
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
@@ -273,11 +296,13 @@ export class ApprovalInbox {
       toolSummary: args.toolSummary,
       message: args.message,
       cwd: args.cwd,
+      ...(args.answerInTerminal ? { answerInTerminal: true } : {}),
     };
     if (args.kind === 'idle' && args.watching) {
       item.acknowledgedAt = item.createdAt;
       item.acknowledgedReason = `watching ${args.watching}`;
     }
+    if (!args.capture && args.context) item.context = normalizeCapturedFrame(args.context);
     this.applyCapture(item, args.capture);
     this.items.set(args.sessionId, item);
     if (args.capture) this.captures.set(args.sessionId, args.capture);

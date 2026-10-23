@@ -15,22 +15,23 @@ describe('keyboard shortcuts', () => {
     expect(appSource).toContain('Digit([1-9])');
     expect(appSource).not.toMatch(/e\.key\.match\(\/\^Digit/);
 
-    // The matched digit travels as a 1-BASED tab number (it names Alt+N), and is
-    // converted to an index exactly once, at the site that indexes the
-    // projection. Asserting the dispatch rather than the arithmetic: pinning the
-    // literal '- 1' here is what let this test go stale when COD-306 moved the
-    // decrement into refAtAltNumber, leaving the real invariant unguarded.
-    expect(appSource).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
-    expect(appSource).toContain('refAtAltNumber(this._tabAltRefs(projection), number)');
-    expect(tabLayoutSource).toContain('refs[number - 1]');
-    expect(tabLayoutSource).toMatch(/number < 1 \|\| number > 9/);
+    // The matched digit is converted to an index once and resolved through the
+    // Focus-aware Alt+N order (COD-509): Focus rows, then live sessions, then
+    // open web tabs.
+    expect(appSource).toContain('const idx = parseInt(digitMatch[1], 10) - 1;');
+    expect(appSource).toContain('const target = this._tabAltRefs()[idx];');
+    expect(appSource).toContain("if (target.kind === 'session') this.selectSession(target.id);");
+    void tabLayoutSource;
   });
 
   it('provides Option+bracket shortcuts for previous and next session', () => {
-    expect(appSource).toContain("e.code === 'BracketLeft'");
-    expect(appSource).toContain("e.code === 'BracketRight'");
-    expect(appSource).toContain('this.prevSession()');
-    expect(appSource).toContain('this.nextSession()');
+    // Registry entries (so they can be rebound), matched by physical key code.
+    expect(appSource).toMatch(/id: 'previous-session'[\s\S]*?code: 'BracketLeft'[\s\S]*?action: 'previousSession'/);
+    expect(appSource).toMatch(/id: 'next-session-alt'[\s\S]*?code: 'BracketRight'[\s\S]*?action: 'nextSession'/);
+    // Downstream dispatches by method name (_shortcutActionHandler); only the
+    // action whose method is named differently needs an explicit mapping.
+    expect(appSource).toContain("if (action === 'previousSession') return () => this.prevSession();");
+    expect(appSource).toContain('nextSession() {');
   });
 
   it('suppresses xterm PTY injection for the same physical Alt nav codes (no ESC leak)', () => {

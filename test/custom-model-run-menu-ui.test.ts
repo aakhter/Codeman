@@ -745,7 +745,7 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
   });
 
   it('routes through run() itself, so the Run in-flight lock actually engages', async () => {
-    // CLAUDE.md, Run launch synchronization: the lock exists so a double click
+    // src/web/CLAUDE.md, Run launch synchronization: the lock exists so a double click
     // cannot create duplicate sessions. A hardcoded dispatch table bypassing
     // run() would never set _runInFlight, which is what this pins.
     const { app } = bootApp({});
@@ -1342,8 +1342,8 @@ describe('Custom Model Endpoint Profiles: _confirmContextWarning (in-app modal, 
     expect(modal.classList.contains('active')).toBe(true);
     const message = win.document.getElementById('customModelContextWarningMessage')!.textContent!;
     expect(message).toContain('qwen3.8-27b-ud-q4_k_xl');
-    expect(message).toContain('16,384');
-    expect(message).toContain('40,000');
+    expect(message).toContain((16384).toLocaleString()); // the modal formats for the user's locale
+    expect(message).toContain((40000).toLocaleString());
     expect(message).toMatch(/llama-swap/i);
     expect(message).toMatch(/fit-ctx/i);
 

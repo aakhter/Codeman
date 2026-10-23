@@ -63,7 +63,7 @@ describe('COD-214 Away Digest visibility setting', () => {
   });
 
   it('defaults showAwayDigest to false', () => {
-    expect(settingsJs).toMatch(/showAwayDigest\s*:\s*false/);
+    expect(settingsJs).toContain('settings.showAwayDigest ?? defaults.showAwayDigest ?? false');
   });
 
   it('reads appSettingsShowAwayDigest checkbox in loadSettings', () => {

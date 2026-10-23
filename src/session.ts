@@ -29,6 +29,8 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { workerResumeOptions } from './remote-worker-recovery.js';
+import { basename } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -44,6 +46,7 @@ import {
   NiceConfig,
   DEFAULT_NICE_CONFIG,
   getErrorMessage,
+  isAdvisorModel,
   isEffortLevel,
   type ClaudeMode,
   type SessionMode,
@@ -58,6 +61,7 @@ import {
   type AntigravityConfig,
   type PiConfig,
   type GrokConfig,
+  type CopilotConfig,
   type DeepSeekConfig,
   type OmpConfig,
   type SessionRemote,
@@ -67,12 +71,13 @@ import {
   type SessionNameSource,
   type SessionWriteOptions,
   type PaneExit,
+  type PromptCacheStatus,
 } from './types.js';
 import { resolveAndClaimOmpSessionId } from './utils/omp-session-resolver.js';
 import { claudeTranscriptExists } from './utils/claude-transcript.js';
 import { matchesPattern } from './config/cli-registry/patterns.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
-import { probeRemoteCliVersion } from './remote-hosts.js';
+import { probeRemoteCliVersion, probeRemoteWorker } from './remote-hosts.js';
 import type { TerminalMultiplexer, MuxSession, CommandDeliveryResult } from './mux-interface.js';
 import { TaskTracker, type BackgroundTask } from './task-tracker.js';
 import { RalphTracker } from './ralph-tracker.js';
@@ -92,7 +97,12 @@ import {
   isPaneQuiet,
   watchingLabel,
   isAwaitingWorkers,
+  isBlockedScreen,
   WATCHING_TAIL_LINES,
+  BLOCKED_TAIL_LINES,
+  BLOCKED_RECHECK_MS,
+  BLOCKED_QUIET_RECHECK_MS,
+  BLOCKED_CLEAR_READS,
   IDLE_RECHECK_MS,
   PANE_PROBE_MIN_INTERVAL_MS,
   PANE_PROBE_RECHECK_MS,
@@ -110,6 +120,7 @@ import {
   getClaudeBinaryPath,
   spawnPtyWithHelperRepair,
   resolveLocalShell,
+  waitForProcessesExit,
 } from './utils/index.js';
 import {
   MAX_TERMINAL_BUFFER_SIZE,
@@ -123,7 +134,7 @@ import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { getCli } from './config/cli-registry/registry.js';
 import { legacyResumeSlot } from './session-cli-registry-bridge.js';
-import { SubmitVerifier } from './session-submit-verifier.js';
+import { SubmitVerifier, exactPromptStillInComposer } from './session-submit-verifier.js';
 import { compileVersionRegex } from './config/cli-registry/patterns.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
@@ -172,6 +183,18 @@ import {
   type MobileInputTraceCollector,
   type MobileInputTraceStage,
 } from './perf/mobile-input-trace.js';
+import type { DisplayModel } from './types/session.js';
+import { resolveConfigModel } from './model-config-resolvers.js';
+import { legacyConfigForMode } from './session-cli-registry-bridge.js';
+import {
+  launchModelFor,
+  readScreenModel,
+  resolveDisplayModel,
+  restoredReportedModel,
+  sanitizeModelName,
+  type ReportedModel,
+  type ReportedModelSource,
+} from './session-display-model.js';
 
 export type { BackgroundTask } from './task-tracker.js';
 export type { RalphTrackerState, RalphTodoItem, ActiveBashTool } from './types.js';
@@ -268,7 +291,10 @@ const WIRE_ACTIVITY_SETTLE_MS = 15_000;
 
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
-/** Graceful shutdown delay when stopping session (100ms) */
+/**
+ * Longest the PTY process gets to exit on SIGTERM before SIGKILL when stopping a
+ * session. A deadline, not a sleep: stop() moves on as soon as it has exited.
+ */
 const GRACEFUL_SHUTDOWN_DELAY_MS = 100;
 
 /** SIGKILL can race a process or its process group exiting after SIGTERM. */
@@ -479,6 +505,21 @@ function detectCheckpointWorkingFrame(grammar: { workingFrameProfile: string }, 
   }
 }
 
+/**
+ * Does this CLI take the top-level session `model` (claude's per-session `--model`)?
+ *
+ * Read off the registry's model-source capability: only a `claude-settings-file` CLI
+ * (claude) launches on that field. Every other CLI takes its model in its own config object
+ * (`codexConfig.model` and so on), so for them the field is inert, and cron hands the
+ * app-wide default (always a Claude id) to any CLI that has a model at all. `toState()`
+ * publishes and persists the field only where this holds, so a codex cron session never
+ * reports a Claude model it did not run on, and `POST /api/sessions` refuses a `model` for
+ * any CLI where it does not.
+ */
+export function cliTakesSessionModel(mode: SessionMode): boolean {
+  return getCli(mode)?.capabilities.model.source === 'claude-settings-file';
+}
+
 /** Display name for a run mode. Falls back to the raw id for an unregistered one. */
 function getModeLabel(mode: SessionMode): string {
   return getCli(mode)?.label ?? mode;
@@ -504,10 +545,11 @@ function cliNeedsVersionProbe(mode: SessionMode): boolean {
  * Codex, Claude Code, and Gemini are known, controlled (Ink/React) TUIs that
  * repaint via cursor positioning, so dropping the alt-screen switch is safe —
  * content stays in the normal buffer. Excluded: `shell` (arbitrary programs like
- * vim/less/htop legitimately need the alt screen), `opencode` (renders its own
- * TUI that may rely on it), `pi` (below) and `grok` (a fullscreen alt-screen TUI
- * with mouse support, i.e. the opencode case, not the Ink case). Keep parity
- * with the replay-side strip in session-routes.ts.
+ * vim/less/htop legitimately need the alt screen), `opencode` (its own MIDDLE strip,
+ * isMuxMouseStripMode), `pi` (below) and `grok` (a fullscreen alt-screen TUI with
+ * mouse support). Keep parity with the replay-side strip (`stripReplayBuffer` in
+ * session-routes.ts); the table in `CliCapabilities.altScreen` is pinned for every
+ * stock CLI in test/claude-scrollback-strip.test.ts.
  *
  * ⚠️ Being excluded here does NOT preserve the alt screen. Every excluded mode
  * falls through to isMuxAltScreenOnlyStripMode(), which strips the alt-screen
@@ -527,8 +569,10 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
 
 /**
  * Modes that need the NARROW strip: alt-screen toggles only, leaving `\x1b[3J`
- * and the mouse-tracking DECSETs alone. Applies to every mode `isAltScreenStripMode`
- * excludes, but ONLY when the session is tmux-backed (`useMux`).
+ * and the mouse-tracking DECSETs alone. Applies to every mode that is neither
+ * `strip-full` (isAltScreenStripMode) nor `strip-mux-and-mouse` (isMuxMouseStripMode),
+ * so `strip-mux-only` and `preserve` alike, but ONLY when the session is tmux-backed
+ * (`useMux`).
  *
  * The bug (issue #205): the tmux CLIENT emits `smcup` (`\x1b[?1049h`) as its first
  * bytes on attach, before any program has run. Unstripped, xterm.js parks in the
@@ -553,7 +597,31 @@ export function isAltScreenStripMode(mode: SessionMode): boolean {
  * `\x1b[3J` from a user's own `clear` is a deliberate "wipe my scrollback".
  */
 export function isMuxAltScreenOnlyStripMode(mode: SessionMode, useMux: boolean): boolean {
-  return useMux && !isAltScreenStripMode(mode);
+  if (!useMux) return false;
+  const altScreen = getCli(mode)?.capabilities.altScreen;
+  return altScreen !== 'strip-full' && altScreen !== 'strip-mux-and-mouse';
+}
+
+/**
+ * Modes whose mouse-tracking DECSETs must be stripped, leaving `3J` alone:
+ * `altScreen: 'strip-mux-and-mouse'`, i.e. a mouse-capable full-screen TUI.
+ *
+ * Why this exists (opencode, measured 2026-09-16): the TUI enables tracking
+ * DECSETs, tmux runs with `mouse off` and therefore passes the PANE's DECSETs
+ * straight through to the tmux client, and the browser's xterm obeyed them —
+ * `mouseTrackingMode` flipped to `'any'` and xterm then reported DRAGS to the TUI
+ * instead of selecting locally. "Mark text, copy on select" silently did nothing
+ * (measured 62 `none` / 18 `any` over 16s, and 5/5 dead drags while `any`), and
+ * the obvious fallback — Ctrl+C — is opencode's `app_exit`, so the failure also
+ * ended sessions. Stripping at the source keeps xterm in selection mode; clicks
+ * still reach the CLI through the browser's hand-encoded tap, which this strip
+ * publishes as `cliMouseTracking` (`_recordStrippedMouseMode`).
+ *
+ * Gated on `useMux` for the same reason as the narrow strip: on the direct-PTY
+ * fallback the program's own DECSETs really do reach xterm and must be honoured.
+ */
+export function isMuxMouseStripMode(mode: SessionMode, useMux: boolean): boolean {
+  return useMux && getCli(mode)?.capabilities.altScreen === 'strip-mux-and-mouse';
 }
 
 // Note: Claude CLI PATH resolution moved to session-cli-builder.ts (buildClaudeEnv)
@@ -690,6 +758,8 @@ export class Session extends EventEmitter {
 
   private _name: string;
   private _nameSource: SessionNameSource;
+  /** `pinCliSessionName` as of the last spawn (see {@link _refreshCliNamePin}). */
+  private _pinEveryCliName = false;
   /**
    * Reconstructs the composer draft from USER keystrokes so the first real
    * prompt can name the tab. Fed only when a write says `fromUser`, and never
@@ -811,6 +881,7 @@ export class Session extends EventEmitter {
   private _activityStreak: ActivityStreak | null = null; // Unbroken run of PTY repaints (working detection)
   private _lastPaneProbeAt = 0; // Throttle for the tmux screen probe
   private _lastPaneProbeWorking: boolean | null = null; // Its last verdict (null = could not read)
+  private _lastPaneProbeTrustDialog = false; // Same capture showed the workspace-trust dialog (see _confirmIdle)
   /**
    * Background work the pane's own footer reports, e.g. `1 monitor`; null for none.
    *
@@ -834,6 +905,8 @@ export class Session extends EventEmitter {
    * running. A session that comes back with no label has no chip on its screen.
    */
   private _watching: string | null = null;
+  /** Last `prompt_cache` report from the statusline exporter; null until Claude sends one. */
+  private _promptCache: PromptCacheStatus | null = null;
   /** Lazily compiled `capabilities.workDetect.workingLine`. See _workingLinePattern(). */
   private _workingLineRe: RegExp | undefined = undefined;
   /** Lazily compiled `capabilities.workDetect.watchingLine`. See _watchingLinePattern(). */
@@ -842,12 +915,51 @@ export class Session extends EventEmitter {
   private _watchingWindow = WATCHING_TAIL_LINES;
   /** Lazily compiled `capabilities.workDetect.awaitingLine`. See _awaitingLinePattern(). */
   private _awaitingLineRe: RegExp | null | undefined = undefined;
+  /** Lazily compiled `capabilities.workDetect.blockedLine`. See _blockedLinePattern(). */
+  private _blockedLineRe: RegExp | null | undefined = undefined;
+  /** Resolved with the pattern above: how many rows at the foot of the screen it sees. */
+  private _blockedWindow = BLOCKED_TAIL_LINES;
+  /**
+   * The pane is showing a dialog the CLI blocks on, read off the screen with
+   * `capabilities.workDetect.blockedLine` (codex: an approval, a question, the trust
+   * prompt). Live state, not persisted: a restarted server re-reads it from the attach
+   * repaint the same way the watching label comes back. See `_noteBlockedReading()`.
+   */
+  private _screenBlocked = false;
+  /** Consecutive readable captures without the dialog (cleared at BLOCKED_CLEAR_READS). */
+  private _blockedGoneReads = 0;
+  /** When the last reading that SAW the dialog was taken. See `_armBlockedRecheck()`. */
+  private _blockedSeenAt = 0;
+  /** Re-reads the screen while a dialog is up, so the alert clears with it. */
+  private _blockedRecheckTimer: NodeJS.Timeout | null = null;
+  /**
+   * The newest model the running CLI reported for itself (its statusline, or its own
+   * footer read off the probe's capture), or null when none has. Feeds `displayModel`
+   * (src/session-display-model.ts). Persisted through `toState()` and restored after a
+   * restart, so an idle session keeps naming its model until the next report.
+   */
+  private _reportedModel: ReportedModel | null = null;
+  /**
+   * The model the CLI's own config pins for this session (`modelDetect.configResolver`),
+   * read at each pane start, attach or relaunch; null when it pins none. Below any
+   * report from the running CLI in `displayModel`. Not persisted: the next start reads it.
+   */
+  private _configModel: string | null = null;
+  /** Bumped per config read, so a read that lands after a newer one is dropped. */
+  private _configModelGen = 0;
+  /** Lazily compiled `capabilities.modelDetect.screenLine`. See _modelLinePattern(). */
+  private _modelLineRe: RegExp | null | undefined = undefined;
+  /** Resolved with the pattern above: how many rows at the foot of the screen it sees. */
+  private _modelLineRows = 1;
+  /** Resolved with the pattern above: the fields it shows that are never the model. */
+  private _modelRejectWords: readonly string[] = [];
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
   private _trustDialogTimer: NodeJS.Timeout | null = null; // Re-read after a keystroke (see below)
   /** Re-sends Enter while a programmatic prompt still sits in the composer (session-submit-verifier.ts). */
   private _submitVerifier: SubmitVerifier | null = null;
+  private _assistantSubmitVerifier: SubmitVerifier | null = null;
   private _interactiveStartedAt = 0; // When the interactive pane launched (bounds that scan)
   private _taskTracker: TaskTracker;
 
@@ -954,6 +1066,8 @@ export class Session extends EventEmitter {
   private _piConfig: PiConfig | undefined;
   // Grok configuration (only for mode === 'grok')
   private _grokConfig: GrokConfig | undefined;
+  // GitHub Copilot configuration (only for mode === 'copilot')
+  private _copilotConfig: CopilotConfig | undefined;
 
   // DeepSeek Harness configuration (only for mode === 'deepseek')
   private _deepSeekConfig: DeepSeekConfig | undefined;
@@ -987,6 +1101,10 @@ export class Session extends EventEmitter {
   // at session creation; threaded into the tmux env exports and the direct-PTY env.
   // Default off → COLORTERM is unset (avoids tmux→PTY→xterm.js color glitches).
   private _truecolorEnabled: boolean = false;
+  // Claude advisor model (code.claude.com/docs/en/advisor), merged into the same launch
+  // `--settings` JSON as ultracode, never the `--advisor` flag (which exits on a refused
+  // pairing). A soft default: /advisor still switches or disables it in-session.
+  private _advisorModel: string | undefined;
 
   // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md). `envKeys`,
   // `configDir` and `launchModel` are internal bookkeeping ONLY (never surfaced via
@@ -1095,6 +1213,7 @@ export class Session extends EventEmitter {
       piConfig?: PiConfig;
       /** Grok configuration (only for mode === 'grok') */
       grokConfig?: GrokConfig;
+      copilotConfig?: CopilotConfig;
       /** DeepSeek Harness configuration (only for mode === 'deepseek') */
       deepSeekConfig?: DeepSeekConfig;
       /** OMP configuration (only for mode === 'omp') */
@@ -1119,6 +1238,8 @@ export class Session extends EventEmitter {
       claudeSessionId?: string;
       /** Whether the persisted Claude identity was authoritatively adopted. */
       claudeSessionIdentityAdopted?: boolean;
+      /** Claude advisor model (soft default via --settings, switchable in-session via /advisor) */
+      advisorModel?: string;
       /** Restored per-session attachment history. May include server-private external paths. */
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Restored per-session reference sources (COD-65). */
@@ -1133,6 +1254,10 @@ export class Session extends EventEmitter {
       claudeSessionChain?: string[];
       /** Restored agent-exit observation for this session's pane (see `paneExit`). */
       paneExit?: PaneExit;
+      /** The previous run's `displayModel`; a CLI-reported one is restored (see `displayModel`). */
+      displayModel?: DisplayModel;
+      /** The previous run's last prompt-cache report, restored so the readout is not blank (see `promptCache`). */
+      promptCache?: PromptCacheStatus;
       /** This session was rebuilt from the tmux socket, so its metadata is a guess. */
       discoveredMuxSession?: boolean;
       /** Restored wall-clock ms of the pane's last output (recovery only; see `_wireActivityAt`). */
@@ -1295,6 +1420,11 @@ export class Session extends EventEmitter {
       this._grokConfig = config.grokConfig;
     }
 
+    // Apply GitHub Copilot configuration
+    if (config.copilotConfig) {
+      this._copilotConfig = config.copilotConfig;
+    }
+
     // Apply env overrides (exported at spawn, not persisted to disk).
     // Legacy migration: pre-0.7.2 carried effort as the CLAUDE_CODE_EFFORT_LEVEL env var,
     // which hard-locks /effort switching. Extract it into _effort (--settings soft default)
@@ -1324,6 +1454,9 @@ export class Session extends EventEmitter {
     if (config.truecolorEnabled !== undefined) {
       this._truecolorEnabled = config.truecolorEnabled;
     }
+    if (isAdvisorModel(config.advisorModel)) {
+      this._advisorModel = config.advisorModel;
+    }
     this._docker = config.docker;
     this._owner = config.owner;
     this._discoveredMuxSession = config.discoveredMuxSession === true;
@@ -1336,6 +1469,12 @@ export class Session extends EventEmitter {
     // replaces it with a first-hand reading. NOT the stats collector, which a
     // browser panel arms and disarms — see `startPaneExitWatcher`.
     this.setPaneExit(config.paneExit);
+    this._reportedModel = restoredReportedModel(config.displayModel) ?? null;
+    // Last prompt-cache report, restored so the Session Options readout is not blank until
+    // the pane's next statusline render. The readout is time-aware, so a value whose expiry
+    // has passed renders as cold rather than stale-warm. Set directly, not via
+    // setPromptCache, so recovery does not re-stamp a compaction it did not just observe.
+    this._promptCache = config.promptCache ?? null;
     // Never self-parent: a session pointing at itself would draw a zero-length
     // lineage arc under its own tab. Only reachable via the recovery path, where
     // both the id and the saved parent come from disk.
@@ -1583,6 +1722,11 @@ export class Session extends EventEmitter {
     }
     if (newId === this._claudeSessionId) return;
     this._claudeSessionId = newId;
+    // The conversation itself changed (a post-/clear switch), so the old prefix's cache
+    // report and its compaction baseline belong to a conversation that is gone. Drop them
+    // rather than show the previous conversation's "warm until" against the new one; the
+    // next statusline render repopulates. A same-id reattach returned above, untouched.
+    this._promptCache = null;
   }
 
   /**
@@ -1687,6 +1831,9 @@ export class Session extends EventEmitter {
     } finally {
       this._paneLifecycleOps--;
       this._paneStartedAt = Date.now();
+      // A start, attach or relaunch is when the CLI read its config, so it is when
+      // the model that config pins is read here too.
+      this._refreshConfigModel();
     }
   }
 
@@ -1736,7 +1883,7 @@ export class Session extends EventEmitter {
   /**
    * True when this session's PTY is a tmux client rather than the program itself.
    * Read by the replay-side alt-screen strip, which must apply the same
-   * `useMux` gate as the live strip (isMuxAltScreenOnlyStripMode).
+   * `useMux` gate as the live strip (isMuxAltScreenOnlyStripMode, isMuxMouseStripMode).
    */
   get usesMux(): boolean {
     return this._useMux;
@@ -1802,6 +1949,56 @@ export class Session extends EventEmitter {
    */
   get watching(): string | null {
     return this._watching;
+  }
+
+  /**
+   * True while the pane shows a dialog its CLI is blocked on, as read off the screen
+   * (`capabilities.workDetect.blockedLine`). Always false for a CLI that declares none,
+   * Claude included: its dialogs arrive as hook events instead. The `blocked` wait reads
+   * it so a caller that asks after the dialog appeared is answered at once.
+   */
+  get screenBlocked(): boolean {
+    return this._screenBlocked;
+  }
+
+  /**
+   * Prompt-cache state of the main conversation as Claude Code last reported it on the
+   * statusline (v2.1.251+), fed by `POST /api/status-telemetry`. Null until the first
+   * report. It rides `toState()` for the Session Options readout and is restored on a
+   * Codeman restart (constructor `promptCache`) so the row is not blank until the pane's
+   * next render; the readout is time-aware, so a value whose `expiresAt` has passed renders
+   * as cold rather than as a stale warm.
+   */
+  get promptCache(): PromptCacheStatus | null {
+    return this._promptCache;
+  }
+
+  /**
+   * Replace the prompt-cache report; true when it differs from the previous one. Stamps
+   * `compactedAt` when this report ENTERS the window in which Claude Code reads
+   * `recacheTokensIfCold` as null: a compaction (`/compact` or its own idle compaction) or
+   * a clearing of old tool results opened it, and the previous report still had a known
+   * value. Claude Code closes the window on the next request (that request is the one that
+   * counts as an expected rebuild), so `expectedRebuilds` never rises inside it and is not
+   * read here. The stamp is carried while the window holds and dropped once it closes; a
+   * first report already inside the window gets none. It is never an alert.
+   */
+  setPromptCache(status: PromptCacheStatus): boolean {
+    const prev = this._promptCache;
+    const inWindow = status.warm && status.recacheTokensIfCold == null;
+    let compactedAt: number | undefined;
+    if (inWindow && prev?.recacheTokensIfCold != null) {
+      compactedAt = Date.now();
+    } else if (inWindow && prev?.compactedAt != null) {
+      compactedAt = prev.compactedAt;
+    }
+    // A NEW object when a stamp applies, never a mutation of the caller's parsed report: the
+    // route broadcasts the STORED object, so the stamp lives here and never leaks back into the
+    // parser's output (which would make the route's "broadcast the stored object" choice vacuous).
+    const next = compactedAt != null ? { ...status, compactedAt } : status;
+    const changed = JSON.stringify(next) !== JSON.stringify(prev);
+    this._promptCache = next;
+    return changed;
   }
 
   /**
@@ -2209,16 +2406,31 @@ export class Session extends EventEmitter {
   }
 
   /**
-   * The name to pin on the Claude CLI as `--name`, or undefined to let Claude
-   * title the conversation itself. `--name` is the prompt-box label, the
-   * `/resume` picker entry and the terminal title all at once, and a pinned
-   * title stops Claude generating its own, so only a name the user chose is
-   * worth pinning. Pinning the `w1-myapp` placeholder gave every conversation
-   * in a case the same `/resume` entry; an auto name is a cut of the first
-   * prompt, which Claude's own generated title already beats.
+   * The name to pin on the Claude CLI as `--name`, or undefined to let Claude title the
+   * conversation itself. `--name` is the prompt-box label, the `/resume` picker entry and the
+   * terminal title all at once, and a pinned title stops Claude generating its own.
+   *
+   * By default only a name the user chose is pinned. Pinning the `w1-myapp` placeholder gave
+   * every conversation in a case the same `/resume` entry (the tab number restarts once a
+   * case's tabs are closed), and an auto name is a cut of the first prompt, which Claude's
+   * own generated title already beats.
+   *
+   * With the opt-in `pinCliSessionName` setting every non-blank tab name is pinned, so the
+   * CLI's labels read the same as the tabs, at the cost of those generated titles. A rename
+   * in Codeman then holds only until the next turn: a process started with `--name`
+   * re-appends its in-memory title (see claude-session-title.ts). The setting is re-read
+   * at each spawn and respawn by {@link _refreshCliNamePin}.
    */
   get cliPinnedName(): string | undefined {
-    return this._nameSource === 'manual' ? this._name : undefined;
+    if (!this._pinEveryCliName) return this._nameSource === 'manual' ? this._name : undefined;
+    return this._name.trim() ? this._name : undefined;
+  }
+
+  /** Re-read `pinCliSessionName` so `cliPinnedName` decides per launch, with no server restart. */
+  private async _refreshCliNamePin(): Promise<void> {
+    // Dynamic: hooks-config -> route-helpers imports Session, so a static import would be a cycle.
+    const { readPinCliSessionNameEnabled } = await import('./hooks-config.js');
+    this._pinEveryCliName = await readPinCliSessionNameEnabled();
   }
 
   setAutoClear(enabled: boolean, threshold?: number): void {
@@ -2666,6 +2878,8 @@ export class Session extends EventEmitter {
       claudeSessionIdentityAdopted: this._claudeSessionIdentityAdopted,
       autoResumeEnabled: this._autoOps.autoResumeEnabled,
       autoResumeAt: this._autoOps.autoResumeAt ?? undefined,
+      promptCache: this._promptCache ?? undefined,
+      statusLineExporter: this._muxSession?.statusLine,
       imageWatcherEnabled: this._imageWatcherEnabled,
       pinned: this._pinned || undefined,
       pinnedAt: this._pinned ? (this._pinnedAt ?? undefined) : undefined,
@@ -2694,12 +2908,18 @@ export class Session extends EventEmitter {
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
       grokConfig: this._grokConfig,
+      copilotConfig: this._copilotConfig,
       deepSeekConfig: this._deepSeekConfig,
       ompConfig: this._ompConfig,
       resumeSessionId: this._resumeSessionId,
       nativeResumeId: this._nativeResumeId,
       effort: this._effort,
+      // Claude only: for any other CLI `_model` is inert (its model lives in its own config
+      // object) and may be the app-wide Claude default cron handed it.
+      model: cliTakesSessionModel(this.mode) ? this._model : undefined,
+      advisorModel: this._advisorModel,
       customModel: this.customModel,
+      displayModel: this.displayModel,
       // COD-118: runtime-only — surfaced so the frontend can require explicit user
       // intent before restarting a crash-looped session. Deliberately NOT restored
       // by the constructor: a Codeman restart starts with a fresh breaker so boot
@@ -3031,7 +3251,14 @@ export class Session extends EventEmitter {
     // Confirmed the mux session (and thus the pane) exists but this reattach
     // is about to respawn it — safe to resolve/pin now.
     this._pinOmpRespawnId();
-    const newPid = await mux.respawnPane(this._buildRespawnPaneOptions());
+    const options = this._buildRespawnPaneOptions();
+    // A liveness probe can race a worker reboot. Transport recovery must only
+    // attach; it must never create a replacement session on a stale answer.
+    options.remote = {
+      ...this._remote,
+      remoteSessionName: this._remote.remoteSessionName ?? `codeman-ssh-${this.id.slice(0, 8)}`,
+    };
+    const newPid = await mux.respawnPane(options);
     if (!newPid) {
       console.error('[Session] reattachRemote: respawnPane failed for', this._muxSession.muxName);
       return false;
@@ -3042,6 +3269,29 @@ export class Session extends EventEmitter {
     console.log('[Session] reattachRemote: reattached remote session', this._muxSession.muxName, 'pid', newPid);
     if (isExternalCliMode(this.mode)) this._startWorkingFramePoller();
     return true;
+  }
+
+  /** COD-486: restart only a pinned conversation after a proven worker reboot. */
+  async resumeRemoteAfterWorkerReboot(): Promise<boolean> {
+    if (this._closing || this._isStopped || this.paneLifecycleInFlight) return false;
+    return this._withPaneLifecycle(async () => {
+      if (!this._remote || !this._useMux || !this._mux || !this._muxSession) return false;
+      const respawn = this._buildRespawnPaneOptions();
+      respawn.resumeSessionId = this._claudeSessionChain.at(-1) ?? this._claudeSessionId ?? respawn.resumeSessionId;
+      const options = workerResumeOptions(respawn, this._nativeResumeId);
+      if (!options || !(await this._mux.muxSessionExists(this._muxSession.muxName))) return false;
+      if (this._closing || this._isStopped) return false;
+      this._stopWorkingFramePoller();
+      const pid = await this._mux.respawnPane(options);
+      if (!pid || this._closing || this._isStopped) return false;
+      const observed = await probeRemoteWorker(this._remote, `codeman-ssh-${this.id.slice(0, 8)}`);
+      // A living SSH wrapper can be attached to a retained FAILED remote pane.
+      // Require the remote agent itself to be running before reporting recovery.
+      if (!observed?.agentRunning || this._closing || this._isStopped) return false;
+      this.clearPaneExitForNewPane();
+      if (isExternalCliMode(this.mode)) this._startWorkingFramePoller();
+      return true;
+    });
   }
 
   /**
@@ -3115,6 +3365,7 @@ export class Session extends EventEmitter {
       antigravityConfig: this._antigravityConfig,
       piConfig: this._piConfig,
       grokConfig: this._grokConfig,
+      copilotConfig: this._copilotConfig,
       deepSeekConfig: this._deepSeekConfig,
       // OMP resolution/pinning does NOT happen here. This object is built
       // EAGERLY — including on every boot-recovery reattach, before anyone
@@ -3131,6 +3382,7 @@ export class Session extends EventEmitter {
       unsetEnvKeys: this._pendingEnvUnsets.size > 0 ? [...this._pendingEnvUnsets] : undefined,
       effort: this._effort,
       truecolorEnabled: this._truecolorEnabled,
+      advisorModel: this._advisorModel,
       historyLimit: this._tmuxHistoryLimit,
       remote: this._remote,
       docker: this._docker,
@@ -3209,6 +3461,7 @@ export class Session extends EventEmitter {
    * still inside it and renders no local `--session-id` to collide.
    */
   private async _buildRespawnPaneOptionsWithResumePin(): Promise<import('./mux-interface.js').RespawnPaneOptions> {
+    await this._refreshCliNamePin();
     const options = this._buildRespawnPaneOptions();
     if (this._remote || this._docker) return options;
     const entry = getCli(this.mode);
@@ -3238,6 +3491,10 @@ export class Session extends EventEmitter {
   }
 
   /** The session's Claude config dir when it has been relocated (#255), else undefined. */
+  getClaudeConfigDirOverride(): string | undefined {
+    return this._claudeConfigDir();
+  }
+
   private _claudeConfigDir(): string | undefined {
     // Trimmed like `claudeProjectsDir()` trims the process-wide override: the
     // envOverrides schema validates keys only, and a whitespace-only value would
@@ -3393,14 +3650,21 @@ export class Session extends EventEmitter {
     // redraws overwrite only the cells they target, so non-erased rows keep
     // their content. Gated to Codex/Claude/Gemini (isAltScreenStripMode).
     //
-    // Every OTHER mode (shell/opencode/antigravity) gets the NARROW strip when it
-    // is tmux-backed: alt-screen toggles only, because the sequence that breaks
+    // Every OTHER mode (shell/antigravity/pi/grok/deepseek/omp) gets the NARROW strip
+    // when it is tmux-backed: alt-screen toggles only, because the sequence that breaks
     // scrollback there is tmux's own client-side smcup at attach, not anything the
     // program in the pane emitted (issue #205, see isMuxAltScreenOnlyStripMode).
     // 3J and the mouse DECSETs stay, so `clear` and mouse-aware TUIs keep working.
+    //
+    // The MIDDLE case (isMuxMouseStripMode) is a mouse-capable full-screen TUI:
+    // it needs smcup AND the mouse DECSETs gone — otherwise the pane's tracking
+    // reaches xterm and every drag becomes a mouse report instead of a text
+    // selection, which is what killed mark-and-copy in opencode — while 3J stays,
+    // because a TUI is not a `clear` consumer.
     const fullStrip = isAltScreenStripMode(this.mode);
-    const altOnlyStrip = !fullStrip && isMuxAltScreenOnlyStripMode(this.mode, this._useMux);
-    if (fullStrip || altOnlyStrip) {
+    const mouseStrip = isMuxMouseStripMode(this.mode, this._useMux);
+    const altOnlyStrip = !fullStrip && !mouseStrip && isMuxAltScreenOnlyStripMode(this.mode, this._useMux);
+    if (fullStrip || mouseStrip || altOnlyStrip) {
       // Debug capture (codex only): when CODEMAN_CODEX_RAW_LOG=1, write the raw
       // codex PTY output (pre-strip) to a per-session log file. Used to diagnose
       // the stacked-status-bar / ghost-row rendering issues by inspecting the
@@ -3443,14 +3707,18 @@ export class Session extends EventEmitter {
       // eslint-disable-next-line no-control-regex
       data = data.replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '');
       if (fullStrip) {
-        data = data
+        // eslint-disable-next-line no-control-regex
+        data = data.replace(/\x1b\[3J/g, '');
+      }
+      if (fullStrip || mouseStrip) {
+        data = data.replace(
           // eslint-disable-next-line no-control-regex
-          .replace(/\x1b\[3J/g, '')
-          // eslint-disable-next-line no-control-regex
-          .replace(/\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g, (seq) => {
+          /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g,
+          (seq) => {
             this._recordStrippedMouseMode(seq);
             return '';
-          });
+          }
+        );
       }
     }
 
@@ -3521,11 +3789,14 @@ export class Session extends EventEmitter {
     // resume only after the new PTY has all synchronous listeners installed.
     this._suspendTerminalViewerSizing();
 
+    await this._refreshCliNamePin();
+
     // Bounds the workspace-trust scan (see _maybeAcceptTrustDialog). Stamped here
     // rather than at PTY spawn so a slow mux attach still counts as startup.
     this._interactiveStartedAt = Date.now();
     this._trustDialogAttempts = 0;
     this._lastTrustDialogScanAt = 0;
+    this._lastPaneProbeTrustDialog = false; // the last pane's verdict, not this one's
     if (this._trustDialogTimer) {
       clearTimeout(this._trustDialogTimer);
       this._trustDialogTimer = null;
@@ -3655,12 +3926,14 @@ export class Session extends EventEmitter {
             antigravityConfig: this._antigravityConfig,
             piConfig: this._piConfig,
             grokConfig: this._grokConfig,
+            copilotConfig: this._copilotConfig,
             deepSeekConfig: this._deepSeekConfig,
             ompConfig: this._ompConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
             truecolorEnabled: this._truecolorEnabled,
+            advisorModel: this._advisorModel,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
             initialCols: this._initialDims?.cols,
@@ -3707,19 +3980,14 @@ export class Session extends EventEmitter {
           this.id;
 
         // For NEW mux sessions: wait for readiness then clean buffer
-        // For RESTORED mux sessions: don't do anything - client will fetch buffer on tab switch
+        // For RESTORED mux sessions: leave the buffer alone - client will fetch it on tab switch
         if (!isRestored) {
           if (isExternalCliMode(this.mode)) {
-            // External CLIs use custom TUIs — no Claude ❯ prompt to detect.
-            // Wait for TUI to stabilize, then mark ready. Don't clear the buffer — the TUI's
-            // initial render IS the useful content. Emit needsRefresh so the client fetches
-            // the full buffer once the TUI has rendered.
-            this._promptCheckTimeout = setTimeout(() => {
-              this._promptCheckTimeout = null;
-              if (this._isStopped) return;
-              this._status = 'idle';
-              this.emit('needsRefresh');
-            }, 3000);
+            // External CLIs use custom TUIs — no ❯ prompt to detect.
+            // Wait for TUI to stabilize (output stops changing), then mark ready.
+            // Don't clear the buffer — the TUI's initial render IS the useful content.
+            // Emit needsRefresh so the client fetches the full buffer once the TUI has rendered.
+            this._armPaneSettle(false);
           } else {
             // Claude mode: wait for ❯ prompt
             this._promptCheckInterval = setInterval(() => {
@@ -3751,6 +4019,8 @@ export class Session extends EventEmitter {
               this._promptCheckTimeout = null;
             }, 5000);
           }
+        } else {
+          this._armPaneSettle(true);
         }
       } catch (err) {
         console.error('[Session] Failed to create mux session, falling back to direct PTY:', err);
@@ -3787,7 +4057,8 @@ export class Session extends EventEmitter {
           this._allowedTools,
           this._effort,
           this.cliPinnedName,
-          getClaudeCliVersion()
+          getClaudeCliVersion(),
+          this._advisorModel
         );
         this.ptyProcess = spawnPtyWithHelperRepair(() =>
           pty.spawn(getClaudeBinaryPath(), args, {
@@ -3933,6 +4204,10 @@ export class Session extends EventEmitter {
         this._expensiveProcessTimer = null;
       }
       this._pendingCleanData = '';
+      // Nothing reads this pane any more, so a dialog on it can no longer be seen to
+      // close: drop the state (and its timer) while the listeners are still attached.
+      // A re-attach re-reads the screen and raises it again if the dialog is still up.
+      this._clearScreenBlocked();
       // If using mux, mark the session as detached but don't kill it
       if (this._muxSession && this._mux) {
         this._mux.setAttached(this.id, false);
@@ -4020,13 +4295,24 @@ export class Session extends EventEmitter {
    * a two-marker match (isTrustDialogScreen), and an attempt cap.
    */
   private _maybeAcceptTrustDialog(): void {
-    if (this._trustDialogAccepted) return;
+    // Stopped: the kill itself produces PTY output, and the buffer tail still holds the
+    // dialog, so without this a deleted session kept "answering" it for several seconds.
+    if (this._trustDialogAccepted || this._isStopped) return;
     const now = Date.now();
     if (now - this._interactiveStartedAt > TRUST_DIALOG_WINDOW_MS) {
       this._trustDialogAccepted = true; // window closed; anything matching now is not the dialog
       return;
     }
-    if (now - this._lastTrustDialogScanAt < TRUST_DIALOG_RETRY_MS) return;
+    const sinceScan = now - this._lastTrustDialogScanAt;
+    if (sinceScan < TRUST_DIALOG_RETRY_MS) {
+      // ⚠️ Defer a throttled read, never drop it. The dialog's own paint is usually the
+      // last output a launching pane produces, and it tends to land inside the throttle
+      // of the read the blank screen before it triggered: dropped, nothing re-read the
+      // screen and the session sat on the dialog for good (2 of 12 fresh launches on
+      // Claude Code 2.1.294). A read already scheduled covers this one.
+      if (!this._trustDialogTimer) this._rescanTrustDialogIn(TRUST_DIALOG_RETRY_MS - sinceScan + 100);
+      return;
+    }
     this._lastTrustDialogScanAt = now;
 
     // Prefer the pane; fall back to the buffer tail on a direct-PTY session,
@@ -4061,14 +4347,17 @@ export class Session extends EventEmitter {
     // on a live 2.1.252 spawn: cursor moved at 6 s, then nothing). The timer is
     // one-shot and self-rearming through this same path, and every exit route
     // goes through _clearAllTimers().
-    // The +100ms puts the re-entry OUTSIDE the scan throttle above; firing at
-    // exactly the throttle boundary would let the scan return early and break
-    // the chain with the dialog still on screen.
+    // The +100ms puts the re-entry OUTSIDE the scan throttle above.
+    this._rescanTrustDialogIn(TRUST_DIALOG_RETRY_MS + 100);
+  }
+
+  /** Re-run the trust-dialog scan after `delayMs`, replacing any read already scheduled. */
+  private _rescanTrustDialogIn(delayMs: number): void {
     if (this._trustDialogTimer) clearTimeout(this._trustDialogTimer);
     this._trustDialogTimer = setTimeout(() => {
       this._trustDialogTimer = null;
       this._maybeAcceptTrustDialog();
-    }, TRUST_DIALOG_RETRY_MS + 100);
+    }, delayMs);
   }
 
   /**
@@ -4157,12 +4446,155 @@ export class Session extends EventEmitter {
     if (now - this._lastPaneProbeAt < PANE_PROBE_MIN_INTERVAL_MS) return this._lastPaneProbeWorking;
     this._lastPaneProbeAt = now;
     const text = this._mux.capturePaneText?.(this._muxSession.muxName) ?? null;
+    // A dialog the CLI is blocked on is not work, whatever else is on screen: codex's
+    // question dialog carries `esc to interrupt` in its own key hints, which is codex's
+    // working line, so without this a session waiting on the user's answer read as busy.
+    // Decided from THIS capture, never from `_screenBlocked`, which lags a vanished dialog
+    // by design (see `_noteBlockedReading`) and would otherwise call a resumed turn idle.
+    const blockedOnScreen = text === null ? null : this._paneShowsBlocked(text);
+    this._noteBlockedReading(blockedOnScreen, text);
     // A turn that ended by handing off to workers the CLI waits for is work too: the
     // composer is up and the pane is quiet, but the next turn starts without the user.
     this._lastPaneProbeWorking =
-      text === null ? null : this._workingLinePattern().test(text) || this._paneAwaitsWorkers(text);
+      text === null
+        ? null
+        : !blockedOnScreen && (this._workingLinePattern().test(text) || this._paneAwaitsWorkers(text));
+    // A capture that failed proves nothing either way, so it keeps the last answer.
+    if (text !== null) {
+      const trustDialog = isTrustDialogScreen(text);
+      if (
+        trustDialog &&
+        !this._lastPaneProbeTrustDialog &&
+        now - this._interactiveStartedAt <= TRUST_DIALOG_WINDOW_MS
+      ) {
+        console.log(`[Session] Holding idle while the workspace trust dialog is on screen: ${this.id}`);
+      }
+      this._lastPaneProbeTrustDialog = trustDialog;
+    }
     this._readWatching(text);
+    this._readScreenModel(text);
     return this._lastPaneProbeWorking;
+  }
+
+  /**
+   * Read the model the CLI's own footer names off the same capture, for a CLI whose
+   * registry entry declares `capabilities.modelDetect`.
+   *
+   * Unlike `_readWatching`, a capture that could not be read, or a footer the pattern
+   * does not find (a popup covering it, a footer turned off), KEEPS the last model. The
+   * two are not symmetric: background work ends and its badge must go, while a model does
+   * not stop running because something was drawn over the row that names it.
+   */
+  private _readScreenModel(paneText: string | null): void {
+    if (paneText === null) return;
+    const pattern = this._modelLinePattern();
+    if (!pattern) return;
+    const model = readScreenModel(paneText, pattern, this._modelLineRows, {
+      rejectWords: this._modelRejectWords,
+      // A footer field equal to the folder this session runs in is the folder, never the
+      // model: the generic half of the rule, for every CLI.
+      cwdBasename: basename(this.workingDir),
+    });
+    if (model) this.noteReportedModel('screen', model);
+  }
+
+  /**
+   * The regex reading this CLI's model off its footer, or null for a CLI that declares
+   * none. Compiled once per session through `compileVersionRegex()` (null, never a throw,
+   * for a pattern it refuses), like the working- and watching-line patterns.
+   */
+  private _modelLinePattern(): RegExp | null {
+    if (this._modelLineRe === undefined) {
+      const detect = getCli(this.mode)?.capabilities.modelDetect;
+      this._modelLineRe = detect?.screenLine ? compileVersionRegex(detect.screenLine) : null;
+      this._modelLineRows = detect?.screenLines ?? 1;
+      this._modelRejectWords = detect?.rejectWords ?? [];
+    }
+    return this._modelLineRe;
+  }
+
+  /**
+   * Record a model the running CLI reported for itself: its statusline (claude's
+   * exporter, via `POST /api/status-telemetry`) or its own footer. The newest report
+   * wins whatever its source. An empty or unprintable report changes nothing.
+   *
+   * @returns true when the reported model changed (and `displayModelChanged` was emitted)
+   */
+  noteReportedModel(source: ReportedModelSource, raw: unknown): boolean {
+    const model = sanitizeModelName(raw);
+    if (!model) return false;
+    if (this._reportedModel?.model === model && this._reportedModel.source === source) return false;
+    this._reportedModel = { model, source };
+    // The status does not change with it, so it needs a broadcast (and a persist) of its own.
+    this.emit('displayModelChanged');
+    return true;
+  }
+
+  /**
+   * The model this session runs as far as the server knows, and where that came from:
+   * the custom endpoint's model, else the newest report from the CLI, else the launch
+   * model (src/session-display-model.ts). Undefined when none is known.
+   */
+  get displayModel(): DisplayModel | undefined {
+    return resolveDisplayModel({
+      customModelId: this._customModel?.modelId,
+      reported: this._reportedModel,
+      configModel: this._configModel,
+      launchModel: launchModelFor(this.mode, this._launchOptionBag()),
+    });
+  }
+
+  /**
+   * The same option bag the spawn reads its launch params from: `model` at the top for
+   * claude (the `--model` or app-wide default it was created with; inert for every other
+   * CLI, which is why it is not handed over for them), each other CLI's own
+   * `<Mode>Config`. Where a param lives is registry data (`legacyConfigForMode`).
+   */
+  private _launchOptionBag(): Record<string, unknown> {
+    return {
+      model: cliTakesSessionModel(this.mode) ? this._model : undefined,
+      openCodeConfig: this._openCodeConfig,
+      codexConfig: this._codexConfig,
+      geminiConfig: this._geminiConfig,
+      antigravityConfig: this._antigravityConfig,
+      piConfig: this._piConfig,
+      grokConfig: this._grokConfig,
+      copilotConfig: this._copilotConfig,
+      deepSeekConfig: this._deepSeekConfig,
+      ompConfig: this._ompConfig,
+    };
+  }
+
+  /**
+   * Read the model this session's CLI config pins, with the reader its registry entry
+   * names (`capabilities.modelDetect.configResolver`), and announce a change. Async and
+   * bounded (the reader probes before it reads); a read that lands after a newer one,
+   * or after the session stopped, is dropped. A remote or docker session's CLI reads its
+   * config on another machine or in its container, so nothing local is read for it.
+   */
+  private _refreshConfigModel(): void {
+    const name = getCli(this.mode)?.capabilities.modelDetect?.configResolver;
+    if (!name || this._remote || this._docker) return;
+    const gen = ++this._configModelGen;
+    const overrides = this._envOverrides;
+    resolveConfigModel(name, {
+      config: legacyConfigForMode(this.mode, this._launchOptionBag()),
+      // The session's own env first (already clamped for a non-granted owner), then the
+      // server's: what the pane's CLI inherits.
+      env: (key) => overrides?.[key] ?? process.env[key],
+    }).then(
+      (model) => {
+        if (gen !== this._configModelGen || this._isStopped) return;
+        // Sanitized where it is published (resolveDisplayModel), like every source.
+        const next = model || null;
+        if (next === this._configModel) return;
+        this._configModel = next;
+        this.emit('displayModelChanged');
+      },
+      () => {
+        /* A reader answers null on doubt and never throws; a throw changes nothing. */
+      }
+    );
   }
 
   /**
@@ -4234,6 +4666,111 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * The regex matching the dialog this CLI blocks on, or null for a CLI whose registry
+   * entry declares none (every CLI but codex today, Claude included: its dialogs arrive
+   * as hook events). Compiled once per session through `compileVersionRegex()`, the same
+   * guard the schema applies, so a pattern it refuses yields null rather than a throw.
+   */
+  private _blockedLinePattern(): RegExp | null {
+    if (this._blockedLineRe === undefined) {
+      const detect = getCli(this.mode)?.capabilities.workDetect;
+      this._blockedLineRe = detect?.blockedLine ? compileVersionRegex(detect.blockedLine) : null;
+      this._blockedWindow = detect?.blockedLines ?? BLOCKED_TAIL_LINES;
+    }
+    return this._blockedLineRe;
+  }
+
+  /** Whether this capture shows a dialog the CLI is blocked on. See `isBlockedScreen()`. */
+  private _paneShowsBlocked(paneText: string): boolean {
+    const pattern = this._blockedLinePattern();
+    return pattern ? isBlockedScreen(paneText, pattern, this._blockedWindow) : false;
+  }
+
+  /**
+   * Fold one screen reading into the blocked state, announcing each transition with
+   * `blockedChanged` (the web server turns it into the alert and the `blocked` signal).
+   *
+   * The two directions are deliberately unequal:
+   * - RAISE on one reading. A match needs the dialog's own footer at the foot of the
+   *   screen, which is only there when the dialog is fully drawn.
+   * - CLEAR on BLOCKED_CLEAR_READS readings in a row. A single capture can land inside a
+   *   full-frame repaint, and clearing on it would re-raise a moment later and send the
+   *   alert, push and webhook twice for one dialog.
+   * A capture that could not be read (`null`) is no evidence either way and changes
+   * nothing, so a tmux hiccup can neither raise nor drop an alert. That is the opposite
+   * of `_readWatching`, and for the same reason: each degrades toward the alert.
+   *
+   * While blocked, `_blockedRecheckTimer` keeps reading, since answering resumes the turn
+   * and a busy pane never reaches the settle path that raised it.
+   *
+   * @param frame the capture the reading came from; rides the raise as the alert's context
+   */
+  private _noteBlockedReading(onScreen: boolean | null, frame: string | null): void {
+    if (onScreen === null || !this._blockedLinePattern()) return;
+    if (onScreen) {
+      this._blockedGoneReads = 0;
+      // Stamped after the capture returned: output processed later is newer than it.
+      this._blockedSeenAt = Date.now();
+      if (!this._screenBlocked) {
+        this._screenBlocked = true;
+        this.emit('blockedChanged', true, frame);
+      }
+      this._armBlockedRecheck();
+      return;
+    }
+    if (!this._screenBlocked) return;
+    if (++this._blockedGoneReads < BLOCKED_CLEAR_READS) {
+      this._armBlockedRecheck();
+      return;
+    }
+    this._clearScreenBlocked();
+  }
+
+  /** (Re)arm the while-blocked screen read. One-shot and self-rearming, like the trust scan. */
+  private _armBlockedRecheck(): void {
+    if (this._blockedRecheckTimer) clearTimeout(this._blockedRecheckTimer);
+    this._blockedRecheckTimer = setTimeout(() => {
+      this._blockedRecheckTimer = null;
+      // No pane left to read (detached): nothing can change until a re-attach, whose
+      // `_resetBuffers()` clears the state and whose repaint reads the screen afresh.
+      if (this._isStopped || !this._screenBlocked || !this._mux?.capturePaneText || !this._muxSession) return;
+      // A dialog leaves the screen only through a repaint, and tmux sends every repaint
+      // to this client as PTY output (`_markActivity`). So while the last reading saw
+      // the dialog and nothing has been drawn since, it is still up: skip the capture
+      // (synchronous, see BLOCKED_QUIET_RECHECK_MS) and look again next interval. Never
+      // once a reading has missed it: the confirming read must happen on a quiet pane
+      // too, or the clear would wait for output that may never come.
+      if (
+        this._blockedGoneReads === 0 &&
+        this._lastActivityAt < this._blockedSeenAt &&
+        Date.now() - this._blockedSeenAt < BLOCKED_QUIET_RECHECK_MS
+      ) {
+        this._armBlockedRecheck();
+        return;
+      }
+      const text = this._mux.capturePaneText(this._muxSession.muxName) ?? null;
+      // Unreadable this time: keep the state, keep looking (_noteBlockedReading ignores a null).
+      if (text === null) {
+        this._armBlockedRecheck();
+        return;
+      }
+      this._noteBlockedReading(this._paneShowsBlocked(text), text);
+    }, BLOCKED_RECHECK_MS);
+  }
+
+  /** Drop the blocked state (and its timer), announcing it when it was set. */
+  private _clearScreenBlocked(): void {
+    this._blockedGoneReads = 0;
+    if (this._blockedRecheckTimer) {
+      clearTimeout(this._blockedRecheckTimer);
+      this._blockedRecheckTimer = null;
+    }
+    if (!this._screenBlocked) return;
+    this._screenBlocked = false;
+    this.emit('blockedChanged', false, null);
+  }
+
+  /**
    * The regex matching this CLI's "a turn is running" status line.
    *
    * Compiled once per session and cached: `_probePaneWorking` runs it against a whole
@@ -4295,20 +4832,90 @@ export class Session extends EventEmitter {
       this.activityTimeout = setTimeout(() => this._confirmIdle(), PANE_PROBE_RECHECK_MS);
       return;
     }
+    // ⚠️ The workspace-trust dialog is not a composer, although its `❯` (on "No, exit")
+    // arms this check and the dialog sits quiet. Calling it idle let an agent that waited
+    // for idle send its prompt into the dialog, and the prompt's Enter answered *exit*.
+    // Not working either, so the status stays where it is until the dialog is gone.
+    // Bounded by the auto-accept's own startup window: later on, a screen that merely
+    // quotes the dialog (an agent reading session-trust-dialog.ts) must not hold idle off.
+    if (this._lastPaneProbeTrustDialog && Date.now() - this._interactiveStartedAt <= TRUST_DIALOG_WINDOW_MS) {
+      this.activityTimeout = setTimeout(() => this._confirmIdle(), PANE_PROBE_RECHECK_MS);
+      return;
+    }
     this._awaitingIdleConfirmation = false;
     this.activityTimeout = null;
     // Emit idle if either:
     // 1. Claude was working and is now at prompt (normal case)
     // 2. Session just started and is ready (status is 'busy' but _isWorking is false)
     const wasWorking = this._isWorking;
-    const isInitialReady = this._status === 'busy' && !this._isWorking;
-    if (wasWorking || isInitialReady) {
-      this._isWorking = false;
-      this._status = 'idle';
-      this._lastPromptTime = Date.now();
-      if (wasWorking) this._maybeCaptureOmpSessionId();
-      this.emit('idle', { reason: wasWorking ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
-    }
+    if (wasWorking || this._status === 'busy') this._concludeIdle(wasWorking);
+  }
+
+  /**
+   * The one place a pane is concluded idle: status, working flag and prompt stamp
+   * change together, and the change is ANNOUNCED. The `idle` event is what the web
+   * server turns into `session:idle` plus a state broadcast, so a path that flips
+   * `_status` without it leaves every browser on the `busy` it was last sent. A fresh
+   * codex pane used to stay "working" in the UI for its whole life that way.
+   *
+   * @param turnEnded a real turn just finished (not a pane becoming ready at launch)
+   */
+  private _concludeIdle(turnEnded: boolean): void {
+    this._isWorking = false;
+    this._status = 'idle';
+    this._lastPromptTime = Date.now();
+    // Only a finished turn proves omp has written its session file; a pane that is
+    // merely ready has nothing to resolve yet and could claim a neighbour's file.
+    if (turnEnded) this._maybeCaptureOmpSessionId();
+    this.emit('idle', { reason: turnEnded ? 'turn-end' : 'initial-ready' } satisfies SessionIdleInfo);
+  }
+
+  /**
+   * Arm the launch settle (`_settlePaneStartup`) for a pane `startInteractive()` just
+   * started or re-attached, when one applies:
+   * - a NEW pane of an external CLI, whose TUI has no ❯ for the Claude wait to find;
+   * - a RESTORED pane (Codeman restart, auto-reattach, tile Attach) of a CLI that
+   *   declares no `capabilities.workDetect`. It is `busy` from `_resetBuffers()` like a
+   *   new pane, and with no composer glyph to arm `_confirmIdle()` nothing else would
+   *   ever settle it. A restored claude or codex pane is left to its glyph, which
+   *   reads the screen first, so a restart in mid-turn is never called idle.
+   */
+  private _armPaneSettle(isRestored: boolean): void {
+    const applies = isRestored ? !getCli(this.mode)?.capabilities.workDetect : isExternalCliMode(this.mode);
+    if (!applies) return;
+    const armedAt = Date.now();
+    this._promptCheckTimeout = setTimeout(() => this._settlePaneStartup(!isRestored, armedAt), 3000);
+  }
+
+  /**
+   * The launch settle: 3 s after a NEW external-CLI pane spawned, or after ANY pane of a
+   * CLI without work detection was re-attached, its TUI is taken to have rendered. A pane
+   * still in its spawn-time `busy` is concluded idle (announced, see `_concludeIdle`),
+   * then, for a new pane, the browser is told to refetch the rendered screen.
+   *
+   * ⚠️ This used to set `_status = 'idle'` without an event. When the launch paint
+   * never tripped `_markWorking()`, the later `_confirmIdle()` found the status
+   * already idle and emitted nothing, so no browser ever learned the pane was ready.
+   *
+   * A pane is left to `_confirmIdle()` only when its CLI declares
+   * `capabilities.workDetect` (its composer glyph arms that confirmation, which reads
+   * the screen first) AND it is already working, or a prompt was submitted since the
+   * timer was armed: a turn started 2.9 s in is not marked working before the deferred
+   * parsers run, and an idle edge here would end a send-and-wait registered for it.
+   * For every other CLI this timer is the only thing that ever settles a fresh pane,
+   * so it settles it even if a stray spinner glyph in the launch paint latched
+   * `_isWorking`.
+   *
+   * @param refreshScreen emit `needsRefresh` (a new pane; an attach refetches by itself)
+   * @param armedAt when the timer was armed (a submit at or after it means a prompt)
+   */
+  private _settlePaneStartup(refreshScreen: boolean, armedAt: number): void {
+    this._promptCheckTimeout = null;
+    if (this._isStopped) return;
+    const busyWithTurn = this._isWorking || this.lastSubmitAt >= armedAt;
+    const leaveToConfirm = busyWithTurn && !!getCli(this.mode)?.capabilities.workDetect;
+    if (this._status === 'busy' && !leaveToConfirm) this._concludeIdle(false);
+    if (refreshScreen) this.emit('needsRefresh');
   }
 
   /**
@@ -4589,6 +5196,7 @@ export class Session extends EventEmitter {
     prompt: string,
     options?: { model?: string; onProgress?: (info: { tokens?: number; status?: string }) => void }
   ): Promise<{ result: string; cost: number }> {
+    if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
     return new Promise((resolve, reject) => {
       if (this.ptyProcess) {
         reject(new Error('Session already has a running process'));
@@ -4725,6 +5333,9 @@ export class Session extends EventEmitter {
     // into a program that never enabled tracking.
     this._cliMouseModes.clear();
     this._syncCliMouseTracking();
+    // Nor does it start inside a dialog. Announced, so a pending alert for the old
+    // pane's dialog is resolved rather than left behind it.
+    this._clearScreenBlocked();
     this._markActivity(true);
   }
 
@@ -4904,6 +5515,17 @@ export class Session extends EventEmitter {
           this._armExternalCliIdleTimer();
           return;
         }
+      } else if (wasWorking && getCli(this.mode)?.capabilities.workDetect?.workingLine) {
+        // A quiet stream is not the end of a turn: a CLI that declares a working line
+        // (opencode's footer spinner, gemini's spinner line) can sit silent between
+        // repaints while its turn still runs. Read the SCREEN before calling it idle,
+        // as _confirmIdle() does for the composer path.
+        // _probePaneWorking() reads the pane (throttled) for the declared working line or
+        // a hand-off to workers; null means it could not read, so the quiet timer stands.
+        if (this._probePaneWorking() === true) {
+          this._armExternalCliIdleTimer();
+          return;
+        }
       }
       if (wasWorking || isInitialReady) {
         this._isWorking = false;
@@ -4917,11 +5539,17 @@ export class Session extends EventEmitter {
   private _clearAllTimers(): void {
     // Stop re-sending Enter for a prompt this session will never take now
     this._submitVerifier?.cancel();
+    this._assistantSubmitVerifier?.cancel();
     this._submitVerifier = null;
     // Clear the workspace-trust follow-up read
     if (this._trustDialogTimer) {
       clearTimeout(this._trustDialogTimer);
       this._trustDialogTimer = null;
+    }
+    // Clear the while-blocked screen read (the state itself is left to its owner)
+    if (this._blockedRecheckTimer) {
+      clearTimeout(this._blockedRecheckTimer);
+      this._blockedRecheckTimer = null;
     }
 
     // Clear activity timeout to prevent memory leak
@@ -5314,10 +5942,68 @@ export class Session extends EventEmitter {
    * discards the data, but it used to do so with no signal at all — which is how
    * input could disappear while the caller believed it had been delivered.
    */
+  private _assistantInputGuard: ((permit?: string) => boolean) | undefined;
+  private _assistantPendingWrites = 0;
+  private _assistantLastInputAt = 0;
+  setAssistantInputGuard(guard: (permit?: string) => boolean): void {
+    this._assistantInputGuard = guard;
+  }
+  get assistantPendingWrites(): number {
+    return this._assistantPendingWrites;
+  }
+  get assistantLastInputAt(): number {
+    return this._assistantLastInputAt;
+  }
+  get assistantInputLocked(): boolean {
+    return !this.assistantInputAllowed();
+  }
+  assistantInputAllowed(permit?: string): boolean {
+    return this._assistantInputGuard?.(permit) ?? true;
+  }
+  async performAuxiliaryInput(operation: () => Promise<void>): Promise<void> {
+    if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
+    this._assistantLastInputAt = Date.now();
+    this._assistantPendingWrites++;
+    try {
+      await operation();
+    } finally {
+      this._assistantPendingWrites--;
+    }
+  }
+  cancelAssistantSubmitVerification(): void {
+    this._submitVerifier?.cancel();
+    this._assistantSubmitVerifier?.cancel();
+  }
+  /** Enter-only recovery for a new, owned Codex request; never retypes its text. */
+  verifyAssistantSubmission(text: string, permit: string, beforeEnter: () => Promise<boolean>): void {
+    this._assistantSubmitVerifier?.cancel();
+    if (
+      getCli(this.mode)?.capabilities.nativeAssistantProfile !== 'codex' ||
+      !this._mux?.capturePaneText ||
+      !this._muxSession
+    )
+      return;
+    this._assistantSubmitVerifier = new SubmitVerifier({
+      capture: () =>
+        this._isStopped || !this._muxSession ? null : this._mux?.capturePaneText?.(this._muxSession.muxName),
+      glyph: () => '›',
+      matches: exactPromptStillInComposer,
+      beforeEnter,
+      sendEnter: async () => {
+        if (this._isStopped || !this.assistantInputAllowed(permit)) return;
+        await this.writeViaMux('\r', { assistantPermit: permit });
+      },
+      log: (message) => console.log(`[Session ${this.id.slice(0, 8)}] assistant ${message}`),
+    });
+    this._assistantSubmitVerifier.arm(text);
+  }
+
   write(data: string, options: SessionWriteOptions = {}): boolean {
-    const submittedPrompt = this._trackSubmit(data, options);
+    if (!this.assistantInputAllowed(options.assistantPermit)) return false;
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
+    this._assistantLastInputAt = Date.now();
+    const submittedPrompt = this._trackSubmit(data, options);
     this._emitSubmittedPrompt(submittedPrompt);
     return true;
   }
@@ -5482,7 +6168,7 @@ export class Session extends EventEmitter {
    *
    * More reliable than direct PTY write for programmatic input, especially
    * with Claude CLI which uses Ink (React for terminals).
-   * Uses tmux `send-keys -l` to inject text + Enter.
+   * Uses tmux to inject the text (one bracketed paste) + Enter.
    *
    * @param data - Input data with optional `\r` for Enter
    * @returns true if input was sent, false if no mux session or PTY
@@ -5494,22 +6180,31 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string, options: SessionWriteOptions = {}): Promise<boolean> {
-    const submittedPrompt = this._trackSubmit(data, options);
-    if (this._mux && this._muxSession) {
-      const sent = await this._mux.sendInput(this.id, data);
-      if (sent) {
-        this._emitSubmittedPrompt(submittedPrompt);
-        this._verifySubmitted(data);
+    if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._assistantPendingWrites++;
+    try {
+      if (this._mux && this._muxSession) {
+        const sent = await this._mux.sendInput(this.id, data);
+        if (sent) {
+          this._assistantLastInputAt = Date.now();
+          const submittedPrompt = this._trackSubmit(data, options);
+          this._emitSubmittedPrompt(submittedPrompt);
+          // Delegated delivery is observed through native acceptance, without autonomous Enter retries.
+          if (!options.assistantPermit) this._verifySubmitted(data);
+        }
+        return sent;
       }
-      return sent;
+      if (this.ptyProcess) {
+        this.ptyProcess.write(data);
+        this._assistantLastInputAt = Date.now();
+        const submittedPrompt = this._trackSubmit(data, options);
+        this._emitSubmittedPrompt(submittedPrompt);
+        return true;
+      }
+      return false;
+    } finally {
+      this._assistantPendingWrites--;
     }
-    // Fallback to PTY write
-    if (this.ptyProcess) {
-      this.ptyProcess.write(data);
-      this._emitSubmittedPrompt(submittedPrompt);
-      return true;
-    }
-    return false;
   }
 
   /**
@@ -5517,6 +6212,8 @@ export class Session extends EventEmitter {
    * unchanged; checkpoint orchestration receives the exact failed stage.
    */
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
+    if (!this.assistantInputAllowed())
+      return { ok: false, stage: 'text', error: 'Assistant owns session input', attempt: 1 };
     const checkpointRunId = this._autoOps.activeCheckpointRunId;
     const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
     const isClear = checkpointCommand === '/clear';
@@ -5611,9 +6308,9 @@ export class Session extends EventEmitter {
         this._isStopped || !this._mux || !this._muxSession
           ? null
           : this._mux.capturePaneText?.(this._muxSession.muxName),
-      sendEnter: () => this._mux?.sendInput(this.id, '\r'),
+      sendEnter: () => (this.assistantInputAllowed() ? this._mux?.sendInput(this.id, '\r') : undefined),
       // ⚠ NO fallback glyph here, unlike the screen-reading probe elsewhere in this file.
-      // Only claude and codex declare a promptGlyph; the other eight modes would fall back
+      // Only claude, codex, pi, opencode, omp, gemini and antigravity declare a promptGlyph; the other modes would fall back
       // to claude's `❯`, which is ALSO starship's default shell prompt (and pure's, and
       // spaceship's, and p10k lean's). On a shell session the line `❯ npm run build` sits
       // on screen for as long as the command runs, promptStillInComposer() reads that as
@@ -5870,6 +6567,7 @@ export class Session extends EventEmitter {
 
   // Legacy method for sending input - wraps runPrompt
   async sendInput(input: string): Promise<void> {
+    if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
     this._status = 'busy';
     this._markActivity(true);
     this.runPrompt(input).catch((err) => {
@@ -5979,8 +6677,10 @@ export class Session extends EventEmitter {
           console.warn('[Session] Failed to send SIGTERM to PTY process (may already be dead):', err);
         }
 
-        // Give it a moment to terminate gracefully
-        await new Promise((resolve) => setTimeout(resolve, GRACEFUL_SHUTDOWN_DELAY_MS));
+        // Give it a moment to terminate gracefully. For a tmux-backed session this
+        // is the attach client, gone within a few ms of SIGTERM, and this used to be
+        // a fixed 100ms sleep on every close.
+        if (pid) await waitForProcessesExit([pid], { timeoutMs: GRACEFUL_SHUTDOWN_DELAY_MS });
 
         // Force kill with SIGKILL if still alive
         try {

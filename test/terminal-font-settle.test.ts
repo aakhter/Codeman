@@ -181,7 +181,7 @@ describe('selectSession font gate', () => {
     // AND applies the floor it reports, so xterm and the PTY cannot disagree
     // (#464). The gate this test guards is unchanged — the font must be
     // measured before the terminal is.
-    const fit = body.indexOf('this.syncTerminalGeometry();');
+    const fit = body.indexOf('this.syncTerminalGeometry?.();', wait);
     expect(wait).toBeGreaterThan(-1);
     expect(fit).toBeGreaterThan(-1);
     expect(wait).toBeLessThan(fit);

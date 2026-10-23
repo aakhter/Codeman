@@ -8,19 +8,15 @@
  * 6. Logout endpoint invalidates session
  * 7. Settings schema rejects unknown fields
  *
- * Port: 3160 (auth tests), 3161 (loopback no-auth tests), 3162 (network override tests)
+ * Port: ephemeral (`new WebServer(0, …)`, read back through `boundPort`)
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { WebServer } from '../src/web/server.js';
 import { TmuxManager } from '../src/tmux-manager.js';
 import { SettingsUpdateSchema } from '../src/web/schemas.js';
 import { getHookSecret, HOOK_SECRET_HEADER } from '../src/config/hook-secret.js';
+import { AUTH_FAILURE_MAX, AUTH_IP_FAILURE_MAX } from '../src/config/auth-config.js';
 
-const AUTH_PORT = 3160;
-const NOAUTH_PORT = 3161;
-const NETWORK_OVERRIDE_PORT = 3162;
-const AUTH_RATE_LIMIT_PORT = 3220;
-const NOAUTH_NETWORK_PORT = 3221;
 const TEST_USER = 'admin';
 const TEST_PASS = 'test-password-12345';
 
@@ -30,12 +26,12 @@ function basicAuthHeader(user: string, pass: string): string {
   return 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 }
 
-async function startAuthServer(port: number): Promise<{ server: WebServer; baseUrl: string }> {
+async function startAuthServer(): Promise<{ server: WebServer; baseUrl: string }> {
   process.env.CODEMAN_PASSWORD = TEST_PASS;
   process.env.CODEMAN_USERNAME = TEST_USER;
-  const server = new WebServer(port, false, true);
+  const server = new WebServer(0, false, true);
   await server.start();
-  return { server, baseUrl: `http://localhost:${port}` };
+  return { server, baseUrl: `http://localhost:${server.boundPort}` };
 }
 
 async function getSessionCookie(baseUrl: string): Promise<string> {
@@ -51,7 +47,7 @@ async function getSessionCookie(baseUrl: string): Promise<string> {
 }
 
 async function exhaustAuthFailures(baseUrl: string, prefix: string): Promise<void> {
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < AUTH_IP_FAILURE_MAX; i++) {
     const res = await fetch(`${baseUrl}/api/status`, {
       headers: { Authorization: basicAuthHeader(TEST_USER, `${prefix}-${i}`) },
     });
@@ -66,9 +62,9 @@ describe('Auth Security', () => {
   beforeAll(async () => {
     process.env.CODEMAN_PASSWORD = TEST_PASS;
     process.env.CODEMAN_USERNAME = TEST_USER;
-    server = new WebServer(AUTH_PORT, false, true);
+    server = new WebServer(0, false, true);
     await server.start();
-    baseUrl = `http://localhost:${AUTH_PORT}`;
+    baseUrl = `http://localhost:${server.boundPort}`;
   });
 
   afterAll(async () => {
@@ -194,7 +190,7 @@ describe('Auth Security', () => {
     let rateBaseUrl: string;
 
     beforeEach(async () => {
-      ({ server: rateServer, baseUrl: rateBaseUrl } = await startAuthServer(AUTH_RATE_LIMIT_PORT));
+      ({ server: rateServer, baseUrl: rateBaseUrl } = await startAuthServer());
     });
 
     afterEach(async () => {
@@ -210,6 +206,19 @@ describe('Auth Security', () => {
 
       expect(res.status).toBe(429);
       expect(res.headers.get('retry-after')).toMatch(/^\d+$/);
+    });
+
+    it('leaves per-IP headroom above the per-account cap before throttling (COD-524)', async () => {
+      // A client behind one egress IP (C3 connectivity) retries more than a person
+      // does, so the per-IP login bucket is wider than the per-account one.
+      expect(AUTH_IP_FAILURE_MAX).toBe(50);
+      expect(AUTH_IP_FAILURE_MAX).toBeGreaterThan(AUTH_FAILURE_MAX);
+      for (let i = 0; i <= AUTH_FAILURE_MAX; i++) {
+        const res = await fetch(`${rateBaseUrl}/api/status`, {
+          headers: { Authorization: basicAuthHeader(TEST_USER, `cod524-${i}`) },
+        });
+        expect(res.status).toBe(401);
+      }
     });
 
     it('should allow an existing valid session cookie during auth failure lockout', async () => {
@@ -361,7 +370,7 @@ describe('No-Auth Server Startup Policy', () => {
     delete process.env.CODEMAN_PASSWORD;
     delete process.env.CODEMAN_USERNAME;
     delete process.env.CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK;
-    server = new WebServer(NOAUTH_PORT, false, true, '127.0.0.1');
+    server = new WebServer(0, false, true, '127.0.0.1');
     await server.start();
   });
 
@@ -373,7 +382,7 @@ describe('No-Auth Server Startup Policy', () => {
   });
 
   it('allows loopback requests without auth when no password is configured', async () => {
-    const res = await fetch(`http://localhost:${NOAUTH_PORT}/api/status`);
+    const res = await fetch(`http://localhost:${server.boundPort}/api/status`);
     expect(res.status).toBe(200);
   });
 
@@ -382,10 +391,10 @@ describe('No-Auth Server Startup Policy', () => {
     // bind without a password no longer refuses to start — it starts and warns,
     // pointing at how to secure it. See docs/security-architecture.md.
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const networkServer = new WebServer(NOAUTH_NETWORK_PORT, false, true, '0.0.0.0');
+    const networkServer = new WebServer(0, false, true, '0.0.0.0');
 
     await expect(networkServer.start()).resolves.toBeUndefined();
-    const res = await fetch(`http://localhost:${NOAUTH_NETWORK_PORT}/api/status`);
+    const res = await fetch(`http://localhost:${networkServer.boundPort}/api/status`);
     expect(res.status).toBe(200);
 
     const warned = warnSpy.mock.calls.flat().join('\n');
@@ -407,10 +416,10 @@ describe('No-Auth Server Startup Policy', () => {
   });
 
   it('allows non-loopback startup with the explicit unauthenticated-network override', async () => {
-    const networkServer = new WebServer(NETWORK_OVERRIDE_PORT, false, true, '0.0.0.0', undefined, true);
+    const networkServer = new WebServer(0, false, true, '0.0.0.0', undefined, true);
 
     await networkServer.start();
-    const res = await fetch(`http://localhost:${NETWORK_OVERRIDE_PORT}/api/status`);
+    const res = await fetch(`http://localhost:${networkServer.boundPort}/api/status`);
     expect(res.status).toBe(200);
     await networkServer.stop();
   });

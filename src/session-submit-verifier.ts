@@ -4,7 +4,7 @@
  *
  * Claude Code 2.1.277 (auto-installed 2026-09-18) takes typed text the moment its
  * composer paints but ignores Enter for the first 30 to 50 seconds after it, so the
- * `send-keys -l <text>` + `send-keys Enter` pair `TmuxManager.sendInput()` sends 50 ms
+ * text + `send-keys Enter` pair `TmuxManager.sendInput()` sends 50 ms
  * apart leaves the prompt sitting on the composer with `0 tokens`, and every caller
  * that then waits for the turn (send-and-wait, the agent skill, the maintainer bot,
  * cron, Ralph) burns its whole timeout on a turn that never started. Measured through
@@ -65,6 +65,36 @@ export function promptStillInComposer(screen: string, prompt: string, glyph: str
   return head.length > 0 && composer.startsWith(head);
 }
 
+/** Assistant retries require the entire composer, not the ordinary 24-character head. */
+export function exactPromptStillInComposer(screen: string, prompt: string, glyph: string): boolean {
+  if (!glyph) return false;
+  const lines = stripAnsi(screen).split('\n');
+  let start = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trimStart().startsWith(glyph)) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return false;
+  const tail = lines.slice(start);
+  // A modal or running-turn footer is not proof of an editable composer.
+  if (
+    /would you like|do you want|allow once|approve|esc to (cancel|interrupt)|select an option|press enter/i.test(
+      tail.join('\n')
+    )
+  )
+    return false;
+  const body = [tail[0].trimStart().slice(glyph.length)];
+  for (const line of tail.slice(1)) {
+    if (!line.trim() || /^[─━]/.test(line.trim())) break;
+    // Continuations must be indented; never consume another prompt or status line.
+    if (!/^\s/.test(line)) return false;
+    body.push(line);
+  }
+  return compact(body.join('')) === compact(prompt) && compact(prompt).length > 0;
+}
+
 export interface SubmitVerifierDeps {
   /** The rendered pane, or null when there is none to read. */
   capture: () => string | null | undefined;
@@ -75,6 +105,9 @@ export interface SubmitVerifierDeps {
   log?: (message: string) => void;
   /** Test seam; production uses SUBMIT_VERIFY_DELAYS_MS. */
   delaysMs?: readonly number[];
+  /** Stronger matching and native acceptance gate for assistant-owned submission. */
+  matches?: (screen: string, text: string, glyph: string) => boolean;
+  beforeEnter?: () => Promise<boolean>;
 }
 
 /**
@@ -107,7 +140,16 @@ export class SubmitVerifier {
       this.timer = null;
       if (gen !== this.generation) return;
       const screen = this.deps.capture();
-      if (promptStillInComposer(screen ?? '', text, this.deps.glyph()) !== true) return;
+      const matches = this.deps.matches ?? promptStillInComposer;
+      if (matches(screen ?? '', text, this.deps.glyph()) !== true) return;
+      try {
+        if (this.deps.beforeEnter && !(await this.deps.beforeEnter())) return;
+      } catch {
+        return;
+      }
+      if (gen !== this.generation) return;
+      // The native check may await IO: reread the composer before sending.
+      if (this.deps.beforeEnter && matches(this.deps.capture() ?? '', text, this.deps.glyph()) !== true) return;
       resent++;
       this.deps.log?.(
         `prompt still in the composer after ${Math.round(elapsed / 1000)}s, re-sending Enter (${resent}/${delays.length})`

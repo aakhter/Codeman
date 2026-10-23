@@ -27,24 +27,51 @@
  * @module web/server
  */
 
+import { findUser } from '../user-store.js';
+import { AssistantRequestManager } from '../assistant-request-manager.js';
+import {
+  AssistantRecovery,
+  assistantComposerEmpty,
+  assistantCodexRecoveryProfile,
+  assistantRecoveryGroup,
+  assistantRecoveryCandidateExited,
+} from '../assistant-recovery.js';
+import {
+  assistantBindingMode,
+  assistantSessionHome,
+  findAssistantConversation,
+  openCodeAssistantHome,
+  nativeAssistantProfile,
+} from '../assistant-native.js';
+import { resolveCodexRecoveryStrategy } from '../codex-command-profiles.js';
+import { canonicalizeCodexHome } from '../checkpoint-conversation-identity.js';
+import { _clampExternalCliBypassForOwner } from './routes/session-routes.js';
+import { clampEnvOverridesForOwner } from '../session-env-clamp.js';
+import { AssistantRequestStore } from '../assistant-request-store.js';
+import { AssistantStore } from '../assistant-store.js';
+import { AssistantRegistry } from '../assistant-registry.js';
+import { registerAssistantRoutes } from './routes/assistant-routes.js';
 import Fastify, { FastifyInstance } from 'fastify';
 import fastifyCompress from '@fastify/compress';
 import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyMultipart from '@fastify/multipart';
-import { pasteImageDirInUseByOtherSession, startPasteImageGc } from './paste-image-gc.js';
+import { pasteImageDirInUseByOtherSession, startPasteImageGc, uploadDirs } from './paste-image-gc.js';
 import { CLEAN_EXIT_CLOSE_REASON, shouldCloseCleanlyExitedSession } from '../pane-exit-sweep.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, chmodSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execFile, execSync } from 'node:child_process';
-import { hostname as getHostname, uptime as osUptime } from 'node:os';
+import { hostname as getHostname, uptime as osUptime, homedir } from 'node:os';
 import { normalizeSettingsObject } from '../config/settings.js';
 import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
 import { rebootRestoreRegistry } from './reboot-restore-registry.js';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
+import { WebhookNotifier, readWebhookConfig } from '../webhook-notify.js';
+import type { WebhookUrgency } from '../types/push.js';
+import { webviewFetch } from './webview-egress.js';
 import { readRemoteHosts, rehydrateRemoteHostFields } from '../remote-hosts.js';
 import type { RemoteWakeRegistry } from '../remote-wake.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
@@ -89,6 +116,7 @@ import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
 import { documentVersionStore } from '../document-version-store.js';
+import { folderGrants } from '../folder-listing.js';
 import { getCli, enabledClis, listClis } from '../config/cli-registry/registry.js';
 import { isCliEntryInstalled, probeStockCliAvailability } from '../utils/cli-installed-probes.js';
 import { readCustomModelHosts } from '../custom-model-hosts.js';
@@ -126,8 +154,10 @@ import { sessionWaits } from './session-wait-registry.js';
 import { intentStore } from '../intent-store.js';
 import { AI_CHECK_MODEL } from '../config/ai-defaults.js';
 import { approvalInbox } from './approval-inbox.js';
+import { SCREEN_BLOCKED_SOURCE } from './screen-blocked.js';
 import { stopDeepSeekWeb } from '../deepseek-web-server.js';
 import { planAutomaticRecovery, snapshotDeadSessionRecoveries } from '../session-recovery.js';
+import { createWorkerRecoveryRecord } from '../remote-worker-recovery.js';
 import { createNativeResumeIdResolver, resolveNativeResumeIdForRecovery } from '../native-session-identity.js';
 import type { SessionRecoveryRecord } from '../types/session-recovery.js';
 import { executeSessionRecovery, recoveryRemoteIsLive, resolveRecoveryTransport } from './session-recovery-service.js';
@@ -313,6 +343,7 @@ import { MAX_CONCURRENT_SESSIONS, MAX_SSE_CLIENTS } from '../config/map-limits.j
 import { resolveTerminalHistoryConfig } from '../config/terminal-history.js';
 import { MAX_PASTE_IMAGE_BYTES } from '../config/buffer-limits.js';
 import { SseEvent, approvalResolvedEventPayload } from './sse-events.js';
+import { MAX_ROUTE_PARAM_LENGTH } from './route-helpers.js';
 import { getLatestPlanUsage, setLatestCodexPlanUsage } from './plan-usage-latest.js';
 import { telemetrySignature } from '../usage-telemetry.js';
 import { readCodexPlanUsage, resolveCodexBinaryPath } from '../utils/codex-cli-resolver.js';
@@ -334,15 +365,18 @@ import {
   registerTeamRoutes,
   registerMuxRoutes,
   registerFileRoutes,
+  registerHtmlViewRoutes,
   registerScheduledRoutes,
   registerHookEventRoutes,
   registerApprovalRoutes,
   registerRebootRestoreRoutes,
   registerSessionRecoveryRoutes,
   registerReadMyMindRoutes,
+  registerGitStatusRoutes,
   registerStatusTelemetryRoutes,
   registerSystemRoutes,
   registerCaseRoutes,
+  registerWorktreeRoutes,
   registerSessionRoutes,
   registerRespawnRoutes,
   registerRalphRoutes,
@@ -359,6 +393,9 @@ import {
   registerVoiceRoutes,
   registerWebviewRoutes,
   registerTabLayoutRoutes,
+  registerMcpSyncRoutes,
+  registerWebhookRoutes,
+  registerDoctorRoutes,
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
   readCustomModelEndpointsEnabled,
@@ -512,6 +549,14 @@ export class WebServer extends EventEmitter {
     owner?: string
   ) => Promise<(SessionNotesSource & { owner?: string }) | null>;
   private port: number;
+
+  /**
+   * The port the server is actually listening on once `start()` has resolved — the
+   * OS-assigned one for `new WebServer(0, …)` — and the constructor's port before that.
+   */
+  get boundPort(): number {
+    return this.port;
+  }
   private host: string;
   private https: boolean;
   /** Reverse-proxy sub-path prefix (normalized: '' for root, or '/foo'). */
@@ -566,12 +611,16 @@ export class WebServer extends EventEmitter {
     removed: (data: { runId: string }) => void;
   } | null = null;
   private tunnelManager: TunnelManager = new TunnelManager();
+  private readonly assistantStore = new AssistantStore();
+  private assistantRequests: AssistantRequestManager | undefined;
   private authSessions: StaleExpirationMap<string, import('./ports/auth-port.js').AuthSessionRecord> | null = null;
   private authFailures: StaleExpirationMap<string, number> | null = null;
   private qrAuthFailures: StaleExpirationMap<string, number> | null = null;
   private hookSecretFailures: StaleExpirationMap<string, number> | null = null;
   private userFailures: StaleExpirationMap<string, number> | null = null;
   private pushStore: PushSubscriptionStore = new PushSubscriptionStore();
+  /** ntfy / Slack / Discord / generic webhook for the push events; config in webhook.json (0600). */
+  private webhookNotifier = new WebhookNotifier(() => readWebhookConfig(getDataDir()), webviewFetch);
   private teamWatcher: TeamWatcher = new TeamWatcher();
   private _orchestratorLoop: import('../orchestrator-loop.js').OrchestratorLoop | null = null;
   private readonly titleHostname: string;
@@ -628,11 +677,16 @@ export class WebServer extends EventEmitter {
     const rewriteUrl = (req: { url?: string }): string => rewriteApiV1Url(stripBasePath(this.basePath, req.url || ''));
     if (https) {
       const { key, cert } = getOrCreateSelfSignedCert();
-      this.app = Fastify({ logger: false, https: { key, cert }, rewriteUrl });
+      this.app = Fastify({
+        logger: false,
+        https: { key, cert },
+        rewriteUrl,
+        routerOptions: { maxParamLength: MAX_ROUTE_PARAM_LENGTH },
+      });
     } else {
-      this.app = Fastify({ logger: false, rewriteUrl });
+      this.app = Fastify({ logger: false, rewriteUrl, routerOptions: { maxParamLength: MAX_ROUTE_PARAM_LENGTH } });
     }
-    this.mux = createMultiplexer();
+    this.mux = createMultiplexer(testMode);
     this.agentActivityCoordinator = new SessionAgentActivityCoordinator({
       inspect: (project, signal) => this.inspectAgentActivity(project, signal),
       onDerivedIdle: (coordinatorSession) => this.commitDerivedAgentIdle(coordinatorSession.id),
@@ -666,6 +720,9 @@ export class WebServer extends EventEmitter {
         this.cachedLightState = null;
         this.sse.broadcastSessionOrder(change);
       },
+      // Fresh, not the 2s cache: the settings PUT does not invalidate it, and a
+      // flip must apply to the very next spawn.
+      childrenFollowParent: async () => (await this.readSettings(true)).spawnedTabsFollowParent === true,
     });
     if (this.testMode) this.tabLayouts.markRestorationSkipped();
 
@@ -706,9 +763,13 @@ export class WebServer extends EventEmitter {
     // (D1: the watcher does NOT reassemble options itself). On success we reset
     // the watcher's backoff; on failure the backoff schedules the next attempt.
     this.mux.on('remoteSessionDropped', (data) => {
-      const { sessionId, attempt } = data as { sessionId: string; attempt: number };
+      const { sessionId, attempt, workerReboot } = data as {
+        sessionId: string;
+        attempt: number;
+        workerReboot?: boolean;
+      };
       this.broadcast(SseEvent.RemoteSessionDropped, { sessionId, attempt });
-      void this.handleRemoteSessionDropped(sessionId);
+      void this.handleRemoteSessionDropped(sessionId, workerReboot);
     });
     this.mux.on('remoteReconnectExhausted', (data) => {
       const { sessionId } = data as { sessionId: string };
@@ -1422,6 +1483,7 @@ export class WebServer extends EventEmitter {
       const chosen = cases.find((info) => info.name === options.caseName);
       if (chosen) session.setNotesLaunchCase(chosen);
     }
+    this.assistantRequests?.attach(session);
     this.attachAgentActivity(session);
     let activityAttached = true;
     try {
@@ -1525,7 +1587,11 @@ export class WebServer extends EventEmitter {
       saveRespawnConfig: this.saveRespawnConfig.bind(this),
       // ConfigPort
       store: this.store,
-      port: this.port,
+      // A getter, not a snapshot: this context is built in setupRoutes(), BEFORE
+      // listen() resolves an ephemeral `port: 0`, and the tunnel start reads it later.
+      get port() {
+        return self.port;
+      },
       https: this.https,
       testMode: this.testMode,
       serverStartTime: this.serverStartTime,
@@ -1632,7 +1698,7 @@ export class WebServer extends EventEmitter {
     registerHostGuard(this.app, () => this.getHostPolicy(), this.basePath);
 
     // Auth middleware (Basic Auth + session cookies + rate limiting)
-    const authState = registerAuthMiddleware(this.app, this.https, this.basePath);
+    const authState = registerAuthMiddleware(this.app, this.https, this.basePath, this.assistantStore);
     if (authState) {
       this.authSessions = authState.authSessions;
       this.authFailures = authState.authFailures;
@@ -1722,7 +1788,9 @@ export class WebServer extends EventEmitter {
     });
 
     // Serve static files — content-hashed assets (e.g. app.a3f8c2e1.js) are immutable, cache aggressively.
-    // HTML must revalidate every time so browsers pick up new hashed filenames after deploys.
+    // HTML must revalidate every time so browsers pick up new hashed filenames after deploys, and every
+    // HTML page has its own route that says so (/, /index.html, /session/:id). ⚠️ A new static .html
+    // needs such a route too: this plugin would hand it a year of `immutable`.
     // cacheControl disabled so setHeaders owns Cache-Control for plain static assets.
     // preCompressed: serve pre-built .br/.gz files (from build step) to avoid per-request CPU compression
     await this.app.register(fastifyStatic, {
@@ -1734,7 +1802,7 @@ export class WebServer extends EventEmitter {
       // `ServerResponse` to a `FastifyReply`, so it is `reply.header()` here and
       // NOT `res.setHeader()`. A v9-style body throws TypeError on every static
       // request, which is every page load. See the v10.0.0 release notes.
-      setHeaders: (reply: any, path: string) => {
+      setHeaders: (reply, filePath) => {
         // ⚠️ That same change ALSO flipped precedence, and silently. Under v9 this
         // callback wrote to the raw response and Fastify's staged reply headers then
         // overwrote it, so a route that set its own Cache-Control before .sendFile()
@@ -1743,12 +1811,16 @@ export class WebServer extends EventEmitter {
         // no-store` its route asks for — a service worker that can never update.
         // So: a route that already decided keeps its answer.
         if (reply.getHeader('Cache-Control') !== undefined) return;
-        // Use .includes() not .endsWith() — preCompressed serves .html.br/.html.gz
-        if (path.includes('.html')) {
+        // A JSON file here is DATA the page fetches at runtime (whats-new.json is rewritten every
+        // release, security-notices.json by hand, manifest.json), never content-hashed and never
+        // `?v=`-busted, so it must revalidate. Under `immutable` a browser may keep last release's
+        // copy for a year, and the page's `fetch(..., { cache: 'no-cache' })` is the only thing
+        // asking it not to; the response header is what every browser honours.
+        if (filePath.endsWith('.json')) {
           reply.header('Cache-Control', 'no-cache');
-        } else {
-          reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+          return;
         }
+        reply.header('Cache-Control', 'public, max-age=31536000, immutable');
       },
     });
 
@@ -1920,16 +1992,240 @@ export class WebServer extends EventEmitter {
     registerTeamRoutes(this.app, ctx);
     registerMuxRoutes(this.app, ctx);
     registerFileRoutes(this.app, ctx);
+    registerHtmlViewRoutes(this.app, ctx);
     registerScheduledRoutes(this.app, ctx);
     registerHookEventRoutes(this.app, ctx);
     registerApprovalRoutes(this.app, ctx);
     registerRebootRestoreRoutes(this.app, ctx);
     registerSessionRecoveryRoutes(this.app, ctx);
     registerReadMyMindRoutes(this.app, ctx);
+    registerGitStatusRoutes(this.app, ctx);
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
+    this.assistantRequests = new AssistantRequestManager(
+      this.assistantStore,
+      new AssistantRequestStore(),
+      (id) => this.sessions.get(id),
+      (id) =>
+        Boolean(
+          this.respawnControllers.get(id)?.isRunning ||
+          this.sessions.get(id)?.ralphTracker.enabled ||
+          this.sessions.get(id)?.autoClearEnabled ||
+          this.sessions.get(id)?.autoCompactEnabled ||
+          this.sessions.get(id)?.checkpointEnabled
+        ),
+      async (r) => {
+        if (
+          r.tokenId &&
+          !this.assistantStore
+            .listTokens(r.assistantId)
+            .some((t) => t.id === r.tokenId && t.owner === r.owner && t.scopes.includes('submit'))
+        )
+          return false;
+        if (!isMultiUserMode()) return r.owner === undefined;
+        const user = r.owner ? await findUser(r.owner) : undefined;
+        return Boolean(user && !user.disabled && !user.mustChangePassword);
+      },
+      (r) =>
+        this.sse.broadcast(
+          'assistant-request:updated',
+          { id: r.id, assistantId: r.assistantId, status: r.status, revision: r.revision },
+          isMultiUserMode() ? { owner: r.owner, adminOnly: r.owner === undefined } : undefined
+        )
+    );
+    registerAssistantRoutes(
+      this.app,
+      new AssistantRegistry(this.assistantStore, (id) => this.assistantRequests!.outstanding(id)),
+      this.sessions,
+      this.assistantRequests
+    );
+    this.assistantRequests.setRecovery(
+      new AssistantRecovery(this.assistantStore, this.assistantRequests, (id) => this.sessions.get(id), {
+        placement: (live) => assistantRecoveryGroup(this.store.getTabLayout(live.owner ?? '@single'), live.id),
+        candidateExited: async (live) => {
+          const session = this.sessions.get(live.id);
+          return Boolean(session?.muxName && (await assistantRecoveryCandidateExited(session.muxName)));
+        },
+        snapshot: (live) => {
+          const session = this.sessions.get(live.id);
+          if (
+            !session ||
+            session.customModel ||
+            session.getCodexProviderIdentityForPersist()?.credentialSource === 'session-key'
+          )
+            throw new Error('Session-scoped credentials require manual recovery');
+          const tabGroupId = assistantRecoveryGroup(this.store.getTabLayout(session.owner ?? '@single'), session.id);
+          const assistantProfile = nativeAssistantProfile(session.mode);
+          if (assistantProfile === 'claude') {
+            const envOverrides = session.getEnvOverridesForPersist();
+            if (Object.keys(envOverrides ?? {}).some((k) => /TOKEN|KEY|AUTH|ENDPOINT|BASE_URL/i.test(k)))
+              throw new Error('Private provider configuration requires manual recovery');
+            const state = session.toState();
+            return {
+              name: session.name,
+              tabGroupId,
+              mode: 'claude' as const,
+              codexConfig: {},
+              envOverrides,
+              claudeConfig: {
+                claudeMode: session.claudeMode,
+                allowedTools: session.allowedTools,
+                model: state.model,
+                effort: state.effort,
+                advisorModel: state.advisorModel,
+              },
+            };
+          }
+          if (assistantProfile === 'opencode') {
+            if (
+              session.openCodeConfig?.configContent ||
+              Object.keys(session.getEnvOverridesForPersist() ?? {}).length ||
+              ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT'].some((key) => process.env[key])
+            )
+              throw new Error('Custom provider configuration requires manual recovery');
+            return {
+              name: session.name,
+              tabGroupId,
+              mode: 'opencode' as const,
+              codexConfig: {},
+              openCodeConfig: {
+                model: session.openCodeConfig?.model,
+                autoAllowTools: session.openCodeConfig?.autoAllowTools,
+              },
+              openCodeConfigHome: canonicalizeCodexHome(process.env.XDG_CONFIG_HOME || join(homedir(), '.config')),
+            };
+          }
+          const { resumeSessionId: _resume, ...codexConfig } = session.codexConfig ?? {};
+          const resumeId = session.nativeResumeId || session.codexConfig?.resumeSessionId;
+          if (codexConfig.baseCommand && !resumeId) throw new Error('Custom launcher native identity unavailable');
+          return {
+            name: session.name,
+            tabGroupId,
+            ...assistantCodexRecoveryProfile(
+              codexConfig,
+              this.store.getCodexCommandProfiles(session.owner ?? '@single'),
+              resumeId || ''
+            ),
+          };
+        },
+        ownerAllowed: async (a) => {
+          if (!isMultiUserMode()) return a.owner === undefined;
+          const user = a.owner ? await findUser(a.owner) : undefined;
+          return Boolean(user && !user.disabled && !user.mustChangePassword);
+        },
+        composerEmpty: async (live) => {
+          const session = this.sessions.get(live.id);
+          return Boolean(
+            session?.muxName &&
+            assistantComposerEmpty(
+              (await this.mux.capturePaneTextAsync?.(session.muxName, { ansi: true })) ?? null,
+              session.mode as 'codex' | 'claude' | 'opencode'
+            )
+          );
+        },
+        create: async (id, assistant, profile) => {
+          const binding = assistant.binding!;
+          if (this.sessions.has(id)) throw new Error('Recovery session already exists');
+          const mode = assistantBindingMode(binding);
+          for (const live of this.sessions.values()) {
+            if (
+              live.mode !== mode ||
+              !live.pid ||
+              live.paneExit ||
+              live.remote ||
+              live.docker ||
+              assistantSessionHome(live) !== binding.codexHome
+            )
+              continue;
+            const native = await findAssistantConversation(binding, live);
+            if (native?.id === binding.conversationId) {
+              if (live.muxName && (await assistantRecoveryCandidateExited(live.muxName))) continue;
+              throw new Error('Original conversation already has another live session');
+            }
+          }
+          let envOverrides: Record<string, string> | undefined;
+          let codexConfig = profile.codexConfig;
+          const claudeConfig = profile.claudeConfig;
+          const assistantProfile = nativeAssistantProfile(mode);
+          if (assistantProfile === 'codex') {
+            const gated = await _clampExternalCliBypassForOwner(assistant.owner, profile.codexConfig);
+            envOverrides = await clampEnvOverridesForOwner(assistant.owner, { CODEX_HOME: binding.codexHome });
+            if (
+              envOverrides?.CODEX_HOME !== binding.codexHome ||
+              JSON.stringify(gated.codexConfig) !== JSON.stringify(profile.codexConfig)
+            )
+              throw new Error('Recovery permissions changed');
+            const checkedProfile = assistantCodexRecoveryProfile(
+              profile.codexConfig,
+              this.store.getCodexCommandProfiles(assistant.owner ?? '@single'),
+              binding.conversationId
+            );
+            if (checkedProfile.resumeCommandTemplate !== profile.resumeCommandTemplate)
+              throw new Error('Recovery launcher template changed');
+            const strategy = resolveCodexRecoveryStrategy(
+              { command: gated.codexConfig?.baseCommand, resumeCommandTemplate: profile.resumeCommandTemplate },
+              binding.conversationId
+            );
+            if (strategy.kind === 'manual_required') throw new Error('Custom launcher needs explicit resume template');
+            codexConfig =
+              strategy.kind === 'template'
+                ? { ...gated.codexConfig!, baseCommand: strategy.command }
+                : gated.codexConfig!;
+          } else if (assistantProfile === 'claude') {
+            if (
+              !claudeConfig ||
+              (await resolveClaudeModeForUsername(claudeConfig.claudeMode, assistant.owner)) !== claudeConfig.claudeMode
+            )
+              throw new Error('Recovery permissions changed');
+            const rawEnv = { ...profile.envOverrides };
+            envOverrides = await clampEnvOverridesForOwner(assistant.owner, rawEnv);
+            const defaultHome = canonicalizeCodexHome(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'));
+            if (
+              Object.entries(rawEnv).some(([key, value]) => envOverrides?.[key] !== value) ||
+              canonicalizeCodexHome(envOverrides?.CLAUDE_CONFIG_DIR || defaultHome, binding.workingDir) !==
+                binding.codexHome
+            )
+              throw new Error('Recovery account changed');
+          } else if (
+            openCodeAssistantHome() !== binding.codexHome ||
+            profile.openCodeConfigHome !==
+              canonicalizeCodexHome(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'))
+          )
+            throw new Error('Recovery account changed');
+          const session = new Session({
+            id,
+            workingDir: binding.workingDir,
+            name: profile.name,
+            mode,
+            owner: assistant.owner,
+            mux: this.mux,
+            useMux: true,
+            codexConfig:
+              assistantProfile === 'codex' ? { ...codexConfig, resumeSessionId: binding.conversationId } : undefined,
+            openCodeConfig:
+              assistantProfile === 'opencode'
+                ? { ...profile.openCodeConfig, continueSession: binding.conversationId, forkSession: false }
+                : undefined,
+            ...(assistantProfile === 'claude' ? { ...claudeConfig, resumeSessionId: binding.conversationId } : {}),
+            envOverrides,
+            checkpointEnabled: false,
+            truecolorEnabled: await this.getTruecolorEnabled(),
+          });
+          await this.registerSessionWithLayout(session, { tabGroupId: profile.tabGroupId ?? undefined });
+          this.store.incrementSessionsCreated();
+          this.persistSessionState(session);
+          await this.setupSessionListeners(session);
+          await session.startInteractive();
+          this.persistSessionState(session);
+          this.broadcast(SseEvent.SessionCreated, this.getSessionStateWithRespawn(session));
+          return session;
+        },
+      })
+    );
+    this.assistantRequests.start();
     registerCodexCommandProfileRoutes(this.app, ctx);
+    registerWorktreeRoutes(this.app, ctx);
     // The registry's lifetime is the server's: it drops per-session wake state on every
     // cleanup path and resolves in-flight wakes on shutdown.
     this.remoteWake = registerSessionRoutes(this.app, ctx, {
@@ -1950,6 +2246,13 @@ export class WebServer extends EventEmitter {
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx, this.basePath);
     registerTabLayoutRoutes(this.app, ctx);
+    registerMcpSyncRoutes(this.app);
+    registerWebhookRoutes(this.app, {
+      notifier: this.webhookNotifier,
+      configDir: getDataDir(),
+      hostTitle: () => this.windowTitle,
+    });
+    registerDoctorRoutes(this.app);
     registerCustomModelRoutes(this.app);
     if (mobileInputTraceCollector.enabled) registerPerfTraceRoutes(this.app, mobileInputTraceCollector);
     registerCliRegistryRoutes(this.app);
@@ -1958,7 +2261,9 @@ export class WebServer extends EventEmitter {
     // due times for any persisted jobs, then expose it to its routes.
     this.cronService = new CronService(ctx);
     this.cronService.init();
-    registerCronRoutes(this.app, { ...ctx, cron: this.cronService });
+    // Only what CronPort declares: a spread of ctx would copy `port` by value (the
+    // pre-listen 0 of an ephemeral bind) into an object nothing keeps in sync.
+    registerCronRoutes(this.app, { cron: this.cronService });
 
     registerWsRoutes(this.app, ctx, () => this.getHostPolicy());
     registerVoiceRoutes(this.app, ctx, () => this.getHostPolicy());
@@ -2185,9 +2490,10 @@ export class WebServer extends EventEmitter {
     const session = this.sessions.get(sessionId);
     const pinned = session?.pinned === true || this.store.getSession(sessionId)?.pinned === true;
     if (coordinateLayout && session && killMux && !pinned) {
-      return this.tabLayouts.runSessionDeletion([{ id: sessionId, owner: session.owner }], () =>
-        this._doCleanupSession(sessionId, killMux, reason, false)
-      );
+      return this.tabLayouts.runSessionDeletion([{ id: sessionId, owner: session.owner }], async () => {
+        this.assistantRequests?.captureRecoveryPlacement(sessionId);
+        return this._doCleanupSession(sessionId, killMux, reason, false);
+      });
     }
     if (session) this.detachAgentActivity(session);
     const lifecycleLog = getLifecycleLog();
@@ -2331,6 +2637,7 @@ export class WebServer extends EventEmitter {
       fileStreamManager.closeSessionStreams(sessionId);
       // Drop live external attachment registrations for this session
       attachmentRegistry.clearSession(sessionId);
+      folderGrants.clearSession(sessionId);
       // Stop watching for images in this session's directory
       imageWatcher.unwatchSession(sessionId);
       // Clean up pasted images directory for this session. The dir belongs to the
@@ -2351,11 +2658,16 @@ export class WebServer extends EventEmitter {
           killing: this.killingSessions,
         })
       ) {
-        const pasteImageDir = join(session.workingDir, '.claude-images');
-        try {
-          rmSync(pasteImageDir, { recursive: true, force: true });
-        } catch {
-          // Best-effort cleanup
+        // Both upload dirs, the pre-move one too; uploadDirs() lists only real
+        // directories that are not the data dir and do not contain it, none for a
+        // remote session, and nothing on a workspace whose bounded probe did not
+        // answer (pastCap: this acts on one path at the user's request).
+        for (const uploadDir of await uploadDirs(session, { pastCap: true })) {
+          try {
+            await fs.rm(uploadDir, { recursive: true, force: true });
+          } catch {
+            // Best-effort cleanup
+          }
         }
       }
       // Drop the agent skill's preamble cache for this session (seeded at create).
@@ -2532,6 +2844,7 @@ export class WebServer extends EventEmitter {
           shortBadge: entry.shortBadge,
           order: entry.order,
           kind: entry.kind,
+          external: entry.capabilities.external,
           enabled,
           available: enabled && installed,
         };
@@ -2613,6 +2926,19 @@ export class WebServer extends EventEmitter {
     }
     const wheelForwardJson = escapeScriptJson(JSON.stringify(wheelForwardClis));
     html = html.replace('</head>', () => `<script>window.__codemanWheelForward=${wheelForwardJson};</script>\n</head>`);
+    // Which run modes page their own transcript on PageUp/PageDown, for the scroll
+    // fallback over a pane with no local history (`_maybePageCliTranscript`). Read off
+    // the `transcriptPageKeys` capability, never an id list here, and injected for a
+    // solo window too for the same reason as the gutter map: it scrolls a terminal.
+    // Ids only, which the registry schema bounds to kebab tokens, so JSON.stringify
+    // alone is enough.
+    const pageKeyClis = enabledClis()
+      .filter((entry) => entry.capabilities.transcriptPageKeys === true)
+      .map((entry) => entry.id);
+    html = html.replace(
+      '</head>',
+      () => `<script>window.__codemanTranscriptPageKeys=${JSON.stringify(pageKeyClis)};</script>\n</head>`
+    );
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
       html = html.replace('</head>', () => `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
       if (settings.gestureControlEnabled === true) {
@@ -2706,6 +3032,7 @@ export class WebServer extends EventEmitter {
   }
 
   private async setupSessionListeners(session: Session): Promise<void> {
+    this.assistantRequests?.attach(session);
     // PTY exit detaches the coordinator together with the old listener set. A
     // later interactive restart reuses this Session object, so restore its
     // exact-identity gate before the replacement PTY becomes observable.
@@ -3493,8 +3820,14 @@ export class WebServer extends EventEmitter {
       'custom-model:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
-      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string }; username?: string };
-      const sessionId = d.sessionId ?? d.id ?? d.session?.id;
+      const d = (data ?? {}) as {
+        sessionId?: string;
+        codemanSessionId?: string;
+        id?: string;
+        session?: { id?: string };
+        username?: string;
+      };
+      const sessionId = d.codemanSessionId ?? d.sessionId ?? d.id ?? d.session?.id;
       const owner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
       // `remote:hostWaking` / `remote:hostWakeFailed` for a create/attach wake have no
       // session yet (nothing exists until the host is up), so the registry names the
@@ -3670,6 +4003,25 @@ export class WebServer extends EventEmitter {
     const template = WebServer.PUSH_EVENT_MAP[event];
     if (!template) return;
 
+    const sessionName = (data.sessionName as string) || '';
+    const sessionId = (data.sessionId as string) || '';
+    const body = WebServer.pushBodyText(event, data, sessionName);
+
+    // Webhook channel (ntfy / Slack / Discord / generic): independent of Web Push, so it runs BEFORE
+    // the "no subscriptions" return below, which is exactly the headless-server case it exists for.
+    // Fire-and-forget; WebhookNotifier dedupes, caps what is in flight and never throws.
+    void this.webhookNotifier
+      .notify({
+        event,
+        title: template.title,
+        body,
+        urgency: template.urgency as WebhookUrgency,
+        sessionId: sessionId || undefined,
+        sessionName: sessionName || undefined,
+        host: this.windowTitle,
+      })
+      .catch(() => undefined);
+
     const subscriptions = this.pushStore.getAll();
     if (subscriptions.length === 0) return;
 
@@ -3690,34 +4042,12 @@ export class WebServer extends EventEmitter {
     const vapidKeys = this.pushStore.getVapidKeys();
     webpush.setVapidDetails('mailto:codeman@localhost', vapidKeys.publicKey, vapidKeys.privateKey);
 
-    const sessionName = (data.sessionName as string) || '';
-    const sessionId = (data.sessionId as string) || '';
-
     // Multi-user: a session-scoped push (all PUSH_EVENT_MAP events carry a sessionId)
     // must reach only the owner's devices (+ admins) — the body embeds the session
     // name + activity, so cross-user delivery would leak it. Resolved once here; the
     // per-subscription gate below is a no-op in single-user (send to all).
     const multiUserPush = isMultiUserMode();
     const pushSessionOwner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
-
-    // Build body text from event data
-    let body = sessionName ? `[${sessionName}]` : '';
-    if (event === SseEvent.SessionError && data.error) {
-      body += body ? ' ' : '';
-      body += String(data.error).slice(0, 200);
-    } else if (event === SseEvent.RespawnBlocked && data.reason) {
-      body += body ? ' ' : '';
-      body += String(data.reason);
-    } else if (event === SseEvent.SessionRalphCompletionDetected && data.phrase) {
-      body += body ? ' ' : '';
-      body += String(data.phrase);
-    } else if (event === SseEvent.SessionRespawnBreakerTripped && data.count) {
-      body += body ? ' ' : '';
-      body += `Stopped after ${Number(data.count)} rapid crashes — restart the session to retry`;
-    } else if (event === SseEvent.HookPermissionPrompt && data.tool_name) {
-      body += body ? ' ' : '';
-      body += `Tool: ${String(data.tool_name)}`;
-    }
 
     const payload = JSON.stringify({
       title: template.title,
@@ -3731,9 +4061,12 @@ export class WebServer extends EventEmitter {
       // Approvals Inbox item id: lets sw.js answer an Approve/Deny action
       // click directly (POST /api/approvals/:id/answer) with no tab open.
       // Gated on the opt-in setting together with the action buttons.
+      // Approve/Deny only when we also have an approvalId to answer with.
+      // Supervised-hook CLIs (DeepSeek) omit approvalId upstream so this also
+      // strips their action buttons — buttons without an id can never answer.
       approvalId: approvalsEnabled && typeof data.approvalId === 'string' ? data.approvalId : undefined,
       urgency: template.urgency,
-      actions: approvalsEnabled ? template.actions : undefined,
+      actions: approvalsEnabled && typeof data.approvalId === 'string' ? template.actions : undefined,
     });
 
     for (const sub of subscriptions) {
@@ -3770,6 +4103,36 @@ export class WebServer extends EventEmitter {
         }
       });
     }
+  }
+
+  /** The notification body for an event (shared by Web Push and the webhook channel). */
+  private static pushBodyText(event: string, data: Record<string, unknown>, sessionName: string): string {
+    let body = sessionName ? `[${sessionName}]` : '';
+    if (event === SseEvent.SessionError && data.error) {
+      body += body ? ' ' : '';
+      body += String(data.error).slice(0, 200);
+    } else if (event === SseEvent.RespawnBlocked && data.reason) {
+      body += body ? ' ' : '';
+      body += String(data.reason);
+    } else if (event === SseEvent.SessionRalphCompletionDetected && data.phrase) {
+      body += body ? ' ' : '';
+      body += String(data.phrase);
+    } else if (event === SseEvent.SessionRespawnBreakerTripped && data.count) {
+      body += body ? ' ' : '';
+      body += `Stopped after ${Number(data.count)} rapid crashes — restart the session to retry`;
+    } else if (event === SseEvent.HookPermissionPrompt && data.tool_name) {
+      body += body ? ' ' : '';
+      body += `Tool: ${String(data.tool_name)}`;
+    } else if (event === SseEvent.HookPermissionPrompt && data.source === SCREEN_BLOCKED_SOURCE && data.message) {
+      // A dialog read off a hook-less CLI's screen (web/screen-blocked.ts), whose message
+      // is built from the CLI's label, never from the screen. Keyed on the source so a
+      // Claude hook's own `message` keeps the body it always had; capped like the error
+      // text, since a hook poster holding the secret can claim the source too (as it can
+      // already claim any `tool_name` above).
+      body += body ? ' ' : '';
+      body += String(data.message).slice(0, 200);
+    }
+    return body;
   }
 
   private cleanupDeadSSEClients(): void {
@@ -3892,7 +4255,7 @@ export class WebServer extends EventEmitter {
     }
 
     // Bound disk use under heavy paste-image traffic: delete `paste-*` files
-    // older than 7 days from each live session's .claude-images/ hourly.
+    // older than 7 days from each live session's upload dirs hourly.
     if (!this.testMode) {
       this._pasteImageGcStop = startPasteImageGc({ sessions: this.sessions });
       // Surface event-loop stalls (e.g. a slow synchronous tmux/ps call) so the
@@ -3902,6 +4265,12 @@ export class WebServer extends EventEmitter {
     }
 
     await this.app.listen({ port: this.port, host: this.host });
+    // A `port: 0` bind gets its number from the OS. Everything below and every later
+    // reader (the banner, CODEMAN_API_URL, the docker bridge listener, the
+    // unauthenticated-bind warnings, the route context's getter) must see that number,
+    // not the 0 that was asked for.
+    const address = this.app.server.address();
+    if (address !== null && typeof address === 'object') this.port = address.port;
     // COD-98: align the codex config.toml Headroom patch with the current toggle +
     // proxy health at boot (non-fatal; reconcile swallows its own errors).
     await reconcileCodexHeadroomPatch();
@@ -4365,7 +4734,7 @@ export class WebServer extends EventEmitter {
    * path adds the session's token totals to the lifetime figures, demotes a
    * pinned record to `stopped` (the durable marker of an intentional kill, which
    * would make the session permanently ineligible for a reboot restore), drops
-   * the persisted Ralph state, and recursively removes `.claude-images` from the
+   * the persisted Ralph state, and recursively removes the upload dirs from the
    * WORKING DIRECTORY, which belongs to the workspace rather than to this session
    * and may hold another live session's pasted images.
    *
@@ -4421,6 +4790,7 @@ export class WebServer extends EventEmitter {
     this.stopTranscriptWatcher(sessionId);
     attachmentRegistry.clearSession(sessionId);
     documentVersionStore.clearSession(sessionId);
+    folderGrants.clearSession(sessionId);
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
@@ -4605,6 +4975,7 @@ export class WebServer extends EventEmitter {
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
               piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
               grokConfig: muxSession.mode === 'grok' ? savedState?.grokConfig : undefined,
+              copilotConfig: muxSession.mode === 'copilot' ? savedState?.copilotConfig : undefined,
               deepSeekConfig: muxSession.mode === 'deepseek' ? savedState?.deepSeekConfig : undefined,
               ompConfig: muxSession.mode === 'omp' ? savedState?.ompConfig : undefined,
               envOverrides: {
@@ -4613,6 +4984,8 @@ export class WebServer extends EventEmitter {
               },
               codexProviderIdentity: codexProviderRecovery.identity,
               effort: savedState?.effort,
+              model: savedState?.model,
+              advisorModel: savedState?.advisorModel,
               attachmentHistory: savedAttachmentHistory,
               checkpointState: savedState?.checkpoint,
               checkpointRuns: savedState?.checkpointRuns,
@@ -4633,6 +5006,15 @@ export class WebServer extends EventEmitter {
               // pane-exit watcher's own tick replaces it with a first-hand
               // reading (not the stats collector — see `startPaneExitWatcher`).
               paneExit: savedState?.paneExit,
+              // The model the CLI last reported (statusline or its own footer), so a
+              // tile header keeps naming it until the next report; an idle claude
+              // session re-renders its statusline only on its next turn.
+              displayModel: savedState?.displayModel,
+              // The last prompt-cache report, restored for the same reason: an idle claude
+              // session re-renders its statusline only on its next turn, so without this the
+              // Session Options readout would read "not reported yet" after every restart. The
+              // readout is time-aware, so a value past its expiry shows as cold, not stale-warm.
+              promptCache: savedState?.promptCache,
               // A record rebuilt from the socket has no provenance, so its
               // apparent locality is a guess (see `MuxSession.discovered`).
               discoveredMuxSession: muxSession.discovered,
@@ -4754,7 +5136,18 @@ export class WebServer extends EventEmitter {
               if (savedState.flickerFilterEnabled !== undefined) {
                 session.flickerFilterEnabled = savedState.flickerFilterEnabled;
               }
-              // Respawn controller (not supported for external CLI sessions)
+              // Tab colour, pin and the image watcher are user-set and persisted like the settings
+              // above, but this path never read them back: after a restart every surviving pane came
+              // back uncoloured and unpinned with its image watcher off, and the next persist
+              // overwrote the saved values. `reapplyPersistedSessionState()` (the reboot-restore
+              // path) already restores all three. The watcher flag has to be set before
+              // `setupSessionListeners()` below, which reads it to decide whether to start one.
+              if (savedState.color) session.setColor(savedState.color);
+              if (savedState.pinned) session.restorePin(true, savedState.pinnedAt);
+              if (savedState.imageWatcherEnabled !== undefined) {
+                session.imageWatcherEnabled = savedState.imageWatcherEnabled;
+              }
+              // Respawn controller (not supported for external-CLI sessions)
               if (!isExternalCliMode(session.mode) && savedState.respawnEnabled && savedState.respawnConfig) {
                 try {
                   this.restoreRespawnController(session, savedState.respawnConfig, 'state.json');
@@ -4976,7 +5369,7 @@ export class WebServer extends EventEmitter {
    * can reset/advance its backoff. Re-running the idempotent remote command
    * REATTACHES the durable remote tmux session (does NOT recreate it).
    */
-  private async handleRemoteSessionDropped(sessionId: string): Promise<void> {
+  private async handleRemoteSessionDropped(sessionId: string, workerReboot = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     // No live Session object (e.g. detached/restored-but-not-attached) — nothing
     // to drive the reattach; report failure so the watcher backs off and retries.
@@ -4986,10 +5379,34 @@ export class WebServer extends EventEmitter {
     }
     let ok = false;
     try {
-      ok = await session.reattachRemote();
+      if (workerReboot) {
+        const settings = await this.readSettings(true);
+        // Settings or the session may change while an async probe is in flight.
+        if (
+          settings.autoRecoverSessionsAfterReboot !== true ||
+          settings.remoteAutoReconnect === false ||
+          this.sessions.get(sessionId) !== session
+        ) {
+          this.noteRemoteReconnect(sessionId, false);
+          return;
+        }
+        ok = await session.resumeRemoteAfterWorkerReboot();
+      } else {
+        ok = await session.reattachRemote();
+      }
     } catch (err) {
       console.error(`[Server] Remote reattach failed for ${sessionId}:`, err);
       ok = false;
+    }
+    if (workerReboot && this.sessions.get(sessionId) === session) {
+      const previous = this.store.getSessionRecoveries().find((row) => row.sourceSessionId === sessionId);
+      if (!ok) {
+        this.store.upsertSessionRecovery(createWorkerRecoveryRecord(session.toState()));
+        if (!previous)
+          console.warn(`[Recovery] Worker reboot resume failed for ${sessionId}; preserved recovery record`);
+      } else if (previous) {
+        this.store.upsertSessionRecovery({ ...previous, status: 'recovered', recoveredSessionId: sessionId });
+      }
     }
     this.noteRemoteReconnect(sessionId, ok);
     if (ok) {
@@ -5065,6 +5482,7 @@ export class WebServer extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    await this.assistantRequests?.stop();
     getLifecycleLog().log({ event: 'server_stopped', sessionId: '*' });
     // Set stopping flag to prevent new timer creation during shutdown
     this.sse.setStopping();

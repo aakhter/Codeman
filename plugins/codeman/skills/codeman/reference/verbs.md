@@ -95,6 +95,9 @@ Differences from `quick-start` worth knowing before you debug one:
 - the id is at `.data.session.id`, not `.data.sessionId`;
 - `workingDir` must already exist (400 `INVALID_INPUT`, "workingDir does not exist"),
   and in multi-user mode must be inside the caller's own workspace (403 `FORBIDDEN`);
+  one that does not answer or cannot be read (an unreachable network mount, a
+  permission error) is 422 `OPERATION_FAILED`, never "does not exist", so do not
+  create a replacement for it;
 - hitting the session cap here is `OPERATION_FAILED`, where `quick-start` returns
   `SESSION_BUSY` for the identical condition.
 
@@ -373,8 +376,10 @@ recovered by submitting it with `{"input":"\r"}`.
 only when the workspace actually has them, see [§5.1](#51-where-to-spawn)) **and for
 `deepseek`** — the one external CLI that reports its own lifecycle, so its `stop` is a
 real end-of-turn signal rather than a guess. On
-`shell`/`opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`omp`, requesting them explicitly is a
-400, and lifecycle transitions there are coarse (a short shell command may emit **no**
+`shell`/`opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`omp`/`copilot`, requesting them explicitly is a
+400 (except `blocked` on `codex`, which Codeman reads off its screen when an approval,
+question or trust dialog is up; a wait for it answers at once if one already is), and
+lifecycle transitions there are coarse (a short shell command may emit **no**
 `idle` transition at all, verified live), so synchronize those with markers.
 
 ⚠️ A dsh session can still refuse them for a per-SESSION reason: `statusReporting:
@@ -425,7 +430,7 @@ from the transcript file, which is flushed slightly *after* the `stop` hook fire
 single read taken the instant send-and-wait returns comes back `""` even though the
 turn finished (verified live: empty on the first call, full text seconds later). `text`
 is also `""` before the worker's first completed turn, and always `""` for modes with
-no transcript (`shell`, `opencode`, `gemini`, `antigravity`, `pi`, `grok`, `omp`; the first four
+no transcript (`shell`, `opencode`, `gemini`, `antigravity`, `pi`, `grok`, `omp`, `copilot`; the first four
 verified live, pi from the same source path), which is
 why the loop above is bounded rather than open-ended. A dsh worker lags too, for its own
 reason: the harness finalizes the assistant message just after it reports `idle`. Fall back to the terminal buffer
@@ -511,7 +516,7 @@ turn), and both better than diffing terminal samples:
 ```
 
 ⚠️ `active-tools` is parsed out of Claude's own output format, so it is **empty for
-`opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`deepseek`/`omp`** (those parsers are skipped wholesale) and
+`opencode`/`codex`/`gemini`/`antigravity`/`pi`/`grok`/`deepseek`/`omp`/`copilot`** (those parsers are skipped wholesale) and
 in practice empty for `shell`. Source-verified, not measured live.
 
 Only if neither helps: sample `terminal?tail=` twice a few seconds apart. A changing
@@ -636,10 +641,12 @@ characters, so an exact compare finds nothing and
 
 ### 5.12 Read My Mind
 
-Each case has an intent profile: user-stated goals plus the user's recent real prompts
-(captured server-side while the opt-in `readMyMindEnabled` setting is on). Read it to
-ground your work in what the user actually wants; write it when the user states an
-intention worth remembering ("the goal is shipping 1.17"):
+Each case has an intent profile: user-stated goals plus durable Claude prompt history
+(captured server-side while the opt-in `readMyMindEnabled` setting is on). Codex recent
+prompts are read only from the strictly owned active rollout on demand for prediction;
+they are never persisted to `intents.json`. Read the profile to ground your work in
+what the user actually wants; write it when the user states an intention worth
+remembering ("the goal is shipping 1.17"):
 
 ```bash
 "${CURL[@]}" "$API/api/v1/sessions/$SELF/intent" | jq '.data.intent'
@@ -652,9 +659,10 @@ Never write goals the user did not state, and never delete the profile
 (`DELETE .../intent`) unless the user asks: it is their memory, not yours. Older
 servers 404 these routes; treat that as "feature absent", not an error.
 
-The same profile feeds a one-shot predictor (claude-mode sessions only; takes 5-90 s
-and costs real tokens, so call it only when asked or when genuinely deciding what the
-user wants next):
+The profile, and for Codex its on-demand strictly owned rollout signals, feed a one-shot
+predictor for Claude and local Codex sessions (5-90 s and real tokens, so call it only
+when asked or when genuinely deciding what the user wants next). The session fixes the
+provider lane: Codex is a separate ephemeral predictor and never falls back to Claude:
 
 ```bash
 "${CURL[@]}" -X POST -H 'Content-Type: application/json' -d '{}' \
@@ -663,9 +671,10 @@ user wants next):
 
 Each suggestion is `{prompt, why, kind}` (`kind`: `continue` / `verify` / `redirect`).
 To re-run after a miss, pass `{"steer":"…","rejected":["…"]}` with the rejected prompt
-texts. A 409 means a prediction is already running for the session; a 400 means
-non-claude mode. ⚠️ Suggestions are **proposals for the user**: never send one into a
-session (yours or another's) unless the user explicitly asked you to act on it.
+texts. A 409 means a prediction is already running for the session; a 400 means an
+unsupported mode (including remote/Docker Codex). ⚠️ The prediction endpoint returns
+suggestion text only. A separate input call can send it into a session (yours or
+another's), so never make that call unless the user explicitly authorized it.
 
 ### 5.13 Messaging claude workers
 
@@ -694,7 +703,7 @@ The shape, each step verified live (probes, failure modes and safety detail in
    column; the row's `name [ref]` is the address. On Codeman 1.16+ with claude
    2.1.224+ a worker's peer name is its Codeman session name, so pass a DESCRIPTIVE
    `sessionName` in quick-start to pick it (a `w<N>-` placeholder-shaped name is not
-   pinned, so it lists derived); older setups list a name derived from the case folder.
+   pinned by default, so it lists derived); older setups list a name derived from the case folder.
    No row = messaging is off for that worker (it is feature-flagged even on matching
    CLI versions, observed live): fall back to the HTTP recipes without complaint.
 3. `SendMessage` the task; first contact must use the `name [ref]` form copied from
@@ -750,4 +759,3 @@ case, a cloned repo or a worktree never appears there.
 Confirm cleanup with `GET /api/v1/sessions`, never with `/api/v1/sessions/unified`
 (that one folds in transcript history from the whole machine and will keep showing
 your worker forever).
-

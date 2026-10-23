@@ -1118,6 +1118,22 @@ describe('TmuxManager (unit)', () => {
       testManager.destroy();
     });
 
+    it.each(['- leading hyphen', '--help', '-n', '- quoted \"text\" $HOME; echo unsafe'])(
+      'keeps %s literal by terminating tmux option parsing',
+      async (text) => {
+        const commands: string[] = [];
+        const testManager = checkpointManager(async (command) => void commands.push(command));
+        await expect(testManager.sendCheckpointCommand('checkpoint-id', `${text}\r`)).resolves.toEqual({
+          ok: true,
+          attempt: 1,
+        });
+        expect(commands).toHaveLength(2);
+        expect(commands[0]).toContain(' -l -- ');
+        expect(commands[1]).toMatch(/send-keys.* Enter$/);
+        testManager.destroy();
+      }
+    );
+
     it('submits a Codex $skill checkpoint with text, selection Enter, then submission Enter', async () => {
       const commands: string[] = [];
       const testManager = checkpointManager(async (command) => void commands.push(command));
@@ -1641,6 +1657,88 @@ describe('TmuxManager (unit)', () => {
         expect(respawnCall?.[0]).toContain("bash -c 'cd '\\''");
         expect(respawnCall?.[0]).toContain('/mnt/gdrive/project');
       } finally {
+        nonTestManager.destroy();
+      }
+    });
+
+    it.each([true, false])(
+      'captures recovered named remote sessions on the ownership socket (owned=%s)',
+      async (owned) => {
+        const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+        const nonTestManager = new NonTestTmuxManager();
+        const pool = (
+          nonTestManager as unknown as {
+            remoteFrameSshPool: { capture: (...args: unknown[]) => Promise<string> };
+          }
+        ).remoteFrameSshPool;
+        const capture = vi.spyOn(pool, 'capture').mockResolvedValue('live frame\n');
+        const remote = {
+          hostId: 'worker',
+          label: 'worker',
+          host: '192.0.2.1',
+          username: 'ubuntu',
+          remotePath: '/remote-only/project',
+          owned,
+          remoteSessionName: 'codeman-ssh-original',
+        };
+        try {
+          for (const options of [{ visibleFrame: true }, { fullHistory: true }]) {
+            await nonTestManager.captureRemotePaneBuffer(remote, 'new-id', 'codeman-c0d51600', options);
+            const command = capture.mock.calls.at(-1)?.[2];
+            expect(command).toContain(`tmux -L ${owned ? 'codeman-remote' : 'codeman'} capture-pane`);
+            expect(command).toContain("-t 'codeman-ssh-original'");
+          }
+        } finally {
+          capture.mockRestore();
+          nonTestManager.destroy();
+        }
+      }
+    );
+
+    it.each([false, true])('checks missing cwd only for local respawn (remote=%s)', async (isRemote) => {
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      const remote = isRemote
+        ? {
+            hostId: 'worker',
+            label: 'worker',
+            host: '192.0.2.1',
+            username: 'ubuntu',
+            remotePath: '/remote-only/project',
+          }
+        : undefined;
+      nonTestManager.registerSession({
+        sessionId: 'cwd12345',
+        muxName: 'codeman-c0d51600',
+        pid: 1000,
+        createdAt: Date.now(),
+        workingDir: '/remote-only/project',
+        mode: 'shell',
+        attached: false,
+        remote,
+      });
+      vi.mocked(existsSync).mockImplementation((path) => path === '/remote-only');
+      vi.mocked(statSync).mockReturnValue({ isDirectory: () => true } as never);
+      const paneDead = vi.spyOn(nonTestManager, 'isPaneDead').mockResolvedValue(false);
+      try {
+        const pid = await nonTestManager.respawnPane({
+          sessionId: 'cwd12345',
+          workingDir: '/remote-only/project',
+          mode: 'shell',
+          remote,
+        });
+        expect(pid).toBe(isRemote ? 4242 : null);
+        const { exec: currentExec } = await import('node:child_process');
+        const respawnCalls = vi.mocked(currentExec).mock.calls.filter(([cmd]) => cmd.includes(' respawn-pane '));
+        expect(respawnCalls).toHaveLength(isRemote ? 1 : 0);
+        if (isRemote) {
+          expect(respawnCalls[0][0]).toContain('ssh');
+          expect(vi.mocked(statSync)).not.toHaveBeenCalledWith('/remote-only/project');
+        }
+      } finally {
+        paneDead.mockRestore();
+        vi.mocked(statSync).mockReset();
+        vi.mocked(existsSync).mockReturnValue(false);
         nonTestManager.destroy();
       }
     });
@@ -2186,7 +2284,9 @@ describe('COD-334 cliNotFoundMessage', () => {
     antigravity: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
     pi: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
     grok: 'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash',
-    deepseek: 'DeepSeek CLI not found. Install with: npm install -g @deepseek-ai/dsh',
+    // Upstream #616 installs pnpm alongside dsh when none is on PATH.
+    deepseek:
+      'DeepSeek CLI not found. Install with: npm install -g @deepseek-ai/dsh && (command -v pnpm >/dev/null || npm install -g pnpm)',
     omp: 'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh',
   } satisfies Record<AgentCliMode, string>;
   const agentMessages = Object.entries(installHints) as Array<[AgentCliMode, string]>;

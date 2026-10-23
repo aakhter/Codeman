@@ -574,13 +574,17 @@ const KeyboardHandler = {
         toolbar.style.display = '';
       }
       const keyboardHeight = this.initialViewportHeight - (window.visualViewport.height || window.innerHeight);
+      // The mobile case picker is a third position:fixed bottom-anchored surface,
+      // and its search field can open the keyboard over it: lift it with the bars.
+      const caseSheet = document.querySelector('.mobile-case-picker.active .mobile-case-picker-sheet');
+      if (caseSheet) caseSheet.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
       if (main && keyboardHeight > 0) {
         const cjkInputHeight = cjkInput?.classList.contains('cjk-input-visible') ? 44 : 0;
         const toolbarHeight =
           toolbar && toolbar.style.display !== 'none'
             ? toolbar?.offsetHeight || toolbar?.getBoundingClientRect?.().height || 40
             : 0;
-        const accessoryHeight = accessoryBar?.classList.contains('visible')
+        const accessoryHeight = accessoryBar?.classList?.contains('visible')
           ? accessoryBar.offsetHeight || accessoryBar.getBoundingClientRect?.().height || 44
           : 0;
         main.style.paddingBottom = `${Math.ceil(toolbarHeight + accessoryHeight + cjkInputHeight)}px`;
@@ -601,6 +605,10 @@ const KeyboardHandler = {
     const accessoryBar = document.querySelector('.keyboard-accessory-bar');
     const cjkInput = document.getElementById('cjkInput');
     const main = document.querySelector('.main');
+    // Not scoped to `.active`, unlike the lift above: a sheet closed while the
+    // keyboard was still up must still have its inline offset cleared, or the
+    // next open slides in already displaced.
+    const caseSheet = document.querySelector('.mobile-case-picker-sheet');
 
     if (toolbar) {
       toolbar.style.transform = '';
@@ -613,6 +621,10 @@ const KeyboardHandler = {
     if (cjkInput) {
       cjkInput.style.transform = '';
       cjkInput.style.bottom = '';
+    }
+    if (caseSheet) {
+      caseSheet.style.transform = '';
+      caseSheet.style.bottom = '';
     }
     if (main) {
       main.style.paddingBottom = '';
@@ -765,7 +777,9 @@ const KeyboardHandler = {
    */
   _sendTerminalResize() {
     if (typeof app === 'undefined' || !app.activeSessionId) return;
-    app.sendResize?.(app.activeSessionId)?.catch?.(() => {});
+    const sessionId = app.activeSessionId;
+    if (document.visibilityState === 'hidden' || app._isTerminalSessionGone?.(sessionId)) return;
+    app.sendResize?.(sessionId)?.catch?.(() => {});
   },
 
   /**

@@ -290,9 +290,7 @@ Object.assign(CodemanApp.prototype, {
       this._webviewDeletedIds = this._webviewDeletedIds || new Set();
       this._webviewDeletedIds.add(deletedId);
     }
-    const deletionSnapshot = deletedId
-      ? (this._refreshTabProjection?.()?.completeRefs || []).map((ref) => ({ kind: ref.kind, id: ref.id }))
-      : null;
+    const deletionSnapshot = deletedId ? this._flatTabRefs() : null;
     const deletionNavigation = deletedId
       ? { generation: this._webviewNavigationGeneration || 0, id: this._webviewNavigationId || null }
       : null;
@@ -450,30 +448,28 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /** One open webview tab at its position in the interleaved visible ref list. */
-  renderWebviewTab(id, index) {
+  renderWebviewTab(id, idx) {
     const webview = this.webviews?.get(id);
     if (!webview) return '';
     const isActive = id === this.activeWebviewId;
     const jsonId = escapeHtml(JSON.stringify(id));
     const icon = webview.icon ? escapeHtml(webview.icon) : '';
-    const focusMarker = this._tabRefFocused?.({ kind: 'webview', id })
-      ? '<span class="tab-focus-marker" title="In Focus" aria-label="In Focus">&#x2605;</span>'
-      : '';
+
     return `<div class="session-tab session-tab--web ${isActive ? 'active' : ''}" data-webview-id="${escapeHtml(id)}"
-        onclick="app.handleWebviewTabClick(event, ${jsonId})"
-        tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
-        aria-label="${escapeHtml(webview.name)} web tab" title="${escapeHtml(webview.url)}">
-        <button type="button" class="tab-ref-drag-handle" data-tab-ref-drag tabindex="-1" onclick="event.preventDefault(); event.stopPropagation()" title="Drag to reorder" aria-label="Move ${escapeHtml(webview.name)} web tab"></button>
-        ${index < 9 ? '<span class="tab-number">' + (index + 1) + '</span>' : ''}
-        <span class="tab-web-icon" aria-hidden="true">${icon || this._webviewGlobeIcon()}</span>
-        <span class="tab-info">
-          <span class="tab-name-row">
-            <span class="tab-name">${escapeHtml(webview.name)}</span>
+          onclick="app.handleWebviewTabClick(event, ${jsonId})"
+          oncontextmenu="app.handleWebviewTabContextMenu(event, ${jsonId})"
+          tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}"
+          aria-label="${escapeHtml(webview.name)} web tab" title="${escapeHtml(webview.url)}">
+          ${idx < 9 ? '<span class="tab-number">' + (idx + 1) + '</span>' : ''}
+          <span class="tab-web-icon" aria-hidden="true">${icon || this._webviewGlobeIcon()}</span>
+          <span class="tab-info">
+            <span class="tab-name-row">
+              ${this._tabOrientation?.() === 'vertical' && this._tabRefFocused?.({ kind: 'webview', id }) ? '<span class="tab-focus-marker" aria-hidden="true">&#x2605;</span>' : ''}
+              <span class="tab-name">${escapeHtml(webview.name)}</span>
+            </span>
           </span>
-        </span>
-        ${focusMarker}
-        <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRefMoveMenu(event, { kind: 'webview', id: ${jsonId} })" title="Move web tab" aria-label="Move web tab">&#x22EF;</button></span>
-      </div>`;
+          <span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.showWebviewModal(${jsonId})" title="URL settings" aria-label="URL settings" tabindex="0">&#x2699;</span><span class="tab-close" onclick="event.stopPropagation(); app.closeWebviewTab(${jsonId})" title="Close tab" aria-label="Close web tab" tabindex="0">&times;</span></span>
+        </div>`;
   },
 
   _webviewGlobeIcon() {
@@ -483,6 +479,16 @@ Object.assign(CodemanApp.prototype, {
   handleWebviewTabClick(event, id) {
     event?.preventDefault?.();
     return this.openWebview(id);
+  },
+
+  /**
+   * Right-click (or the menu key) on a web tab in the vertical rail opens its
+   * actions (Focus, group moves, settings), the flat rail included, where it is
+   * the only way in. Everywhere else the browser keeps its own menu.
+   */
+  handleWebviewTabContextMenu(event, id) {
+    if (!this._tabLayoutEditable?.()) return false;
+    return this.openTabWebviewMenu?.(event, id);
   },
 
   /** Mark exactly one tab active across BOTH tab kinds. */
@@ -511,6 +517,7 @@ Object.assign(CodemanApp.prototype, {
       tab.removeAttribute('aria-selected');
       tab.setAttribute('aria-current', 'false');
     }
+    this._syncTabTreeSelection?.(container);
   },
 
   // ── Opening / closing ─────────────────────────────────────────────────────
@@ -698,7 +705,15 @@ Object.assign(CodemanApp.prototype, {
 
   openWebviewExternal(id) {
     const webview = this.webviews.get(id || this.activeWebviewId);
-    if (webview) window.open(webview.url, '_blank', 'noopener');
+    if (!webview) return;
+    // A host that refuses must not fall through to window.open, which in a
+    // WebView can replace the dashboard page.
+    const hosted = this.openInHostWindow?.(webview.url) ?? null;
+    if (hosted !== null) {
+      if (!hosted) this.showToast('Could not open a new window for this dashboard', 'error');
+      return;
+    }
+    window.open(webview.url, '_blank', 'noopener');
   },
 
   closeWebviewTab(id) {
@@ -706,8 +721,19 @@ Object.assign(CodemanApp.prototype, {
     this.renderSessionTabs();
   },
 
+  /**
+   * Every open tab in strip order (sessions, then web tabs) as {kind, id} refs:
+   * the neighbour a closed web tab hands the active state to.
+   */
+  _flatTabRefs() {
+    return [
+      ...(this.sessionOrder || []).filter((id) => this.sessions?.has(id)).map((id) => ({ kind: 'session', id })),
+      ...(this.webviewOrder || []).filter((id) => this.webviews?.has(id)).map((id) => ({ kind: 'webview', id })),
+    ];
+  },
+
   _removeWebviewTab(id, completeSnapshot, allowFallback = true) {
-    const before = completeSnapshot === undefined ? this._refreshTabProjection?.()?.completeRefs : completeSnapshot;
+    const before = completeSnapshot === undefined ? this._flatTabRefs() : completeSnapshot;
     const completeBefore = Array.isArray(before) ? before : [];
     this._cancelPendingWebviewOpen(id);
     this.webviewOrder = (this.webviewOrder || []).filter((x) => x !== id);

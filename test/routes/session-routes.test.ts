@@ -14,14 +14,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { PassThrough, Writable } from 'node:stream';
-import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyMultipart from '@fastify/multipart';
-import { rm, mkdir, writeFile } from 'node:fs/promises';
+import { registryFilePath, reloadCliRegistry } from '../../src/config/cli-registry/registry.js';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtemp, rm, mkdir, writeFile, readFile, readdir, symlink } from 'node:fs/promises';
 import { createMockRouteContext, type MockRouteContext } from '../mocks/index.js';
 import { installRouteErrorHandler } from '../../src/web/route-error-handler.js';
 import { ApiErrorCode, httpStatusForErrorCode } from '../../src/types.js';
@@ -34,7 +34,18 @@ import { createUser, invalidateUsersCache } from '../../src/user-store.js';
 
 // Mock execFile so the send-key route's `tmux` invocation is observable (not run for real).
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }));
+const remoteImageWrite = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('../../src/remote-file-transfer.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/remote-file-transfer.js')>()),
+  writeRemoteFileBytes: remoteImageWrite,
+}));
 const heicConvert = vi.hoisted(() => vi.fn(async () => Buffer.from('ffd8ffe000104a4649460001', 'hex')));
+// A tiny video cap so the streamed path's truncation branch is reachable in-process.
+vi.mock('../../src/config/buffer-limits.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/config/buffer-limits.js')>()),
+  MAX_PASTE_VIDEO_BYTES: 64,
+}));
+
 const remoteStore = vi.hoisted(() => ({
   hosts: [] as Array<{
     id: string;
@@ -145,7 +156,30 @@ vi.mock('../../src/utils/cli-resolver.js', async (orig) => {
   };
 });
 
-import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
+// The remote scrollback read is an ssh round trip; the route only decides when to
+// ask and what to do with the answer.
+const remoteScrollback = vi.hoisted(() => vi.fn(async (): Promise<string | null> => null));
+vi.mock('../../src/remote-pane-history.js', () => ({ fetchRemoteScrollback: remoteScrollback }));
+
+// Bounded path probe: a live session's workspace can sit on a network mount that
+// stopped answering, and the paste-image route probes it before the first disk
+// touch (#516). Default is call-through so the real probe runs for the other
+// routes here (create / quick-start); the paste-image tests drive the result via
+// pathProbe.kind (reset to null right after, since it is process-wide).
+const pathProbe = vi.hoisted(() => ({
+  kind: null as import('../../src/utils/bounded-path-probe.js').PathProbeKind | null,
+}));
+vi.mock('../../src/utils/bounded-path-probe.js', async (orig) => {
+  const actual = await orig<typeof import('../../src/utils/bounded-path-probe.js')>();
+  return {
+    ...actual,
+    probePathKind: vi.fn((path: string, opts?: { pastCap?: boolean }) =>
+      pathProbe.kind !== null ? Promise.resolve(pathProbe.kind) : actual.probePathKind(path, opts)
+    ),
+  };
+});
+
+import { registerSessionRoutes, _resetPasteRateBuckets } from '../../src/web/routes/session-routes.js';
 import { checkRemoteTmuxAvailable as checkRemoteTmuxProbe } from '../../src/remote-hosts.js';
 import { RemoteWakeRegistry, REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS } from '../../src/remote-wake.js';
 import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
@@ -154,6 +188,7 @@ import { isCodexAvailable } from '../../src/utils/codex-cli-resolver.js';
 import { isGeminiAvailable } from '../../src/utils/gemini-cli-resolver.js';
 import { isAntigravityAvailable } from '../../src/utils/antigravity-cli-resolver.js';
 import { isPiAvailable } from '../../src/utils/pi-cli-resolver.js';
+import { describeUnknownPath, probePathKind } from '../../src/utils/bounded-path-probe.js';
 
 interface LocalHarness {
   app: FastifyInstance;
@@ -1036,6 +1071,24 @@ describe('session-routes', () => {
   // ========== POST /api/sessions/:id/send-key ==========
 
   describe('POST /api/sessions/:id/send-key', () => {
+    it('rejects both input routes before sending keys while assistant handoff owns the session', async () => {
+      harness.ctx._session.assistantInputLocked = true;
+      execFile.mockClear();
+      const key = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/send-key',
+        payload: { key: 'S-Enter' },
+      });
+      const input = await harness.app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/input',
+        payload: { input: 'must not send\r' },
+      });
+      expect(key.statusCode).toBe(409);
+      expect(input.statusCode).toBe(409);
+      expect(execFile).not.toHaveBeenCalled();
+      expect(harness.ctx._session.writeBuffer).toEqual([]);
+    });
     it('routes tmux send-keys through the dedicated Codeman socket (-L)', async () => {
       // Regression guard: bare `tmux` would hit the user's default server and never
       // find a session that lives only on the Codeman socket (#80 regression class).
@@ -1057,6 +1110,74 @@ describe('session-routes', () => {
       expect((argv as string[]).slice(0, 2)).toEqual(['-L', 'codeman']);
       expect(argv).toContain('send-keys');
       expect(argv).toContain('-H');
+    });
+
+    describe('newline chord comes from the CLI registry (capabilities.newline)', () => {
+      const sentHex = async (mode: string, key: string): Promise<string[]> => {
+        execFile.mockReset();
+        execFile.mockImplementation((_bin: string, _argv: string[], _opts: unknown, cb: (e: Error | null) => void) =>
+          cb(null)
+        );
+        const session = harness.ctx._session as unknown as { mode: string };
+        const before = session.mode;
+        session.mode = mode;
+        try {
+          const res = await harness.app.inject({
+            method: 'POST',
+            url: '/api/sessions/test-session-1/send-key',
+            payload: { key },
+          });
+          expect(res.statusCode).toBe(200);
+        } finally {
+          session.mode = before;
+        }
+        const argv = execFile.mock.calls[0][1] as string[];
+        return argv.slice(argv.indexOf('-H') + 3); // after "-H -t <pane>"
+      };
+
+      it('sends a line feed for Shift+Enter to a CLI that declares nothing', async () => {
+        expect(await sentHex('claude', 'S-Enter')).toEqual(['0a']);
+        expect(await sentHex('opencode', 'S-Enter')).toEqual(['0a']);
+      });
+
+      it('sends a line feed to Codex too: no stock CLI declares a chord', async () => {
+        expect(await sentHex('codex', 'S-Enter')).toEqual(['0a']);
+      });
+
+      describe('a CLI that declares esc-enter (here via a user clis.json override of codex)', () => {
+        beforeEach(() => {
+          const file = registryFilePath();
+          mkdirSync(dirname(file), { recursive: true });
+          writeFileSync(
+            file,
+            JSON.stringify({ schemaVersion: 1, clis: { codex: { capabilities: { newline: 'esc-enter' } } } }),
+            { mode: 0o600 }
+          );
+          reloadCliRegistry();
+        });
+        afterEach(() => {
+          rmSync(registryFilePath(), { force: true });
+          reloadCliRegistry();
+        });
+
+        it('sends Esc+Enter for Shift+Enter, and only to that CLI', async () => {
+          expect(await sentHex('codex', 'S-Enter')).toEqual(['1b', '0d']);
+          expect(await sentHex('claude', 'S-Enter')).toEqual(['0a']);
+        });
+
+        it('still sends a line feed for Ctrl+Enter', async () => {
+          expect(await sentHex('codex', 'C-Enter')).toEqual(['0a']);
+        });
+      });
+
+      it('always sends a line feed for Ctrl+Enter', async () => {
+        expect(await sentHex('codex', 'C-Enter')).toEqual(['0a']);
+        expect(await sentHex('claude', 'C-Enter')).toEqual(['0a']);
+      });
+
+      it('falls back to a line feed for a mode the registry does not know', async () => {
+        expect(await sentHex('no-such-cli', 'S-Enter')).toEqual(['0a']);
+      });
     });
 
     it('rejects keys outside the hex allowlist without invoking tmux', async () => {
@@ -1164,6 +1285,10 @@ and effort involved in moving workloads.
   // ========== POST /api/sessions/:id/paste-image ==========
 
   describe('POST /api/sessions/:id/paste-image', () => {
+    // Rate buckets are process-global; clear them so one test's uploads cannot
+    // exhaust another's budget (the video bucket is only 3/min).
+    beforeEach(() => _resetPasteRateBuckets());
+
     function imageUploadBody(boundary: string, filename: string, mimetype: string, imageBytes: Buffer): Buffer {
       return Buffer.concat([
         Buffer.from(
@@ -1182,50 +1307,200 @@ and effort involved in moving workloads.
 
     function makeSessionRemote(remotePath = '/Users/saqebakhter/repos/projects/moneytrove'): void {
       harness.ctx._session.workingDir = remotePath;
-      vi.spyOn(harness.ctx._session, 'toState').mockReturnValue({
-        ...harness.ctx._session.toState(),
-        workingDir: remotePath,
-        remote: {
-          hostId: 'mac-mini',
-          label: 'mac-mini',
-          host: '192.168.21.109',
-          username: 'saqebakhter',
-          remotePath,
-        },
-      });
-    }
-
-    function mockSuccessfulSshUpload(): Buffer[] {
-      const stdinChunks: Buffer[] = [];
-      spawn.mockImplementation(() => {
-        const child = new PassThrough() as unknown as {
-          stdin: Writable;
-          stdout: PassThrough;
-          stderr: PassThrough;
-          on: (event: string, cb: (...args: unknown[]) => void) => unknown;
-          emit: (event: string, ...args: unknown[]) => boolean;
-        };
-        child.stdout = new PassThrough();
-        child.stderr = new PassThrough();
-        child.stdin = new Writable({
-          write(chunk, _encoding, callback) {
-            stdinChunks.push(Buffer.from(chunk));
-            callback();
-          },
-          final(callback) {
-            queueMicrotask(() => child.emit('close', 0));
-            callback();
-          },
-        });
-        return child;
-      });
-      return stdinChunks;
+      (harness.ctx._session as { remote?: unknown }).remote = {
+        hostId: 'mac-mini',
+        label: 'mac-mini',
+        host: '192.168.21.109',
+        username: 'saqebakhter',
+        remotePath,
+      };
     }
 
     it('converts HEIC paste images to JPEG attachments when browser-side normalization falls back', async () => {
-      makeSessionRemote();
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-heic-'));
+      harness.ctx._session.workingDir = workDir;
       heicConvert.mockClear();
-      const stdinChunks = mockSuccessfulSshUpload();
+      const boundary = 'codeman-test-boundary';
+      const heic = Buffer.from('00000034667479706865696300000000', 'hex');
+      try {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          headers: {
+            host: 'codeman.test',
+            origin: 'http://codeman.test',
+            'content-type': `multipart/form-data; boundary=${boundary}`,
+          },
+          payload: imageUploadBody(boundary, 'IMG_4996.HEIC', 'image/heic', heic),
+        });
+
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.success).toBe(true);
+        expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+        expect((await readFile(body.data.path)).subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+        expect(heicConvert).toHaveBeenCalledWith(heic);
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('transfers remote images over SSH without creating a local upload directory', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-remote-image-'));
+      makeSessionRemote(workDir);
+      remoteImageWrite.mockClear();
+      try {
+        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(200);
+        const { path, filename } = JSON.parse(res.body).data;
+        expect(path).toBe(`${workDir}/.claude-images/${filename}`);
+        expect(remoteImageWrite).toHaveBeenCalledWith(
+          harness.ctx._session.remote,
+          expect.objectContaining({
+            dir: `${workDir}/.claude-images`,
+            filePath: path,
+            bytes: jpeg,
+            transferLabel: 'remote image upload',
+          })
+        );
+        expect(await readdir(workDir)).toEqual([]);
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('surfaces SSH transfer errors without returning a successful attachment path', async () => {
+      makeSessionRemote();
+      remoteImageWrite.mockRejectedValueOnce(new Error('remote image upload failed: Permission denied'));
+      const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+      expect(res.statusCode).toBe(500);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false });
+      expect(JSON.parse(res.body).data).toBeUndefined();
+    });
+
+    it('validates remote image bytes before attempting an SSH transfer', async () => {
+      makeSessionRemote();
+      remoteImageWrite.mockClear();
+      const res = await upload('shot.jpg', 'image/jpeg', Buffer.from('not a valid image'));
+      expect(res.statusCode).toBe(415);
+      expect(remoteImageWrite).not.toHaveBeenCalled();
+    });
+
+    it('converts mislabeled HEIC (declared image/jpeg, HEIF bytes — the MIUI/Android case) via magic sniff', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-heic-mislabel-'));
+      harness.ctx._session.workingDir = workDir;
+      heicConvert.mockClear();
+
+      const boundary = 'codeman-test-boundary';
+      // ftyp brand mif1 — HEIF bytes hiding under a JPEG filename + MIME.
+      const heic = Buffer.from('000000346674797061696631000000006d69663168656963', 'hex');
+      heic.write('mif1', 8, 'ascii'); // major brand
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: imageUploadBody(boundary, 'IMG_2001.jpg', 'image/jpeg', heic),
+      });
+
+      await rm(workDir, { recursive: true });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+      expect(heicConvert).toHaveBeenCalledWith(heic);
+    });
+
+    const jpeg = Buffer.from('ffd8ffe000104a46494600010100', 'hex');
+    const uploadImage = (name: string, mime: string, bytes: Buffer) =>
+      harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: {
+          host: 'codeman.test',
+          origin: 'http://codeman.test',
+          'content-type': 'multipart/form-data; boundary=codeman-test-boundary',
+        },
+        payload: imageUploadBody('codeman-test-boundary', name, mime, bytes),
+      });
+
+    it('writes into .codeman-uploads with a self-ignoring .gitignore, written once and never over a file already there', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      try {
+        const first = await uploadImage('shot.jpg', 'image/jpeg', jpeg);
+        expect(first.statusCode).toBe(200);
+        expect(JSON.parse(first.body).data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.jpg$/);
+        expect(await readdir(workDir)).toEqual(['.codeman-uploads']);
+        expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('*\n');
+
+        await writeFile(join(workDir, '.codeman-uploads', '.gitignore'), 'theirs\n');
+        expect((await uploadImage('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
+        expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('theirs\n');
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('takes back an ignore file whose write failed, so the next upload writes a real one', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      const ignoreFile = join(workDir, '.codeman-uploads', '.gitignore');
+      // The exclusive create succeeds and the two-byte write fails, as on a full disk.
+      const spy = vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (path) => {
+        await writeFile(path as string, '');
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      });
+      try {
+        expect((await uploadImage('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(500);
+        expect(existsSync(ignoreFile)).toBe(false);
+        expect((await uploadImage('shot.jpg', 'image/jpeg', jpeg)).statusCode).toBe(200);
+        expect(await readFile(ignoreFile, 'utf8')).toBe('*\n');
+      } finally {
+        spy.mockRestore();
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('refuses a planted symlink at .codeman-uploads and writes nothing through it', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      const elsewhere = await mkdtemp(join(tmpdir(), 'codeman-elsewhere-'));
+      harness.ctx._session.workingDir = workDir;
+      await symlink(elsewhere, join(workDir, '.codeman-uploads'));
+      try {
+        const res = await uploadImage('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(403);
+        expect(JSON.parse(res.body).error).toBe('.codeman-uploads is not a regular directory');
+        expect(await readdir(elsewhere)).toEqual([]);
+      } finally {
+        await rm(workDir, { recursive: true });
+        await rm(elsewhere, { recursive: true });
+      }
+    });
+
+    it('refuses incomplete remote connection metadata before touching disk', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      // A remote session's workingDir is the REMOTE path: a file written here is unreadable there.
+      (harness.ctx._session as unknown as { remote: unknown }).remote = { hostId: 'gpu-box' };
+      try {
+        const res = await uploadImage('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(400);
+        expect(JSON.parse(res.body).error).toMatch(/remote/);
+        expect(await readdir(workDir)).toEqual([]);
+      } finally {
+        (harness.ctx._session as unknown as { remote: unknown }).remote = undefined;
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('returns 415 with the error envelope when HEIC conversion fails', async () => {
+      heicConvert.mockClear();
+      heicConvert.mockRejectedValueOnce(new Error('HEIC dimensions 30000x30000 exceed the 64MP decode limit'));
 
       const boundary = 'codeman-test-boundary';
       const heic = Buffer.from('00000034667479706865696300000000', 'hex');
@@ -1237,26 +1512,21 @@ and effort involved in moving workloads.
           origin: 'http://codeman.test',
           'content-type': `multipart/form-data; boundary=${boundary}`,
         },
-        payload: imageUploadBody(boundary, 'IMG_4996.HEIC', 'image/heic', heic),
+        payload: imageUploadBody(boundary, 'IMG_4997.HEIC', 'image/heic', heic),
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(415);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(body.data.path).toMatch(
-        /^\/Users\/saqebakhter\/repos\/projects\/moneytrove\/\.claude-images\/paste-\d+-[a-f0-9]{8}\.jpg$/
-      );
-      const written = Buffer.concat(stdinChunks);
-      expect(written.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
-      expect(heicConvert).toHaveBeenCalledWith(heic);
+      expect(body.success).toBe(false);
+      expect(body.errorCode).toBe('INVALID_INPUT');
+      expect(body.error).toMatch(/HEIC/);
     });
 
-    it('uploads paste images for remote sessions to the remote workspace over ssh', async () => {
-      makeSessionRemote();
-      const stdinChunks = mockSuccessfulSshUpload();
+    it('rejects ftyp brands heic-decode cannot convert (e.g. heim) without invoking the converter', async () => {
+      heicConvert.mockClear();
 
       const boundary = 'codeman-test-boundary';
-      const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+      const heim = Buffer.from('00000034667479706865696d00000000', 'hex');
       const res = await harness.app.inject({
         method: 'POST',
         url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
@@ -1265,23 +1535,456 @@ and effort involved in moving workloads.
           origin: 'http://codeman.test',
           'content-type': `multipart/form-data; boundary=${boundary}`,
         },
-        payload: pngUploadBody(boundary, png),
+        payload: imageUploadBody(boundary, 'IMG_4998.HEIC', 'image/heic', heim),
       });
 
+      expect(res.statusCode).toBe(415);
+      expect(JSON.parse(res.body).success).toBe(false);
+      expect(heicConvert).not.toHaveBeenCalled();
+    });
+
+    it.each(['heis', 'hevm', 'hevs'])(
+      'rejects the %s brand, which heic-decode cannot convert, without invoking the converter',
+      async (brand) => {
+        heicConvert.mockClear();
+
+        const boundary = 'codeman-test-boundary';
+        const file = Buffer.concat([
+          Buffer.from('0000003466747970', 'hex'),
+          Buffer.from(brand, 'ascii'),
+          Buffer.from('00000000', 'hex'),
+        ]);
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          headers: {
+            host: 'codeman.test',
+            origin: 'http://codeman.test',
+            'content-type': `multipart/form-data; boundary=${boundary}`,
+          },
+          payload: imageUploadBody(boundary, 'IMG_4998.HEIC', 'image/heic', file),
+        });
+
+        expect(res.statusCode).toBe(415);
+        expect(heicConvert).not.toHaveBeenCalled();
+      }
+    );
+
+    it('probes the session workspace past the stall cap before writing (#516)', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      try {
+        // Clear right before the request so only THIS upload's call can satisfy the pin.
+        vi.mocked(probePathKind).mockClear();
+        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(200);
+        expect(probePathKind).toHaveBeenCalledWith(workDir, { pastCap: true });
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('refuses with the describeUnknownPath message, and writes nothing, when the workspace does not answer', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      pathProbe.kind = 'unknown';
+      try {
+        const res = await upload('shot.jpg', 'image/jpeg', jpeg);
+        expect(res.statusCode).toBe(422);
+        const body = JSON.parse(res.body);
+        expect(body.errorCode).toBe('OPERATION_FAILED');
+        expect(body.error).toBe(describeUnknownPath('Workspace', workDir, { pastCap: true }));
+        expect(await readdir(workDir)).toEqual([]);
+      } finally {
+        pathProbe.kind = null;
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    // `?kind=video`: the phone Attach button's camera-roll videos. Streamed to
+    // disk under their own cap; without the flag the route stays image-only.
+    const boundary = 'codeman-test-boundary';
+    const movHeaders = {
+      host: 'codeman.test',
+      origin: 'http://codeman.test',
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+    };
+    // size + ftyp + "qt  " brand, as an iPhone writes it, padded past the 12-byte sniff.
+    const qtMov = Buffer.concat([Buffer.from('0000001466747970717420200000000071742020', 'hex'), Buffer.alloc(20)]);
+
+    it('streams a ?kind=video upload to .codeman-uploads under the video extension', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, 'IMG_0001.MOV', 'video/quicktime', qtMov),
+      });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.success).toBe(true);
-      expect(body.data.path).toMatch(
-        /^\/Users\/saqebakhter\/repos\/projects\/moneytrove\/\.claude-images\/paste-\d+-[a-f0-9]{8}\.png$/
-      );
-      expect(spawn).toHaveBeenCalledTimes(1);
-      const [bin, argv] = spawn.mock.calls[0];
-      expect(bin).toBe('ssh');
-      expect(argv).toContain('BatchMode=yes');
-      expect(argv).toContain('ConnectTimeout=10');
-      expect(argv).toContain('saqebakhter@192.168.21.109');
-      expect(String(argv.at(-1))).toContain('mkdir "$dir"');
-      expect(Buffer.concat(stdinChunks)).toEqual(png);
+      expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.mov$/);
+      expect(await readFile(body.data.path)).toEqual(qtMov);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('accepts the registry video containers across their magic families (m4v, webm, ogv)', async () => {
+      // The admitted set is VIDEO_ATTACHMENT_EXTENSIONS (mp4/webm/mov/m4v/ogv); mov is
+      // covered above. These three exercise the three sniff families: ISO BMFF (m4v),
+      // EBML (webm) and Ogg (ogv). Three per session stays inside the 3/min video budget.
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      const m4v = Buffer.concat([Buffer.from('00000018667479706d703432', 'hex'), Buffer.alloc(16)]); // ftyp mp42
+      const webm = Buffer.concat([Buffer.from('1a45dfa3a3428681', 'hex'), Buffer.alloc(16)]); // EBML
+      const ogv = Buffer.concat([Buffer.from('4f67675300020000', 'hex'), Buffer.alloc(16)]); // "OggS"
+      for (const [name, mime, bytes, ext] of [
+        ['VID_0001.m4v', 'video/x-m4v', m4v, '.m4v'],
+        ['VID_0002.webm', 'video/webm', webm, '.webm'],
+        ['VID_0003.ogv', '', ogv, '.ogv'], // no MIME type: the name's extension carries it
+      ] as const) {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+          headers: movHeaders,
+          payload: imageUploadBody(boundary, name, mime || 'application/octet-stream', bytes),
+        });
+        expect(res.statusCode, name).toBe(200);
+        expect(JSON.parse(res.body).data.filename.endsWith(ext), name).toBe(true);
+      }
+      await rm(workDir, { recursive: true });
+    });
+
+    it('refuses 3gp and mkv, which a phone camera roll does not produce and the viewer cannot play', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      const threeGp = Buffer.concat([Buffer.from('0000001866747970336770340000000033677034', 'hex'), Buffer.alloc(20)]);
+      const mkv = Buffer.concat([Buffer.from('1a45dfa3a3428681', 'hex'), Buffer.alloc(24)]);
+      for (const [name, mime, bytes] of [
+        ['VID.3gp', 'video/3gpp', threeGp],
+        ['VID.mkv', 'video/x-matroska', mkv],
+      ] as const) {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+          headers: movHeaders,
+          payload: imageUploadBody(boundary, name, mime, bytes),
+        });
+        expect(res.statusCode, name).toBe(400);
+        expect(JSON.parse(res.body).error, name).toMatch(/Unsupported video type/);
+      }
+      await rm(workDir, { recursive: true });
+    });
+
+    it('rejects a video without the flag, so the image path stays image-only', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, 'IMG_0001.MOV', 'video/quicktime', qtMov),
+      });
+      // Named as a type the image path does not take: once the sniff fails, refused by name.
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toMatch(/Unsupported file type: \.mov/);
+    });
+
+    it('refuses an image declared under ?kind=video, so nothing rides the video cap through memory', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, 'a.png', 'image/png', qtMov),
+      });
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toMatch(/Unsupported video type/);
+    });
+
+    it('unlinks a ?kind=video upload whose bytes are not a video container', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(24)]);
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, 'fake.mov', 'video/quicktime', png),
+      });
+      expect(res.statusCode).toBe(415);
+      expect(await readdir(join(workDir, '.codeman-uploads'))).toEqual(['.gitignore']); // the folder's own ignore file, no upload
+      await rm(workDir, { recursive: true });
+    });
+
+    it('leaves no partial file behind when a ?kind=video transfer ends early', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      // The body stops mid-part: no closing boundary ever arrives.
+      const cut = imageUploadBody(boundary, 'IMG_0003.MOV', 'video/quicktime', qtMov).subarray(0, -12);
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+        headers: movHeaders,
+        payload: cut,
+      });
+      expect(res.statusCode).toBeGreaterThanOrEqual(400); // "Premature close" out of the write loop
+      expect(await readdir(join(workDir, '.codeman-uploads'))).toEqual(['.gitignore']); // the folder's own ignore file, no upload
+      await rm(workDir, { recursive: true });
+    });
+
+    it('unlinks a ?kind=video upload over the video cap and answers 413', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      const big = Buffer.concat([qtMov, Buffer.alloc(200)]); // cap is mocked to 64 bytes
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, 'IMG_0002.MOV', 'video/quicktime', big),
+      });
+      expect(res.statusCode).toBe(413);
+      expect(JSON.parse(res.body).error).toMatch(/too large/);
+      expect(await readdir(join(workDir, '.codeman-uploads'))).toEqual(['.gitignore']); // the folder's own ignore file, no upload
+      await rm(workDir, { recursive: true });
+    });
+
+    it('judges a ?kind=video upload on its header, before the body has landed on disk', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      // Mislabeled AND over the (64-byte) cap: the header verdict comes first, so the
+      // answer is 415, never the 413 that would mean the whole body was taken in.
+      const big = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(200)]);
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, 'fake.mov', 'video/quicktime', big),
+      });
+      expect(res.statusCode).toBe(415);
+      expect(await readdir(join(workDir, '.codeman-uploads'))).toEqual(['.gitignore']); // the folder's own ignore file, no upload
+      await rm(workDir, { recursive: true });
+    });
+
+    it('refuses an upload for a remote session before touching disk, video or image', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-video-'));
+      harness.ctx._session.workingDir = workDir;
+      // A remote session's workingDir is the REMOTE path: a file written here is unreadable there.
+      (harness.ctx._session as unknown as { remote: unknown }).remote = { hostId: 'gpu-box' };
+      for (const [url, name, mime, bytes] of [
+        [`/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`, 'IMG_0001.MOV', 'video/quicktime', qtMov],
+        [
+          `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          'shot.png',
+          'image/png',
+          Buffer.from('89504e470d0a1a0a00000000', 'hex'),
+        ],
+      ] as const) {
+        const res = await harness.app.inject({
+          method: 'POST',
+          url,
+          headers: movHeaders,
+          payload: imageUploadBody(boundary, name, mime, bytes),
+        });
+        expect(res.statusCode).toBe(400);
+        expect(JSON.parse(res.body).error).toMatch(/remote/);
+      }
+      (harness.ctx._session as unknown as { remote: unknown }).remote = undefined;
+      expect(await readdir(workDir)).toEqual([]);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('keeps the image path on its own size cap: a valid image past the video cap is accepted without the flag', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      try {
+        // A real PNG far larger than the mocked 64-byte video cap but well under the
+        // harness's 10MB image cap. If the video path's per-call cap override leaked
+        // onto the image path, @fastify/multipart would truncate this and the magic
+        // check would fail; without ?kind=video it must be accepted whole.
+        const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(4096)]);
+        const res = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          headers: movHeaders,
+          payload: imageUploadBody(boundary, 'shot.png', 'image/png', png),
+        });
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.path).toMatch(/\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}\.png$/);
+        expect(await readFile(body.data.path)).toEqual(png);
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    it('caps ?kind=video at 3 per minute per session, far below the image rate, on its own bucket', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-uploads-'));
+      harness.ctx._session.workingDir = workDir;
+      try {
+        for (let i = 0; i < 3; i++) {
+          const ok = await harness.app.inject({
+            method: 'POST',
+            url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+            headers: movHeaders,
+            payload: imageUploadBody(boundary, `IMG_000${i}.MOV`, 'video/quicktime', qtMov),
+          });
+          expect(ok.statusCode).toBe(200);
+        }
+        const limited = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image?kind=video`,
+          headers: movHeaders,
+          payload: imageUploadBody(boundary, 'IMG_0004.MOV', 'video/quicktime', qtMov),
+        });
+        expect(limited.statusCode).toBe(429);
+        expect(JSON.parse(limited.body).error).toMatch(/3 video uploads\/min/);
+        // The image bucket is independent, so an image still goes through.
+        const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(24)]);
+        const img = await harness.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+          headers: movHeaders,
+          payload: imageUploadBody(boundary, 'shot.png', 'image/png', png),
+        });
+        expect(img.statusCode).toBe(200);
+      } finally {
+        await rm(workDir, { recursive: true });
+      }
+    });
+
+    // Documents: admitted by the name's extension, judged on the bytes, buffered
+    // like an image, saved with a sanitized stem of the original name.
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n%'), Buffer.alloc(16)]);
+    const zip = Buffer.concat([Buffer.from('504b0304140000000800', 'hex'), Buffer.alloc(16)]);
+    const upload = (name: string, mime: string, bytes: Buffer) =>
+      harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/paste-image`,
+        headers: movHeaders,
+        payload: imageUploadBody(boundary, name, mime, bytes),
+      });
+
+    it('accepts a PDF, an OOXML document and a text file into .codeman-uploads with the name kept', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      for (const [name, mime, bytes, saved] of [
+        ['Q3 report.pdf', 'application/pdf', pdf, /\/\.codeman-uploads\/paste-\d+-[a-f0-9]{8}-Q3-report\.pdf$/],
+        ['notes.docx', 'application/octet-stream', zip, /-notes\.docx$/], // no usable MIME: the name decides
+        ['todo.md', 'text/markdown', Buffer.from('# héllo\n- [ ] one\n'), /-todo\.md$/],
+        ['data.csv', 'application/octet-stream', Buffer.from('a,b\n1,2\n'), /-data\.csv$/],
+        ['archive.zip', 'application/zip', zip, /-archive\.zip$/],
+      ] as const) {
+        const res = await upload(name, mime, bytes);
+        expect(res.statusCode, name).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.data.path, name).toMatch(saved);
+        expect(await readFile(body.data.path), name).toEqual(bytes);
+      }
+      // The workspace-side convention: the dir ignores itself, the old dir is not created.
+      expect(await readFile(join(workDir, '.codeman-uploads', '.gitignore'), 'utf8')).toBe('*\n');
+      expect(await readdir(workDir)).toEqual(['.codeman-uploads']);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('keeps only [A-Za-z0-9._-] of the original stem, capped at 40 chars', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      const res = await upload('../..\\ (final) ' + 'x'.repeat(60) + '.v2.PDF', 'application/pdf', pdf);
+      expect(res.statusCode).toBe(200);
+      const { filename } = JSON.parse(res.body).data;
+      expect(filename).toMatch(/^paste-\d+-[a-f0-9]{8}-final-x{34}\.pdf$/);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('refuses a script or an HTML page by name, with a message that says so', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      for (const [name, mime] of [
+        ['run.sh', 'text/x-shellscript'],
+        ['page.html', 'text/html'],
+        ['app.py', 'text/x-python'],
+      ] as const) {
+        const res = await upload(name, mime, Buffer.from('#!/bin/sh\necho hi\n'));
+        expect(res.statusCode, name).toBe(400);
+        expect(JSON.parse(res.body).error, name).toMatch(/Unsupported file type/);
+      }
+      expect(await readdir(workDir)).toEqual([]);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('keeps the image path for an image MIME under a document name and for HEIC under a generic name', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      heicConvert.mockClear();
+      const gif = Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(10)]);
+      const heic = Buffer.from('00000034667479706865696300000000', 'hex');
+      for (const [name, mime, bytes, ext] of [
+        ['animation.txt', 'image/gif', gif, '.gif'], // the MIME type wins over the name, as on the client
+        ['camera.pdf', 'image/heic', heic, '.jpg'],
+        ['camera.bin', 'application/octet-stream', heic, '.jpg'], // sniffed, as it was before documents
+      ] as const) {
+        const res = await upload(name, mime, bytes);
+        expect(res.statusCode, name).toBe(200);
+        expect(JSON.parse(res.body).data.filename.endsWith(ext), name).toBe(true);
+      }
+      expect(heicConvert).toHaveBeenCalledTimes(2);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('logs why a text upload was refused without printing its bytes', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const secret = Buffer.from('token=SECRET\u0000');
+        expect((await upload('notes.txt', 'text/plain', secret)).statusCode).toBe(415);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.includes('declaredExt=.txt'));
+        expect(line).toMatch(/reason=nul-byte/);
+        expect(line).not.toContain(secret.toString('hex'));
+        expect(line).not.toContain('SECRET');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('refuses document bytes that do not match the declared type', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(24)]);
+      for (const [name, bytes] of [
+        ['fake.pdf', png], // PNG bytes under a PDF name
+        ['fake.docx', pdf], // a PDF under an OOXML name
+      ] as const) {
+        const res = await upload(name, 'application/octet-stream', bytes);
+        expect(res.statusCode, name).toBe(415);
+        expect(JSON.parse(res.body).error, name).toBe(`File bytes do not match declared type ${extname(name)}`);
+      }
+      expect(await readdir(workDir)).toEqual([]);
+      await rm(workDir, { recursive: true });
+    });
+
+    it('refuses non-UTF-8 text by naming the encoding, UTF-16 when a BOM says so', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'codeman-doc-'));
+      harness.ctx._session.workingDir = workDir;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const notUtf8 = (ext: string) => `This ${ext} file is not UTF-8 text; save it as UTF-8 and attach it again`;
+      const utf16 = (ext: string) => `This ${ext} file is UTF-16 text, not UTF-8; save it as UTF-8 and attach it again`;
+      try {
+        for (const [name, bytes, error, reason] of [
+          // Excel "Unicode Text" / Notepad "Unicode": UTF-16LE with its BOM.
+          ['export.txt', Buffer.from('\ufeffa\tb\n', 'utf16le'), utf16('.txt'), 'utf16-bom'],
+          ['export.csv', Buffer.from([0xfe, 0xff, 0x00, 0x61, 0x00, 0x0a]), utf16('.csv'), 'utf16-bom'], // UTF-16BE
+          ['binary.txt', Buffer.from('hello\u0000world'), notUtf8('.txt'), 'nul-byte'], // NUL, no BOM
+          ['latin1.csv', Buffer.from('a,René\n', 'latin1'), notUtf8('.csv'), 'not-utf8'], // Excel's default CSV
+        ] as const) {
+          warn.mockClear();
+          const res = await upload(name, 'application/octet-stream', bytes);
+          expect(res.statusCode, name).toBe(415);
+          expect(JSON.parse(res.body).error, name).toBe(error);
+          expect(String(warn.mock.calls[0]?.[0]), name).toMatch(
+            new RegExp(`declaredExt=\\S+ size=\\d+ reason=${reason}$`)
+          );
+        }
+      } finally {
+        warn.mockRestore();
+      }
+      expect(await readdir(workDir)).toEqual([]);
+      await rm(workDir, { recursive: true });
     });
   });
 
@@ -1975,6 +2678,59 @@ and effort involved in moving workloads.
       expect(body.data.captureRows).toBeUndefined();
     });
 
+    it('reports how many scrollback rows tmux holds for the captured pane', async () => {
+      // `truncated` measures the byte stream; this is what a `full=1` pull can
+      // return. 0 (a fullscreen CLI in the alternate screen) is the case where
+      // the client must not offer to load the rest.
+      harness.ctx._session.terminalBuffer = 'x'.repeat(4096);
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (
+          _name: string,
+          opts?: { capturedGeometry?: { cols: number; rows: number }; capturedHistoryLines?: number }
+        ) => {
+          if (opts) {
+            opts.capturedGeometry = { cols: 100, rows: 50 };
+            opts.capturedHistoryLines = 0;
+          }
+          return 'visible frame';
+        }
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=1024`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.truncated).toBe(true);
+      expect(body.data.paneHistoryLines).toBe(0);
+    });
+
+    it("omits paneHistoryLines for a remote session, whose local pane's 0 is not the remote history", async () => {
+      // The local pane hosts the remote tmux client in the alternate screen, so it
+      // reports 0, while full=1 reads the real scrollback from the remote tmux.
+      const session = harness.ctx._session as unknown as { remote?: unknown };
+      session.remote = { hostId: 'h1', label: 'proxx', host: 'proxx.lan', username: 'tim', remotePath: '/home/tim' };
+      harness.ctx._session.terminalBuffer = 'x'.repeat(4096);
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedHistoryLines?: number }) => {
+          if (opts) opts.capturedHistoryLines = 0;
+          return 'visible frame';
+        }
+      );
+      try {
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=1024`,
+        });
+        const body = JSON.parse(res.body);
+        expect(body.data.truncated).toBe(true);
+        expect(body.data.paneHistoryLines).toBeUndefined();
+      } finally {
+        session.remote = undefined;
+      }
+    });
+
     // ── COD-178: TUI modes replay the tmux capture ONLY — raw byte history is
     // full-screen redraw frames painted at historical window sizes; replaying
     // them at the browser's current row count scrolls each frame into
@@ -2390,6 +3146,50 @@ and effort involved in moving workloads.
         );
       });
 
+      it.each([false, true])('mirror captures local wrapper only when alive (dead=%s)', async (dead) => {
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'worker',
+          host: '192.0.2.1',
+          username: 'ubuntu',
+          remotePath: '/remote',
+        };
+        const remote = vi.fn(async () => 'REMOTE_FRAME');
+        const local = vi.fn(() => 'LOCAL_FRAME');
+        harness.ctx.mux.isPaneDead = vi.fn(async () => dead);
+        harness.ctx.mux.captureLivePaneFrame = vi.fn(async () => (dead ? null : 'LOCAL_FRAME'));
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remote;
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = local;
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1&mirror=1`,
+        });
+        const data = JSON.parse(res.body).data;
+        expect(data.terminalBuffer).toBe(dead ? 'REMOTE_FRAME' : 'LOCAL_FRAME');
+        expect(data.source).toBe('mux-frame');
+        expect(remote).toHaveBeenCalledTimes(dead ? 1 : 0);
+        expect(local).not.toHaveBeenCalled();
+        expect(harness.ctx.mux.isPaneDead).not.toHaveBeenCalled();
+      });
+
+      it('mirror with empty local wrapper still captures the remote frame', async () => {
+        (harness.ctx._session as { remote?: unknown }).remote = {
+          hostId: 'worker',
+          host: '192.0.2.1',
+          username: 'ubuntu',
+          remotePath: '/remote',
+        };
+        harness.ctx.mux.isPaneDead = vi.fn(async () => false);
+        const remote = vi.fn(async () => 'REMOTE_FRAME');
+        (harness.ctx.mux as { captureRemotePaneBuffer?: unknown }).captureRemotePaneBuffer = remote;
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => '');
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?frame=1&mirror=1`,
+        });
+        expect(JSON.parse(res.body).data.terminalBuffer).toBe('REMOTE_FRAME');
+        expect(remote).toHaveBeenCalledOnce();
+      });
+
       it('COD-441: scopes a remote frame connection to the authenticated viewer', async () => {
         const username = 'frameviewer';
         const cleanup = await useRegularUserHarness(username);
@@ -2581,6 +3381,7 @@ and effort involved in moving workloads.
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain('accumulated byte history fallback');
       expect(body.data.source).toBe('history');
+      expect(body.data.paneHistoryLines).toBeUndefined();
     });
 
     // ── COD-47: full tmux scrollback replay on full page reload ──
@@ -2667,6 +3468,199 @@ and effort involved in moving workloads.
       expect(body.data.terminalBuffer).toContain(newestMarker);
       expect(body.data.terminalBuffer).not.toContain(oldestMarker);
       expect(body.data.terminalBuffer.endsWith(`${newestMarker}${cursorRestore}`)).toBe(true);
+    });
+
+    it('`lines=` bounds the history a full capture reads, clamped to the configured limit', async () => {
+      // Grid tiles send it (TerminalTile._historyLinesQuery): without it a full
+      // capture reads the whole history limit synchronously, and `tail` cuts it
+      // only afterwards. Absent or malformed, the limit itself, as before.
+      const limit = (await harness.ctx.getTerminalHistoryConfig()).tmuxHistoryLimit;
+      harness.ctx._session.mode = 'claude';
+      const captureSpy = vi.fn(
+        (_name: string, _opts?: { historyLimitLines?: number; lastLines?: number }) => 'captured frame'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+      const linesFor = async (query: string) => {
+        captureSpy.mockClear();
+        await harness.app.inject({ method: 'GET', url: `/api/sessions/${harness.ctx._sessionId}/terminal?${query}` });
+        const options = captureSpy.mock.calls[0]?.[1];
+        return options?.lastLines ?? options?.historyLimitLines;
+      };
+
+      expect(await linesFor(`full=1&tail=${1024 * 1024}&lines=10040`)).toBe(10040);
+      expect(await linesFor('full=1&lines=1')).toBe(100);
+      expect(await linesFor('full=1')).toBe(limit);
+      expect(await linesFor(`full=1&lines=${limit + 5}`)).toBe(limit);
+      for (const bad of ['0', '-5', 'abc', '1.5', '', '1e4', '9999999999']) {
+        expect(await linesFor(`full=1&lines=${bad}`), `lines=${bad}`).toBe(limit);
+      }
+    });
+
+    it('`lines=` requests bounded full history even without an explicit full flag', async () => {
+      harness.ctx._session.mode = 'shell';
+      const captureSpy = vi.fn(() => 'bounded pane history');
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+      await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?tail=${1024 * 1024}&lines=500`,
+      });
+      expect(captureSpy).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.objectContaining({ fullHistory: true, lastLines: 500 })
+      );
+    });
+
+    // A shell's tab-select load reads a `lines=` window SMALLER than xterm's
+    // scrollback, so a cut there is real: the client must hear that tmux holds
+    // more, or it treats the window as the whole history and scroll-to-top
+    // stops offering the rest. tmux reports its history depth on the capture.
+    it('reports a `lines=` cut of tmux history as a recoverable tail truncation', async () => {
+      harness.ctx._session.mode = 'shell';
+      const lineCountFor = async (lines: number, historySize: number | undefined) => {
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+          (_name: string, opts?: { capturedHistoryLines?: number }) => {
+            if (opts && historySize !== undefined) opts.capturedHistoryLines = historySize;
+            return 'captured rows\r\nlast row';
+          }
+        );
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1&tail=${1024 * 1024}&lines=${lines}`,
+        });
+        const data = JSON.parse(res.body).data;
+        return { truncated: data.truncated, reason: data.truncationReason, linesCut: data.historyLinesCut };
+      };
+
+      expect(await lineCountFor(10000, 25000)).toEqual({ truncated: true, reason: 'tail', linesCut: true });
+      expect(await lineCountFor(10000, 10000)).toEqual({ truncated: false, reason: null, linesCut: false });
+      expect(await lineCountFor(10000, 400)).toEqual({ truncated: false, reason: null, linesCut: false });
+      // No depth reported (an older tmux, a failed query): nothing is claimed.
+      expect(await lineCountFor(10000, undefined)).toEqual({ truncated: false, reason: null, linesCut: false });
+    });
+
+    // Without `lines=` the bound is the configured ceiling. On tmux before 3.7 a
+    // live pane keeps history deeper than a lowered ceiling, which no request
+    // can read, so reporting it as a recoverable cut would offer Load full
+    // history on a pull that can never return more.
+    it('reports no cut for a full capture without `lines=`, nor for `lines=` at the ceiling', async () => {
+      harness.ctx._session.mode = 'shell';
+      const limit = (await harness.ctx.getTerminalHistoryConfig()).tmuxHistoryLimit;
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedHistoryLines?: number }) => {
+          if (opts) opts.capturedHistoryLines = limit * 5;
+          return 'captured rows\r\nlast row';
+        }
+      );
+      for (const query of ['full=1', `full=1&tail=${1024 * 1024}`, `full=1&lines=${limit}`]) {
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?${query}`,
+        });
+        const data = JSON.parse(res.body).data;
+        expect({ truncated: data.truncated, reason: data.truncationReason }, query).toEqual({
+          truncated: false,
+          reason: null,
+        });
+      }
+    });
+
+    // A nested tmux (remote SSH and Docker cases, or `tmux` run by hand in a
+    // shell) holds the pane in the alternate screen, where tmux keeps no
+    // history: the full capture is one screen. `alt=recording` (a shell's
+    // automatic load) then gets the visible frame over the byte recording,
+    // which still carries the scrollback.
+    describe('alt=recording on a pane in the alternate screen', () => {
+      const install = (alternateOn: boolean | undefined) => {
+        const spy = vi.fn((_name: string, opts?: { fullHistory?: boolean; capturedAlternateOn?: boolean }) => {
+          if (opts?.fullHistory) {
+            if (alternateOn !== undefined) opts.capturedAlternateOn = alternateOn;
+            return 'one screen of full capture';
+          }
+          return 'visible frame';
+        });
+        (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = spy;
+        return spy;
+      };
+      const load = async (query: string) => {
+        const res = await harness.app.inject({
+          method: 'GET',
+          url: `/api/sessions/${harness.ctx._sessionId}/terminal?${query}`,
+        });
+        return JSON.parse(res.body).data;
+      };
+
+      beforeEach(() => {
+        harness.ctx._session.mode = 'shell';
+        harness.ctx._session.terminalBuffer = 'recorded scrollback\r\n';
+      });
+
+      it('falls back to the visible frame over the tailed byte recording', async () => {
+        const spy = install(true);
+        const data = await load(`full=1&tail=${1024 * 1024}&alt=recording&lines=10000`);
+        expect(spy).toHaveBeenCalledTimes(2);
+        expect(spy.mock.calls[1][1]).toEqual({});
+        expect(data.source).toBe('mux-visible');
+        expect(data.terminalBuffer).toContain('recorded scrollback');
+        expect(data.terminalBuffer).toContain('visible frame');
+        expect(data.terminalBuffer).not.toContain('one screen of full capture');
+      });
+
+      it('keeps the full capture when the pane is in the normal screen or tmux did not say', async () => {
+        for (const alternateOn of [false, undefined]) {
+          const spy = install(alternateOn);
+          const data = await load(`full=1&tail=${1024 * 1024}&alt=recording&lines=10000`);
+          expect(spy, String(alternateOn)).toHaveBeenCalledTimes(1);
+          expect(data.source).toBe('mux-full-history');
+          expect(data.terminalBuffer).toContain('one screen of full capture');
+        }
+      });
+
+      it('keeps the full capture without the opt-in (agents, Load full history, scroll pulls)', async () => {
+        const spy = install(true);
+        const data = await load(`full=1&tail=${1024 * 1024}&lines=10000`);
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(data.source).toBe('mux-full-history');
+      });
+    });
+
+    it('lets the byte cap outrank a `lines=` cut: the oldest bytes of the window are gone for good', async () => {
+      harness.ctx._session.mode = 'shell';
+      const { terminalBufferMaxBytes } = await harness.ctx.getTerminalHistoryConfig();
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedHistoryLines?: number }) => {
+          if (opts) opts.capturedHistoryLines = 25000;
+          return `${'x'.repeat(100)}\r\n`.repeat(Math.ceil(terminalBufferMaxBytes / 102) + 10);
+        }
+      );
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1&lines=10000`,
+      });
+      const data = JSON.parse(res.body).data;
+      expect(data.truncated).toBe(true);
+      expect(data.truncationReason).toBe('capped');
+    });
+
+    it('a capture bounded by `lines=` is still a full capture: rows kept, cursor restore last', async () => {
+      // Only how much history tmux reads changes. The row-preserving skips key
+      // on isFullCapture, and the relative cursor move must still end it.
+      const cursorRestore = '\x1b[3A\r\x1b[2C';
+      const capture = `\r\n${['first row', 'second row', 'last row'].join('\r\n')}${cursorRestore}`;
+      harness.ctx._session.mode = 'claude';
+      harness.ctx._session.terminalBuffer = 'byte history that must not be prepended';
+      const captureSpy = vi.fn((_name: string, opts?: { fullHistory?: boolean }) =>
+        opts?.fullHistory ? capture : 'only the visible frame'
+      );
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = captureSpy;
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1&tail=${1024 * 1024}&lines=40`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('mux-full-history');
+      expect(body.data.terminalBuffer.startsWith('\r\nfirst row')).toBe(true);
+      expect(body.data.terminalBuffer.endsWith(`last row${cursorRestore}`)).toBe(true);
+      expect(body.data.terminalBuffer).not.toContain('byte history');
     });
 
     it('full reload (?full=1) returns the tmux capture ALONE — byte history is not duplicated', async () => {
@@ -4155,10 +5149,15 @@ and effort involved in moving workloads.
           // The request budget, not the 90 s session default: the reverse proxy would
           // cut the request at 60 s while the session was still being built.
           expect(wakeWaitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ hostId: 'hufflepuff' }), {
-            timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+            timeoutMs: expect.any(Number),
             // The shutdown signal rides along so `WebServer.stop()` can end the poll.
             signal: expect.any(AbortSignal),
           });
+          // Not asserted to the millisecond: the wake's own elapsed time is subtracted,
+          // so a slow runner lands a few ms under the budget.
+          const [, readyOpts] = wakeWaitUntilReady.mock.calls[0] as unknown as [unknown, { timeoutMs: number }];
+          expect(readyOpts.timeoutMs).toBeLessThanOrEqual(REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS);
+          expect(readyOpts.timeoutMs).toBeGreaterThan(REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS - 1_000);
         } finally {
           startShell.mockRestore();
         }

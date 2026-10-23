@@ -12,6 +12,7 @@ export { Debouncer, KeyedDebouncer } from './debouncer.js';
 export { startEventLoopMonitor } from './event-loop-monitor.js';
 export type { EventLoopMonitorHandle } from './event-loop-monitor.js';
 export { StaleExpirationMap } from './stale-expiration-map.js';
+export { isProcessRunning, waitForProcessesExit, PROCESS_EXIT_POLL_MS } from './process-exit-wait.js';
 export {
   ANSI_ESCAPE_PATTERN_FULL,
   ANSI_ESCAPE_PATTERN_SIMPLE,
@@ -79,3 +80,18 @@ export {
 } from './deepseek-cli-resolver.js';
 export type { DeepSeekProfile, DeepSeekProfileKind } from './deepseek-cli-resolver.js';
 export { resolveOmpDir, isOmpAvailable, getOmpNotFoundMessage, getOmpCliVersion } from './omp-cli-resolver.js';
+export {
+  resolveCopilotDir,
+  isCopilotAvailable,
+  getCopilotNotFoundMessage,
+  getCopilotCliVersion,
+} from './copilot-cli-resolver.js';
+export {
+  boundedPathExists,
+  describeUnknownPath,
+  probePath,
+  probePathKind,
+  isNearStalledPath,
+  unknownPathReason,
+} from './bounded-path-probe.js';
+export type { PathProbeState, PathProbeKind, PathProbeOptions } from './bounded-path-probe.js';

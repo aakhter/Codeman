@@ -36,8 +36,8 @@ function makeElement() {
   };
 }
 
-describe('App Settings authoritative checkpoint gate', () => {
-  it('waits for server settings and renders false instead of stale local true', async () => {
+async function renderCheckpointDefault(local: Record<string, unknown>, server: Record<string, unknown>) {
+  {
     const CodemanApp = function CodemanApp(this: Record<string, unknown>) {};
     const localStorage = makeLocalStorage();
     const elements: Record<string, ReturnType<typeof makeElement>> = {};
@@ -49,6 +49,8 @@ describe('App Settings authoritative checkpoint gate', () => {
       // earlier in the classic-script order) defines it. This vm loads settings-ui.js
       // alone, so it has to be supplied or openAppSettings throws a ReferenceError.
       DEFAULT_VOICE_KEYTERMS: 'Codeman, tmux, Claude',
+      DEFAULT_TOAST_DURATION_MS: 4000,
+      AUTO_CLOSE_NOTIFICATION_MS: 5000,
       MobileDetection: { getDeviceType: () => 'desktop', isHandheldDevice: () => false, isTouchDevice: () => false },
       VoiceInput: {
         _getDeepgramConfig: () => ({}),
@@ -78,6 +80,8 @@ describe('App Settings authoritative checkpoint gate', () => {
     });
 
     const app = new (CodemanApp as unknown as new () => Record<string, any>)();
+    app.$ = (id: string) => elements[id];
+    app.loadWebhook = async () => {};
     app._updatePushUI = () => {};
     app._refreshHeadroomStatus = () => {};
     app.renderShortcutSettingsList = () => {};
@@ -92,11 +96,27 @@ describe('App Settings authoritative checkpoint gate', () => {
     app._initUpdatesSection = () => {};
     app.switchSettingsTab = () => {};
     app.loadTunnelStatus = () => {};
-    app.saveAppSettingsToStorage({ checkpointDefaultEnabled: true });
-    app._settingsSyncPromise = app.loadAppSettingsFromServer(Promise.resolve({ checkpointDefaultEnabled: false }));
+    app.saveAppSettingsToStorage(local);
+    app._settingsSyncPromise = app.loadAppSettingsFromServer(Promise.resolve(server));
 
     await app.openAppSettings();
 
-    expect(elements.appSettingsCheckpointDefault.checked).toBe(false);
+    return elements.appSettingsCheckpointDefault.checked;
+  }
+}
+
+describe('App Settings authoritative checkpoint gate', () => {
+  it('waits for server settings and renders false instead of stale local true', async () => {
+    expect(await renderCheckpointDefault({ checkpointDefaultEnabled: true }, { checkpointDefaultEnabled: false })).toBe(
+      false
+    );
+  });
+
+  it('treats a key the server does not send as ON, not as a stale local false', async () => {
+    // GET /api/settings is a plain read, so a settings.json without the key sends
+    // nothing for it, while the server itself treats the absence as ON
+    // (getCheckpointDefaultEnabled). A stale local false must not survive that,
+    // or the checkbox shows OFF and the next save writes false to the server.
+    expect(await renderCheckpointDefault({ checkpointDefaultEnabled: false }, {})).toBe(true);
   });
 });

@@ -276,7 +276,7 @@ describe('exactly one function may change the terminal size', () => {
     }
     expect(bodyOf(terminalUi, 'setFontSize(size) {')).toContain('this._refitAfterCellSizeChange()');
     const helper = bodyOf(terminalUi, '_refitAfterCellSizeChange() {');
-    expect(helper).toContain('this.sendResize(this.activeSessionId)');
+    expect(helper).toContain('this.sendResize(this.activeSessionId, { preserveFont: true })');
     expect(helper).toContain('this.syncTerminalGeometry()');
     // Three call sites in the font setters (size, family, weight) plus the two
     // font-settle re-fits.
@@ -366,9 +366,9 @@ describe('the failed-load notice fits the narrowest terminal this app will rende
   });
 
   it('does not tell the reader to reopen the tab, which retries nothing', () => {
-    // selectSession early-returns when the session is already active, so
-    // clicking the tab you are already on does not re-fetch.
-    expect(app).toContain('if (this.activeSessionId === sessionId && !forceReload)');
+    // A user selection of the already active session can restore viewer sizing
+    // ownership, so selection remains explicit even when the session matches.
+    expect(app).toContain("this._terminalViewerActivity?.activate('session-select')");
     expect(noticeLines().join(' ')).not.toMatch(/reopen|switch tab/i);
   });
 });
@@ -392,7 +392,7 @@ describe('the server reports the geometry the PTY actually holds', () => {
 
   it('the WebSocket answers a resize with what took', () => {
     const ws = read('src/web/routes/ws-routes.ts');
-    const at = ws.indexOf('session.resize(msg.c, msg.r,');
+    const at = ws.indexOf('session.resizeFromTerminalViewer(sizingToken, msg.c, msg.r,');
     expect(at).toBeGreaterThan(-1);
     const after = ws.slice(at, at + 1400);
     expect(after).toContain('"t":"zc"');

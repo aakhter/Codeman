@@ -69,6 +69,14 @@ export type Cond =
  */
 export type QuoteStyle = 'auto' | 'bare' | 'double' | 'single';
 
+/**
+ * Workspace-relative directories an agent CLI scans for project skills. A closed list
+ * rather than a free path: the value decides where the server WRITES, and
+ * `~/.codeman/clis.json` can set it, so it must never be able to name `..` or an
+ * absolute path.
+ */
+export type AgentSkillDir = '.claude/skills' | '.agents/skills';
+
 /** One argv element. */
 export type ArgSpec =
   /** A bare literal word, e.g. the base binary or codex's `resume` subcommand. */
@@ -89,6 +97,29 @@ export interface CliVariant {
   when?: Cond;
   args: ArgSpec[];
 }
+
+/** The newline chord a CLI's composer reads as "insert a line break" (see `CliCapabilities.newline`). */
+export type NewlineSequence = 'line-feed' | 'esc-enter';
+
+/** The config readers `capabilities.modelDetect.configResolver` may name (src/model-config-resolvers.ts). */
+export type ModelConfigResolverName = 'deepseek-route';
+
+/**
+ * The synced App Settings keys `capabilities.launchDefaults` may name (src/web/launch-defaults.ts).
+ * A closed list rather than any settings key, so a clis.json override cannot feed an
+ * arbitrary setting onto a command line; each name must also be a `SettingsUpdateSchema`
+ * key, which the resolver's typing enforces.
+ */
+export type LaunchDefaultSettingKey = 'codexModel' | 'codexReasoningEffort';
+
+/** The MCP config dialects `src/mcp-sync.ts` has an adapter for. */
+export type McpConfigFormat =
+  | 'claude-json'
+  | 'gemini-json'
+  | 'codex-toml'
+  | 'opencode-json'
+  | 'antigravity-json'
+  | 'copilot-json';
 
 export interface CliLaunch {
   params: Record<string, ParamSpec>;
@@ -327,6 +358,8 @@ export interface CliEnv {
  * Keeping them as separate fields makes that invariant structural rather than commented.
  */
 export interface CliCapabilities {
+  /** Named native conversation adapter used by Codeman assistant bindings. */
+  nativeAssistantProfile?: 'codex' | 'claude' | 'opencode';
   /**
    * Non-Claude run mode that uses its own TUI and output format (`isExternalCliMode`):
    * no Claude transcript, no hooks, no Claude-format token/BashTool parsing. An explicit
@@ -368,8 +401,8 @@ export interface CliCapabilities {
     /**
      * How many rows at the FOOT of the screen that row can appear in, counting non-blank
      * rows only. Claude writes its chip on the last row and keeps the default; Codex pins
-     * its own above the composer, which puts it third from the bottom, so it declares
-     * more. Keep each number as small as that CLI's layout allows: every extra row is
+     * its own above the composer, which puts it third or fourth from the bottom (its hint
+     * row comes and goes), so it declares more. Keep each number as small as that CLI's layout allows: every extra row is
      * another row an agent might be able to write, and the label is what silences an
      * alert. See `watchingLabel()` in `session-activity.ts`.
      */
@@ -387,6 +420,32 @@ export interface CliCapabilities {
      * tested. See `isAwaitingWorkers()` in `session-activity.ts`.
      */
     awaitingLine?: string;
+    /**
+     * Source of a regex matching the dialog this CLI draws when it stops and waits for the
+     * user to answer something (an approval, a question, a trust prompt): Codeman reads
+     * such a pane as BLOCKED, with the same red "needs you" alert, push, webhook and
+     * `blocked` wait signal a Claude `permission_prompt` hook raises. It is the source of
+     * that state for a CLI with no hook of its own (`hooks: 'none'`); a CLI whose hooks
+     * report it never consults the screen for it.
+     *
+     * Tested against the last `blockedLines` non-blank rows of a pane capture, joined
+     * with `\n`, so the pattern can require several markers at once and anchor on the
+     * end of the window (no `m` flag: `$` is the last row). It must anchor on chrome
+     * only that CLI draws, at the FOOT of the screen, where a dialog replaces the
+     * composer: the text above is the agent's own, and it can print anything. A forged
+     * match may cost a false alert and nothing else, because Codeman never answers such a
+     * dialog. See `isBlockedScreen()` in `session-activity.ts`.
+     *
+     * A CLI that omits it is never blocked from the screen, which is what every CLI was
+     * before the field existed.
+     */
+    blockedLine?: string;
+    /**
+     * How many non-blank rows at the foot of the screen `blockedLine` sees. A dialog's
+     * options wrap at narrow widths, which is what pushes its markers up the screen, so
+     * this is sized for the narrowest pane the CLI was measured at. Default 1.
+     */
+    blockedLines?: number;
   };
   /**
    * How many columns this CLI indents its transcript body by, so a copy taken from its
@@ -411,6 +470,17 @@ export interface CliCapabilities {
    * Absent means no strip at all, the same fail-safe direction `workDetect` takes.
    */
   transcriptGutter?: number;
+  /**
+   * Literal text the TUI draws once its composer can take a prompt — what `codeman agent
+   * spawn` waits for (a `wait-output` match) before it calls a worker ready.
+   *
+   * Deliberately NOT `workDetect.promptGlyph`: claude's `❯` also marks the selected row
+   * of its workspace-trust dialog, which is exactly the screen a readiness wait must not
+   * mistake for a composer, so claude declares its composer's own hint text instead.
+   * Absent means no readiness wait: a spawn returns as soon as the session exists, and
+   * the caller synchronizes on `wait-output` markers.
+   */
+  composerReadyMark?: string;
   /** No direct-PTY fallback: the CLI must run inside tmux (secrets ride tmux setenv). */
   requiresMux: boolean;
   /**
@@ -442,11 +512,40 @@ export interface CliCapabilities {
    */
   transcript: 'claude-jsonl' | 'codex-rollout' | 'deepseek-zstd' | 'omp-jsonl' | 'none';
   /**
-   * 'strip-full'     — alt-screen + erase-scrollback + mouse DECSETs stripped (Ink TUIs).
-   * 'strip-mux-only' — only tmux's own attach-time smcup (the safe default).
-   * 'preserve'       — leave everything (a direct-PTY shell running vim/less/htop).
+   * What the server strips from this CLI's output stream before the browser sees it.
+   * The value encodes three independent choices (predicates in session.ts):
+   *
+   * | value                 | alt-screen toggles  | `3J` (erase scrollback) | mouse DECSETs       |
+   * |-----------------------|---------------------|-------------------------|---------------------|
+   * | `strip-full`          | stripped            | stripped                | stripped            |
+   * | `strip-mux-and-mouse` | stripped under tmux | kept                    | stripped under tmux |
+   * | `strip-mux-only`      | stripped under tmux | kept                    | kept                |
+   * | `preserve`            | stripped under tmux | kept                    | kept                |
+   *
+   * `strip-full` is `isAltScreenStripMode`; `strip-mux-and-mouse` is `isMuxMouseStripMode`;
+   * every other value takes `isMuxAltScreenOnlyStripMode`, so at runtime `preserve` and
+   * `strip-mux-only` are the same row — `preserve` only says what such a CLI's pane
+   * holds (terminal-owned scrollback: a shell, pi), not a different strip.
+   *
+   * - alt-screen: the tmux CLIENT emits `smcup` as its first bytes at attach, parking
+   *   xterm in the scrollback-less alternate buffer; a pane program's own toggles never
+   *   reach the client (tmux repaints instead). "Under tmux" means `useMux`: on a
+   *   direct-PTY fallback the `?1049h` is the program's own and must stay.
+   * - `3J`: a user's `clear` is a deliberate scrollback wipe; only an Ink TUI's
+   *   redraw-driven `3J` (strip-full) is noise.
+   * - mouse DECSETs: stripping them keeps a drag a local selection instead of a report
+   *   to the TUI. The browser then hand-encodes clicks (`_sendSyntheticSgrTap`), gated
+   *   on the `cliMouseTracking` the server records as it strips. Kept where a program's
+   *   own mouse support must work in the pane (htop/vim in a shell).
+   *
+   * Stock CLIs: `strip-full` = claude, codex, gemini (Ink TUIs); `strip-mux-and-mouse` =
+   * opencode and copilot (full-screen TUIs that enable tracking themselves); `strip-mux-only` =
+   * antigravity, grok, deepseek, omp; `preserve` = shell, pi.
+   *
+   * A fourth combination is the point to split this into flags; three is still cheaper
+   * as an enum.
    */
-  altScreen: 'strip-full' | 'strip-mux-only' | 'preserve';
+  altScreen: 'strip-full' | 'strip-mux-only' | 'strip-mux-and-mouse' | 'preserve';
   echo: {
     policy: 'buffer' | 'predict' | 'off';
     /** How the local-echo overlay locates the composer row. */
@@ -506,6 +605,20 @@ export interface CliCapabilities {
     reversalDeadReports?: number;
     streak?: { resetMs: number; steps: number[] };
   };
+  /**
+   * The CLI pages its OWN transcript on PageUp/PageDown, so a wheel or touch scroll over
+   * a pane with no local history can be turned into those keys instead of doing nothing
+   * (`_maybePageCliTranscript` in terminal-ui.js). Read by the frontend through
+   * `window.__codemanTranscriptPageKeys`, which the server builds from this field.
+   *
+   * ⚠ NOT wheel forwarding. `wheelForward` above sends SGR mouse wheel REPORTS; this sends
+   * plain keys, and only when the local buffer is hollow (normal buffer, `baseY === 0`).
+   * A CLI can ignore one and honour the other: codex ignores SGR wheel reports (so its
+   * `wheelForward` stays 'never') yet pages on PageUp/PageDown.
+   *
+   * Absent means no paging, so a CLI nobody has measured keeps plain local scrolling.
+   */
+  transcriptPageKeys?: boolean;
   keyboardAccessory: 'agent' | 'shell';
   /** Multi-user: this CLI is a raw shell, so its commands need the privileged gate. */
   privilegedCommandGate: boolean;
@@ -514,7 +627,20 @@ export interface CliCapabilities {
   ralph: boolean;
   respawn: boolean;
   effort: boolean;
+  /**
+   * Codeman may write its agent skill (`skills/codeman`) into this CLI's workspace and
+   * seed its per-session preamble (behind the synced `agentSkillEnabled` setting,
+   * add-only, marker-owned). Where it lands comes from `agentSkillDir` below.
+   */
   agentSkillInjection: boolean;
+  /**
+   * The workspace-relative directory this CLI scans for project skills, so the skill
+   * lands at `<workspace>/<agentSkillDir>/codeman/SKILL.md` where the CLI discovers it.
+   * Measured per CLI. Absent with `agentSkillInjection: true` means Claude Code's
+   * `.claude/skills`, which is what the boolean meant before this field existed, so a
+   * `~/.codeman/clis.json` written against the old schema keeps its behaviour.
+   */
+  agentSkillDir?: AgentSkillDir;
   statusLineTelemetry: boolean;
   /**
    * Whether this CLI can create and answer Approvals Inbox items
@@ -534,6 +660,55 @@ export interface CliCapabilities {
   approvals: boolean;
   /** Where a model override is delivered. Claude uniquely writes settings.local.json. */
   model: { source: 'flag' | 'claude-settings-file' | 'none'; param?: string };
+  /**
+   * Where this CLI draws the model it is running, so a session header can name it
+   * (`SessionState.displayModel`, src/session-display-model.ts).
+   *
+   * `screenLine` is the source of a regex with exactly ONE capture group, the model. It
+   * runs over the last `screenLines` non-blank rows of the pane capture the idle/working
+   * probe already takes (rows joined with `\n`, so a pattern may span them), which costs no
+   * extra tmux call and re-reads the footer at every turn transition, so an in-session
+   * `/model` switch is followed.
+   *
+   * ⚠ The rows are pane text and the agent writes most of a pane, so a pattern must anchor
+   * on chrome only this CLI draws (the row under its own composer, an effort word in its
+   * own footer format), never on a shape the agent could print in its transcript. Measured
+   * on a live pane per CLI; absent means the CLI's screen is never read for a model and
+   * the session shows its launch model, if any.
+   *
+   * `configResolver` names a reader (src/model-config-resolvers.ts) that resolves the
+   * model the CLI's own config pins, the way that CLI resolves it for the session, for
+   * while the screen names none (its status line switched off, or not drawn yet). Read
+   * once per pane start, attach or relaunch, bounded and read-only; the screen still
+   * wins whenever it names a model. A NAMED reader, like a launcher profile, so the
+   * per-CLI behaviour stays data here and code in one module.
+   */
+  modelDetect?: {
+    screenLine?: string;
+    screenLines?: number;
+    /**
+     * Words the `screenLine` field can show when it is NOT the model (a footer whose model
+     * field is switched off shows the next field there), compared lower-cased. A field
+     * equal to the session's own working-directory basename is never the model either,
+     * for every CLI; that rule is the shared reader's, not data.
+     */
+    rejectWords?: string[];
+    configResolver?: ModelConfigResolverName;
+  };
+  /**
+   * Synced App Settings that seed this CLI's launch params when the caller left them unset,
+   * keyed by LAUNCH PARAM name (`{ model: 'codexModel' }`), never the legacy wire name; the
+   * resolver translates through `launch.legacyConfigAliases` like every other `param`.
+   *
+   * Filled into the entry's `launch.legacyConfigField` object at create time by
+   * `applyLaunchDefaults()` (src/web/launch-defaults.ts), which re-validates each value
+   * with `SettingsUpdateSchema` and never overwrites a value the caller sent. Which
+   * launches get it is the CALLER's decision (local ones only: never remote, Docker or a
+   * custom model endpoint). `schema.ts` refuses an undeclared param, and an entry without
+   * a `legacyConfigField`, whose params would otherwise be read off the request body itself.
+   * Absent = no launch defaults.
+   */
+  launchDefaults?: Record<string, LaunchDefaultSettingKey>;
   /**
    * Params a non-granted multi-user owner may not set freely, and what they are forced to.
    * Data-driven so a CUSTOM CLI's bypass flag is clampable exactly like codex's.
@@ -589,6 +764,33 @@ export interface CliCapabilities {
   gates: Record<string, { minVersion: string; failClosed: boolean }>;
   /** Cap on a single terminal frame, when this CLI needs a tighter one than the default. */
   maxFrameBytes?: number;
+  /**
+   * The bytes the web UI types into this CLI's pane for Shift+Enter (the `send-key` route).
+   * `line-feed` (`0x0a`, also what Ctrl+Enter sends) is what Claude Code's Ink input and most TUIs
+   * read as "insert a newline"; `esc-enter` (`ESC` `CR`, the same chord as Option/Alt+Enter and
+   * the mobile ⌥Enter key) is for a TUI that ignores a bare line feed. Absent = `line-feed`.
+   * Data, not a branch on the CLI id, so supporting another CLI's quirk is one line here.
+   */
+  newline?: NewlineSequence;
+  /**
+   * Where this CLI keeps its user-level MCP server list, for MCP sync (`src/mcp-sync.ts`).
+   * `path` is relative to the home directory. `format` names the file dialect the sync
+   * adapter reads and writes. Absent = no known/verified MCP config file, so the CLI is
+   * skipped by sync rather than guessed at.
+   *
+   * `relocation` names the env var the CLI itself reads to move that file (codex's
+   * `CODEX_HOME`, claude's `CLAUDE_CONFIG_DIR`, opencode's `XDG_CONFIG_HOME`). When the SERVER
+   * process env (what the CLIs Codeman spawns inherit) sets it to an absolute directory, the
+   * file is `<that dir>/<relocation.path>` instead; set to anything else, the target is
+   * reported `skipped` rather than written somewhere the CLI never reads. Absent = the file
+   * only follows `$HOME`.
+   */
+  mcpConfig?: {
+    path: string;
+    altPath?: string;
+    format: McpConfigFormat;
+    relocation?: { envVar: string; path: string };
+  };
   /**
    * How this CLI is pointed at a user-supplied custom OpenAI-compatible
    * endpoint (local, e.g. llama.cpp, or cloud, e.g. Azure AI Foundry) — the
@@ -762,7 +964,15 @@ export interface CliOverlays {
    * shell), the same end state a local session reaches through the mouse sync. The CLI keeps its
    * startup decision; tmux then passes the wheel through because the pane asked for it.
    */
-  remote?: { command?: string; fromLaunchSpec?: true; tmuxMouseAtStartupSeconds?: number } | { disabled: true };
+  remote?:
+    | {
+        command?: string;
+        fromLaunchSpec?: true;
+        tmuxMouseAtStartupSeconds?: number;
+        /** COD-486: exact identity source for automatic worker reboot resume. */
+        workerRebootResume?: 'pinned-session' | 'native-session';
+      }
+    | { disabled: true };
   /**
    * `rootCommand` is the same invocation for a container whose exec user is uid 0. Only
    * declare it when the normal `command` would be REFUSED as root: claude's carries

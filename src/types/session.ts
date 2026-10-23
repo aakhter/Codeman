@@ -8,15 +8,16 @@
  * - SessionConfig — creation-time config (id, workingDir, createdAt)
  * - SessionOutput — captured stdout/stderr/exitCode
  * - SessionStatus — 'idle' | 'busy' | 'stopped' | 'error' | 'parked'
- * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp' (which CLI backend)
+ * - SessionMode — 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp' | 'copilot' (which CLI backend)
  * - ClaudeMode — CLI permission mode ('dangerously-skip-permissions' | 'auto' | 'normal' | 'allowedTools')
  * - SessionColor — visual differentiation color
  * - OpenCodeConfig — OpenCode-specific settings (model, autoAllowTools, continueSession)
- * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, resumeSessionId)
+ * - CodexConfig — Codex (OpenAI CLI)-specific settings (model, reasoningEffort, resumeSessionId, bypass, animations, renderMode)
  * - GeminiConfig — Gemini CLI-specific settings (model, approvalMode, resumeSession)
  * - AntigravityConfig — Antigravity CLI (agy) settings (model, dangerouslySkipPermissions, resumeConversationId)
  * - PiConfig — Pi CLI (pi.dev) settings (model, provider, thinking, resume/continue, project trust)
  * - GrokConfig — Grok Build CLI (xAI `grok`) settings (model, alwaysApprove, resume/continue)
+ * - CopilotConfig — GitHub Copilot CLI settings (model, allowAll, resume/continue)
  * - DeepSeekConfig — DeepSeek Harness (`dsh`) settings (profile, permissionMode, resume, status bridge)
  *
  * Cross-domain relationships:
@@ -74,7 +75,8 @@ export type SessionMode =
   | 'pi'
   | 'grok'
   | 'deepseek'
-  | 'omp';
+  | 'omp'
+  | 'copilot';
 export type SessionCheckpointMode = 'compact' | 'clear' | 'new';
 
 export interface SessionCheckpointState {
@@ -115,11 +117,13 @@ export interface SessionWriteOptions {
    * name a tab; Ralph, respawn, cron and approval writes leave this unset.
    */
   fromUser?: boolean;
+  /** Internal assistant coordinator permit; never accepted from HTTP or WebSocket payloads. */
+  assistantPermit?: string;
 }
 
 export type RemoteCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp' | 'copilot'
 >;
 
 /**
@@ -265,7 +269,7 @@ export interface RemoteSessionInfo {
 /** Which CLI backends a Docker case can run (same set as remote). */
 export type DockerCommandMode = Extract<
   SessionMode,
-  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp'
+  'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp' | 'copilot'
 >;
 
 /** Container engine. Docker and Podman differ in the uid/userns + host-gateway alias. */
@@ -429,6 +433,36 @@ export function isEffortLevel(value: string | undefined): value is EffortLevel {
   return value !== undefined && (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
+/**
+ * Reasoning effort levels codex accepts as `model_reasoning_effort` (codex-cli 0.154.0).
+ * Which of them a given model honours is codex's business; Codeman only keeps the value
+ * to a known word, since it lands in the launch argv.
+ */
+export const CODEX_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+/** Codex reasoning effort for a session, passed as `--config model_reasoning_effort=<level>` */
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
+
+/**
+ * Model aliases Claude Code accepts for its advisor tool (a stronger model the session's
+ * main model consults at decision points; code.claude.com/docs/en/advisor). Haiku is left
+ * out on purpose: it can call an advisor but never act as one.
+ */
+export const ADVISOR_MODEL_ALIASES = ['fable', 'opus', 'sonnet'] as const;
+
+/** A full model id in one of the advisor-capable families, e.g. `claude-opus-5-5`. */
+const ADVISOR_MODEL_ID_PATTERN = /^claude-(?:fable|opus|sonnet)-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Type guard: is the value an advisor model Codeman will pass to claude? An alias from
+ * ADVISOR_MODEL_ALIASES or a full fable/opus/sonnet model id. ⚠️ This allowlist is also the
+ * injection guard: the value is rendered inside the single-quoted `--settings` JSON argument.
+ */
+export function isAdvisorModel(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 64) return false;
+  return (ADVISOR_MODEL_ALIASES as readonly string[]).includes(value) || ADVISOR_MODEL_ID_PATTERN.test(value);
+}
+
 /** OpenCode session configuration */
 export interface OpenCodeConfig {
   /** Model identifier (e.g., "anthropic/claude-sonnet-4-5", "openai/gpt-5.2", "ollama/codellama") */
@@ -449,6 +483,8 @@ export type CodexRenderMode = 'hybrid';
 export interface CodexConfig {
   /** Model identifier (e.g., "gpt-5", "o4-mini"). Passed via --model. */
   model?: string;
+  /** Reasoning effort for this session. Passed via --config model_reasoning_effort=<level>. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Resume a previous codex conversation by session id (passed via --resume) */
   resumeSessionId?: string;
   /** Bypass approval prompts (passes --dangerously-bypass-approvals-and-sandbox) */
@@ -548,6 +584,32 @@ export interface GrokConfig {
   /** Continue the most recent session for the working directory (-c). Skipped when resumeSessionId is set. */
   continueSession?: boolean;
   /** Resume a specific session by ID (--resume). Ids only, never titles or paths. */
+  resumeSessionId?: string;
+}
+
+/**
+ * GitHub Copilot CLI (`copilot`) session configuration.
+ *
+ * Copilot asks before running tools ("Manual Approval") and before touching paths
+ * outside the trusted folder. `--yolo` is its allow-all switch (tools, paths and URLs),
+ * the one the Run button opts into like the other agent CLIs' bypass switches. Verified
+ * against copilot 1.0.94.
+ */
+export interface CopilotConfig {
+  /** Model ID passed via --model (e.g. "claude-sonnet-5.5", or "auto"). */
+  model?: string;
+  /**
+   * Allow every tool, path and URL without asking (passes --yolo). Absent = Copilot's own
+   * Manual Approval mode. Multi-user: forced off for non-granted owners by the only-if-sent
+   * clamp branch, like codex/antigravity/grok.
+   */
+  allowAll?: boolean;
+  /** Resume the most recent session (--continue). Skipped when resumeSessionId is set. */
+  continueSession?: boolean;
+  /**
+   * Resume a specific session (--resume <value>): an id, id prefix or session name, as ONE plain word
+   * starting with a letter or digit (a leading `-` would make the value its own flag).
+   */
   resumeSessionId?: string;
 }
 
@@ -680,6 +742,24 @@ export interface CustomModelSelection {
 }
 
 /**
+ * Where a session's {@link DisplayModel} came from (src/session-display-model.ts):
+ * - `custom-endpoint`: the Custom Model Endpoint Profile's model, which wins.
+ * - `statusline`: the CLI reported it (claude's statusLine exporter), follows a switch.
+ * - `screen`: read off the CLI's own footer (`capabilities.modelDetect`), follows a switch.
+ * - `config`: what the CLI's own config pins for this session
+ *   (`capabilities.modelDetect.configResolver`), while its screen names none.
+ * - `launch`: what the session was launched with; nothing has reported since.
+ */
+export type DisplayModelSource = 'custom-endpoint' | 'statusline' | 'screen' | 'config' | 'launch';
+
+/** The model a session runs as far as the server knows, for a session header. */
+export interface DisplayModel {
+  /** Display text: sanitized (no control characters) and at most 64 characters. */
+  model: string;
+  source: DisplayModelSource;
+}
+
+/**
  * The full custom-model selection a session keeps: the public selection plus the
  * bookkeeping `Session.setCustomModel()` needs to UNDO it later without guessing what
  * it once wrote. Persisted to state.json only as the disk-only `__customModel` field
@@ -743,6 +823,51 @@ export interface PaneExit {
    */
   at: number;
 }
+
+/**
+ * Normalized prompt-cache state of a session's main conversation, from the statusline's
+ * `prompt_cache` object (`parsePromptCache` in usage-telemetry.ts). `warm` is the only
+ * field Claude always reports: once the prefix has gone cold it sends `warm:false` with a
+ * null `expires_at`.
+ */
+export interface PromptCacheStatus {
+  warm: boolean;
+  /** Cache lifetime of the current prefix; Claude Code only ever reports these two. */
+  ttl?: '5m' | '1h';
+  /** Epoch MILLISECONDS when the cached prefix goes cold (the statusline reports seconds). */
+  expiresAt?: number;
+  /** Tokens the next request re-writes if the cache has gone cold by then. */
+  recacheTokensIfCold?: number;
+  /** Requests this session that re-processed content the cache already held. */
+  misses?: number;
+  /** Cache rebuilds that followed a compaction or a clearing of old tool results. */
+  expectedRebuilds?: number;
+  /** Cache read tokens as a fraction of all input tokens this session, 0-1. */
+  hitRatio?: number;
+  /** Claude Code's diagnosis of the last miss, e.g. `ttl_expired_1h` or `tools_changed`. */
+  lastMissCauses?: string[];
+  /**
+   * Epoch MS when Codeman saw the context compacted (`/compact`, Claude Code's own idle
+   * compaction, or a clearing of old tool results): the first warm report whose
+   * `recacheTokensIfCold` is null after one that carried it. Carried while the null window holds,
+   * dropped at the next request. Derived in `Session.setPromptCache`, not reported by the
+   * statusline, so it is never set by `parsePromptCache`. Lets the readout say "Context compacted
+   * at HH:MM"; it is never an alert.
+   */
+  compactedAt?: number;
+}
+
+/**
+ * Whether this launch carries Codeman's statusLine exporter, the only source of
+ * `promptCache`, and why not when it does not. Decided once per claude spawn
+ * (`TmuxManager`), so a setting flipped later does not change it until the next launch.
+ * - `injected`: the exporter is on the launch.
+ * - `collection-off`: plan-usage collection (`showPlanUsageLimits`) was off at launch.
+ * - `workspace-statusline`: the workspace's own `.claude/settings.local.json` sets a
+ *   statusLine (or could not be read), and Codeman never replaces one there.
+ * - `remote`: remote and Docker launches never carry the exporter.
+ */
+export type StatusLineExporter = 'injected' | 'collection-off' | 'workspace-statusline' | 'remote';
 
 export interface SessionState {
   /** Trusted configured case snapshot retained at launch for later notebook assignment. */
@@ -840,6 +965,16 @@ export interface SessionState {
   autoResumeEnabled?: boolean;
   /** Pending usage-limit auto-resume fire time (epoch ms), if armed */
   autoResumeAt?: number;
+  /**
+   * Prompt-cache state of the main conversation as Claude Code last reported it on the
+   * statusline (v2.1.251+), fed by `POST /api/status-telemetry`. Absent until the first
+   * report. Restored on a restart (the Session constructor's `promptCache`) so the readout
+   * is not blank until the pane's next render; the readout is time-aware, so a value whose
+   * `expiresAt` has passed reads as cold rather than as a stale warm.
+   */
+  promptCache?: PromptCacheStatus;
+  /** Why a cache report will or will not arrive (see `StatusLineExporter`); absent when unknown. */
+  statusLineExporter?: StatusLineExporter;
   /** Pinned to the top of the session manager list (COD-139) */
   pinned?: boolean;
   /** When the session was pinned (epoch ms) — orders the pinned group, most-recent-first */
@@ -877,7 +1012,8 @@ export interface SessionState {
   /**
    * True while the CLI in the pane has a mouse-tracking DECSET on, as observed
    * by the server on its way out of the stream (those sequences are stripped for
-   * claude/codex/gemini, so the browser can never see them itself). The browser
+   * the strip-full and strip-mux-and-mouse modes, claude/codex/gemini and opencode
+   * under tmux, so the browser can never see them itself). The browser
    * hand-encodes a click report ONLY when this is true; without it, every click
    * sent mouse reports to a CLI that never asked for them.
    */
@@ -902,6 +1038,8 @@ export interface SessionState {
   piConfig?: PiConfig;
   /** Grok-specific configuration (only for mode === 'grok') */
   grokConfig?: GrokConfig;
+  /** GitHub Copilot CLI configuration (only for mode === 'copilot') */
+  copilotConfig?: CopilotConfig;
   /** DeepSeek Harness configuration (only for mode === 'deepseek') */
   deepSeekConfig?: DeepSeekConfig;
   /** OMP-specific configuration (only for mode === 'omp') */
@@ -919,6 +1057,17 @@ export interface SessionState {
   nativeResumeId?: string | null;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort?: EffortLevel;
+  /** Claude advisor model (`advisorModel` in the launch `--settings`, switchable in-session via /advisor) */
+  advisorModel?: string;
+  /**
+   * The model the session was LAUNCHED with (`--model`): the caller's per-session `model`, or
+   * the app-wide default when there was none. Persisted so a recovered session relaunches on
+   * the same model rather than whatever the default is by then. Not `cliModel`, which is what
+   * the CLI's banner reports. Claude sessions only (`cliTakesSessionModel()`): every other CLI
+   * keeps its model in its own config object (`codexConfig.model` and so on), and this is
+   * absent for them.
+   */
+  model?: string;
   /**
    * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): the custom
    * OpenAI-compatible endpoint (local or cloud) this session's CLI is currently pointed
@@ -928,6 +1077,16 @@ export interface SessionState {
    * written) is {@link CustomModelBookkeeping}, persisted disk-only like `__envOverrides`.
    */
   customModel?: CustomModelSelection;
+  /**
+   * The model this session runs, as far as the server knows it, and where that came from
+   * (src/session-display-model.ts): the custom endpoint's model, else the newest report
+   * from the CLI itself (statusline or its own footer), else the model its config pins,
+   * else the launch model. Absent when
+   * none is known; a session header then shows the harness alone. Untrusted display text
+   * (pane-derived for `screen`): render it as text. Persisted, and a `statusline`/`screen`
+   * value is restored after a restart until the next report replaces it.
+   */
+  displayModel?: DisplayModel;
   /** Sanitized per-session attachment history. */
   attachmentHistory?: SessionAttachmentHistoryItem[];
   /** Per-session reference sources (COD-65). */

@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionAttachmentHistoryItem, SessionStatus, SessionRemote } from '../../src/types.js';
+import type { PromptCacheStatus, SessionAttachmentHistoryItem, SessionStatus, SessionRemote } from '../../src/types.js';
 import { sanitizeAttachmentHistory, upsertAttachmentHistory } from '../../src/session-attachment-history.js';
 
 /**
@@ -58,6 +58,13 @@ export class MockSession extends EventEmitter {
    * need to be able to set it.
    */
   watching: string | null = null;
+  /** Mirrors Session.promptCache / setPromptCache (fed by POST /api/status-telemetry). */
+  promptCache: PromptCacheStatus | null = null;
+  setPromptCache(status: PromptCacheStatus): boolean {
+    const changed = JSON.stringify(status) !== JSON.stringify(this.promptCache);
+    this.promptCache = status;
+    return changed;
+  }
   private _activeChildProcesses: { pid: number; command: string }[] = [];
   ralphTracker: null = null;
   writeBuffer: string[] = [];
@@ -109,6 +116,11 @@ export class MockSession extends EventEmitter {
    * which is the state in which input used to disappear silently.
    */
   failWrites = false;
+  assistantInputLocked = false;
+  async performAuxiliaryInput(operation: () => Promise<void>): Promise<void> {
+    if (this.assistantInputLocked) throw new Error('Assistant owns session input');
+    await operation();
+  }
 
   /** Direct PTY write (used by session.write()). Mirrors the real boolean return. */
   write(data: string): boolean {
@@ -466,6 +478,14 @@ export class MockSession extends EventEmitter {
   );
   restartCli = vi.fn(async () => true);
   getCustomModelForPersist = vi.fn(() => this._mockCustomModel);
+  /** Mirrors Session.noteReportedModel: the statusline route records the CLI's model. */
+  reportedModel: { model: string; source: 'statusline' | 'screen' } | null = null;
+  noteReportedModel = vi.fn((source: 'statusline' | 'screen', raw: unknown): boolean => {
+    if (typeof raw !== 'string' || !raw.trim()) return false;
+    if (this.reportedModel?.model === raw && this.reportedModel.source === source) return false;
+    this.reportedModel = { model: raw, source };
+    return true;
+  });
 
   /** Stub for sendInput */
   sendInput = vi.fn();

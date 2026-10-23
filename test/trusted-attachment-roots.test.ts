@@ -25,11 +25,13 @@ describe('trusted attachment roots', () => {
     await fs.mkdir(workspace);
     await fs.mkdir(trustedRoot);
     delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    delete process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
     resetTrustedAttachmentRootsForTests();
   });
 
   afterEach(async () => {
     delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    delete process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
     resetTrustedAttachmentRootsForTests();
     vi.restoreAllMocks();
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -124,6 +126,56 @@ describe('trusted attachment roots', () => {
       const logged = warn.mock.calls.flat().join(' ');
       expect(logged).not.toContain(tempDir);
       expect(logged).not.toContain(os.homedir());
+    });
+  });
+
+  describe('explicit workspace upload mappings (COD-523)', () => {
+    beforeEach(() => {
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trustedRoot;
+      process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = JSON.stringify({ [workspace]: trustedRoot });
+    });
+
+    it('reads and uploads from the mapped enclave without creating a workspace directory', async () => {
+      await fs.writeFile(join(trustedRoot, 'existing.txt'), 'preserved');
+      await expect(resolveLocalUploadDirectory(workspace, admin)).resolves.toEqual({
+        kind: 'trusted',
+        canonicalDir: trustedRoot,
+        agentDirectory: trustedRoot,
+      });
+      await expect(ensureLocalUploadDirectory(workspace, admin)).resolves.toEqual({
+        kind: 'trusted',
+        canonicalDir: trustedRoot,
+        agentDirectory: trustedRoot,
+      });
+      await expect(fs.lstat(join(workspace, '.codeman-attachments'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(join(trustedRoot, 'existing.txt'), 'utf8')).toBe('preserved');
+    });
+
+    it('refuses non-admin use of mapped roots', async () => {
+      await expect(ensureLocalUploadDirectory(workspace, user)).rejects.toMatchObject({ statusCode: 403 });
+    });
+
+    it('refuses roots outside the exact trusted-root set', async () => {
+      process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = '';
+      await expect(ensureLocalUploadDirectory(workspace, admin)).rejects.toMatchObject({ statusCode: 403 });
+    });
+
+    it('refuses mapped root aliases rather than following them', async () => {
+      const alias = join(tempDir, 'root-alias');
+      await fs.symlink(trustedRoot, alias);
+      process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = JSON.stringify({ [workspace]: alias });
+      await expect(ensureLocalUploadDirectory(workspace, admin)).rejects.toMatchObject({ statusCode: 403 });
+    });
+
+    it('fails closed for malformed configuration without creating local storage', async () => {
+      process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = '{invalid';
+      await expect(ensureLocalUploadDirectory(workspace, admin)).rejects.toMatchObject({ statusCode: 403 });
+      await expect(fs.lstat(join(workspace, '.codeman-attachments'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('does not apply another workspace mapping to this workspace', async () => {
+      process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = JSON.stringify({ [tempDir]: trustedRoot });
+      await expect(resolveLocalUploadDirectory(workspace, admin)).resolves.toBeNull();
     });
   });
 

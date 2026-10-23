@@ -201,6 +201,18 @@ not try to set one. Configure it where the harness does: `~/.dsh/settings.yaml`
 plus a home-level `~/.dsh/cordis.patch.yml`, or a `--patch` overlay on the
 profile. That is also how you point dsh at a local or third-party provider.
 
+Codeman does READ the route, for display only: a session header names the model
+the TUI's status line draws, and while it draws none (the status bar's model
+field switched off, or not painted yet) the model the session's route config
+pins (`src/deepseek-route-config.ts`). That is dsh-TUI's own rule: the last of
+`profiles/<profile>/cordis.patch.yml` and `$DSH_HOME/cordis.patch.yml` carrying
+`config` for the `dsh-tui` row, and only when it names BOTH `provider` and
+`model`; a half-pinned route is dropped whole by the TUI and shows nothing here.
+`settings.yaml`'s `agent-default-model` is the headless default and is not read.
+The reader never writes, follows no symlink out of the dsh home, and returns the
+model id alone. The TUI can still reject a pinned route against its provider's
+model catalog at startup; the status line, when on, then shows what it chose.
+
 **Environment.** `DSH_*` and `DEEPSEEK_*` are allowlisted for `envOverrides`
 (so `DSH_HOME`, `DSH_PERMISSION_MODE`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`
 all flow through). Provider keys with *other* names are deliberately not: a dsh
@@ -253,8 +265,8 @@ siblings; no other external CLI mode qualifies. Two edges are worth repeating he
   reports a turn that never ran, and leaves the prompt in a pane that was not yet
   accepting input. Wait for the composer (`❯`) instead.
 - **Wait on `stop`, not on the default signal set.** That set also carries `idle`,
-  which for every external CLI is inferred from output stabilization; a dsh TUI
-  that repaints rarely reads as idle mid-turn.
+  which for dsh is inferred from output stabilization; a dsh TUI that repaints
+  rarely reads as idle mid-turn.
 
 ## 6. The web UI as a tab
 

@@ -6,7 +6,7 @@
  *
  * Port: N/A (source-text assertions only).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -25,10 +25,36 @@ describe('COD-187 live-mirror structural guards', () => {
     expect(dropIdx).toBeLessThan(capIdx);
   });
 
-  it('the 25s remote reconcile tick early-returns for mirror sessions', () => {
+  it('periodically heals remote mirrors while preserving local and history views', () => {
     const start = appJs.indexOf('_remoteReconcileTick() {');
-    const body = appJs.slice(start, start + 700);
-    expect(body).toContain('if (this._isMirrorSession(id)) return;');
+    const method = appJs.slice(start, appJs.indexOf('\n  }\n', start) + 5);
+    const tick = new Function(`return ({${method}})._remoteReconcileTick`)();
+    const refresh = vi.fn();
+    const app = {
+      activeSessionId: 'remote',
+      terminal: {},
+      _isLoadingBuffer: false,
+      _isMirrorSession: () => true,
+      sessions: new Map([['remote', { remote: {} }]]),
+      _viewMode: 'live',
+      _refreshMirrorFrame: refresh,
+    };
+    tick.call(app);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith('remote');
+    refresh.mockClear();
+    app._viewMode = 'history';
+    tick.call(app);
+    expect(refresh).not.toHaveBeenCalled();
+    app._viewMode = 'live';
+    app.sessions.clear();
+    tick.call(app);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('invalidates mirror capture deduplication after live output', () => {
+    const start = appJs.indexOf('_onSessionTerminal(data) {');
+    const end = appJs.indexOf('batchTerminalWrite(data.data)', start);
+    expect(appJs.slice(start, end)).toContain('if (this._isMirrorSession(data.id)) this._lastMirrorFrame = null;');
   });
 
   it('the reconcile family reroutes mirror sessions to a frame refresh (never full history)', () => {
@@ -40,7 +66,8 @@ describe('COD-187 live-mirror structural guards', () => {
 
   it('needsRefresh recovers mirror tabs via ?frame=1, not a history replay', () => {
     const start = appJs.indexOf('async _onSessionNeedsRefresh(');
-    const body = appJs.slice(start, start + 900);
+    // Upstream's tile-grid and refresh-owner guards now come first, so read further in.
+    const body = appJs.slice(start, start + 1600);
     expect(body).toContain('_isMirrorSession(this.activeSessionId)');
     expect(body).toContain('_refreshMirrorFrame');
   });
@@ -67,7 +94,7 @@ describe('COD-187 live-mirror structural guards', () => {
   });
 
   it('selectSession fetches ?frame=1 for mirror tabs and skips snapshot/cache restores', () => {
-    expect(appJs).toContain('? `/api/sessions/${sessionId}/terminal?frame=1`');
+    expect(appJs).toContain('? `/api/sessions/${sessionId}/terminal?frame=1&mirror=1`');
     expect(appJs).toContain('let snapshot = mirror ? null : this._xtermSnapshots?.get(sessionId);');
     expect(appJs).toContain('const cachedBuffer = mirror ? undefined : this.terminalBufferCache.get(sessionId);');
   });
@@ -76,7 +103,7 @@ describe('COD-187 live-mirror structural guards', () => {
     const start = termUi.indexOf('attachCustomKeyEventHandler');
     const body = termUi.slice(start, start + 1600);
     const gate = body.indexOf("this._viewMode === 'history'");
-    const esc = body.indexOf("ev.key === 'Escape'");
+    const esc = body.indexOf("ev.key === 'Escape'", gate);
     expect(gate).toBeGreaterThan(-1);
     expect(esc).toBeGreaterThan(gate); // Escape check is inside the history gate
     expect(body.slice(esc, esc + 200)).toContain('return false');

@@ -45,8 +45,17 @@ export const BROWSER_TEST_GLOBS = [
   'test/capture-geometry-retry.browser.test.ts',
   'test/codex-predictive-echo.test.ts', // also needs a real codex binary
   'test/split-pane-terminal.browser.test.ts',
+  'test/terminal-tile-scroll.browser.test.ts',
+  'test/terminal-touch-paging.browser.test.ts',
+  'test/shift-enter-keypress.browser.test.ts',
+  'test/key-tester.browser.test.ts',
+  'test/webhook-settings.browser.test.ts',
+  'test/case-custom-path.browser.test.ts',
+  'test/doctor-settings.browser.test.ts',
+  'test/git-status.browser.test.ts',
   'test/split-pane-orchestration.browser.test.ts',
   'test/split-pane-auto-collapse.browser.test.ts',
+  'test/mobile-ime-preview.browser.test.ts',
 ];
 
 /**

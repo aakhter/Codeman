@@ -129,3 +129,30 @@ describe('TmuxManager.capturePaneTextAsync', () => {
     expect(activeCapture).not.toHaveBeenCalled();
   });
 });
+
+describe('live mirror frame capture', () => {
+  it('reads frame, geometry and liveness in one asynchronous tmux command', async () => {
+    const execute = vi.fn<TmuxPaneTextExecutor>().mockResolvedValue({
+      stdout: 'live screen\n__CODEMAN_GEOM__\n2 0 80 24\n__CODEMAN_PANE_DEAD__ 0\n',
+    });
+    const manager = managerWith(execute);
+    const frame = await manager.captureLivePaneFrame('codeman-acde-1234');
+    expect(frame).toContain('live screen');
+    expect(frame).toContain('\x1b[1;3H');
+    expect(frame).not.toContain('__CODEMAN_');
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][1]).toContain(';');
+    expect(execute.mock.calls[0][1]).not.toContain('list-panes');
+  });
+  it.each(['1', 'unknown'])('does not use a dead or unverified wrapper (%s)', async (dead) => {
+    const execute = vi.fn<TmuxPaneTextExecutor>().mockResolvedValue({
+      stdout: `old screen\n__CODEMAN_GEOM__\n2 0 80 24\n__CODEMAN_PANE_DEAD__ ${dead}\n`,
+    });
+    await expect(managerWith(execute).captureLivePaneFrame('codeman-acde-1234')).resolves.toBeNull();
+  });
+  it('rejects invalid targets without executing', async () => {
+    const execute = vi.fn<TmuxPaneTextExecutor>();
+    await expect(managerWith(execute).captureLivePaneFrame('bad; command')).resolves.toBeNull();
+    expect(execute).not.toHaveBeenCalled();
+  });
+});

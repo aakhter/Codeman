@@ -108,15 +108,9 @@ async function projectBrowserResponse(webviews: Webview[]): Promise<string[]> {
   browser.renderWebviewMenuItems = vi.fn();
   browser.renderSessionTabs = vi.fn();
   await browser.initWebviews();
-  return win.CodemanTabLayout.project(
-    {
-      version: 1,
-      updatedAt: '2026-08-16T00:00:00.000Z',
-      groups: [],
-      ungrouped: [{ kind: 'webview', id: 'alice-view' }],
-    },
-    { openWebviewIds: browser.webviewOrder }
-  ).visibleRefs.map((ref) => ref.id);
+  // The browser keeps only the stored ids the authenticated list contains, so
+  // another owner's saved tab can never reappear in this device's strip.
+  return browser.webviewOrder.filter((id: string) => browser.webviews.has(id));
 }
 
 describe('GET /api/webviews', () => {

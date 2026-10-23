@@ -59,6 +59,8 @@ function loadHomeSessionsApp(
   const context = vm.createContext({
     CodemanApp,
     console,
+    setInterval: () => 1,
+    clearInterval: () => {},
     window: { innerWidth },
     document: {
       documentElement: {
@@ -283,7 +285,7 @@ describe('home sessions column: model', () => {
     ]);
   });
 
-  it('labels a row with its case and a short backend badge', () => {
+  it('labels a row with its case; an agent CLI carries its mode for the logo', () => {
     const app = loadHomeSessionsApp({
       sessions: sessionMap([{ id: 'a', name: 'w1-claudeman', mode: 'codex' }]),
       sessionOrder: ['a'],
@@ -292,33 +294,39 @@ describe('home sessions column: model', () => {
 
     const [row] = app.buildHomeSessionRows();
     expect(row.caseName).toBe('claudeman');
-    expect(row.modeBadge).toBe('cx');
-    // claude is the default backend and gets no badge — the strip does the same.
+    // Agent CLIs show their logo (drawn from row.mode), not a text badge, the
+    // same as the strip; test/tab-harness-logo.test.ts pins the markup.
+    expect(row.mode).toBe('codex');
+    expect(row.modeBadge).toBe('');
     const plain = loadHomeSessionsApp({
       sessions: sessionMap([{ id: 'a', mode: 'claude' }]),
       sessionOrder: ['a'],
       cases: CASES,
     });
-    expect(plain.buildHomeSessionRows()[0].modeBadge).toBe('');
+    expect(plain.buildHomeSessionRows()[0].mode).toBe('claude');
   });
 
-  it('badges every non-claude backend, so a new run mode cannot read as claude here', () => {
-    // The badge map is a per-mode lookup with a '' fallback, so a mode missing from it
-    // is indistinguishable from claude in this rail while the tab strip badges it fine.
+  it('gives only the shell a text badge, and every backend its own mode', () => {
     for (const [mode, badge] of [
       ['shell', 'sh'],
-      ['opencode', 'oc'],
-      ['codex', 'cx'],
-      ['gemini', 'gm'],
-      ['antigravity', 'ag'],
-      ['pi', 'pi'],
+      ['claude', ''],
+      ['opencode', ''],
+      ['codex', ''],
+      ['gemini', ''],
+      ['antigravity', ''],
+      ['pi', ''],
+      ['grok', ''],
+      ['deepseek', ''],
+      ['omp', ''],
     ] as const) {
       const app = loadHomeSessionsApp({
         sessions: sessionMap([{ id: 'a', mode }]),
         sessionOrder: ['a'],
         cases: CASES,
       });
-      expect(app.buildHomeSessionRows()[0].modeBadge).toBe(badge);
+      const [row] = app.buildHomeSessionRows();
+      expect(row.modeBadge, mode).toBe(badge);
+      expect(row.mode, mode).toBe(mode);
     }
   });
 });
@@ -471,36 +479,21 @@ describe('home screens: one order, one numbering', () => {
   });
 
   it('Alt+digit resolves through the live-session projection in app.js', () => {
-    // Static guard for the handler half of the invariant above: the digit branch
-    // must never index sessionOrder directly, because a delete that raced the
-    // order sync leaves a dead id in it and every key to its right then names
-    // the wrong tab. It resolves through the tab-layout projection instead —
-    // which is BUILT from live sessions and open web tabs (COD-306), so the
-    // filtering is structural rather than a filter() at the call site, and the
-    // web-tab continuation past the last session comes along with it.
+    // Static guard for the handler half of the invariant above: the digit
+    // branch indexes the Alt+N order (`_tabAltRefs`, COD-509), which filters
+    // sessionOrder against live sessions before indexing, for sessions AND for
+    // the web-tab continuation.
     const appJs = readFileSync(resolve(PUBLIC, 'app.js'), 'utf8');
     const start = appJs.indexOf('^Digit([1-9])$');
     expect(start).toBeGreaterThan(-1);
     const branch = appJs.slice(start, start + 1200);
-    expect(branch).toContain('_activateVisibleTabNumber(parseInt(digitMatch[1], 10))');
+    expect(branch).toContain('this._tabAltRefs()[idx]');
     expect(branch).not.toContain('this.sessionOrder[idx]');
-
-    const activate = appJs.slice(appJs.indexOf('_activateVisibleTabNumber(number) {'));
-    // The refs argument was extracted into _tabAltRefs() (which prefers an explicit
-    // altRefs ordering and falls back to visibleRefs). Still the same projection, one
-    // hop further out — assert the hop rather than the old inlined expression, and pin
-    // that the accessor really is projection-derived so this cannot drift into a
-    // non-projection source (COD-385).
-    expect(activate.slice(0, 400)).toContain('refAtAltNumber(this._tabAltRefs(projection), number)');
-    const altRefs = appJs.slice(appJs.indexOf('_tabAltRefs(projection) {'));
-    expect(altRefs.slice(0, 200)).toContain('projection?.altRefs');
-    expect(altRefs.slice(0, 200)).toContain('projection?.visibleRefs');
-    // Both tab kinds are reachable by number, not just sessions.
-    expect(activate.slice(0, 400)).toMatch(/kind === 'session'[\s\S]{0,200}kind === 'webview'/);
-
-    const project = appJs.slice(appJs.indexOf('_projectTabLayout() {'));
-    expect(project.slice(0, 600)).toContain('liveSessionIds: [...this.sessions.keys()]');
-    expect(project.slice(0, 600)).toContain('.filter((id) => this.webviews?.has(id))');
+    const altStart = appJs.indexOf('  _tabAltRefs(projection');
+    expect(altStart).toBeGreaterThan(-1);
+    const alt = appJs.slice(altStart, altStart + 800);
+    expect(alt).toContain('this.sessionOrder.filter((id) => this.sessions.has(id))');
+    expect(alt).toContain('(this.webviewOrder || []).filter((id) => this.webviews?.has(id))');
   });
 });
 

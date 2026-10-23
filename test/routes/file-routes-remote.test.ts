@@ -466,6 +466,25 @@ describe('file routes in a remote (SSH) case', () => {
       expect(ranged.headers['content-range']).toBe('bytes 1-3/42');
     });
 
+    it('refuses a registered remote attachment whose path now resolves into a blocked tree', async () => {
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+      const published = await publish(outsidePath);
+      const attachmentId = (published.body as { data: { attachmentId: string } }).data.attachmentId;
+
+      // The file was swapped for a symlink into /etc after registration: the by-id
+      // route must judge the path the REMOTE host resolves, not the registered one.
+      mockedProbePaths.mockResolvedValue([fileProbe('/etc/shadow', 42), dirProbe]);
+      mockedCreateReadStream.mockClear();
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sessionId}/attachments/${attachmentId}/raw`,
+      });
+
+      expect(res.statusCode).toBeGreaterThanOrEqual(400);
+      expect(res.body).not.toContain('remote bytes');
+      expect(mockedCreateReadStream).not.toHaveBeenCalled();
+    });
+
     it('reports the remote size in the attachment metadata poll', async () => {
       mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
       const published = await publish(outsidePath);

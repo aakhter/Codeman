@@ -20,11 +20,13 @@ import type {
   AntigravityConfig,
   PiConfig,
   GrokConfig,
+  CopilotConfig,
   DeepSeekConfig,
   OmpConfig,
   SessionRemote,
   SessionDocker,
   PaneExit,
+  StatusLineExporter,
 } from './types.js';
 import type { CodexProviderEnvironment } from './codex-provider-identity.js';
 
@@ -50,6 +52,10 @@ export interface MuxSession {
   workingDir: string;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
   remote?: SessionRemote;
+  /** Worker boot observed while the durable remote session existed (COD-486). */
+  remoteBootId?: string;
+  /** An intentional/missing session observed before a reboot must stay closed. */
+  remoteRecoverySuppressed?: boolean;
   /** Docker execution metadata for local tmux sessions wrapping `docker exec` */
   docker?: SessionDocker;
   /** Owning username in multi-user mode (round-tripped through recovery like remote/docker) */
@@ -66,6 +72,8 @@ export interface MuxSession {
   ralphEnabled?: boolean;
   headroomRouted?: boolean;
   headroomRoutedAt?: number;
+  /** Whether the current launch carries the statusLine exporter; set on every create and respawn. */
+  statusLine?: StatusLineExporter;
   /**
    * This record was rebuilt from the tmux socket rather than from Codeman's own
    * bookkeeping, so everything on it but the name and the pid is a guess. Its
@@ -103,7 +111,8 @@ export interface CreateSessionOptions {
    * Name pinned on a claude spawn as `--name` (version-gated, sanitized, local only).
    * Deliberately NOT `name`: `--name` owns the prompt-box label, the `/resume` picker
    * entry and the terminal title, and a pinned title stops Claude generating its own,
-   * so only a user-chosen name belongs here (see `Session.cliPinnedName`).
+   * so by default only a user-chosen name belongs here; the opt-in `pinCliSessionName`
+   * setting pins every tab name (see `Session.cliPinnedName`).
    */
   cliName?: string;
   niceConfig?: NiceConfig;
@@ -116,6 +125,7 @@ export interface CreateSessionOptions {
   antigravityConfig?: AntigravityConfig;
   piConfig?: PiConfig;
   grokConfig?: GrokConfig;
+  copilotConfig?: CopilotConfig;
   deepSeekConfig?: DeepSeekConfig;
   ompConfig?: OmpConfig;
   /** When restoring after reboot, resume a previous Claude conversation by its session ID */
@@ -126,6 +136,8 @@ export interface CreateSessionOptions {
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75). Default off → `unset COLORTERM`. Codex is always truecolor. */
   truecolorEnabled?: boolean;
+  /** Claude advisor model, merged into the same `--settings` JSON (overridable via /advisor in-session) */
+  advisorModel?: string;
   /** tmux history-limit (scrollback lines) allocated when this session is created. */
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
@@ -146,6 +158,8 @@ export interface CreateSessionOptions {
 /** Options for respawning a dead pane. */
 export interface RespawnPaneOptions {
   sessionId: string;
+  /** Verified worker reboot: resume exactly, with no fresh-conversation fallback. */
+  remoteResumeOnly?: boolean;
   workingDir: string;
   mode: SessionMode;
   /** Session display name (tab name). */
@@ -154,7 +168,8 @@ export interface RespawnPaneOptions {
    * Name pinned on a respawned claude as `--name` (version-gated, sanitized, local only).
    * Deliberately NOT `name`: `--name` owns the prompt-box label, the `/resume` picker
    * entry and the terminal title, and a pinned title stops Claude generating its own,
-   * so only a user-chosen name belongs here (see `Session.cliPinnedName`).
+   * so by default only a user-chosen name belongs here; the opt-in `pinCliSessionName`
+   * setting pins every tab name (see `Session.cliPinnedName`).
    */
   cliName?: string;
   niceConfig?: NiceConfig;
@@ -167,6 +182,7 @@ export interface RespawnPaneOptions {
   antigravityConfig?: AntigravityConfig;
   piConfig?: PiConfig;
   grokConfig?: GrokConfig;
+  copilotConfig?: CopilotConfig;
   deepSeekConfig?: DeepSeekConfig;
   ompConfig?: OmpConfig;
   /** Resume a previous Claude conversation when respawning */
@@ -184,6 +200,8 @@ export interface RespawnPaneOptions {
   effort?: EffortLevel;
   /** Opt Claude/non-codex sessions into `export COLORTERM=truecolor` (COD-75, preserved across respawns). Default off. */
   truecolorEnabled?: boolean;
+  /** Claude advisor model (preserved across respawns, merged into the same `--settings` JSON) */
+  advisorModel?: string;
   /** Original tmux history-limit retained for config parity; respawn cannot resize the existing pane. */
   historyLimit?: number;
   /** Remote execution metadata for local tmux sessions wrapping SSH */
@@ -208,6 +226,21 @@ export interface PaneCaptureOptions {
   /** Return only the last N lines of the capture (the cheap `?tail=` replay path). */
   lastLines?: number;
   /**
+   * Full-history only: scrollback rows read from somewhere other than this pane
+   * (raw `capture-pane -p -e -J` text, oldest first). The pane then contributes
+   * only its visible frame and caret, and its own history is not read. A remote
+   * session's real history lives in the REMOTE tmux (`remote-pane-history.ts`).
+   */
+  scrollbackOverride?: string;
+  /**
+   * With `scrollbackOverride`: the screen rows of the pane that history came
+   * from, read right after it. The frame this pane captures later can have
+   * scrolled past some of them, or show only part of a taller screen, so the
+   * rows above where the frame's top overlaps them are kept between the
+   * scrollback and the frame (`joinScrollbackAndFrame`).
+   */
+  scrollbackOverrideScreen?: string;
+  /**
    * Byte cap the consumer will keep from the capture. Sizes the child-process
    * stdout buffer (with slack) so multi-MB scrollback dumps aren't killed by
    * the 1MB execSync default (ENOBUFS).
@@ -222,6 +255,24 @@ export interface PaneCaptureOptions {
    * rendering it needs the real height to know the frame fits.
    */
   capturedGeometry?: { cols: number; rows: number };
+  /**
+   * Filled in by the implementation with the number of rows the pane holds in
+   * scrollback ABOVE the visible frame (tmux `#{history_size}`), read in the
+   * same query as the geometry. 0 means a full-history capture can return
+   * nothing beyond the visible frame: a pane in the alternate screen (a
+   * fullscreen CLI that keeps its transcript itself) never accumulates any.
+   * A full-history capture bounded by `historyLimitLines` below this depth
+   * left older lines behind in the multiplexer, which the caller must report
+   * as recoverable. Absent when the pane could not be queried.
+   */
+  capturedHistoryLines?: number;
+  /**
+   * Filled in by the implementation with whether the pane was in the alternate
+   * screen at capture time, when it can tell. tmux keeps no history for such a
+   * pane (a nested tmux client puts it there), so a full-history capture of it
+   * holds one screen plus whatever the pane held before.
+   */
+  capturedAlternateOn?: boolean;
 }
 
 /**
@@ -423,6 +474,9 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   captureActivePaneBuffer?(muxName: string, opts?: PaneCaptureOptions): string | null;
 
+  /** Current active frame plus liveness, captured in one nonblocking local command. */
+  captureLivePaneFrame?(muxName: string): Promise<string | null>;
+
   /**
    * Plain text of the visible frame: no styles, no cursor query, no repaint
    * reconstruction. Deliberately cheaper than `capturePaneBuffer` because idle
@@ -436,7 +490,7 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Plain text from the active pane's visible screen, captured asynchronously
    * for activity detection.
    */
-  capturePaneTextAsync?(muxName: string, opts?: { signal?: AbortSignal }): Promise<string | null>;
+  capturePaneTextAsync?(muxName: string, opts?: { signal?: AbortSignal; ansi?: boolean }): Promise<string | null>;
 
   /**
    * COD-180 — capture a REMOTE session's pane buffer on the remote tmux server

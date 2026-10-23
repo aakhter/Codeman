@@ -308,7 +308,9 @@ Object.assign(CodemanApp.prototype, {
   },
 
   closeTabRailActionMenu(options = {}) {
-    const menu = document.querySelector('.tab-rail-action-menu');
+    // The group menu borrows this class for its look but has its own owner
+    // (closeTabGroupMenu); removing its DOM here would strand its listeners.
+    const menu = document.querySelector('.tab-rail-action-menu:not(.tab-layout-group-action-menu)');
     const trigger = this._tabRailActionMenuTrigger;
     menu?.remove();
     if (this._tabRailActionMenuOutside) {
@@ -338,24 +340,34 @@ Object.assign(CodemanApp.prototype, {
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-label', 'Session actions');
     const settings = this.loadAppSettingsFromStorage();
-    const ref = { kind: 'session', id: sessionId };
-    const placementActions =
-      this._tabRefMoveActions?.(ref).map((destination) => ({
-        label: destination.label,
-        run: () => this.moveTabRefToGroup(ref, destination.groupId, destination.index),
-      })) || [];
-    placementActions.unshift(...(this._tabRefPlacementActions?.(ref) || []));
     const actions = [
       { label: 'Notes', run: () => this.openSessionNotes(sessionId) },
       { label: 'Session options', run: () => this.openSessionOptions(sessionId) },
-      this._tabRefFocusAction(ref),
-      ...placementActions,
-      ...(settings.showTabDetachButton || this.detachedSessions?.has(sessionId)
-        ? [{ label: 'Open in a new window', run: () => this.detachSession(sessionId) }]
-        : []),
+      // Focus and group placement (vertical rail with a tab layout only; [] elsewhere).
+      ...(this._tabRefMoveActions?.({ kind: 'session', id: sessionId }) || []),
+      // A tile (Detach Tiles on) opens its own size, over where it is: the
+      // keyboard's way to what dragging its header out of the window does.
+      ...(this._tileGrid?.has?.(sessionId) && this._tileDetachAllowed?.()
+        ? [{ label: 'Open in a new window', run: () => this.detachTile(sessionId) }]
+        : (this.tabDetachButtonEnabled?.(settings) ?? settings.showTabDetachButton) ||
+            this.detachedSessions?.has(sessionId)
+          ? [{ label: 'Open in a new window', run: () => this.detachSession(sessionId) }]
+          : []),
       { label: 'Close session', className: 'danger', run: () => this.requestCloseSession(sessionId) },
     ];
     for (const action of actions) {
+      // A note (a child session's placement) is plain text, not a menu item: it
+      // takes no focus and no arrow stop, and describes the menu instead.
+      if (action.note) {
+        const note = document.createElement('div');
+        note.className = 'tab-rail-action-menu-note';
+        note.setAttribute('role', 'none');
+        note.id = 'tabRailActionMenuNote';
+        note.textContent = action.label;
+        menu.setAttribute('aria-describedby', note.id);
+        menu.appendChild(note);
+        continue;
+      }
       const button = document.createElement('button');
       button.type = 'button';
       button.setAttribute('role', 'menuitem');

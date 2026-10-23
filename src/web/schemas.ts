@@ -18,11 +18,14 @@ import {
   MIN_TERMINAL_SCROLLBACK_LINES,
 } from '../config/terminal-history.js';
 import { MAX_EDITABLE_BYTES } from '../config/file-editing.js';
+import { CODEX_REASONING_EFFORTS } from '../types/session.js';
+import { WEBHOOK_KINDS, WEBHOOK_SCOPES } from '../types/push.js';
 import { MIN_MATCH_LENGTH, MAX_MATCH_LENGTH } from '../config/agent-wait.js';
 import { MAX_WAKE_MACS } from '../config/remote-wake-limits.js';
 import { MAX_INPUT_LENGTH } from '../config/terminal-limits.js';
 import { enabledCliIds, enabledClis } from '../config/cli-registry/registry.js';
 import type { SessionMode } from '../types.js';
+import { isAdvisorModel } from '../types/session.js';
 
 // ========== Path Validation ==========
 
@@ -125,6 +128,37 @@ export const FileWriteSchema = z
   .strict();
 
 /**
+ * Body validation for `POST /api/sessions/:id/html-view` (render a local HTML file
+ * as a sandboxed page). Exactly one of `path` (absolute or relative to the session
+ * workspace) or `attachmentId` (a registered attachment of the session);
+ * the extension, containment, guard and broad-root checks are the route's
+ * (html-view-routes.ts), after parsing.
+ */
+export const HtmlViewOpenSchema = z
+  .object({
+    path: z
+      .string({ error: 'Missing path parameter' })
+      .min(1, 'Missing path parameter')
+      .max(4096)
+      .refine((p) => !p.includes('\0') && !p.includes('\n') && !p.includes('\r'), {
+        message: 'Invalid path',
+      })
+      .optional(),
+    // A registered attachment (COD-526): its real path is server-private, so a
+    // published file is named by its registry id and resolved by the route.
+    attachmentId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9_-]+$/, 'Invalid attachment id')
+      .optional(),
+  })
+  .strict()
+  .refine((b) => (b.path === undefined) !== (b.attachmentId === undefined), {
+    message: 'Missing path parameter',
+  });
+
+/**
  * The run-mode ids the API currently accepts: every ENABLED registry entry.
  *
  * Exported so anything needing the authoritative list derives it from here rather than
@@ -173,7 +207,7 @@ function sessionModeSchema(): z.ZodType<SessionMode> {
 /**
  * Allowlisted env var key prefixes, contributed by the ENABLED CLIs in the registry
  * (`env.allowedPrefixes`) — `CLAUDE_CODE_`, `OPENCODE_`, `CODEX_`, `GEMINI_`, `GOOGLE_`,
- * `ANTIGRAVITY_`, `PI_`, `GROK_`, `XAI_`, `DSH_`, `DEEPSEEK_` as shipped.
+ * `ANTIGRAVITY_`, `PI_`, `GROK_`, `XAI_`, `DSH_`, `DEEPSEEK_`, `OMP_`, `COPILOT_` as shipped.
  *
  * ⚠️ Resolved AT PARSE TIME, not at module load. This used to be a frozen array computed
  * once when the module was imported, which meant a CLI enabled while the server was running
@@ -238,7 +272,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_*, PI_*, GROK_*, XAI_*, DSH_*, DEEPSEEK_*, OMP_* keys and CLAUDE_CONFIG_DIR are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_*, PI_*, GROK_*, XAI_*, DSH_*, DEEPSEEK_*, OMP_*, COPILOT_* keys and CLAUDE_CONFIG_DIR are allowed.',
     }
   );
 
@@ -250,6 +284,20 @@ const safeEnvOverridesSchema = z
  * block in-session `/effort` switching). `ultracode` enables dynamic workflow orchestration.
  */
 const effortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']).optional();
+
+/**
+ * Claude advisor model for new sessions: `fable`/`opus`/`sonnet` or a full model id in one of
+ * those families (isAdvisorModel). Merged into the launch `--settings` JSON as `advisorModel`,
+ * a soft default that /advisor still switches in-session. The allowlist is also the injection
+ * guard for the single-quoted `--settings` argument.
+ */
+const advisorModelSchema = z
+  .string()
+  .max(64)
+  .refine((value) => isAdvisorModel(value), {
+    message: 'advisorModel must be fable, opus, sonnet or a full claude-fable/opus/sonnet model id',
+  })
+  .optional();
 
 // ========== Session Routes ==========
 
@@ -298,6 +346,7 @@ const CodexConfigSchema = z
       .max(100)
       .regex(/^[a-zA-Z0-9._\-/]+$/)
       .optional(),
+    reasoningEffort: z.enum(CODEX_REASONING_EFFORTS).optional(),
     resumeSessionId: z
       .string()
       .max(100)
@@ -401,6 +450,28 @@ const GrokConfigSchema = z
       .string()
       .max(100)
       .regex(/^[a-zA-Z0-9._-]+$/)
+      .optional(),
+  })
+  .optional();
+
+const CopilotConfigSchema = z
+  .object({
+    // A leading alphanumeric, like resumeSessionId below: a value like `--yolo` would otherwise be read
+    // as its own flag after `--model` (bypassing the allowAll clamp). `/` stays for provider/id.
+    model: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._\-/]*$/)
+      .optional(),
+    allowAll: z.boolean().optional(),
+    continueSession: z.boolean().optional(),
+    // A single plain word with a leading alphanumeric: --resume also matches session NAMES, so
+    // `my-feature` is accepted, but a value like `--yolo` must not be, because --resume's value is
+    // optional and the next token would be read as its own flag (bypassing the allowAll clamp).
+    resumeSessionId: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
       .optional(),
   })
   .optional();
@@ -517,6 +588,15 @@ export const DeepSeekWebStartSchema = z
  */
 const parentSessionIdSchema = z.string().max(100).optional();
 
+/**
+ * Tab group the new session should be placed in (the group's "New session"
+ * action). Advisory like parentSessionId: the layout service looks the id up in
+ * the creating owner's own layout and ignores one it cannot find, so a stale or
+ * foreign id never fails a spawn. A malformed value (null, empty, over-long) is
+ * still a 400, because only the browser sends it.
+ */
+const tabGroupIdSchema = z.string().min(1).max(100).optional();
+
 export const CreateSessionSchema = z.object({
   caseName: z
     .string()
@@ -525,20 +605,39 @@ export const CreateSessionSchema = z.object({
   workingDir: safePathSchema.optional(),
   mode: sessionModeSchema().optional(),
   name: z.string().max(100).optional(),
-  tabGroupId: z.string().min(1).max(100).optional(),
   /** Session that spawned this one — see parentSessionIdSchema. */
   parentSessionId: parentSessionIdSchema,
+  /** Tab group to place the new session in: see tabGroupIdSchema. */
+  tabGroupId: tabGroupIdSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
+  /** Claude advisor model (soft default via --settings, switchable in-session via /advisor) */
+  advisorModel: advisorModelSchema,
   /** Model override to write to .claude/settings.local.json (e.g., "opus[1m]"). Empty string clears. */
   modelOverride: z.string().max(50).optional(),
+  /**
+   * Claude model for THIS session only, passed as `claude --model <id>`; nothing is written to
+   * disk. Wins over the app-wide default model. A subset of the registry's `model-claude`
+   * pattern, so a value accepted here is never rejected at launch. The first character must be
+   * a letter or digit: the value lands in argv, and no model id opens with `-`, so a
+   * flag-shaped value is refused here rather than left to the launch quoting. An empty string
+   * means no per-session model, as it does for `modelOverride`. Claude only: the route refuses
+   * it for any other CLI and on a remote attach.
+   */
+  model: z
+    .string()
+    .max(100)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._\-[\]]*$/)
+    .or(z.literal(''))
+    .optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
   antigravityConfig: AntigravityConfigSchema,
   piConfig: PiConfigSchema,
   grokConfig: GrokConfigSchema,
+  copilotConfig: CopilotConfigSchema,
   deepSeekConfig: DeepSeekConfigSchema,
   ompConfig: OmpConfigSchema,
   /** Resume a previous Claude conversation by its session ID (used for reboot recovery) */
@@ -643,6 +742,43 @@ export const StatusTelemetrySchema = z.object({
         .nullish(),
       cost: z.object({ total_cost_usd: z.number().nullish() }).nullish(),
       model: z.object({ display_name: z.string().max(100).nullish() }).nullish(),
+      // Main-conversation prompt-cache statistics (Claude Code v2.1.251+). Every documented
+      // scalar field is listed nullish: `expires_at`/`hit_ratio`/`last_miss_at`/
+      // `recache_tokens_if_cold` are all documented as possibly null, and the object gains
+      // fields over CLI versions, so a stricter shape would 400 the whole post and blank the
+      // footer (the recurring .optional()/null trap). Causes stay `unknown` (the parser keeps
+      // the strings); `last_miss_cause`'s extra numeric keys and the `miss_causes` record are
+      // stripped by Zod unread, which keeps the stored object bounded — a hostile localhost
+      // payload cannot bloat state, since only the normalized subset below is ever stored.
+      prompt_cache: z
+        .object({
+          warm: z.boolean().nullish(),
+          caching_observed: z.boolean().nullish(),
+          // No length cap: a future TTL longer than today's `5m`/`1h` must not 400 the whole
+          // post and blank the footer. parsePromptCache discards any TTL it does not know, so
+          // the stored value stays bounded to those two regardless.
+          ttl: z.string().nullish(),
+          expires_at: z.number().nullish(),
+          requests: z.number().nullish(),
+          misses: z.number().nullish(),
+          expected_rebuilds: z.number().nullish(),
+          hit_ratio: z.number().nullish(),
+          cache_write_tokens: z.number().nullish(),
+          miss_recache_tokens: z.number().nullish(),
+          last_miss_at: z.number().nullish(),
+          recache_tokens_if_cold: z.number().nullish(),
+          // Keep the first 20 causes instead of 400-ing the whole post (which also drops the
+          // footer, the plan chip and the model report it carries) when Claude Code reports more. The
+          // preprocess slices BEFORE the array validates, so an over-long array costs one bounded
+          // slice, never per-element validation across every entry (parsePromptCache then keeps
+          // the string ones among those 20).
+          last_miss_cause: z
+            .object({
+              causes: z.preprocess((v) => (Array.isArray(v) ? v.slice(0, 20) : v), z.array(z.unknown()).nullish()),
+            })
+            .nullish(),
+        })
+        .nullish(),
     })
     .nullish(),
 });
@@ -667,6 +803,13 @@ export const CreateCaseSchema = z.object({
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format. Use only letters, numbers, hyphens, underscores.'),
   description: z.string().max(1000).optional(),
   codexCommandSelection: LocalCaseCodexCommandSelectionSchema,
+  /**
+   * Create the case in this folder instead of under the cases directory. Absolute, or starting with
+   * `~`. Only length-bounded here: what makes it acceptable (shape, blocked trees, symlinks, an
+   * existing folder with contents) is judged by `prepareNewCasePath()` in web/case-path.ts, which
+   * also produces the user-facing reason.
+   */
+  path: z.string().min(1).max(1000).optional(),
 });
 
 /**
@@ -693,6 +836,34 @@ export const CloneCaseSchema = z.object({
 /** Schema for POST /api/cases/clone-preflight — ask the remote what it has, clone nothing. */
 export const ClonePreflightSchema = z.object({
   repository: z.string().min(1).max(2048),
+});
+
+// ========== Git worktrees of a case (src/git-worktrees.ts) ==========
+
+/**
+ * A worktree name: one segment of letters, digits, `.`, `_`, `-`, starting with a letter or
+ * digit, at most 64 characters (Claude Code's own `--worktree` limit). The finer rules (no `..`,
+ * no trailing `.lock`) are `worktreeNameError()`, which every route applies after this.
+ */
+const worktreeNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Invalid worktree name. Use letters, digits, ".", "_" and "-".');
+
+/** Schema for POST /api/cases/:name/worktrees: a new worktree on a new branch. */
+export const CreateWorktreeSchema = z.object({
+  name: worktreeNameSchema,
+  /** New branch name; default `worktree-<name>`, Claude Code's convention. */
+  branch: z.string().min(1).max(200).optional(),
+  /** Start point (branch, tag or commit); default the case's current HEAD. */
+  base: z.string().min(1).max(200).optional(),
+});
+
+/** Query of DELETE /api/cases/:name/worktrees/:worktree. */
+export const RemoveWorktreeQuerySchema = z.object({
+  /** Also `git branch -d` the worktree's branch (never `-D`). */
+  deleteBranch: z.enum(['true', 'false', '1', '0']).optional(),
 });
 
 const RemoteCommandOverridesSchema = z
@@ -1157,9 +1328,17 @@ export const QuickStartSchema = z.object({
   /** Display name for the created session tab (e.g. w1-mycase). Cosmetic; the durable
    *  mux/container names derive from the session id, not this. Defaults server-side. */
   sessionName: z.string().max(128).optional(),
-  tabGroupId: z.string().min(1).max(100).optional(),
   /** Session that spawned this one — see parentSessionIdSchema. */
   parentSessionId: parentSessionIdSchema,
+  /** Tab group to place the new session in: see tabGroupIdSchema. */
+  tabGroupId: tabGroupIdSchema,
+  /**
+   * Start the session in this git worktree of the case (`<case>/.claude/worktrees/<worktree>`,
+   * created through POST /api/cases/:name/worktrees) instead of the case folder. Local cases
+   * only: refused (400) for remote and Docker cases. The worktree must be a registered worktree
+   * of the case's repository; it is never created here.
+   */
+  worktree: worktreeNameSchema.optional(),
   /** Model override written to <case>/.claude/settings.local.json (e.g. "opus[1m]").
    *  Empty string clears. Applied for local AND docker cases (the docker workspace is
    *  a real host dir, so the settings file crosses the bind mount); rejected for
@@ -1172,11 +1351,14 @@ export const QuickStartSchema = z.object({
   antigravityConfig: AntigravityConfigSchema,
   piConfig: PiConfigSchema,
   grokConfig: GrokConfigSchema,
+  copilotConfig: CopilotConfigSchema,
   deepSeekConfig: DeepSeekConfigSchema,
   ompConfig: OmpConfigSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
+  /** Claude advisor model (soft default via --settings, switchable in-session via /advisor) */
+  advisorModel: advisorModelSchema,
   /**
    * Who is spawning this worker (`codeman-skill` from the packaged agent skill), or,
    * equivalently, the `X-Codeman-Agent-Origin` header; the body wins when both are
@@ -1403,6 +1585,14 @@ export const SettingsUpdateSchema = z
      */
     workspaceHooksEnabled: z.boolean().optional(),
     /**
+     * Launch every Claude session with `--name` set to its tab name (default OFF: only a
+     * name the user chose is pinned). Nothing acts on it in `PUT /api/settings`: it is read
+     * fresh from disk by readPinCliSessionNameEnabled() (hooks-config.ts) at every claude
+     * create and respawn, like readPlanUsageTelemetryEnabled(), so a toggle applies from the
+     * next spawn with no restart.
+     */
+    pinCliSessionName: z.boolean().optional(),
+    /**
      * Let browser dictation transcribe through this machine's Claude Code login,
      * the same speech-to-text service the CLI's own `/voice` mode uses
      * (docs/claude-voice-plan.md). SYNCED, default OFF: enabling it spends the
@@ -1429,6 +1619,14 @@ export const SettingsUpdateSchema = z
      */
     autoNameSessions: z.boolean().optional(),
     /**
+     * Spawned tabs follow their parent: a session created by another one keeps
+     * following its parent's tab (into its group, moving with it) until moved by
+     * hand. SYNCED, default OFF, because the server does the placement:
+     * TabLayoutService.sessionCreated() reads it at every creation, and with it
+     * off the child lands after its parent once and is hand-placed from then on.
+     */
+    spawnedTabsFollowParent: z.boolean().optional(),
+    /**
      * Read My Mind (docs/readmymind-plan.md): capture the user's submitted
      * prompts into per-case intent profiles. SYNCED, default OFF (opt-in:
      * captured prompts are sensitive). OFF stops capture immediately; already
@@ -1452,6 +1650,13 @@ export const SettingsUpdateSchema = z
      */
     cliManagementEnabled: z.boolean().optional(),
     /**
+     * MCP server sync (src/mcp-sync.ts): copies each enabled CLI's user-level MCP servers into
+     * the other CLIs' own config files. SYNCED, default OFF: it writes other tools' config in
+     * the server user's home (including any env values and headers on the servers), so it is
+     * opt-in. While OFF, GET/POST /api/mcp-sync answer 403 and the Settings controls are hidden.
+     */
+    mcpSyncEnabled: z.boolean().optional(),
+    /**
      * Read My Mind predictor model override. Empty/absent = the AI-checker
      * default (opus: prediction quality is the product and it runs only on an
      * explicit press). Shell-safety is validated again at spawn time.
@@ -1468,6 +1673,13 @@ export const SettingsUpdateSchema = z
     // Declared here (like tabTwoRows) so it persists server-side and can seed a
     // fresh device; it is still PER-DEVICE by client policy — settings-ui.js lists
     // it in `displayKeys`, so a server value never overwrites a device's own choice.
+    /**
+     * CLI Logos on Tabs. Display key (per-device), default ON: only an explicit
+     * false hides the agent logo on session tabs and the desktop home rail
+     * (`html[data-tab-logos='off']`, a CSS-only switch). Tile and split headers
+     * and the Run menus keep their logos.
+     */
+    showTabCliLogos: z.boolean().optional(),
     tabOrientation: z.enum(['horizontal', 'vertical']).optional(),
     tabRailWidth: z.number().int().min(208).max(360).optional(),
     tabRailDetail: z.enum(['simple', 'rich']).optional(),
@@ -1480,6 +1692,25 @@ export const SettingsUpdateSchema = z
      *              rail drag-reorderable.
      */
     tabRailSort: z.enum(['activity', 'manual']).optional(),
+    /**
+     * Tab layout, the arrangement of the tab list (Discussion #426). Display key
+     * (per-device).
+     * 'classic' = one flat list in tab order, as before. The default.
+     * 'state'   = a row per state in the header strip (needs you, waiting,
+     *             working, idle; option C), sections in the flat side rail and
+     *             the sidebar. Opt-in.
+     * 'case'    = one cluster per case (option A): a labelled box in the strip,
+     *             a section in the side rail and the sidebar. Opt-in.
+     * 'ledger'  = the flat list on an aligned column grid with a status bar
+     *             per cell (option B). Header strip on desktop only. Opt-in.
+     */
+    tabArrangement: z.enum(['state', 'case', 'ledger', 'classic']).optional(),
+    /**
+     * Which end the state groups start from when `tabArrangement` is 'state'.
+     * Display key (per-device). 'urgent-first' = needs you on top (the
+     * default); 'urgent-last' = the other way up, needs you in the bottom row.
+     */
+    tabStateOrder: z.enum(['urgent-first', 'urgent-last']).optional(),
     /**
      * Session list layout. Display key (per-device).
      * 'header'       = horizontal tab strip
@@ -1533,9 +1764,24 @@ export const SettingsUpdateSchema = z
     // dead-mux reconciliation. Unsafe/ambiguous records still remain queued.
     autoRecoverSessionsAfterReboot: z.boolean().optional(),
     thinkingEffort: z.string().max(20).optional(),
+    /** Advisor model for new Claude sessions ('' = leave it to the CLI's own /advisor choice). */
+    claudeAdvisorModel: z
+      .string()
+      .max(64)
+      .refine((value) => value === '' || isAdvisorModel(value), { message: 'Invalid advisor model' })
+      .optional(),
     // UI visibility
     showFontControls: z.boolean().optional(),
     showSystemStats: z.boolean().optional(),
+    /**
+     * How the header draws its WS / CPU / MEM / plan-usage cluster. Display key
+     * (per-device), desktop only (the cluster is hidden below 768px).
+     * 'classic' = the bars and the 5H · 7D chip, as before
+     * 'compact' = two pills (WS/CPU/MEM, the plan windows), a ring beside every value.
+     *             The default.
+     * 'tiles'   = label over value with a bar underneath, no icons
+     */
+    headerStatsStyle: z.enum(['classic', 'compact', 'tiles']).optional(),
     showTokenCount: z.boolean().optional(),
     showCost: z.boolean().optional(),
     showLifecycleLog: z.boolean().optional(),
@@ -1562,6 +1808,12 @@ export const SettingsUpdateSchema = z
     /** Hide/show the response-viewer (eye) header button */
     showResponseViewer: z.boolean().optional(),
     // Codex CLI settings
+    codexModel: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._\-/]*$/)
+      .optional(),
+    codexReasoningEffort: z.enum(['', ...CODEX_REASONING_EFFORTS]).optional(),
     codexDangerouslyBypassApprovals: z.boolean().optional(),
     codexAnimationsEnabled: z.boolean().nullable().optional(),
     // Terminal history and retention
@@ -1588,6 +1840,8 @@ export const SettingsUpdateSchema = z
         browserNotifications: z.boolean().optional(),
         audioAlerts: z.boolean().optional(),
         stuckThresholdMs: z.number().optional(),
+        toastDurationMs: z.number().optional(),
+        browserAutoCloseMs: z.number().optional(),
         muteCritical: z.boolean().optional(),
         muteWarning: z.boolean().optional(),
         muteInfo: z.boolean().optional(),
@@ -2033,6 +2287,20 @@ export const PushPreferencesUpdateSchema = z.object({
   pushPreferences: z.record(z.string(), z.boolean()),
 });
 
+/**
+ * PUT /api/webhook. `.strict()` like every settings-shaped schema; `url` is optional so a change of
+ * kind or scope never needs the secret re-sent, and an empty string clears it. The kind and scope
+ * lists are the store's own, so the schema can never accept a value the store would coerce away.
+ */
+export const WebhookUpdateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    kind: z.enum(WEBHOOK_KINDS).optional(),
+    scope: z.enum(WEBHOOK_SCOPES).optional(),
+    url: z.string().max(2048).optional(),
+  })
+  .strict();
+
 // ========== Ralph Loop ==========
 
 /** POST /api/ralph-loop/start */
@@ -2049,6 +2317,8 @@ export const RalphLoopStartSchema = z.object({
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
+  /** Claude advisor model (soft default via --settings, switchable in-session via /advisor) */
+  advisorModel: advisorModelSchema,
   planItems: z
     .array(
       z.object({

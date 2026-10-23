@@ -476,9 +476,10 @@ const MobileTabSheet = {
 
     const focusHeaderItems = allFocusIds.map(itemFor).filter(Boolean);
     const renderedFocus = focusCollapsed ? [] : focusHeaderItems;
-    // Focus renders as a shortcut section AND sessions remain in their
-    // canonical group/Ungrouped section (desktop-rail parity). Focus
-    // membership is driven purely off projection focusRefs — never off
+    // Focus renders as its own section of SHORTCUTS: a focused session is
+    // drawn there AND in its own group at its own position (desktop-rail
+    // parity, COD-525: the projection's sections never contain Focus).
+    // Membership is driven purely off projection focusRefs, never off
     // item.session.focus. When Focus is collapsed, only the header renders
     // (zero rows) so the section stays expandable, mirroring collapsed
     // named groups.

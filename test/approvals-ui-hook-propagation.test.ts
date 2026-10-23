@@ -43,7 +43,11 @@ function loadPrototype(): object {
 }
 
 function loadSettingsPrototype(): object {
-  const context = vm.createContext({ CodemanApp: class CodemanApp {} });
+  const context = vm.createContext({
+    CodemanApp: class CodemanApp {},
+    document: { addEventListener: vi.fn() },
+    window: {},
+  });
   vm.runInContext(`${SETTINGS_SOURCE}\nglobalThis.__settingsPrototype = CodemanApp.prototype;`, context, {
     filename: 'settings-ui.js',
   });

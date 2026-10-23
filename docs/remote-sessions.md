@@ -267,6 +267,71 @@ unreachable host answers "unknown", which also means do not revive. The answer
 is cached per session and cleared whenever the pane is next seen alive, so a
 stale `true` from one transport drop can never revive the NEXT clean exit.
 
+## Terminal history from the remote tmux
+
+The local pane runs the ssh attach, so it only sees the remote tmux client's
+full-screen repaints and keeps a fraction of the scrollback (none after a
+reattach). A full-history load (`GET /api/sessions/:id/terminal?full=1`) of a
+remote session therefore reads the scrollback rows from the REMOTE pane in one
+ssh round trip (`src/remote-pane-history.ts`) and splices them above the local
+visible frame and caret. Bounded (5 s for the round trip, at most 1.5 s queued
+for a slot in the shared ssh limiter) and fail-soft: any failure keeps the
+local capture, and a transport failure (ssh exit 255, a timeout, output that is
+not the script's) also skips that host for 30 s; a failure of the remote
+command itself (a remote tmux session that is gone) affects that session only.
+How much history exists is the remote tmux's own `history-limit`, which the
+launch command does not set (tmux's default is 2000 lines).
+
+The same round trip also reads the remote SCREEN, in the same tmux command list
+as the history, because two seams would otherwise drop rows at the join:
+
+- **Rows that scroll during the round trip.** The local frame is captured only
+  once the round trip is back, so rows that scrolled off the screen in between
+  are in neither the remote history nor the local frame (measured before this
+  read existed: 13 lines lost with a 150 ms round trip and fast output).
+- **A shared remote session with a taller client.** Under `window-size latest`
+  a remote session attached elsewhere is sized by its latest client; when that
+  client is taller than this pane, the rows above this pane's frame are only
+  on the remote screen (measured before: 20 rows).
+
+Both are rows of the remote screen above where the local frame begins, so the
+load keeps them between the history and the frame (`joinScrollbackAndFrame`,
+`findFrameInScreen` in `src/tmux-manager.ts`). The frame is placed by matching
+its top rows against the screen as text (escape sequences and trailing blanks
+ignored, since the two tmuxes need not encode attributes alike); the screen's
+trailing blank rows and its last content row, which output in flight can still
+change, are left out of the match, the overlap must be at least three rows
+with two of them non-blank, and the highest match wins. A placement too low
+would REPEAT the rows between it and the true one, so a shorter overlap (a lone
+`$` row that happens to match after a spinner row changed) is not trusted.
+When the frame cannot be placed (more output scrolled than the screen held, or
+nothing matches), the join is history over frame, as without the screen read.
+That includes an agent TUI mid-turn (Claude Code, codex, opencode): it keeps a
+live region (spinner, composer, footer) pinned to the bottom and inserts new
+rows above it, so the frame is not a shifted copy of the screen and is not
+placed. A plain shell places, unless the frame's top row is the second half
+of a wrapped line (the screen holds that line as one joined row, so nothing
+matches and the join is history over frame). What is left: when the screen
+repeats a whole block of rows, the frame can be placed at the higher copy,
+which leaves out the rows between the two copies.
+
+The history, the history size and the screen are ONE tmux command list
+(`capture-pane … \; display-message … \; capture-pane …`), not separate `tmux`
+runs. tmux runs a client's command list back to back without reading pane
+output in between, so the screen begins exactly where the history ends. As
+separate runs the shell kept writing between them and the rows that scrolled in
+those milliseconds were in neither capture (measured with output streaming: 1-2
+rows per load on a LAN host, every read on a local busy pane). This rests on how
+tmux's command queue behaves, not on a documented guarantee. A random marker row
+(`display-message`) separates the history from the size and the screen, since
+tmux output cannot carry the NUL markers around it. tmux before 3.2 prints no
+newline after `capture-pane -p` output, so when the history ends inside a
+wrapped line the marker is glued onto that row; the parser accepts the marker
+at the end of a row and re-terminates the history. The remote `tail -c` bound
+applies to that whole output, history first, and is the configured byte cap
+plus 1 MiB for the marker, size and screen, so a cut lands in the history; the
+route trims what it returns to the cap itself.
+
 ## File access over SSH
 
 A remote case's `workingDir` is an absolute path on the **remote** host
@@ -286,6 +351,8 @@ and it follows the same rule as the launch path: every ssh command line comes fr
 | `GET /api/sessions/:id/file-thumbnail` | `400` for remote files |
 | `POST /api/sessions/:id/attachments` | Registers an absolute path that lives on the **remote** host (a clicked link pointing outside the case directory) by probing it there |
 | `GET /api/sessions/:id/attachments/:attachmentId/raw` | Streams the registered remote file over ssh, same 200/206/416 contract; `preview` (office) and `thumbnail` answer `400` |
+| `POST /api/sessions/:id/folders` | Lists a folder (absolute or `~/`) on the **remote** host in one ssh round trip (`remoteListFolder`): resolved with `cd -P`, missing → `404`, a file → `400 Not a folder` |
+| `GET /api/sessions/:id/folders/:folderId/files/:name/raw` | Streams one file of a granted remote folder over ssh after the same re-probe + guard as an attachment; `preview` (office) and `thumbnail` answer `400` |
 | `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing`; the history list resolves EVERY entry in one batched probe, never one connection per entry |
 
 ⚠️ The attachment route is the one a clicked path takes when it is **outside** the case
@@ -568,11 +635,19 @@ session-create flow, or via the per-host **"Discover existing sessions"** button
 
 ### File Viewer (COD-252)
 
-The File Viewer lists remote workspaces and downloads remote files through the
-system OpenSSH `sftp` client. It reuses the saved host's identity, port, jump
-host, SOCKS proxy, and extra SSH options; no separate SFTP configuration is
-required. Directories load as they are expanded. Bounded text previews use the
-same SSH connection contract so a growing remote file cannot exhaust local disk.
+The File Viewer lists remote workspaces through the system OpenSSH `sftp` client,
+and the file manager's mkdir/rename/delete go over the same connection. It reuses
+the saved host's identity, port, jump host, SOCKS proxy, and extra SSH options; no
+separate SFTP configuration is required. Directories load as they are expanded.
+
+File **reads** (`file-content`, `file-raw`, previews, attachments) do not use SFTP.
+They go through `src/remote-files.ts` (#415, adopted downstream in COD-453): the
+realpath, the workspace-boundary check and the stat all run on the remote host, so
+a symlink inside the remote workspace cannot reach a file outside it; the size caps
+apply to the REMOTE size before a byte is read; bodies stream over ssh (Range-aware)
+and are never staged on this host; and every call is bounded by the shared ssh
+limiter. Remote files are read-only in the viewer, and Office previews/thumbnails
+are unavailable for them (conversion would need the bytes on local disk).
 
 ## Security notes
 
@@ -593,3 +668,23 @@ same SSH connection contract so a growing remote file cannot exhaust local disk.
   Key Pattern.
 - `docs/security-architecture.md` — overall network/auth model.
 - COD-104 (tmux prereq + durable launch), COD-105 (discover + attach, detach-not-kill ownership), COD-107 (shell-safe connection args).
+
+### Worker reboot recovery (COD-486)
+
+With both **Remote Auto-Reconnect** and **Auto-recover sessions after reboot** enabled,
+Codeman also watches for a worker reboot while the Codeman server stays running. It
+records the worker boot identity while the remote agent is running and persists that
+baseline in the managed mux record. When an SSH wrapper exits with status 255 and the
+worker returns with a different boot identity, Codeman can resume an owned conversation
+in the same tab even though the worker's tmux session disappeared.
+
+Transport reconnects use attach-only commands. Reboot recovery uses exact resume commands:
+Claude's pinned conversation UUID, or a saved native conversation ID for Codex/OpenCode.
+It never falls back to a new conversation. Failed or unsupported resumes leave a record
+in the Recovery Queue for explicit handling. Existing retry limits still apply.
+
+An intentional close, a session observed missing before the reboot, a retained exited
+agent, a discovered attachment, an opaque custom launcher, an unknown boot identity, or
+a missing native conversation ID does not trigger automatic resume. Sessions already lost
+before this feature learned their original worker boot identity cannot be recovered
+automatically from that past reboot. No worker is woken or rebooted by this recovery path.

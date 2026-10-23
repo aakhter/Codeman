@@ -24,9 +24,10 @@ src/web/public/settings-ui.js
 src/web/public/sw.js
 src/web/public/terminal-ui.js
 src/web/public/voice-input.js
-src/web/public/upload.html
 scripts/remotion/
 
 # Hand-maintained; Prettier escapes underscores in glob paths and corrupts paragraphs.
 AGENTS.md
 CLAUDE.md
+src/web/CLAUDE.md
+docs/releasing.md

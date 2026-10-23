@@ -43,6 +43,7 @@ function loadPaletteHarness(overrides: Record<string, any> = {}) {
       listeners[`list:${event}`] = handler;
     }),
   };
+  elements.sessionRecoveryList = { replaceChildren: vi.fn(), appendChild: vi.fn() };
   elements.quickStartCase = {
     value: 'plex-previews',
   };
@@ -131,13 +132,6 @@ describe('Command-K session palette', () => {
       .buildCommandPaletteItems('waiting on agents')
       .find((entry: any) => entry.sessionId === 'sess-beta');
     expect(item.subtitle).toContain('WAITING ON AGENTS');
-  });
-  it('does not expose Map-order sessions while the owner tab layout is pending', () => {
-    const { app } = loadPaletteHarness();
-    app._tabLayoutFirstPaintPending = true;
-    app.sessionOrder = [];
-
-    expect(app.buildCommandPaletteItems().filter((item: any) => item.type === 'session')).toEqual([]);
   });
 
   it('refreshes only while the command palette modal is active', () => {

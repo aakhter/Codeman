@@ -40,6 +40,10 @@ function loadTerminalPolicy({
     removeEventListener: vi.fn(),
     CodemanTerminalInput: { classifyPredictInput: vi.fn() },
     CodemanTerminalFont: { resolve: (value: unknown) => value || 'default-font' },
+    CodemanTerminalGeometry: {
+      clampTerminalDimensions: (dims: { cols: number; rows: number } | undefined) =>
+        dims ? { cols: Math.max(40, dims.cols), rows: Math.max(10, dims.rows) } : null,
+    },
   };
   const context = vm.createContext({
     console,
@@ -291,7 +295,15 @@ function createApp(deviceType: string, initial: Record<string, string>, mode = '
   const app = Object.assign(Object.create(loaded.mixin), {
     activeSessionId: 'session-1',
     sessions: new Map([['session-1', { mode }]]),
-    terminal: { options: { fontSize: 14 } },
+    terminal: {
+      options: { fontSize: 14 },
+      cols: 75,
+      rows: 62,
+      resize: vi.fn(function (this: any, cols: number, rows: number) {
+        this.cols = cols;
+        this.rows = rows;
+      }),
+    },
     fitAddon: { fit },
     _localEchoOverlay: { refreshFont: vi.fn() },
     _predictiveEcho: { refreshFont: vi.fn() },

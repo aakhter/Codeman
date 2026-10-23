@@ -27,12 +27,14 @@ keystroke echo. Idle now lands a few seconds after a turn genuinely ends.
 There are several layers stacked on that: a completion message from the CLI, an AI check,
 output silence, and token stability.
 
-**For the other CLIs** it depends on what the CLI tells Codeman. Codex declares its own
-prompt glyph and working line, so it gets the same screen check Claude does (before 1.26.1
-every Codex session reported idle for its whole life). DeepSeek Harness reports idle,
-working and blocked to Codeman itself, which is as precise as hooks. Everything else is
-output stabilization: the session is idle when output stops changing. Coarser, and it is
-why the features further down this page are Claude-only.
+**For the other CLIs** it depends on what the CLI tells Codeman. Codex, OpenCode, Gemini
+CLI, Pi, OMP and Antigravity each declare their own prompt marker and working line, so they
+get the same screen check Claude does (before 1.26.1 every Codex session reported idle for
+its whole life). DeepSeek Harness reports its end of turn and its dialogs to Codeman itself,
+which is as precise as hooks; its working and idle display still comes from its output.
+Grok Build declares neither. Codeman calls a new grok pane idle 3 seconds after launch, and
+after that it has only generic cues to go on (Claude's `❯` prompt marker, a braille spinner
+glyph), which grok may not draw, so its working and idle status is unreliable.
 
 ## The Respawn Controller
 
@@ -99,6 +101,14 @@ limit-paused. Without that, the next cycle would fire `/clear` and wipe the conv
 are waiting to resume. This is the single most useful setting for overnight runs on a
 subscription plan.
 
+## The prompt cache readout
+
+**Claude only.** On the Respawn tab, above the loop controls.
+
+Claude Code bills a turn against the cached conversation while that cache is warm, and lets the cache expire after a fixed idle time: one hour on a subscription within plan usage, five minutes on an API key, a cloud provider or extra-usage credits. The first turn after a longer break re-processes the whole context at the cache-write rate, which is why coming back to a big session after lunch costs more than the turns around it.
+
+Claude Code 2.1.251 and newer reports the cache state on the statusline after every response, and Codeman's statusline exporter keeps it per session. The row shows **Warm until HH:MM** with the lifetime and the tokens that would be re-cached if it went cold, or **Cold** with the size of the re-cache the next turn pays. When Claude reports them it also shows the session's cache hit rate and the cause of the last cache miss (for example `ttl_expired_1h` or `tools_changed`), so a surprise miss has a reason next to it. If the conversation is compacted while it stays warm (Claude Code now does this on its own on large idle sessions, a manual `/compact` does it too, and so does a clearing of old tool results), the row notes **Context compacted at HH:MM** until the next turn: Claude Code reports no re-cache size until then. None of this raises an alert. The row refreshes live and flips to cold on its own when the lifetime passes, and the last state is kept across a Codeman restart so it is not blank until the session's next turn. Sessions without a statusline of their own also get a short `cache:until HH:MM` or `cache:cold` group in the terminal footer. The readout rides the plan usage chip's telemetry collection, which is on by default on desktop.
+
 ## The plan usage chip
 
 **Claude only.** A header chip showing live subscription usage, on by default on desktop and
@@ -153,8 +163,10 @@ run summary and lifecycle log carry the detail.
 - **The update prompt is what makes a reset survivable.** After `/clear`, everything the
   agent knows comes from that summary and the project files. A vague update prompt produces
   a vague next cycle.
-- **Non-Claude sessions can respawn**, but with output-based idle detection and no
-  usage-limit auto-resume.
+- **Non-Claude sessions can respawn**, but with no usage-limit auto-resume, and with
+  output-based idle detection except on DeepSeek Harness, whose own end-of-turn report
+  reaches the respawn controller the way Claude's `stop` hook does while its status bridge
+  is on (a local session, by default).
 - **Do not run respawn on a session you are actively typing in.** It will send prompts
   underneath you.
 

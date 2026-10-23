@@ -141,6 +141,8 @@ export function buildServiceEnv(
   if (CODEMAN_INSTANCE) env.CODEMAN_INSTANCE = CODEMAN_INSTANCE;
   const trustedAttachmentRoots = process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS?.trim();
   if (trustedAttachmentRoots) env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trustedAttachmentRoots;
+  const workspaceAttachmentRoots = process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS?.trim();
+  if (workspaceAttachmentRoots) env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = workspaceAttachmentRoots;
   return env;
 }
 

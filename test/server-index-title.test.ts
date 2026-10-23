@@ -115,7 +115,9 @@ describe('WebServer index.html <title> templating (#82)', () => {
       // enabled CLI declares a gutter, so it needs stripping on every machine.
       .replace(/<script>window\.__codemanTranscriptGutter=\{.*?\};<\/script>\n/, '')
       // COD-464: same shape, the wheelForward map.
-      .replace(/<script>window\.__codemanWheelForward=\{.*?\};<\/script>\n/, '');
+      .replace(/<script>window\.__codemanWheelForward=\{.*?\};<\/script>\n/, '')
+      // Likewise the page-key mode list: an array, possibly empty, always injected.
+      .replace(/<script>window\.__codemanTranscriptPageKeys=\[.*?\];<\/script>\n/, '');
     const beforeTitle = rawTemplate.split('<title>Codeman</title>')[0];
     const afterTitle = rawTemplate.split('<title>Codeman</title>')[1];
     expect(html.startsWith(beforeTitle)).toBe(true);

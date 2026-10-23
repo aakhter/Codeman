@@ -12,8 +12,8 @@ import { TmuxManager } from './tmux-manager.js';
  *
  * Requires tmux to be installed. Throws with install instructions if not found.
  */
-export function createMultiplexer(): TerminalMultiplexer {
-  if (!TmuxManager.isTmuxAvailable()) {
+export function createMultiplexer(testMode = false): TerminalMultiplexer {
+  if (!testMode && !TmuxManager.isTmuxAvailable()) {
     throw new Error('tmux not found. Install: sudo apt install tmux');
   }
 

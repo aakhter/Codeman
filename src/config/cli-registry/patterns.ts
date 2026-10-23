@@ -20,6 +20,7 @@
 export type TokenPattern =
   | 'model'
   | 'model-claude'
+  | 'model-plain'
   | 'model-pi'
   | 'id'
   | 'id-dotted'
@@ -43,6 +44,9 @@ const PATTERNS: Record<TokenPattern, RegExp> = {
   model: /^[a-zA-Z0-9._\-/]+$/,
   // buildSpawnCommand's claude branch — `[` and `]` for bracketed model aliases
   'model-claude': /^[a-zA-Z0-9._\-[\]]+$/,
+  // copilot --model. Same characters as `model`, but a leading alphanumeric: the value follows a
+  // flag, so `--yolo` must not pass as a model id and become its own flag (the allowAll clamp bypass).
+  'model-plain': /^[a-zA-Z0-9][a-zA-Z0-9._\-/]*$/,
   // buildPiCommand — `:` for a thinking suffix (`sonnet:high`), `/` for `provider/id`
   'model-pi': /^[a-zA-Z0-9._\-/:]+$/,
   // opencode --session, codex resume
@@ -117,5 +121,18 @@ export function compileVersionRegex(source: string): RegExp | null {
     return new RegExp(source);
   } catch {
     return null;
+  }
+}
+
+/**
+ * How many capture groups a regex source declares (named ones included), or -1 when it
+ * does not compile. Matching the empty string against `source|` always succeeds through
+ * the empty alternative, and the match array then has one slot per group.
+ */
+export function countCaptureGroups(source: string): number {
+  try {
+    return (new RegExp(`${source}|`).exec('') as RegExpExecArray).length - 1;
+  } catch {
+    return -1;
   }
 }

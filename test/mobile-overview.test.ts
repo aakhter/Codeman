@@ -26,6 +26,9 @@ function fakeElement(): any {
     setAttribute(name: string, value: string) {
       el.attrs[name] = value;
     },
+    getAttribute(name: string) {
+      return el.attrs[name] ?? null;
+    },
     appendChild(child: any) {
       el.children.push(child);
       return child;
@@ -551,6 +554,7 @@ describe('mobile overview run picker (CLI availability gating)', () => {
       'grok',
       'deepseek',
       'omp',
+      'copilot',
       'shell',
     ]);
   });

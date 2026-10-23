@@ -27,21 +27,18 @@
  *    session's permission mode and its docker form is `--session-id … || resume`, semantics
  *    no other CLI has and a static `overlays.command` string cannot express.
  *  - **Genuinely per-CLI prose.** One error message that explains why a deepseek session in
- *    particular will never deliver a `stop` signal, and the literal strings a CLI's own TUI
- *    paints (codex's `Working (2s • esc to interrupt)`, opencode's Bubble Tea spinner) — there
- *    is no boolean a capability could carry, and the frames of a CLI nobody has watched cannot
- *    be invented.
- *  - **Two conversation-identity MECHANISMS.** Claude's identity arrives over its own
- *    SessionStart hook and is adopted into session state; codex's is recovered by scanning
- *    rollout files on disk and disambiguated against sibling panes' submit times. A field whose
- *    value was "hook" for one and "scan \$CODEX_HOME" for the other would just be naming the two
- *    code paths, which is a branch with extra steps. (COD-416 wave 4 DID convert the part of
- *    this area that was genuinely data: the checkpoint terminal grammar — which glyph means
- *    ready, which frame means working — is now `capabilities.checkpoint`.)
+ *    particular will never deliver a `stop` signal.
  *
  * ⚠️ Adding an entry here is a decision, not a formality. If the branch is about what a CLI
  * CAN DO, it belongs in `CliCapabilities` instead — and if it needs to run code, in
  * `config/cli-registry/profiles.ts` as a named profile.
+ *
+ * ⚠️ Each entry also carries how many times its expression occurs in that file, compared
+ * EXACTLY. The key is only `<file>::<expression>`, so without a count an approved branch
+ * approved every later copy of the same text in the same file: the codex launch defaults
+ * added two more `mode === 'codex'` branches to session-routes.ts and passed silently,
+ * because the legacy-plumbing entry already covered that string. A new copy now fails as
+ * an unapproved branch would, and a removed one fails as stale until the count drops.
  *
  * Port: none (pure static analysis).
  */
@@ -77,226 +74,65 @@ const EXEMPT_FILES = new Set(
   ].map((p) => p.split('/').join(sep))
 );
 
+/** One approved branch: how many copies of it the file holds, and why it is not a capability. */
+interface Allowance {
+  count: number;
+  reason: string;
+}
+
+const allow = (count: number, reason: string): Allowance => ({ count, reason });
+
 /**
- * Specific surviving branches, each with the reason it is not a capability.
+ * Specific surviving branches, each with the reason it is not a capability and the exact
+ * number of times the expression occurs in that file (see the header).
  * Keyed `<relative path>::<the matched expression>`.
  */
-const ALLOWED_BRANCHES: Record<string, string> = {
-  // ── COD-416 wave 4: the last two, triaged rather than baselined ─────────────────────
-  //
-  // The DOWNSTREAM PRE-REGISTRY BASELINE block that stood here is GONE, and with it the
-  // `PRE_REGISTRY` placeholder: all 53 keys are now either registry data or an entry with its
-  // own stated reason. Wave 4 converted the checkpoint TERMINAL GRAMMAR — which glyph means
-  // "ready" and which frame means "working" — into `capabilities.checkpoint` plus a named
-  // CHECKPOINT_FRAME_PROFILES classifier, and triaged what remained.
-  //
-  // ⚠️ What remains under these two keys is NOT leftover branching: it is the two CONVERSATION
-  // IDENTITY integrations, which are different mechanisms rather than different values of one
-  // mechanism. Claude's identity arrives over its own SessionStart HOOK and is adopted into
-  // session state; codex's is recovered by scanning ROLLOUT FILES on disk and disambiguated
-  // against sibling panes' submit times. There is no field whose value could be "hook" for one
-  // and "scan ~/.codex" for the other without that field simply naming the two code paths —
-  // which is a branch with extra steps. Their negated twins are already allowlisted directly
-  // below for exactly this reason, and this is the same family.
-
-  // Claude session identity + the direct-PTY path. Every site asks "is this Claude": whether
-  // its SessionStart hook has reported in, whether its authoritative conversation id has been
-  // adopted, and the terminal write + resume-id preservation for the direct-PTY fallback —
-  // which exists only for claude, the one CLI Codeman ever runs without tmux. The `❯` glyph
-  // and working-frame that USED to be in this list are now data (`capabilities.checkpoint`).
-  "session.ts::mode === 'claude'":
-    "claude's SessionStart-hook readiness, adopted conversation identity, and the direct-PTY " +
-    "fallback — identity mechanics, not a capability (twin of the `mode !== 'claude'` entry below)",
-
-  // Codex conversation identity + its own TUI prose. The identity sites recover a conversation
-  // by scanning $CODEX_HOME rollout files, arm a fresh-thread baseline around `/new`, and
-  // publish submit times to a cross-session map so a sibling codex pane's turn is not mistaken
-  // for this one's. The two frame sites are per-CLI PROSE, the same category as the
-  // `session.ts::mode === 'opencode'` entry below and in one case the same function. The
-  // remaining site is a `CODEMAN_CODEX_RAW_LOG=1` debugging hook for codex's stacked status bar.
-  "session.ts::mode === 'codex'":
-    'codex rollout-file conversation identity, cross-session submit disambiguation, and its own ' +
-    "TUI frame prose + raw-log debug hook (twin of the `mode !== 'codex'` entry below)",
-
-  // tmux-manager.ts's last key, after wave 3e moved the remote and docker command chains onto
-  // registry data. Everything left is LOCAL-only and none of it is a "how does this CLI launch"
-  // question: two sites re-check the COD-392 grant before honouring an owner-authored command
-  // line (the value itself is `launch.rawCommandField` data now; the GRANT check is a
-  // multi-user authorization question about shell text, not about codex), four are COD-98 /
-  // COD-254 Headroom routing — the same lane split already allowlisted for
-  // `config/headroom-routing.ts`, where claude routes by env var and codex by a config.toml
-  // patch — one is codex's remote resume-TEMPLATE recovery, and one matches the literal text
-  // codex prints when a skill is invoked.
-  "tmux-manager.ts::mode === 'codex'":
-    'COD-392 owner-command grant re-check, COD-98 Headroom config.toml routing, remote ' +
-    "resume-template recovery, and codex's own skill-invocation prose — all local-only",
-
-  // ── COD-416 wave 1: triaged out of the baseline above ───────────────────────────────
-  //
-  // Converted to DATA (no entry needed, the branch is gone):
-  //   web/session-wait-registry.ts `approvalsAvailableForMode` → `capabilities.approvals`,
-  //   a fourth independent set that lines up with neither `hooks` nor `external`.
-  //
-  // The rest are category (2): each is a genuine per-CLI question, not a capability, and
-  // each carries its own reason below rather than a shared placeholder.
-
-  // --- Read My Mind / intent capture: strict per-provider lanes, claude-only by design ---
-  //
-  // Same reasoning as the `web/server.ts::mode !== 'claude'` entry further down, and the
-  // reason CLAUDE.md tells you NOT to reach for `hooksAvailableForMode()` here: these read
-  // Claude's OWN transcript, and the local-Codex lane reads a strictly-owned codex rollout.
-  // A capability would have to merge two deliberately separate provider lanes.
-  "web/routes/readmymind-routes.ts::mode === 'claude'": "Read My Mind claude lane: reads Claude's own transcript",
-  "web/routes/readmymind-routes.ts::mode === 'codex'":
-    'Read My Mind local-Codex lane: strictly-owned codex rollout, no cross-provider fallback',
-  "session-agent-activity-coordinator.ts::mode === 'claude'":
-    'agent observation is keyed on claudeSessionId — a Claude transcript fact, not a capability',
-  "hooks-config.ts::mode !== 'claude'":
-    "verifies CLAUDE's own SessionStart hook identity; a non-claude mode has no such hook to verify",
-
-  // --- Headroom context-compression routing (COD-98) ---
-  //
-  // Not "which CLIs support a proxy" but "which two CLIs Codeman knows how to point at one",
-  // and the two mechanisms are different in kind: claude takes ANTHROPIC_BASE_URL via env
-  // injection, codex takes a config.toml patch. A boolean capability could not say which.
-  "config/headroom-routing.ts::mode !== 'claude'": 'Headroom claude lane: ANTHROPIC_BASE_URL env injection (COD-98)',
-  "config/headroom-routing.ts::mode === 'claude'": 'Headroom claude lane: ANTHROPIC_BASE_URL env injection (COD-98)',
-  "config/headroom-routing.ts::mode === 'codex'":
-    'Headroom codex lane: config.toml patch, a different mechanism (COD-98)',
-
-  // --- Codex-specific features whose subject IS the codex artifact format ---
-  "web/routes/file-routes.ts::mode !== 'codex'":
-    "file-uri previews decode codex's own artifact URI scheme; the 403 names the mode in its prose",
-  "session-recovery.ts::mode !== 'codex'":
-    'recovers a custom CODEX launch string against a codex resume template; no other CLI has one',
-
-  // --- Approvals ingestion path split (COD-328) ---
-  //
-  // NOT a duplicate of `capabilities.approvals` above: that says WHETHER a mode has items,
-  // this says WHICH path builds them. Claude's come from hook events, so the transition
-  // path must exclude it or a claude turn-end would double-file an item the hook already
-  // filed. Both halves of the pair are claude-shaped questions, not capability ones.
-  "web/session-listener-wiring.ts::mode !== 'claude'":
-    "transition-inferred idle is for the modes WITHOUT hooks; claude's items come from hook events",
-
+const ALLOWED_BRANCHES: Record<string, Allowance> = {
   // --- Legacy <Mode>Config plumbing (public wire shape, see the header) ---
-  //
-  // Same category as the `===` block below, reached from the recovery and validation paths.
-  "native-session-identity.ts::mode === 'codex'": 'Codex rollout lookup for native resume identity',
-  "native-session-identity.ts::mode === 'opencode'": 'OpenCode session lookup for native resume identity',
-  "native-session-identity.ts::mode !== 'codex'": 'Codex rollout scan reuse for native resume identity',
-  "web/session-recovery-service.ts::mode === 'codex'": 'legacy Codex resume config slot',
-  "web/session-recovery-service.ts::mode === 'opencode'": 'legacy OpenCode resume config slot',
-  "web/server.ts::'codex', 'opencode'].includes(":
-    'native identity capture is implemented for these transcript formats',
-
-  // ── COD-416 wave 2: session.ts ──────────────────────────────────────────────────────
-  //
-  // Converted to DATA (no entry needed, the branches are gone): `_applyNativeResumeIdForResume`
-  // read codex/opencode/gemini/antigravity out of a four-way chain that was a second copy of
-  // `legacyConfigField` + the `resumeId` alias. It now reads `legacyResumeSlot()`, which
-  // removed BOTH the gemini and antigravity keys from this file outright.
-
-  // Per-CLI TUI frame regexes. `detectExternalCliWorkingFrame` matches the literal strings
-  // codex's and opencode's TUIs paint ("Working (2s • esc to interrupt)", Bubble Tea's
-  // spinner+timer). That is per-CLI PROSE, not a behavioural switch: there is no boolean a
-  // capability could carry, and the pattern for a CLI Codeman has never observed cannot be
-  // invented. Moving these into registry `patterns` is its own change with its own risk —
-  // they feed idle detection — and is deliberately not bundled into a refactor.
-  "session.ts::mode === 'opencode'": "opencode's own TUI working-frame regex; per-CLI prose, not a capability",
-
-  // Claude session-identity + direct-PTY checkpoint. Both sites ask "is this Claude", whose
-  // SessionStart hook and `❯` prompt transition are what the code waits on: a non-claude mode
-  // is hook-ready by definition (there is no Claude hook to wait for), and the instant-clear
-  // generation check only exists for the direct-PTY Claude fallback. Same family as the
-  // `hooks-config.ts` and `web/server.ts::mode !== 'claude'` entries.
-  "session.ts::mode !== 'claude'":
-    'Claude SessionStart-hook readiness and the direct-PTY checkpoint clear — claude-identity questions',
-
-  // Codex provider identity + resolved launch command, both server-only persistence.
-  // ⚠️ The `getResolvedCodexCommandForPersist` site is COD-392's `baseCommand`, which COD-416
-  // itself records as having to STAY code-level: it is a complete server-resolved shell
-  // command, and the argv engine forbids shell text by design, so there is no registry shape
-  // for it. The identity site is the Read My Mind codex lane (see readmymind-routes entries).
-  "session.ts::mode !== 'codex'":
-    'codex provider identity + COD-392 baseCommand persistence; the argv engine cannot express a shell command',
-
-  // COD-189 shell burst tracking, on the SHARED output path because shell sessions never pass
-  // through the interactive-session hooks. Same reason as the session-routes.ts shell entry:
-  // this is about tmux pane history vs byte history, not about any CLI's behaviour.
-  "session.ts::mode === 'shell'": 'COD-189 shell burst tracking on the shared output path',
-
-  // ── COD-416 wave 3a: the stale external-CLI mode lists (Q23, approved) ──────────────
-  //
-  // respawn-routes.ts (3 gates), ralph-routes.ts (1) and server.ts (5 restore chains) each
-  // named a hardcoded `opencode|codex|gemini(|antigravity)` list while their own comments
-  // said "not supported for EXTERNAL CLI sessions". The list was the external set as it stood
-  // when antigravity was added (dda03c3a) and was never extended for pi/grok/deepseek/omp —
-  // so all nine sites are now `isExternalCliMode()`, deleting 9 keys outright.
-  //
-  // ⚠️ A DELIBERATE, APPROVED BEHAVIOUR CHANGE, not a refactor: respawn newly refuses
-  // pi/grok/deepseek/omp and ralph newly refuses those plus antigravity. They were never
-  // really supported — respawn drives Claude-shaped `/clear` + re-prompt and ralph parses
-  // Claude's todo output, neither of which an external CLI understands.
-  //
-  // ⚠️ `!isExternalCliMode()` and NOT `capabilities.respawn`/`.ralph`: shell is `false` for
-  // both in the registry but is not an external CLI, and shell respawn/ralph work today.
-  // Gating on the capability would have silently killed them — a regression dressed up as a
-  // cleanup, which is exactly what the capability's name invites you to do.
-
-  // With those chains gone, this key's only remaining sites are the Read My Mind local-Codex
-  // provider-recovery helpers (`resolveRestoredCodexProviderIdentity` and its recovery
-  // sibling) — the same strict per-provider lane as the readmymind-routes entries above, and
-  // an early return for a mode that has no codex rollout to recover.
-  //
-  // It was blocked behind Q23 purely by the `file::expression` granularity limit: one key,
-  // two unrelated uses. Removing the chains is what made it allowlistable on its own merits.
-  "web/server.ts::mode !== 'codex'":
-    'Read My Mind local-Codex provider identity/recovery; a non-codex session has no rollout to recover',
-
-  // --- Capture-canonical terminal reload (COD-189) ---
-  //
-  // About tmux pane history vs byte history for a SHELL pane, not about any CLI's
-  // behaviour: a fast shell burst makes byte history sparse while the pane history stays
-  // contiguous. There is no CLI capability being asked about here.
-  "web/routes/session-routes.ts::mode === 'shell'": 'COD-189 capture-canonical full reload for shell panes',
-
-  // --- Legacy <Mode>Config plumbing (public wire shape, see the header) ---
-  "web/routes/session-routes.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'codex'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'gemini'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'antigravity'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'pi'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'grok'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'deepseek'": 'legacy <Mode>Config plumbing',
-  "web/server.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'codex'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'gemini'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'antigravity'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'pi'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'grok'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'deepseek'": 'legacy <Mode>Config plumbing (session recovery)',
-  "web/server.ts::mode === 'omp'": 'legacy <Mode>Config plumbing (session recovery)',
+  "web/routes/session-routes.ts::mode === 'opencode'": allow(4, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'codex'": allow(7, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'gemini'": allow(4, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'antigravity'": allow(4, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'pi'": allow(2, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'grok'": allow(2, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'copilot'": allow(2, 'legacy <Mode>Config plumbing'),
+  "web/routes/session-routes.ts::mode === 'deepseek'": allow(2, 'legacy <Mode>Config plumbing'),
+  "web/server.ts::mode === 'opencode'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'codex'": allow(5, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'gemini'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'antigravity'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'pi'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'grok'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'copilot'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'deepseek'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
+  "web/server.ts::mode === 'omp'": allow(1, 'legacy <Mode>Config plumbing (session recovery)'),
 
   // --- Claude's remote/docker command construction ---
-  "tmux-manager.ts::mode === 'claude'":
+  "tmux-manager.ts::mode === 'claude'": allow(
+    6,
     "claude's remote pane command carries per-session permission flags, and its docker form is " +
-    '`--session-id … || resume`; neither fits a static overlays.command string',
-  "tmux-manager.ts::mode === 'omp'":
+      '`--session-id … || resume`; neither fits a static overlays.command string'
+  ),
+  "tmux-manager.ts::mode === 'omp'": allow(
+    1,
     'remote omp respawn needs the pinned/continue --resume override threaded through ' +
-    '(resumeSessionId/ompConfig), which the static overlays.remote.command string has no ' +
-    'room for; the command itself is still rendered through buildSpawnCommandFromRegistry, ' +
-    'the same mode-agnostic engine local/docker spawns use — only the BRANCH is per-mode',
+      '(resumeSessionId/ompConfig), which the static overlays.remote.command string has no ' +
+      'room for; the command itself is still rendered through buildSpawnCommandFromRegistry, ' +
+      'the same mode-agnostic engine local/docker spawns use — only the BRANCH is per-mode'
+  ),
 
   // --- Per-CLI prose and launch handling not yet generalised ---
-  "web/session-wait-registry.ts::mode === 'deepseek'":
-    'an error message explaining why THIS mode in particular will never deliver a stop signal',
-  "web/routes/approval-routes.ts::mode === 'deepseek'":
-    'the DeepSeek status bridge is the only non-claude source of approval items',
-  "cron/cron-service.ts::mode === 'claude'": 'cron launch handling, not yet generalised',
-  "cron/cron-service.ts::mode === 'shell'": 'cron launch handling, not yet generalised',
-  "web/routes/session-routes.ts::mode === 'claude'": 'docker case bookkeeping keyed on the claude conversation id',
-  "cli.ts::mode === 'shell'": 'a CLI-table label, not behaviour',
+  "web/session-wait-registry.ts::mode === 'deepseek'": allow(
+    1,
+    'an error message explaining why THIS mode in particular will never deliver a stop signal'
+  ),
+  "cron/cron-service.ts::mode === 'claude'": allow(1, 'cron launch handling, not yet generalised'),
+  "cron/cron-service.ts::mode === 'shell'": allow(1, 'cron launch handling, not yet generalised'),
+  "web/routes/session-routes.ts::mode === 'claude'": allow(
+    2,
+    'docker case bookkeeping keyed on the claude conversation id'
+  ),
+  "cli.ts::mode === 'shell'": allow(2, 'a CLI-table label, not behaviour'),
 
   // --- Negated forms surfaced when BRANCH_PATTERN widened past `===` (see its comment) ---
   //
@@ -310,41 +146,172 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   // there, the shared predicate silently widened both to a mode with no transcript to read.
   // CLAUDE.md documents this as deliberate and `test/deepseek-mode.test.ts` pins it, so a
   // capability here would be actively wrong.
-  "web/server.ts::mode !== 'claude'":
+  "web/server.ts::mode !== 'claude'": allow(
+    2,
     "intent capture reads Claude's own transcript, and the recovered-workspace hook sweep " +
-    'writes .claude hooks — both are claude questions, not capability ones (see CLAUDE.md)',
+      'writes .claude hooks — both are claude questions, not capability ones (see CLAUDE.md)'
+  ),
 
   // The TUI is a CLIENT of the server, and these two are about what it can offer for a row:
   // resume builds a `claude --resume`, and the mode badge is suppressed for the default mode
   // purely so the common case reads clean. The badge one is cosmetic and not a capability at
   // all; the resume one would need a "resumable from a claude transcript" field that nothing
   // else would read.
-  "tui/tui-app.ts::mode !== 'claude'": 'TUI resume builds a claude --resume; claude-transcript-only by construction',
-  "tui/tui-render.ts::mode !== 'claude'": 'cosmetic: suppress the mode badge for the default mode',
-
-  // Push approve/deny BUTTONS are withheld for dsh because the answer route refuses
-  // keystrokes for its dialogs (third-party TUI, unmeasured contract) — a button whose
-  // answer would be refused is worse than none. Arguably wants an "answerable dialogs"
-  // capability; deliberately not invented here.
-  "web/routes/hook-event-routes.ts::mode !== 'deepseek'":
-    'push buttons withheld where the answer route refuses keystrokes',
+  "tui/tui-app.ts::mode !== 'claude'": allow(
+    1,
+    'TUI resume builds a claude --resume; claude-transcript-only by construction'
+  ),
+  "tui/tui-render.ts::mode !== 'claude'": allow(1, 'cosmetic: suppress the mode badge for the default mode'),
 
   // Legacy <Mode>Config plumbing, same category as the `===` entries above.
-  "web/routes/session-routes.ts::mode !== 'omp'": 'legacy <Mode>Config plumbing (resolveOmpConfigForCreate)',
+  "web/routes/session-routes.ts::mode !== 'omp'": allow(
+    2,
+    'legacy <Mode>Config plumbing (resolveOmpConfigForCreate), and one link of the scaffolded-case hooks ' +
+      'chain (see the opencode entry below)'
+  ),
 
   // ⚠️ Scaffolded-case hooks. This chain excludes seven CLIs but NOT `deepseek`, while its
   // own comment says DeepSeek uses its own system — so a scaffolded deepseek case gets a
   // Claude hooks block written into it. That inconsistency is UPSTREAM's and predates this
   // change; expressing the chain as a capability would have to pick a side and would
   // therefore be a behaviour change. Left exactly as found, and named here so it is visible.
-  "web/routes/session-routes.ts::mode !== 'opencode'":
+  "web/routes/session-routes.ts::mode !== 'opencode'": allow(
+    2,
     'scaffolded-case hooks + the COD-91 self-heal skip; the chain omits deepseek upstream, ' +
-    'so any capability form would change behaviour — see PR discussion',
-  "web/routes/session-routes.ts::mode !== 'codex'": 'scaffolded-case hooks (see the opencode entry)',
-  "web/routes/session-routes.ts::mode !== 'gemini'": 'scaffolded-case hooks (see the opencode entry)',
-  "web/routes/session-routes.ts::mode !== 'antigravity'": 'scaffolded-case hooks (see the opencode entry)',
-  "web/routes/session-routes.ts::mode !== 'pi'": 'scaffolded-case hooks (see the opencode entry)',
-  "web/routes/session-routes.ts::mode !== 'grok'": 'scaffolded-case hooks (see the opencode entry)',
+      'so any capability form would change behaviour — see PR discussion'
+  ),
+  "web/routes/session-routes.ts::mode !== 'codex'": allow(2, 'scaffolded-case hooks (see the opencode entry)'),
+  "web/routes/session-routes.ts::mode !== 'gemini'": allow(1, 'scaffolded-case hooks (see the opencode entry)'),
+  "web/routes/session-routes.ts::mode !== 'antigravity'": allow(1, 'scaffolded-case hooks (see the opencode entry)'),
+  "web/routes/session-routes.ts::mode !== 'pi'": allow(1, 'scaffolded-case hooks (see the opencode entry)'),
+  "web/routes/session-routes.ts::mode !== 'grok'": allow(1, 'scaffolded-case hooks (see the opencode entry)'),
+  // ── Downstream-only entries (local fork) ──
+  "assistant-registry.ts::mode !== 'codex'": allow(
+    1,
+    'Assistant binding validates Codex session_meta UUID, workspace and originator; no cross-provider fallback'
+  ),
+  "reboot-restore.ts::mode === 'codex'": allow(
+    2,
+    'Codex rollout UUID evidence versus the Claude conversation chain in boot reconciliation'
+  ),
+  "session-recovery-names.ts::mode === 'codex'": allow(
+    2,
+    'Codex session_index and rollout identity metadata used for recovery display names'
+  ),
+  "session-recovery-names.ts::mode === 'claude'": allow(
+    1,
+    'Claude transcript conversation-name metadata selected by its exact conversation identity'
+  ),
+  "session-recovery-preview.ts::mode === 'codex'": allow(
+    2,
+    'Codex rollout-path attribution and its response_item user-prompt transcript format'
+  ),
+  "session-recovery-preview.ts::mode === 'claude'": allow(
+    2,
+    'Claude transcript-path attribution and sessionId/cwd/isSidechain identity proof'
+  ),
+  "session-recovery.ts::mode === 'codex'": allow(
+    1,
+    'Allowlisted native conversation UUID from the public codexConfig resumeSessionId field'
+  ),
+  "session-recovery.ts::mode === 'claude'": allow(
+    1,
+    'Newest adopted Claude conversation-chain identity rather than the original tab UUID'
+  ),
+  "web/routes/reboot-restore-routes.ts::mode === 'codex'": allow(
+    3,
+    'Existing public codexConfig versus top-level Claude resumeSessionId launch-field plumbing'
+  ),
+  "web/routes/session-recovery-routes.ts::mode === 'codex'": allow(
+    1,
+    'Refresh missing local Codex identity through the verified rollout-file resolver'
+  ),
+  "web/routes/session-recovery-routes.ts::mode === 'claude'": allow(
+    1,
+    'Refresh local Claude identity through the adopted conversation chain and transcript evidence'
+  ),
+  "session.ts::mode === 'claude'": allow(
+    5,
+    "claude's SessionStart-hook readiness, adopted conversation identity, and the direct-PTY " +
+      "fallback — identity mechanics, not a capability (twin of the `mode !== 'claude'` entry below)"
+  ),
+  "session.ts::mode === 'codex'": allow(
+    8,
+    'codex rollout-file conversation identity, cross-session submit disambiguation, and its own ' +
+      "TUI frame prose + raw-log debug hook (twin of the `mode !== 'codex'` entry below)"
+  ),
+  "tmux-manager.ts::mode === 'codex'": allow(
+    10,
+    'COD-392 owner-command grant re-check, COD-98 Headroom config.toml routing, remote ' +
+      "resume-template recovery, and codex's own skill-invocation prose — all local-only"
+  ),
+  "web/routes/readmymind-routes.ts::mode === 'claude'": allow(
+    1,
+    "Read My Mind claude lane: reads Claude's own transcript"
+  ),
+  "web/routes/readmymind-routes.ts::mode === 'codex'": allow(
+    2,
+    'Read My Mind local-Codex lane: strictly-owned codex rollout, no cross-provider fallback'
+  ),
+  "session-agent-activity-coordinator.ts::mode === 'claude'": allow(
+    1,
+    'agent observation is keyed on claudeSessionId — a Claude transcript fact, not a capability'
+  ),
+  "hooks-config.ts::mode !== 'claude'": allow(
+    1,
+    "verifies CLAUDE's own SessionStart hook identity; a non-claude mode has no such hook to verify"
+  ),
+  "config/headroom-routing.ts::mode !== 'claude'": allow(
+    1,
+    'Headroom claude lane: ANTHROPIC_BASE_URL env injection (COD-98)'
+  ),
+  "config/headroom-routing.ts::mode === 'claude'": allow(
+    1,
+    'Headroom claude lane: ANTHROPIC_BASE_URL env injection (COD-98)'
+  ),
+  "config/headroom-routing.ts::mode === 'codex'": allow(
+    1,
+    'Headroom codex lane: config.toml patch, a different mechanism (COD-98)'
+  ),
+  "web/routes/file-routes.ts::mode !== 'codex'": allow(
+    1,
+    "file-uri previews decode codex's own artifact URI scheme; the 403 names the mode in its prose"
+  ),
+  "session-recovery.ts::mode !== 'codex'": allow(
+    1,
+    'recovers a custom CODEX launch string against a codex resume template; no other CLI has one'
+  ),
+  "web/session-listener-wiring.ts::mode !== 'claude'": allow(
+    1,
+    "transition-inferred idle is for the modes WITHOUT hooks; claude's items come from hook events"
+  ),
+  "native-session-identity.ts::mode === 'codex'": allow(1, 'Codex rollout lookup for native resume identity'),
+  "native-session-identity.ts::mode === 'opencode'": allow(1, 'OpenCode session lookup for native resume identity'),
+  "native-session-identity.ts::mode !== 'codex'": allow(1, 'Codex rollout scan reuse for native resume identity'),
+  "web/session-recovery-service.ts::mode === 'codex'": allow(1, 'legacy Codex resume config slot'),
+  "web/session-recovery-service.ts::mode === 'opencode'": allow(1, 'legacy OpenCode resume config slot'),
+  "web/server.ts::'codex', 'opencode'].includes(": allow(
+    1,
+    'native identity capture is implemented for these transcript formats'
+  ),
+  "session.ts::mode === 'opencode'": allow(
+    1,
+    "opencode's own TUI working-frame regex; per-CLI prose, not a capability"
+  ),
+  "session.ts::mode !== 'claude'": allow(
+    2,
+    'Claude SessionStart-hook readiness and the direct-PTY checkpoint clear — claude-identity questions'
+  ),
+  "session.ts::mode !== 'codex'": allow(
+    2,
+    'codex provider identity + COD-392 baseCommand persistence; the argv engine cannot express a shell command'
+  ),
+  "session.ts::mode === 'shell'": allow(1, 'COD-189 shell burst tracking on the shared output path'),
+  "web/server.ts::mode !== 'codex'": allow(
+    2,
+    'Read My Mind local-Codex provider identity/recovery; a non-codex session has no rollout to recover'
+  ),
+  "web/routes/session-routes.ts::mode === 'shell'": allow(1, 'COD-189 capture-canonical full reload for shell panes'),
 };
 
 /** Every stock CLI id, derived rather than restated so a new entry is covered automatically. */
@@ -433,6 +400,43 @@ function scan(): { findings: Finding[]; filesScanned: number } {
 
 const { findings, filesScanned } = scan();
 
+interface CountMismatch {
+  key: string;
+  allowed: number;
+  found: number;
+  lines: string[];
+}
+
+/**
+ * Allowlisted keys whose occurrence count differs from the approved one: `grown` holds the
+ * keys with MORE copies than approved (a new branch riding an old approval), `shrunk` the
+ * ones with fewer (a stale approval that would let the next copy back in unseen).
+ * Unallowlisted keys are not this function's business; the offenders check covers them.
+ */
+function countMismatches(
+  found: Finding[],
+  allowed: Record<string, Allowance>
+): { grown: CountMismatch[]; shrunk: CountMismatch[] } {
+  const byKey = new Map<string, Finding[]>();
+  for (const f of found) byKey.set(f.key, [...(byKey.get(f.key) ?? []), f]);
+  const grown: CountMismatch[] = [];
+  const shrunk: CountMismatch[] = [];
+  for (const [key, allowance] of Object.entries(allowed)) {
+    const hits = byKey.get(key) ?? [];
+    const mismatch = {
+      key,
+      allowed: allowance.count,
+      found: hits.length,
+      lines: hits.map((f) => `${f.file}:${f.line}`),
+    };
+    if (hits.length > allowance.count) grown.push(mismatch);
+    else if (hits.length < allowance.count) shrunk.push(mismatch);
+  }
+  return { grown, shrunk };
+}
+
+const { grown, shrunk } = countMismatches(findings, ALLOWED_BRANCHES);
+
 describe('no CLI-id branching outside the stock catalog', () => {
   it('scans a meaningful number of source files (sanity)', () => {
     // If this collapses toward zero the walker or the exemption list drifted and every
@@ -480,12 +484,56 @@ describe('no CLI-id branching outside the stock catalog', () => {
     ).toEqual([]);
   });
 
+  it('has no new copy of an allowlisted branch', () => {
+    // An approval covers the copies that were reviewed, not every later line that happens
+    // to spell the same expression in the same file.
+    const detail = grown
+      .map((m) => `  ${m.key}: ${m.found} found, ${m.allowed} approved\n    ${m.lines.join('\n    ')}`)
+      .join('\n');
+    expect(
+      grown,
+      grown.length === 0
+        ? ''
+        : `Found more copies of an allowlisted CLI-id branch than were approved:\n${detail}\n\n` +
+            'Express the new copy as a CliCapabilities field (or a named profile) rather than raising ' +
+            "the count. Raise it only for another branch of the SAME kind, and read this file's header first."
+    ).toEqual([]);
+  });
+
   it('has no stale allowlist entries', () => {
     // An allowlisted branch that no longer exists is a lie about the codebase, and the next
-    // person to reintroduce that exact branch would sail straight through.
-    const present = new Set(findings.map((f) => f.key));
-    const stale = Object.keys(ALLOWED_BRANCHES).filter((key) => !present.has(key));
-    expect(stale, `ALLOWED_BRANCHES entries no longer present — delete them:\n  ${stale.join('\n  ')}`).toEqual([]);
+    // person to reintroduce that exact branch would sail straight through. The same holds
+    // for an approved count above what the file still has.
+    const stale = shrunk.map((m) => `${m.key}: ${m.found} found, ${m.allowed} approved`);
+    expect(
+      stale,
+      `ALLOWED_BRANCHES entries no longer (fully) present; delete them or lower the count:\n  ${stale.join('\n  ')}`
+    ).toEqual([]);
+  });
+
+  it('counts copies per key, so one extra copy of an approved branch fails (anti-vacuity)', () => {
+    const at = (line: number): Finding => ({
+      file: 'web/example.ts',
+      expression: "mode === 'codex'",
+      line,
+      key: "web/example.ts::mode === 'codex'",
+    });
+    const approved = { "web/example.ts::mode === 'codex'": allow(1, 'synthetic') };
+    expect(countMismatches([at(10)], approved)).toEqual({ grown: [], shrunk: [] });
+    const extra = countMismatches([at(10), at(42)], approved);
+    expect(extra.grown).toEqual([
+      {
+        key: "web/example.ts::mode === 'codex'",
+        allowed: 1,
+        found: 2,
+        lines: ['web/example.ts:10', 'web/example.ts:42'],
+      },
+    ]);
+    expect(countMismatches([], approved).shrunk.map((m) => m.key)).toEqual(["web/example.ts::mode === 'codex'"]);
+    // Every live entry carries a positive whole count, or the comparison means nothing.
+    for (const [key, { count }] of Object.entries(ALLOWED_BRANCHES)) {
+      expect(Number.isInteger(count) && count > 0, key).toBe(true);
+    }
   });
 });
 
@@ -503,6 +551,7 @@ describe('declared-for-later fields', () => {
   const DECLARED_FOR_LATER = [
     'accent',
     'capabilities.echo',
+    // capabilities.wheelForward is read downstream (COD-464 paced wheel → CLI).
     'capabilities.keyboardAccessory',
     'capabilities.maxFrameBytes',
     // The Docker credential-seeding path still reads its own CRED_STORES table: this shape

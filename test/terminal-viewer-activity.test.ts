@@ -245,6 +245,7 @@ function makeMainSelectionApp(
     sendResize: vi.fn(async () => false),
     attachmentHistoryDrawerOpen: false,
   });
+  app.syncTerminalGeometry = vi.fn(() => app.fitAddon.fit());
   return app;
 }
 
@@ -770,6 +771,7 @@ describe('terminal viewer activity browser integration', () => {
       closeMobileHeaderUtilities: vi.fn(),
       markIdleAlertSeen: vi.fn(),
       fitAddon: { fit },
+      syncTerminalGeometry: vi.fn(() => fit()),
       _terminalViewerActivity: { activate },
     });
 
@@ -1005,13 +1007,48 @@ describe('terminal viewer activity browser integration', () => {
     );
     expect(selection).not.toContain('forceHttp');
     expect(selection).toMatch(/userInitiated[\s\S]*_terminalViewerActivity\?\.activate\('session-select'\)/);
-    expect(selection).toContain(
+    expect(selection).toMatch(
+      /if \(userInitiated && document\.visibilityState === 'visible'\)[\s\S]*this\.sendResize\(sessionId\)/
+    );
+    // COD-370: the post-load SIGWINCH nudge is gated the same way, and it runs
+    // before dimsAfterLoad is read, since sendResize fits synchronously first.
+    const postLoad = selection.slice(selection.indexOf('Do NOT re-introduce Ctrl+L'));
+    expect(postLoad).toContain(
       "if (userInitiated && document.visibilityState === 'visible') this.sendResize(sessionId);"
     );
+    expect(postLoad.indexOf('this.sendResize(sessionId);')).toBeLessThan(postLoad.indexOf('const dimsAfterLoad'));
   });
 
   it('keeps ordinary browser resize observation off the unowned HTTP endpoint', () => {
     expect(terminalUiSource).not.toMatch(/fetch\(`\/api\/sessions\/\$\{[^}]+\}\/resize`/);
+  });
+
+  it('activates with container size instead of an inherited phone grid and follows with resize ACK request', () => {
+    const h = loadAppHarness();
+    let deps: Record<string, (...args: unknown[]) => unknown> | undefined;
+    h.setTerminalTarget(new FakeTarget());
+    h.windowTarget.CodemanTerminalViewerActivity = {
+      create: vi.fn((value) => {
+        deps = value;
+        return { destroy: vi.fn() };
+      }),
+    };
+    const app = Object.create(h.CodemanApp.prototype);
+    const order: string[] = [];
+    app.activeSessionId = 's1';
+    app._wsReady = true;
+    app._wsSessionId = 's1';
+    app._ws = { readyState: 1, send: vi.fn(() => order.push('va')) };
+    app.getTerminalDimensions = vi.fn(() => ({ cols: 160, rows: 45 }));
+    app.getFittedTerminalDimensions = vi.fn(() => ({ cols: 55, rows: 30, viewportType: 'desktop' }));
+    app.sendResize = vi.fn(async () => {
+      order.push('resize');
+    });
+    app._initTerminalViewerActivity();
+    expect(deps!.dimensions()).toEqual({ cols: 160, rows: 45, viewportType: 'desktop' });
+    expect(deps!.send({ t: 'va', c: 160, r: 45, v: 'desktop' })).toBe(true);
+    expect(order).toEqual(['va', 'resize']);
+    expect(app.sendResize).toHaveBeenCalledWith('s1', { preserveFont: true });
   });
 
   it('exposes fitted dimensions without fitting or sending and cleans the controller up', () => {

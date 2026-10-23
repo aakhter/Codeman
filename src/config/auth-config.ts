@@ -21,8 +21,19 @@ export const MAX_AUTH_SESSIONS = 100;
 // Rate Limiting
 // ============================================================================
 
-/** Max failed auth attempts per IP before 429 rejection */
+/**
+ * Max failed auth attempts per bucket before 429 rejection. Applies to the
+ * per-username lockout and the hook-secret bucket.
+ */
 export const AUTH_FAILURE_MAX = 10;
+
+/**
+ * Max failed login attempts per client IP before 429 rejection (COD-524). Wider
+ * than AUTH_FAILURE_MAX because one egress IP can carry an automated client's
+ * retries (C3 connectivity); the per-username lockout above still caps guesses
+ * against any one account.
+ */
+export const AUTH_IP_FAILURE_MAX = 50;
 
 /** Failed auth attempt tracking window (ms) */
 export const AUTH_FAILURE_WINDOW_MS = 15 * 60 * 1000;

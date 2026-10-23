@@ -69,4 +69,13 @@ describe('createMultiplexer', () => {
 
     expect(() => createMultiplexer()).toThrow('tmux not found');
   });
+
+  it('skips the executable probe in test mode', () => {
+    tmuxAvailableSpy.mockReturnValue(false);
+
+    const mux = createMultiplexer(true);
+    expect(tmuxAvailableSpy).not.toHaveBeenCalled();
+    expect(mux.backend).toBe('tmux');
+    mux.destroy();
+  });
 });

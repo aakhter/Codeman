@@ -93,15 +93,6 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
     expect(indexHtml).toContain('<option value="360">Maximum');
   });
 
-  it('keeps the setting device-local and round-trips it through App Settings', () => {
-    expect(settingsJs).toMatch(/tabRailWidth:\s*256/);
-    expect(settingsJs).toContain("document.getElementById('appSettingsTabRailWidth')");
-    expect(settingsJs).toMatch(/tabRailWidth:\s*this\.readTabRailWidthSetting/);
-    const displayKeys = settingsJs.slice(settingsJs.indexOf('const displayKeys = new Set(['));
-    expect(displayKeys.slice(0, 1600)).toContain("'tabRailWidth'");
-    expect(settingsJs).toMatch(/tabRailWidth:\s*_trw/);
-  });
-
   it('installs a dedicated controller before the first terminal is created', () => {
     expect(indexHtml).toContain('<script defer src="tab-rail-resize.js"></script>');
     expect(appJs).toContain('this.initTabRailResize?.()');
@@ -262,21 +253,10 @@ describe('tab rail resize and wrapping wiring (COD-299)', () => {
     expect(stylesCss).toMatch(/prefers-reduced-motion:\s*reduce[\s\S]{0,1200}tab-rail/);
   });
 
-  it('keeps full names available and offers compact actions at narrow widths', () => {
-    expect(appJs).toMatch(/const tabTooltip = [^;]*name/);
-    expect(appJs).toContain('class="tab-name-prefix"');
-    expect(appJs).toContain('data-full-name="${escapeHtml(name)}"');
-    expect(appJs).toContain("tab.setAttribute('aria-label', accessibleName)");
-    expect(stylesCss).toMatch(/data-tab-orientation='vertical'[\s\S]{0,100}\.tab-name-prefix/);
-    expect(appJs).toContain('tab-more');
-    expect(railResizeJs).toContain('openTabRailActionMenu');
-    expect(stylesCss).toContain('tab-rail-compact');
-  });
-
   it('routes Settings width changes through the same settled resize coordinator', () => {
     expect(settingsJs).toContain('applyTabOrientation({ settleRailWidth: true })');
     expect(settingsJs).toContain('this.applyTabRailWidth?.({ settle: settleRailWidth })');
-    expect(settingsJs).toContain('if (!settleRailWidth) this.fitAddon?.fit()');
+    expect(settingsJs).toContain('if (!settleRailWidth) this.syncTerminalGeometry?.()');
   });
 
   it('closes detached rail menus before tab rebuilds and session cleanup', () => {

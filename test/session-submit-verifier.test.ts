@@ -9,7 +9,12 @@
  * composer, is capped, and is cancelled by a newer write or teardown.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SubmitVerifier, promptStillInComposer, SUBMIT_VERIFY_DELAYS_MS } from '../src/session-submit-verifier.js';
+import {
+  SubmitVerifier,
+  promptStillInComposer,
+  exactPromptStillInComposer,
+  SUBMIT_VERIFY_DELAYS_MS,
+} from '../src/session-submit-verifier.js';
 
 const PROMPT =
   'Read /home/arkon/.codeman/pr-bot/jobs/pr-439/brief.md and carry out the review it describes. Do not ask questions.';
@@ -173,5 +178,78 @@ describe('SubmitVerifier', () => {
     v.arm(PROMPT);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(calls).toBe(2);
+  });
+});
+
+describe('assistant Enter-only recovery', () => {
+  it('requires the entire composer and rejects dialogs, suffix changes and stale transcript echoes', () => {
+    expect(
+      exactPromptStillInComposer('› Reply exactly SHORT_OK\n\n  model footer', 'Reply exactly SHORT_OK', '›')
+    ).toBe(true);
+    expect(exactPromptStillInComposer('› Reply exactly\n  SHORT_OK\n\n footer', 'Reply exactly SHORT_OK', '›')).toBe(
+      true
+    );
+    expect(exactPromptStillInComposer('› Reply exactly SHORT_OK extra\n', 'Reply exactly SHORT_OK', '›')).toBe(false);
+    expect(exactPromptStillInComposer('› Reply exactly SHORT_OK\n›\n', 'Reply exactly SHORT_OK', '›')).toBe(false);
+    expect(
+      exactPromptStillInComposer(
+        '› Reply exactly SHORT_OK\n\n Would you like to approve?',
+        'Reply exactly SHORT_OK',
+        '›'
+      )
+    ).toBe(false);
+  });
+  it('checks native eligibility and rereads the composer after asynchronous IO', async () => {
+    vi.useFakeTimers();
+    try {
+      let screen = '› short request\n';
+      const sendEnter = vi.fn();
+      const beforeEnter = vi.fn(async () => {
+        screen = '› somebody else\n';
+        return true;
+      });
+      const verifier = new SubmitVerifier({
+        capture: () => screen,
+        glyph: () => '›',
+        matches: exactPromptStillInComposer,
+        beforeEnter,
+        sendEnter,
+        delaysMs: [10, 10],
+      });
+      verifier.arm('short request');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(beforeEnter).toHaveBeenCalledTimes(1);
+      expect(sendEnter).not.toHaveBeenCalled();
+      verifier.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('stops when native eligibility is revoked or cannot be proven', async () => {
+    vi.useFakeTimers();
+    try {
+      for (const beforeEnter of [
+        async () => false,
+        async () => {
+          throw new Error('native unavailable');
+        },
+      ]) {
+        const sendEnter = vi.fn();
+        const verifier = new SubmitVerifier({
+          capture: () => '› short request\n',
+          glyph: () => '›',
+          matches: exactPromptStillInComposer,
+          beforeEnter,
+          sendEnter,
+          delaysMs: [10, 10],
+        });
+        verifier.arm('short request');
+        await vi.advanceTimersByTimeAsync(100);
+        expect(sendEnter).not.toHaveBeenCalled();
+        verifier.cancel();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

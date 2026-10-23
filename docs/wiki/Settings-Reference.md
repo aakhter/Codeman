@@ -29,6 +29,10 @@ The practical rule: **appearance and input are per device, behaviour is shared.*
 did not follow you, it is in one of the first two rows, and you change it again on that
 device.
 
+In [Multi-User Mode](Multi-User-Mode) the server's settings are shared by every user, so
+only an **admin** can change them. A regular user's **Save** keeps their per-device settings
+as usual and tells them that server-wide settings can only be changed by an admin.
+
 ## App Settings
 
 ### Updates
@@ -50,20 +54,37 @@ supervised by systemd or launchd; npm installs report as non-updatable. See
 | Normal / Bold font weight     | xterm defaults       | Per device, each slot from 100 to 900. The bundled JetBrains Mono renders every step, so a lighter normal weight makes Claude's bold headings stand out. Applies live to the terminal, both echo overlays and open team panes. |
 | WebGL Renderer                | On                   | With a GPU-stall watchdog that falls back to DOM rendering.            |
 | Gesture Control               | Off                  | Camera hand tracking. Also needs `CODEMAN_GESTURE=1` on the server.    |
+| Key tester                    | n/a                  | A diagnostic that stores nothing. Click the box and press keys to see what this browser reports (key, code, modifiers) for keydown, keypress and keyup, for when a chord such as Shift+Enter behaves differently on one device. Keys pressed there reach no session and trigger no shortcut. |
 
 ### Header & Panels
 
 Chips for every optional header control, with a live preview of the resulting header:
 
 Run, Font Size, System Stats, Redraw Terminal, Response Viewer, Away Digest, Session
-Manager, Attachments, File Viewer, Multi-monitor, Split, Plan Usage, Lifecycle Log, Monitor,
+Manager, Attachments, File Viewer, Multi-monitor, Split, Tiles, Plan Usage, Lifecycle Log, Monitor,
 Project Insights, File Browser, Subagents, Approvals Inbox, Read My Mind, Ultracode Agents,
 Ultracode Windows, Cron.
 
-Most default to off. The stock desktop header is system stats, File Viewer, and the gear.
+**Bottom bar** (below the chips): **Git status** shows a small indicator at the right of the
+bottom bar, off by default and per device. It reads `● N` uncommitted files, `↑ N` commits not
+pushed, `⚠ N` merge conflicts, `? N` repositories git could not read, or `✓` when everything is
+committed and pushed. Click it for the Git window; see
+[Working With Files](Working-With-Files#git-changes). **Git status: group files
+by folder** (per device, on by default) shows changed files under collapsed folders in that
+window; off lists every file by its full path. **Git status: max repositories** (per device,
+1 to 50, default 12) is how many repositories the window lists when a session's folder holds
+several projects. **Git status: git timeout** (per device, 5 to 120 seconds, default 30) is how
+long one git command may run before that repository is reported as unreadable; raise it for
+repositories on a slow network share.
+
+Most default to off. The stock desktop header is system stats, File Viewer, Tiles, and the gear.
+**Header Stats Style** picks how the system stats and plan usage are drawn: *Compact*
+(default; two pills with a ring beside every value), *Tiles* (label over value with a bar underneath) or *As before* (the bars and the `5H · 7D` chip). Desktop only, per device.
 New header controls never appear on phones. Split is desktop-only regardless of this
 setting — the button and the feature both stay off below a ~1180px viewport, where two
-resizable panes plus their divider have nowhere to go.
+resizable panes plus their divider have nowhere to go. **Tiles** is desktop-only the same
+way; it also enables the `Ctrl+Shift+G` grid toggle on this device. See
+[Tile Grid](Tile-Grid).
 
 This section also holds background-agent tracking, including whether to track agents for
 every session or only the active tab.
@@ -73,27 +94,49 @@ every session or only the active tab.
 | Setting                | Notes                                                                                     |
 | ---------------------- | ----------------------------------------------------------------------------------------- |
 | Skin                   | Theme palettes, light ones included. Applied before first paint, so no flash of the wrong theme. |
-| Entrance Animations     | Per-surface animation styles for tabs, terminals, windows, and lineage lines. All default to the legacy no-animation behaviour. |
 | Display Name           | Your name in the UI. Cosmetic only; it never renames the package, CLI, API, or storage.    |
 | Interface Language     | English or Simplified Chinese. Per device.                                                 |
 | Session List Layout    | Header tab strip (default), a collapsible left sidebar, or the sidebar with detailed rows. See [The Dashboard](The-Dashboard#session-list-layout). |
 | Tab Orientation        | Keeps the header list but turns the strip vertical beside the terminal, resizable, with detailed rows by default. Desktop and tablet only. |
-| Vertical Rail Order    | *By activity* (default) sorts the rail the way the home screens are sorted; *Manual* keeps your tab order and drag-reordering. |
+| Tab Layout             | *Classic* (default): the single list as before. *By state*: a row each for needs you, waiting, working and idle, sections in the rail and sidebar. *By case*: one box per case. *Ledger*: an aligned column grid. See [The Dashboard](The-Dashboard#tab-layouts). |
+| State Order            | For *By state*: needs you on top (default) or at the bottom, right above the terminal. |
+| Vertical Rail Order    | *By activity* (default) sorts the rail the way the home screens are sorted; *Manual* keeps your tab order and drag-reordering. With *By state* or *By case* it orders the rows inside each section. |
 | Tall Tabs              | Taller tab strip.                                                                          |
+| CLI Logos on Tabs      | Each agent tab, and its row on the desktop home rail, shows the CLI's logo before the name. Off hides those logos on this device; the status dot and the shell's SH badge stay, and tiles, split headers and the Run menus keep their logos. On by default. |
 | Pop-out Button on Tabs | Adds the detach control to tabs, with a per-tab override.                                  |
-| Spawn Lineage Lines    | Arcs from a parent tab to sessions it spawned. Desktop only, on by default.                |
+| Spawn Lineage Lines    | Lines from each tab to the sessions it spawned; the selected tab's family is drawn thicker. Desktop only, on by default. |
 | Auto-name Sessions     | Titles a new tab after its first prompt, keeping the case prefix (`w3-myapp: fix the login redirect`). Synced, off by default. See [The Dashboard](The-Dashboard#automatic-session-names). |
+| Spawned Tabs Follow Their Parent | A session started by another one (an agent's worker, a `parentSessionId` spawn) follows its parent's tab into its group and moves with it until you move it by hand; the row menu then says where it sits and offers *Follow parent again*. Off, it starts right after its parent and stays put. Decided when the tab is created, so flipping it leaves existing tabs alone. Synced, off by default. |
 | Overview Home Screen   | The phone home screen. On by default.                                                      |
+
+### Animations
+
+All per device, all off by default, applied as you pick them.
+
+| Setting                | Notes                                                                                     |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| Entrance Theme         | One look for how new tabs, terminal panes, agent windows and their lines arrive (Terminal, Beam down, Launch, Soft focus, Quiet, Playful). Off by default. |
+| Tile Animations        | How tiles arrive when the tile grid opens and leave when it closes: fly out of their tabs, dealt from the Tiles button, CRT, beam down, cascade, pop or soft; each screen then plays the theme's terminal animation. Off by default (the grid's quick fade); picking a theme presets it. |
+| Animation Lab          | Opens the per-surface lab (the same as `?animlab=1`): every style side by side, with replay, stagger and speed. Closes settings first. |
 
 ### Models
 
-Claude model cards, the 1M context window switch, and the thinking effort segment. The cards
-and the switch compose into one model choice, so there is no separate "which one wins"
-question.
+Claude model cards, the 1M context window switch, the thinking effort segment and the
+advisor segment. The cards and the switch compose into one model choice, so there is no
+separate "which one wins" question.
 
-Model and effort are both **soft defaults**: the model is written into the case's
-`.claude/settings.local.json` and effort is passed at start, so `/model` and `/effort`
-inside a session override them at any time.
+Model, effort and advisor are all **soft defaults**: the model is written into the case's
+`.claude/settings.local.json` and effort and advisor are passed at start, so `/model`,
+`/effort` and `/advisor` inside a session override them at any time.
+
+**Advisor** gives new Claude sessions Claude Code's
+[advisor tool](https://code.claude.com/docs/en/advisor): a second, stronger model that Claude
+consults before committing to an approach, when an error keeps coming back, and before it
+calls a task done. A common pairing is a Sonnet main model with an Opus or Fable advisor,
+which costs less than running the stronger model all the time. **Default** leaves it to
+whatever you picked with `/advisor` yourself. The advisor needs the Anthropic API (not
+Bedrock or Vertex), and an advisor that ranks below the session's model is simply not
+attached.
 
 **Custom model endpoints** (off by default) adds a saved-endpoint list plus a matching
 section to the Run dropdown, for pointing a harness at your own OpenAI-compatible server
@@ -107,16 +150,25 @@ instead of its native cloud backend. See [Custom Model Endpoints](Custom-Model-E
 | Allowed Tools                    | The list used by the explicit mode.                                                            |
 | Ralph / Todo Tracker             | Enables the Ralph loop surfaces.                                                               |
 | Agent Teams                      | Experimental teams. Also needs the CLI's own environment flag.                                 |
-| Codeman Agent Skill              | Injects the agent skill into new Claude sessions per case. Off by default. See [Driving Codeman From An Agent](Driving-Codeman-From-An-Agent). |
+| Pin tab names on the CLI         | Launches every Claude session with `--name` set to its tab name, so Claude Code's prompt label and `/resume` list match your tabs. Claude then stops generating its own titles for those sessions, and a rename in Codeman holds only until the next turn. Synced, off by default; applies from the next session start or respawn. |
+| Codeman Agent Skill              | Under **All agent CLIs**. Injects the agent skill into each new session's case, where that session's CLI looks for skills (every CLI except Pi and a plain shell). Off by default. See [The Codeman Skill](Codeman-Skill). |
 | Remote auto-reconnect            | Reattaches dropped remote SSH sessions. On by default.                                         |
 | Nice priority / value            | Runs agent processes at a lower CPU priority.                                                  |
-| Bypass approvals and sandbox     | Pi's project trust. Read [Agent CLIs](Agent-CLIs) before enabling.                             |
+| Default Codex model              | Model for new local Codex sessions; empty uses Codex's own config. Letters, digits, `.` `_` `-` `/` only. |
+| Default Codex reasoning effort   | Reasoning level for new local Codex sessions; empty uses Codex's own config.                   |
+| Bypass approvals and sandbox     | Starts new Codex sessions with `--dangerously-bypass-approvals-and-sandbox`. Read [Agent CLIs](Agent-CLIs) before enabling. |
 | Animated status effects          | Cosmetic.                                                                                      |
+| MCP server sync                  | Copies the MCP servers each installed, enabled CLI (Claude, Codex, Gemini, OpenCode, Antigravity) and GitHub Copilot CLI has into the others' own config files. Synced, off by default, admin only in multi-user mode. Turn it on and **Apply** or **Save** (Apply keeps Settings open), then **Preview** shows what would change and **Sync now** applies it. It only adds missing servers, keeps the previous file as `.codeman-bak`, and leaves a file that receives env values or headers readable by you only. A config dir moved by `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME` or `COPILOT_HOME` in Codeman's own environment is followed. |
 
 ### Notifications
 
-Master toggle, browser notifications, push subscription, audio alerts, and the idle
-threshold that decides when a quiet session counts as needing you. See
+Master toggle, browser notifications, push subscription, audio alerts, how long a
+corner toast stays on screen (**Toast display time**, 1 to 300 seconds, default 3) and
+how long a desktop notification stays up before Codeman closes it (**Browser
+notification display time**, default 8; both per device, and your OS may close a
+desktop notification sooner), the idle
+threshold that decides when a quiet session counts as needing you, and the server-wide
+webhook (ntfy, Slack, Discord or generic JSON; admins only in multi-user mode). See
 [Notifications And Approvals](Notifications-And-Approvals).
 
 ### Voice
@@ -133,8 +185,10 @@ Rebinding for the shortcut registry. See [Keyboard Shortcuts](Keyboard-Shortcuts
 ### System
 
 `CLAUDE.md` template for new cases, default working directory, the image watcher, and
-Cloudflare tunnel controls including the tunnel and upload URLs. In multi-user mode, the
-**Users** administration entry is injected here.
+Cloudflare tunnel controls including the tunnel URL. The **Diagnostics** group runs
+`codeman doctor` on the server and lists the agent CLIs, tmux, Node and the optional office
+tools with their versions and install hints (admin only in multi-user mode). In multi-user
+mode, the **Users** administration entry is injected here.
 
 ## Session Options
 
@@ -168,7 +222,11 @@ Some things are configured before the server starts, not in the UI:
 | `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledges exposing the server with no password.                  |
 | `CODEMAN_BASE_URL`                  | Mounts Codeman under a sub-path behind a reverse proxy that forwards the prefix unchanged. See [Remote Access](Remote-Access). |
 | `CODEMAN_MAX_DOWNLOAD_BYTES`        | Cap on raw file bodies and downloads. 2 GB by default, `0` for none.    |
+| `CODEMAN_MAX_PASTE_IMAGE_BYTES`     | Cap on one pasted, dropped or attached image or document. 50 MB by default. |
+| `CODEMAN_MAX_PASTE_VIDEO_BYTES`     | Cap on one attached video (phone Attach, drop). 1 GB by default; videos stream to disk, so this bounds disk use, not memory. |
 | `CODEMAN_MAX_REMOTE_FILE_SSH`       | Concurrent ssh reads for files in remote cases. 4 by default.           |
+| `CODEMAN_PATH_PROBE_TIMEOUT_MS`     | How long a linked case's folder may take to answer before it is shown as unreachable. 1500 ms by default; raise it for a slow but healthy mount. |
+| `CODEMAN_PATH_PROBE_MAX_STALLED`    | Unanswered folder checks allowed to pile up before new ones are refused. 2 by default: one below the threadpool size minus one, so it follows `UV_THREADPOOL_SIZE` (4 unless set), and it is never allowed above that ceiling. A check you start by opening one case or session may use the one slot left above it. |
 
 ## Gotchas
 

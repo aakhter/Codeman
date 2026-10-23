@@ -74,17 +74,13 @@ const HOME_SESSIONS_PILL_LABEL = {
   done: 'done',
 };
 
-/** Short backend badge, mirroring `.tab-mode` in the tab strip. */
+/**
+ * Text badge per backend, mirroring the tab strip: only the shell has one. Every
+ * agent CLI (claude included) shows its logo instead, through the same
+ * `run-mode-dot <id>` slot the strip uses (see _buildHomeSessionRow).
+ */
 const HOME_SESSIONS_MODE_BADGE = {
   shell: 'sh',
-  opencode: 'oc',
-  codex: 'cx',
-  gemini: 'gm',
-  antigravity: 'ag',
-  pi: 'pi',
-  grok: 'gk',
-  deepseek: 'ds',
-  omp: 'om',
 };
 
 Object.assign(CodemanApp.prototype, {
@@ -179,17 +175,17 @@ Object.assign(CodemanApp.prototype, {
   // ═══════════════════════════════════════════════════════════════
 
   /**
-   * Complete locally renderable refs in authoritative order. Collapse is absent
-   * here because Home is a complete tab list, not the visible vertical tree.
+   * Every locally renderable tab in strip order: sessions (sessionOrder), then
+   * web tabs. Home is a complete tab list, never the rail's collapsed view.
    */
   _homeTabRefs() {
     if (this._tabLayoutFirstPaintPending) return [];
-    const projected = Array.isArray(this._completeTabRefs)
-      ? this._completeTabRefs
-      : this._refreshTabProjection?.()?.completeRefs;
-    if (Array.isArray(projected)) return projected;
-
-    // Safe legacy fallback while the authoritative layout is unavailable.
+    const projected = this._refreshTabProjection?.()?.completeRefs;
+    if (Array.isArray(projected)) {
+      return projected.filter((ref) =>
+        ref.kind === 'session' ? this.sessions?.has(ref.id) : this.webviews?.has(ref.id)
+      );
+    }
     const sessions = Array.isArray(this.sessionOrder) ? [...this.sessionOrder] : [];
     for (const id of this.sessions?.keys() || []) if (!sessions.includes(id)) sessions.push(id);
     return [
@@ -286,6 +282,7 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Array<object>} row descriptors, ready to render
    */
   buildHomeSessionRows() {
+    if (this._tabLayoutFirstPaintPending) return [];
     const cases = Array.isArray(this.cases) ? this.cases : [];
     const order = Array.isArray(this.sessionOrder) ? this.sessionOrder : [];
     const ids = order.filter((id) => this.sessions?.has(id));
@@ -297,6 +294,7 @@ Object.assign(CodemanApp.prototype, {
       const session = this.sessions.get(id);
       const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
       const state = this._mobileOverviewState(session, this.pendingHooks?.get(id));
+      const activity = window.CodemanSessionActivity?.resolve(session);
       // Guarded: a stale cached mobile-overview.js may predate the helper.
       const exit = this._mobileOverviewExit ? this._mobileOverviewExit(state, session) : null;
       const mode = session.mode || 'claude';
@@ -309,10 +307,15 @@ Object.assign(CodemanApp.prototype, {
         caseName: matched ? matched.name : '',
         dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
         state,
+        activityStatusSince: Number(session.activityStatusSince) || 0,
         // What the row's dot, accent and pill show. It differs from `state` only
         // for an exited agent (Ark0N/Codeman#446), whose state still sorts it.
         display: exit ? 'exited' : state,
-        pill: exit ? 'exited' : HOME_SESSIONS_PILL_LABEL[state] || state,
+        pill: exit
+          ? 'exited'
+          : state === 'waiting_agents' || state === 'checking_agents'
+            ? activity?.compactLabel || state
+            : HOME_SESSIONS_PILL_LABEL[state] || state,
         // What the pane's footer says is still running in the background, straight off
         // the session payload. Same field, same meaning as on the phone overview.
         watching: typeof session.watching === 'string' ? session.watching : '',
@@ -342,12 +345,6 @@ Object.assign(CodemanApp.prototype, {
   renderHomeSessions() {
     const el = document.getElementById('homeSessions');
     if (!el) return;
-
-    if (this._tabLayoutFirstPaintPending) {
-      el.replaceChildren();
-      this._stopHomeSessionsClock();
-      return;
-    }
 
     const rows = this.buildHomeTabRows();
 
@@ -541,6 +538,14 @@ Object.assign(CodemanApp.prototype, {
       badge.setAttribute('data-i18n-skip', '');
       badge.textContent = row.modeBadge;
       line1.appendChild(badge);
+    } else {
+      // The agent's logo: PR #532's slot, the mode id as data (an id with no
+      // logo rule gets the slot's plain dot). CLI Logos on Tabs hides it in CSS
+      // (html[data-tab-logos='off']), exactly as it does on the tab strip.
+      const logo = document.createElement('span');
+      logo.className = `home-sessions-harness run-mode-dot ${row.mode}`;
+      logo.setAttribute('aria-hidden', 'true');
+      line1.appendChild(logo);
     }
     const name = document.createElement('span');
     // .session-name is in the i18n skip list: a session name is user content.

@@ -11,10 +11,12 @@
 **Using it**
 
 - [The Dashboard](The-Dashboard)
+- [Tile Grid](Tile-Grid)
 - [Agent CLIs](Agent-CLIs)
 - [Custom Model Endpoints](Custom-Model-Endpoints)
 - [Working With Files](Working-With-Files)
 - [Session Notes](Session-Notes)
+- [Git Worktrees](Git-Worktrees)
 - [Input And Voice](Input-And-Voice)
 - [Mobile Guide](Mobile-Guide)
 - [Keyboard Shortcuts](Keyboard-Shortcuts)
@@ -42,6 +44,7 @@
 
 **Automation**
 
+- [The Codeman Skill](Codeman-Skill)
 - [Driving It From An Agent](Driving-Codeman-From-An-Agent)
 - [HTTP API](HTTP-API)
 - [Hooks & Integrations](Hooks-And-Integrations)

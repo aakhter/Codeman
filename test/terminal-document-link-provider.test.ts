@@ -545,7 +545,9 @@ describe('COD-232 terminal document link provider', () => {
   });
 
   it('preserves standalone legacy text links outside the session workspace', () => {
-    const paths = ['/tmp/result.txt', '/tmp/result.json', '/tmp/result.md'];
+    // Markdown is a preview type since upstream 1.41.1 (FILE_PREVIEW_EXTENSIONS), so
+    // only plain text keeps the log viewer here.
+    const paths = ['/tmp/result.txt', '/tmp/result.json'];
     const { provide, logSpy, previewSpy, originalSessionId } = makeHarness(paths.join(' '));
 
     const links = provide();
@@ -1090,7 +1092,10 @@ describe('COD-288 marker-prefixed absolute paths', () => {
       '1. /home/u/ws/report.zip and docs/notes.md',
       { workingDir: '/home/u/ws' }
     );
-    expect(workspaceLinks().map((link) => link.text)).toEqual(['docs/notes.md']);
+    // The greedy spaced marker candidate is still rejected (nothing external is minted);
+    // since upstream v1.42.0 `.zip` is in the shared FILE_PATH_LINK_PATTERN (prompt
+    // uploads take documents), so the complete zip path links on its own through it.
+    expect(workspaceLinks().map((link) => link.text)).toEqual(['docs/notes.md', '/home/u/ws/report.zip']);
     expect(workspaceExternalSpy).not.toHaveBeenCalled();
 
     const { provide: externalLinks, externalPreviewSpy } = makeHarness('1. /mnt/c/kb/data.bin backup notes.pdf');

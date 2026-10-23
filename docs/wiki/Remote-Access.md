@@ -104,6 +104,25 @@ The quick-tunnel URL is a random `*.trycloudflare.com` address that changes ever
 tunnel restarts. For a stable hostname, `./scripts/tunnel.sh named setup` walks through a
 named tunnel.
 
+If you run a named Cloudflare tunnel outside Codeman's tunnel manager, its custom hostname
+is not known to Codeman automatically. Add the exact hostname to `CODEMAN_ALLOWED_HOSTS` in
+the web service environment, for example:
+
+```ini
+Environment="CODEMAN_ALLOWED_HOSTS=codeman.example.com"
+```
+
+Then reload the user service and restart Codeman:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart codeman-web
+```
+
+Without this, the tunnel can reach the loopback server but every request is rejected with
+`403 host not allowed` by the anti-DNS-rebinding guard. Keep `CODEMAN_PASSWORD` or an
+equivalent tunnel access policy enabled for a public hostname.
+
 To survive reboots:
 
 ```bash

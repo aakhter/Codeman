@@ -58,6 +58,7 @@ const MOBILE_OVERVIEW_RUN_MODES = [
   { mode: 'grok', label: 'Grok', short: 'Grok' },
   { mode: 'deepseek', label: 'DeepSeek', short: 'DeepSeek' },
   { mode: 'omp', label: 'OMP', short: 'OMP' },
+  { mode: 'copilot', label: 'GitHub Copilot', short: 'GitHub Copilot' },
   { mode: 'shell', label: 'Terminal / Shell', short: 'Shell' },
 ];
 
@@ -91,6 +92,8 @@ const MOBILE_OVERVIEW_PILL_LABEL = {
   needs: 'needs you',
   error: 'error',
   waiting: 'waiting',
+  waiting_agents: 'AGENTS',
+  checking_agents: 'CHECKING',
   working: 'working',
   idle: 'idle',
   done: 'done',
@@ -265,6 +268,7 @@ Object.assign(CodemanApp.prototype, {
         // pair resolved for DISPLAY, and the two must not drift apart.
         lastActivityAt: Number(session.lastActivityAt) || 0,
         lastSubmitAt: Number(session.lastSubmitAt) || 0,
+        activityStatusSince: Number(session.activityStatusSince) || 0,
         since: exit ? exit.since : this._mobileOverviewSince(state, session),
         orderIndex: orderIndex === -1 ? Number.MAX_SAFE_INTEGER : orderIndex,
       };
@@ -488,7 +492,6 @@ Object.assign(CodemanApp.prototype, {
       sessions: this.sessions,
       cases: this.cases,
       sessionOrder: this.sessionOrder,
-      layoutPending: this._tabLayoutFirstPaintPending,
       pendingHooks: this.pendingHooks,
       history: this._mobileOverviewHistory,
     });
@@ -809,7 +812,7 @@ Object.assign(CodemanApp.prototype, {
       const wrap = document.createElement('div');
       wrap.className = 'mobile-overview-row-wrap';
       wrap.appendChild(item);
-      wrap.appendChild(this._buildMobileOverviewApprovalStrip(approval));
+      wrap.appendChild(this._buildMobileOverviewApprovalStrip(approval, row));
       return wrap;
     }
 
@@ -964,7 +967,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /** Compact answer buttons for a NEEDS YOU row: parsed options, else Approve/Deny. */
-  _buildMobileOverviewApprovalStrip(approval) {
+  _buildMobileOverviewApprovalStrip(approval, row) {
     const strip = document.createElement('div');
     strip.className = 'mobile-overview-approval-strip';
     strip.setAttribute('data-i18n-skip', '');
@@ -979,6 +982,15 @@ Object.assign(CodemanApp.prototype, {
       });
       strip.appendChild(btn);
     };
+    // Alert-only (DeepSeek Harness / supervised hooks): open the session instead
+    // of Approve/Deny that the answer route would refuse.
+    if (approval.answerInTerminal) {
+      addBtn('Answer in terminal', 'primary', () => {
+        if (typeof this.selectSession === 'function') this.selectSession(approval.sessionId);
+        else if (typeof this.openApprovalSession === 'function') this.openApprovalSession(approval.id);
+      });
+      return strip;
+    }
     if (approval.options && approval.options.length) {
       for (const o of approval.options) {
         const label = o.label.length > 24 ? o.label.slice(0, 24) + '…' : o.label;

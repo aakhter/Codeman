@@ -18,6 +18,7 @@ vi.mock('node:fs/promises', () => ({
     readdir: vi.fn(async () => []),
     readFile: vi.fn(async () => 'file content'),
     stat: vi.fn(async () => ({ size: 100, isFile: () => true, isDirectory: () => true })),
+    realpath: vi.fn(async (p: string) => p),
   },
 }));
 
@@ -442,6 +443,86 @@ describe('file-routes', () => {
       }
     });
 
+    // The folder grid is a third file-serving surface (folder-listing.ts): the
+    // same rule as the picker, on the resolved folder AND on each served file.
+    describe('folder grid', () => {
+      const ALICE = `${SPACES}/alice/cases`;
+      const BOB = `${SPACES}/bob/renders`;
+
+      const owned = async (role: 'admin' | 'user', username: string) => {
+        const scoped = await harnessAs(role, username);
+        scoped.ctx._session.owner = username;
+        return scoped;
+      };
+      const grant = (scoped: RouteTestHarness, path: string) =>
+        scoped.app.inject({
+          method: 'POST',
+          url: `/api/sessions/${scoped.ctx._sessionId}/folders`,
+          payload: { path },
+        });
+
+      beforeEach(() => {
+        mockedStat.mockImplementation(async (p) => {
+          const file = /\.\w+$/.test(String(p));
+          return { size: 100, mtimeMs: 1, isFile: () => file, isDirectory: () => !file } as never;
+        });
+      });
+
+      it("refuses another user's space and never reads it", async () => {
+        const scoped = await owned('user', 'bob');
+        try {
+          mockedReaddir.mockClear();
+          const res = await grant(scoped, ALICE);
+          expect(res.statusCode).toBe(403);
+          expect(JSON.parse(res.body).error).toBe('Folder is outside your space');
+          expect(mockedReaddir).not.toHaveBeenCalled();
+        } finally {
+          await scoped.app.close();
+        }
+      });
+
+      it('lists a folder in their own space', async () => {
+        const scoped = await owned('user', 'bob');
+        try {
+          mockedReaddir.mockResolvedValueOnce([] as never);
+          const res = await grant(scoped, BOB);
+          expect(res.statusCode).toBe(200);
+          expect(JSON.parse(res.body).data.path).toBe(BOB);
+        } finally {
+          await scoped.app.close();
+        }
+      });
+
+      it("refuses a file of their own folder that resolves into another user's space", async () => {
+        const scoped = await owned('user', 'bob');
+        try {
+          mockedReaddir.mockResolvedValueOnce([] as never);
+          const { folderId } = JSON.parse((await grant(scoped, BOB)).body).data;
+          mockedRealpathSync.mockImplementation(((p: string) =>
+            p === `${BOB}/plan.png` ? `${ALICE}/secret-project/plan.png` : p) as never);
+          const res = await scoped.app.inject({
+            method: 'GET',
+            url: `/api/sessions/${scoped.ctx._sessionId}/folders/${folderId}/files/plan.png/raw`,
+          });
+          expect(res.statusCode).toBe(403);
+          expect(JSON.parse(res.body).error).toBe('File is outside your space');
+          expect(mockedCreateReadStream).not.toHaveBeenCalled();
+        } finally {
+          await scoped.app.close();
+        }
+      });
+
+      it('lets a multi-user admin list any folder', async () => {
+        const scoped = await owned('admin', 'root');
+        try {
+          mockedReaddir.mockResolvedValueOnce([] as never);
+          expect((await grant(scoped, ALICE)).statusCode).toBe(200);
+        } finally {
+          await scoped.app.close();
+        }
+      });
+    });
+
     it('keeps the host-wide roots for a multi-user admin', async () => {
       const scoped = await harnessAs('admin', 'root');
       try {
@@ -707,20 +788,42 @@ describe('file-routes', () => {
       expect(body.data.url).toContain('file-raw');
     });
 
-    it('flags known-binary extensions (e.g. xlsx) instead of dumping mojibake', async () => {
+    it('flags legacy XLS files as binary instead of dumping mojibake', async () => {
+      mockedStat.mockResolvedValue({ size: 4096 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=sheet.xls`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.data.type).toBe('binary');
+      expect(body.data.content).toBeUndefined();
+    });
+
+    it('classifies xlsx as a client-side spreadsheet preview, never a text body', async () => {
       mockedStat.mockResolvedValue({ size: 4096 } as never);
 
       const res = await harness.app.inject({
         method: 'GET',
         url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=sheet.xlsx`,
       });
-      expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.success).toBe(true);
-      // 'spreadsheet', not the generic 'binary': xlsx has a real viewer here
-      // (the downstream XLSX preview), and the type is what routes to it.
       expect(body.data.type).toBe('spreadsheet');
+      expect(body.data.url).toBe(`/api/sessions/${harness.ctx._sessionId}/file-raw?path=sheet.xlsx`);
       expect(body.data.content).toBeUndefined();
+    });
+
+    it('keeps ods (and xls) download-only binaries', async () => {
+      mockedStat.mockResolvedValue({ size: 4096 } as never);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/file-content?path=sheet.ods`,
+      });
+      expect(JSON.parse(res.body).data.type).toBe('binary');
     });
 
     it('sniffs NUL bytes and flags binary content for unknown extensions', async () => {
@@ -896,6 +999,22 @@ describe('file-routes', () => {
       });
       expect(res.statusCode).toBe(413);
       expect(JSON.parse(res.body).error).toContain('CODEMAN_MAX_DOWNLOAD_BYTES');
+    });
+
+    it('caps an xlsx ?preview=true fetch at 10 MB, leaving downloads and small previews alone', async () => {
+      mockedStat.mockResolvedValue({ size: 11 * 1024 * 1024 } as never);
+      const url = `/api/sessions/${harness.ctx._sessionId}/file-raw?path=book.xlsx`;
+
+      const preview = await harness.app.inject({ method: 'GET', url: `${url}&preview=true` });
+      expect(preview.statusCode).toBe(413);
+      expect(JSON.parse(preview.body).error).toMatch(/file too large/i);
+
+      const download = await harness.app.inject({ method: 'GET', url: `${url}&preview=true&download=true` });
+      expect(download.statusCode).toBe(200);
+
+      mockedStat.mockResolvedValue({ size: 2048 } as never);
+      const small = await harness.app.inject({ method: 'GET', url: `${url}&preview=true` });
+      expect(small.statusCode).toBe(200);
     });
   });
 

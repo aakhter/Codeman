@@ -12,7 +12,9 @@ import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { finished } from 'node:stream/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
 import {
   ApiErrorCode,
@@ -27,14 +29,23 @@ import {
   type AntigravityConfig,
   type PiConfig,
   type GrokConfig,
+  type CopilotConfig,
   type DeepSeekConfig,
   type OmpConfig,
   type RemoteHost,
 } from '../../types.js';
-import { Session, isAltScreenStripMode, isExternalCliMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
+import {
+  Session,
+  cliTakesSessionModel,
+  isAltScreenStripMode,
+  isExternalCliMode,
+  isMuxAltScreenOnlyStripMode,
+  isMuxMouseStripMode,
+} from '../../session.js';
 import type { PaneCaptureOptions } from '../../mux-interface.js';
 import { SseEvent } from '../sse-events.js';
 import { webviewCapabilities } from '../../webview-capabilities.js';
+import { htmlViewCapabilities } from '../../html-view-capabilities.js';
 import {
   CreateSessionSchema,
   SessionNameSchema,
@@ -112,7 +123,9 @@ import { buildAgentCaseMarker, writeAgentCaseMarker } from '../../agent-case-mar
 import { canUsernameRunPrivilegedCommands, resolveClaudeModeForUsername } from '../../user-store.js';
 import { clampEnvOverridesForOwner } from '../../session-env-clamp.js';
 import { enabledClis, getCli } from '../../config/cli-registry/registry.js';
+import type { AgentSkillDir, NewlineSequence } from '../../config/cli-registry/types.js';
 import { resolveCliLaunchError } from '../../utils/cli-launcher.js';
+import { applyLaunchDefaults } from '../launch-defaults.js';
 import { legacyConfigForMode } from '../../session-cli-registry-bridge.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
@@ -120,6 +133,8 @@ import {
   writeHooksConfig,
   updateCaseModel,
   stripCaseEnvKeys,
+  agentSkillDir,
+  agentSkillDirFor,
   applyAgentSkill,
   refreshUserAgentSkill,
   seedAgentSessionPreamble,
@@ -170,9 +185,11 @@ import type { SessionRemote } from '../../types.js';
 import { resolveCodexCommandSelection, resolveLocalCaseCodexCommand } from '../../codex-command-profiles.js';
 
 import { MAX_INPUT_LENGTH, MAX_SESSION_NAME_LENGTH } from '../../config/terminal-limits.js';
-import { MAX_PASTE_IMAGE_BYTES } from '../../config/buffer-limits.js';
+import { MAX_PASTE_IMAGE_BYTES, MAX_PASTE_VIDEO_BYTES } from '../../config/buffer-limits.js';
+import { VIDEO_ATTACHMENT_EXTENSIONS } from '../../attachment-registry.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
 import {
+  transcriptNeedsScreenCapture,
   getLastTranscriptResponse,
   isExternalCliTranscriptMode,
   parseExternalCliTranscript,
@@ -194,11 +211,14 @@ import {
   readDockerHosts,
   toSessionDocker,
 } from '../../docker-hosts.js';
+import { resolveCaseRepository, resolveManagedWorktree } from '../../git-worktrees.js';
+import { describeUnknownPath, probePathKind } from '../../utils/index.js';
 import { findLatestOmpSessionId } from '../../utils/omp-session-resolver.js';
 import { scanOmpSessionsHistory } from '../../omp-transcript.js';
 import { scanCodexSessionsHistory, codexThreadBySessionId } from '../../codex-transcript.js';
 import { readDeepSeekLastResponse } from '../../deepseek-transcript.js';
 import { appendClaudeCustomTitle } from '../../claude-session-title.js';
+import { UPLOADS_DIR } from '../paste-image-gc.js';
 
 // Path to linked-cases registry (same file used by case-routes resolveCasePath)
 const LINKED_CASES_FILE = dataPath('linked-cases.json');
@@ -211,6 +231,20 @@ const SINGLE_USER_OWNER = '@single';
  * the host is in ssh backoff: the body is the local wrapper's copy, which may
  * not be live and holds about one screen of history. The client warns on it.
  */
+/**
+ * The tmux history lines a full capture may read (`capture-pane -S -<n>`): the
+ * optional `lines` query parameter, an integer of at least 1, never more than
+ * the configured history limit; absent or malformed, the limit itself, as
+ * before. A grid tile sends its own scrollback size: its xterm keeps no more
+ * than that, while a capture of the whole history (tens of thousands of lines,
+ * cut to `tail` only afterwards) is synchronous work on this event loop.
+ */
+function captureHistoryLines(raw: string | undefined, historyLimit: number): number {
+  if (typeof raw !== 'string' || !/^\d{1,9}$/.test(raw)) return historyLimit;
+  const lines = Number(raw);
+  return lines >= 1 ? Math.min(lines, historyLimit) : historyLimit;
+}
+
 function remoteCaptureDegradedFields(
   ctx: { mux: { isRemoteCaptureDegraded?(remote: SessionRemote): boolean } },
   session: { remote?: SessionRemote }
@@ -348,6 +382,37 @@ function geminiHome(): string {
 }
 
 /**
+ * The replay half of the strip parity triangle: what `_handleTerminalOutput` (session.ts)
+ * removes from the live stream, removed again from a stored buffer before it is replayed,
+ * because a buffer recorded before the live-side strip existed (or by an older server)
+ * still carries the sequences, and one replayed enable is enough to re-park xterm.
+ *
+ * - `strip-full` (claude/codex/gemini): alt-screen toggles, `3J` and mouse DECSETs.
+ *   xterm obeys the toggles by switching to its scrollback-less alt buffer and wiping
+ *   saved lines, so history disappeared on tab switch.
+ * - `strip-mux-and-mouse` (opencode, tmux-backed): alt-screen toggles and mouse DECSETs.
+ *   A replayed tracking enable parks xterm in report mode, where a drag goes to the CLI
+ *   instead of selecting text (and Ctrl+C without a selection is opencode's app_exit).
+ *   `3J` stays: a TUI is not a `clear` consumer.
+ * - every other mode, tmux-backed: tmux's own client smcup only (#205).
+ *
+ * Exported so the parity with the live strip is a test (claude-scrollback-strip.test.ts).
+ */
+export function stripReplayBuffer(buffer: string, mode: SessionMode, usesMux: boolean): string {
+  if (isAltScreenStripMode(mode)) {
+    return buffer
+      .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
+      .replace(ERASE_SCROLLBACK_PATTERN, '')
+      .replace(MOUSE_TRACKING_PATTERN, '');
+  }
+  if (isMuxMouseStripMode(mode, usesMux)) {
+    return buffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '').replace(MOUSE_TRACKING_PATTERN, '');
+  }
+  if (isMuxAltScreenOnlyStripMode(mode, usesMux)) return buffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '');
+  return buffer;
+}
+
+/**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
  * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA) to animate
  * the spinner and update the status bar. During long thinking phases, these frames
@@ -406,18 +471,53 @@ export function stripInkRedrawBloat(buffer: string): string {
 }
 
 /**
- * Validate image bytes against a declared extension. Sniffs the first ~12 bytes
- * for a known magic-number signature. Defends against polyglots (e.g. HTML or
- * SVG disguised under a `Content-Type: image/png` header) and against simple
- * extension-only spoofing — both the multipart filename and the Content-Type
- * are attacker-controlled, the raw bytes are not.
+ * The text half of the document allowlist: these are judged on their encoding
+ * (valid UTF-8, no NUL byte) rather than on a signature, since plain text has none.
+ */
+const TEXT_UPLOAD_EXTS = new Set(['.txt', '.md', '.csv', '.tsv', '.json', '.log', '.yaml', '.yml', '.xml']);
+
+/**
+ * Documents a user hands an agent to read: the office formats plus the text
+ * family. Curated on purpose, never SUPPORTED_ATTACHMENT_EXTENSIONS or
+ * EDITABLE_EXTENSIONS, which carry sh/py/js/html; a prompt upload is a thing
+ * to read, not a thing to run or serve. Each is judged on its bytes by
+ * imageMagicMatchesExt (signature, or UTF-8 without NUL for text). The browser
+ * keeps its own copies (test/upload-document-list-parity.test.ts pins them).
+ */
+export const ALLOWED_DOCUMENT_EXTS: ReadonlySet<string> = new Set([
+  '.pdf',
+  '.docx',
+  '.pptx',
+  '.xlsx',
+  '.zip',
+  ...TEXT_UPLOAD_EXTS,
+]);
+
+/**
+ * Validate upload bytes against a declared extension. Sniffs the first ~12 bytes
+ * for a known magic-number signature (a text file is instead required to be
+ * UTF-8 without a NUL byte, the one check plain text allows). Defends against
+ * polyglots (e.g. HTML or SVG disguised under a `Content-Type: image/png`
+ * header) and against simple extension-only spoofing — both the multipart
+ * filename and the Content-Type are attacker-controlled, the raw bytes are not.
+ * Fail-closed: an extension this function does not know is never a match.
  *
  * Signatures: https://en.wikipedia.org/wiki/List_of_file_signatures
  */
 export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
+  if (TEXT_UPLOAD_EXTS.has(ext)) return data.length > 0 && !data.includes(0) && isUtf8(data);
   if (data.length < 12) return false;
   const u32be = (off: number): number => data.readUInt32BE(off);
   switch (ext) {
+    case '.pdf':
+      // "%PDF-"
+      return u32be(0) === 0x25504446 && data[4] === 0x2d;
+    case '.docx':
+    case '.pptx':
+    case '.xlsx':
+    case '.zip':
+      // PK\x03\x04, the local-file header every non-empty zip (OOXML included) opens with
+      return u32be(0) === 0x504b0304;
     case '.png':
       return u32be(0) === 0x89504e47 && u32be(4) === 0x0d0a1a0a;
     case '.jpg':
@@ -442,17 +542,30 @@ export function imageMagicMatchesExt(data: Buffer, ext: string): boolean {
       // ISO Base Media File Format: size + "ftyp" + major brand.
       if (u32be(4) !== 0x66747970) return false;
       const brand = data.subarray(8, 12).toString('ascii');
-      return ['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand);
+      // Exactly the brands heic-decode's isHeic() accepts (upstream PR #151):
+      // anything else passes this check only to fail conversion.
+      return ['heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1'].includes(brand);
     }
+    case '.mp4':
+    case '.m4v':
+    case '.mov':
+      // ISO Base Media File Format / QuickTime: size + a top-level atom type. Brands
+      // vary too widely to enumerate (qt, isom, mp42, avc1, hev1, ...), and an older
+      // QuickTime file can open on an atom other than ftyp.
+      return ['ftyp', 'moov', 'mdat', 'wide', 'free', 'skip'].includes(data.subarray(4, 8).toString('ascii'));
+    case '.webm':
+      // EBML header (Matroska's WebM subset)
+      return u32be(0) === 0x1a45dfa3;
+    case '.ogv':
+      // Ogg container ("OggS")
+      return u32be(0) === 0x4f676753;
     default:
       return false;
   }
 }
 
-function getSessionRemote(session: { toState?: () => unknown }): SessionRemote | undefined {
-  const state = typeof session.toState === 'function' ? session.toState() : undefined;
-  if (!state || typeof state !== 'object') return undefined;
-  const remote = (state as { remote?: unknown }).remote;
+function getSessionRemote(session: { remote?: unknown }): SessionRemote | undefined {
+  const remote = session.remote;
   if (!remote || typeof remote !== 'object') return undefined;
   const candidate = remote as Partial<SessionRemote>;
   if (
@@ -481,37 +594,133 @@ async function writeRemotePasteImage(remote: SessionRemote, imageDir: string, fi
   });
 }
 
-// Per-(IP, sessionId) token bucket for paste-image. 30 requests/minute.
-// Bucket map entries are pruned when they drift > 1h stale to bound memory
-// against a flood of unique IP keys.
+/**
+ * Create or re-verify `{workingDir}/.codeman-uploads` for a prompt upload, or
+ * null when something other than a regular directory sits there. An agent or
+ * postinstall script could plant `.codeman-uploads -> ~/.ssh/` and redirect
+ * future writes outside workingDir: lstat (not stat) sees the symlink itself,
+ * and mkdir without `recursive` does not follow one for the leaf either;
+ * O_EXCL|O_NOFOLLOW on the file open makes the write itself symlink-safe.
+ * The folder ignores itself: a `.gitignore` of `*`, written once with O_EXCL,
+ * so the user's repository never sees uploads, their own ignore file is never
+ * touched, and a file already there is theirs and stays as it is.
+ */
+async function ensureUploadDir(workingDir: string): Promise<string | null> {
+  // workingDir exists (live session) and the caller bounded-probed its mount, so
+  // the lstat/mkdir below normally start on a reachable path; a mount that dies
+  // after that probe is the same residual race POST /api/sessions accepts.
+  const uploadDir = join(workingDir, UPLOADS_DIR);
+  try {
+    const dirStat = await fs.lstat(uploadDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return null;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    try {
+      await fs.mkdir(uploadDir);
+    } catch (mkErr: unknown) {
+      // Concurrent uploads (a batch of photos) race to create the dir — the
+      // losers get EEXIST. Treat an already-present REAL directory as success,
+      // but re-verify it isn't a symlink a racing actor planted.
+      if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
+      const raceStat = await fs.lstat(uploadDir);
+      if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) return null;
+    }
+  }
+  const ignoreFile = join(uploadDir, '.gitignore');
+  try {
+    // 'wx' = O_CREAT|O_EXCL, which also fails on a symlink at the path.
+    await fs.writeFile(ignoreFile, '*\n', { flag: 'wx' });
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return uploadDir;
+    // The create can succeed before the write fails (ENOSPC): an empty ignore
+    // file would read as the user's on the next upload, so take it back; its own
+    // failure must not replace the cause.
+    await fs.rm(ignoreFile, { force: true }).catch(() => {});
+    throw err;
+  }
+  return uploadDir;
+}
+
+/**
+ * The part of an uploaded document's name that survives into the saved name,
+ * so `Q3 report (final).pdf` is findable as `paste-<ts>-<hex>-Q3-report-final.pdf`.
+ * Only `[A-Za-z0-9._-]` survive, runs of anything else become one `-`, and the
+ * result is capped at 40 chars; nothing in it can be a path separator or a
+ * second extension that matters (the allowlisted extension is appended after).
+ */
+function sanitizeUploadStem(filename: string): string {
+  const stem = basename(filename).replace(/\.[^.]*$/, '');
+  return stem
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 40);
+}
+
+/** Open a fresh, uniquely named paste file for writing. */
+async function openPasteFile(imageDir: string, ext: string, stem = '') {
+  // Date.now() collides on same-ms uploads from two tabs (last-write wins
+  // silently). Append 8 hex chars so concurrent pastes get distinct names.
+  // The `paste-` prefix is what the GC (paste-image-gc.ts) matches on.
+  const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${stem ? `-${stem}` : ''}${ext}`;
+  const filepath = join(imageDir, filename);
+  // O_EXCL: refuse to overwrite (collision is impossible with random suffix,
+  // but defends against TOCTOU). O_NOFOLLOW: refuse if filepath is a symlink.
+  const fh = await fs.open(
+    filepath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
+  );
+  return { filename, filepath, fh };
+}
+
+// Per-(IP, sessionId) token buckets for paste-image. Images: 30/min. Videos: 3/min,
+// a much lower rate because one video can be up to MAX_PASTE_VIDEO_BYTES (1GB), so the
+// 30/min cap would let a single authenticated client write 30GB of disk a minute; 3/min
+// bounds that to 3GB. Bucket entries are pruned when they drift > 1h stale to bound
+// memory against a flood of unique IP keys.
 const PASTE_RATE_TOKENS = 30;
-const PASTE_RATE_REFILL_PER_MS = PASTE_RATE_TOKENS / 60_000;
+const VIDEO_RATE_TOKENS = 3;
 const PASTE_BUCKET_TTL_MS = 60 * 60 * 1000;
 const PASTE_BUCKET_GC_THRESHOLD = 1000;
 const pasteRateBuckets = new Map<string, { tokens: number; lastRefill: number }>();
+const videoRateBuckets = new Map<string, { tokens: number; lastRefill: number }>();
 
-export function consumePasteToken(key: string, now: number = Date.now()): boolean {
-  if (pasteRateBuckets.size > PASTE_BUCKET_GC_THRESHOLD) {
-    for (const [k, b] of pasteRateBuckets) {
-      if (now - b.lastRefill > PASTE_BUCKET_TTL_MS) pasteRateBuckets.delete(k);
+function takeToken(
+  buckets: Map<string, { tokens: number; lastRefill: number }>,
+  key: string,
+  capacity: number,
+  now: number
+): boolean {
+  if (buckets.size > PASTE_BUCKET_GC_THRESHOLD) {
+    for (const [k, b] of buckets) {
+      if (now - b.lastRefill > PASTE_BUCKET_TTL_MS) buckets.delete(k);
     }
   }
-  let b = pasteRateBuckets.get(key);
+  let b = buckets.get(key);
   if (!b) {
-    b = { tokens: PASTE_RATE_TOKENS, lastRefill: now };
-    pasteRateBuckets.set(key, b);
+    b = { tokens: capacity, lastRefill: now };
+    buckets.set(key, b);
   }
-  const delta = (now - b.lastRefill) * PASTE_RATE_REFILL_PER_MS;
-  b.tokens = Math.min(PASTE_RATE_TOKENS, b.tokens + delta);
+  b.tokens = Math.min(capacity, b.tokens + (now - b.lastRefill) * (capacity / 60_000));
   b.lastRefill = now;
   if (b.tokens < 1) return false;
   b.tokens -= 1;
   return true;
 }
 
+export function consumePasteToken(key: string, now: number = Date.now()): boolean {
+  return takeToken(pasteRateBuckets, key, PASTE_RATE_TOKENS, now);
+}
+
+// Videos stream to disk under a far larger per-file cap, so they draw on their own,
+// much lower bucket (see the comment above the constants).
+export function consumeVideoToken(key: string, now: number = Date.now()): boolean {
+  return takeToken(videoRateBuckets, key, VIDEO_RATE_TOKENS, now);
+}
+
 // Test hook: reset between runs.
 export function _resetPasteRateBuckets(): void {
   pasteRateBuckets.clear();
+  videoRateBuckets.clear();
 }
 
 /**
@@ -647,7 +856,8 @@ export async function _clampExternalCliBypassForOwner(
   antigravityConfig?: AntigravityConfig,
   piConfig?: PiConfig,
   grokConfig?: GrokConfig,
-  deepSeekConfig?: DeepSeekConfig
+  deepSeekConfig?: DeepSeekConfig,
+  copilotConfig?: CopilotConfig
 ): Promise<{
   codexConfig: CodexConfig | undefined;
   geminiConfig: GeminiConfig | undefined;
@@ -655,6 +865,7 @@ export async function _clampExternalCliBypassForOwner(
   piConfig: PiConfig | undefined;
   grokConfig: GrokConfig | undefined;
   deepSeekConfig: DeepSeekConfig | undefined;
+  copilotConfig: CopilotConfig | undefined;
 }> {
   const out = await clampExternalCliBypassForOwner(owner, {
     codexConfig,
@@ -663,6 +874,7 @@ export async function _clampExternalCliBypassForOwner(
     piConfig,
     grokConfig,
     deepSeekConfig,
+    copilotConfig,
   });
   return out as {
     codexConfig: CodexConfig | undefined;
@@ -671,6 +883,7 @@ export async function _clampExternalCliBypassForOwner(
     piConfig: PiConfig | undefined;
     grokConfig: GrokConfig | undefined;
     deepSeekConfig: DeepSeekConfig | undefined;
+    copilotConfig: CopilotConfig | undefined;
   };
 }
 
@@ -752,6 +965,27 @@ function currentSignalFor(
   if (dead || session.pid === null || session.pid === undefined) return 'exit';
   if (session.status === 'idle' && !session.isAutonomouslyIdle()) return null;
   return signalForStatus(session.status);
+}
+
+/**
+ * `currentSignalFor`, answering `blocked` for a session whose pane is showing a dialog
+ * its CLI is blocked on (`Session.screenBlocked`, read off the screen for a CLI with no
+ * hook: codex) when the caller asked for it. A hook-raised `blocked` is an edge with no
+ * history, but this one is a level the server is still looking at, so a caller that
+ * asks after the dialog appeared is answered at once instead of waiting out its timeout
+ * for an edge that already passed. Only when `blocked` was asked for: such a pane is also
+ * `idle`, and a caller that asked for `idle` alone must keep getting `idle`. Used by
+ * `GET .../wait` and by a DUPLICATE send-and-wait, every place a wait answers from the
+ * session's current state.
+ */
+function currentSignalForWait(
+  session: { pid: number | null; status: SessionStatus; isAutonomouslyIdle(): boolean; screenBlocked?: boolean },
+  dead: boolean,
+  until: readonly WaitSignal[]
+): WaitSignal | null {
+  const signal = currentSignalFor(session, dead);
+  if (signal !== 'exit' && session.screenBlocked && until.includes('blocked')) return 'blocked';
+  return signal;
 }
 
 // ── Worker liveness for tmux-backed sessions ────────────────────────────────
@@ -931,8 +1165,8 @@ function abortOnClientHangUp(reply: FastifyReply): AbortController {
  * Injection is best-effort and stays that way: neither a refusal nor a thrown error
  * may fail the create.
  */
-async function injectAgentSkill(casePath: string): Promise<void> {
-  const skillDir = join(casePath, '.claude', 'skills', 'codeman');
+async function injectAgentSkill(casePath: string, dir: AgentSkillDir): Promise<void> {
+  const skillDir = agentSkillDirFor(casePath, dir);
   try {
     // Claude Code loads a same-named USER-LEVEL skill (`~/.claude/skills/codeman`,
     // written once by `codeman skill install`) over the case copy injected below, so a
@@ -941,7 +1175,7 @@ async function injectAgentSkill(casePath: string): Promise<void> {
     // current on the same trigger. Refresh-only + marker-guarded; quiet on refusal,
     // since a foreign user copy is the user's own authored skill, not a config error.
     await refreshUserAgentSkill();
-    const result = await applyAgentSkill(casePath, true);
+    const result = await applyAgentSkill(casePath, true, dir);
     if (result === 'foreign') {
       console.warn(
         `[agent-skill] not injected: ${skillDir} exists but is not Codeman-managed (no marker), refusing to touch it. Remove that copy if you want the packaged skill there.`
@@ -1073,6 +1307,7 @@ export function registerSessionRoutes(
     // logout has to retire them too or every dashboard URL opened during this
     // login keeps relaying without one (WebviewCapabilityStore.revokeOwner).
     webviewCapabilities.revokeOwner(ownerFor(req));
+    htmlViewCapabilities.revokeOwner(ownerFor(req));
     reply.clearCookie(AUTH_COOKIE_NAME, { path: '/' });
     return {};
   });
@@ -1119,6 +1354,25 @@ export function registerSessionRoutes(
     if (capMsg) return createErrorResponse(ApiErrorCode.OPERATION_FAILED, capMsg);
 
     const body = parseBody(CreateSessionSchema, req.body);
+    // The top-level `model` is Claude's per-session `--model`. Every other CLI takes its model
+    // in its own config object (`codexConfig.model` and so on), so a `model` here would be
+    // dropped without a word; refuse it before anything is written for the session.
+    if (body.model && !cliTakesSessionModel(body.mode ?? 'claude')) {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'model applies to claude sessions only; other CLIs take their model in their own config object, such as codexConfig.model'
+      );
+    }
+    // An attach launches nothing (the remote agent is already running), so a launch model
+    // or advisor would be dropped the same way, so both are refused, as they have been since
+    // they were added. The older launch fields (effort, envOverrides) predate this and keep
+    // their silent ignore here, since refusing them now would break existing callers.
+    if (body.attachRemoteSession && (body.model || body.advisorModel)) {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'model and advisorModel shape a new launch, and attachRemoteSession launches nothing; leave them out when attaching'
+      );
+    }
     let workingDir = body.workingDir || process.cwd();
     let remote = undefined;
     const mode = body.mode || 'claude';
@@ -1204,15 +1458,22 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'workingDir is outside your workspace');
     }
 
-    // Validate workingDir exists and is a directory
+    // Validate workingDir exists and is a directory. Bounded: a workingDir on a
+    // network mount that stopped answering must not freeze the event loop, and
+    // "did not answer" is reported as such, never as "does not exist".
     if ((body.workingDir || body.caseName) && !remote) {
-      try {
-        const stat = statSync(workingDir);
-        if (!stat.isDirectory()) {
-          return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir is not a directory');
-        }
-      } catch {
+      const kind = await probePathKind(workingDir, { pastCap: true });
+      if (kind === 'unknown') {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          describeUnknownPath('workingDir', workingDir, { pastCap: true })
+        );
+      }
+      if (kind === 'absent') {
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir does not exist');
+      }
+      if (kind !== 'directory') {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'workingDir is not a directory');
       }
     }
 
@@ -1293,16 +1554,6 @@ export function registerSessionRoutes(
     // Runs AFTER applyWorkspaceHooks so it probes the block that call just installed.
     const claudeSessionStartHookReady = await verifyClaudeSessionStartHookCapability(mode, workingDir, Boolean(remote));
 
-    if (!remote && body.workingDir && (body.mode ?? 'claude') === 'claude') {
-      // Agent skill (docs/agent-control-plan.md §2): ADD-ONLY on create, same shared-
-      // .claude rationale as the statusLine above: a create must never remove the
-      // skill from under other live sessions in the repo. Marker-guarded, so a
-      // user's own skills/codeman is never touched.
-      if (await ctx.getAgentSkillEnabled()) {
-        await injectAgentSkill(workingDir);
-      }
-    }
-
     // Refuse up front if the requested CLI cannot start, rather than spawning a pane that
     // dies on `command not found`. The message comes from the resolver, so it names where
     // resolution actually looked (server PATH, login shell, the entry's search dirs); a
@@ -1328,6 +1579,18 @@ export function registerSessionRoutes(
       if (cliLaunchError) {
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, cliLaunchError);
       }
+    }
+
+    // Agent skill (docs/agent-control-plan.md §2): ADD-ONLY on create, same shared-
+    // workspace rationale as the statusLine above: a create must never remove the
+    // skill from under other live sessions in the repo. Marker-guarded, so a user's
+    // own copy is never touched. Every CLI that takes the skill gets it in the directory
+    // that CLI scans (`capabilities.agentSkillDir`); the same remote and named-workingDir
+    // conditions as the hooks above, and only once the launch pre-flight passed, so a
+    // CLI that cannot start leaves nothing in the workspace.
+    const createSkillDir = agentSkillDir(getCli(body.mode ?? 'claude')?.capabilities);
+    if (!remote && body.workingDir && createSkillDir && (await ctx.getAgentSkillEnabled())) {
+      await injectAgentSkill(workingDir, createSkillDir);
     }
 
     // Pre-validate resumeSessionId: check that the conversation file actually exists
@@ -1362,24 +1625,29 @@ export function registerSessionRoutes(
 
     const globalNice = await ctx.getGlobalNiceConfig();
     const modelConfig = await ctx.getModelConfig();
+    // Synced App Settings launch defaults (capabilities.launchDefaults, codex's model and
+    // effort today) fill the CLI's own config object where the caller left it unset.
+    // Local launches only: a remote attach runs whatever the remote pane already runs.
+    const launchBody = remote ? body : await applyLaunchDefaults(mode, body);
     // Where a model override comes from is a capability, and the three answers are
     // genuinely different mechanisms:
     //   'flag'                 — the CLI takes --model, so read the value the caller sent
     //                            in that CLI's own config object.
-    //   'claude-settings-file' — claude alone, whose model is written to
-    //                            <case>/.claude/settings.local.json rather than passed as
-    //                            a flag, so the app-wide default applies here.
+    //   'claude-settings-file' — claude alone, whose persistent model is written to
+    //                            <case>/.claude/settings.local.json (`modelOverride`). A
+    //                            per-session `model` from the caller goes out as --model and
+    //                            wins; without one, the app-wide default applies.
     //   'none'                 — shell has no model; deepseek's is a composition entry in
     //                            the profile's config tree, not a session field
     //                            (docs/deepseek-integration.md). Both get nothing.
     const modelSource = getCli(mode)?.capabilities.model;
     const model =
       modelSource?.source === 'flag'
-        ? (legacyConfigForMode(mode, body as unknown as Record<string, unknown>)?.[modelSource.param ?? 'model'] as
-            | string
-            | undefined)
+        ? (legacyConfigForMode(mode, launchBody as unknown as Record<string, unknown>)?.[
+            modelSource.param ?? 'model'
+          ] as string | undefined)
         : modelSource?.source === 'claude-settings-file'
-          ? modelConfig?.defaultModel || undefined
+          ? body.model || modelConfig?.defaultModel || undefined
           : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     // Section 6.3: force non-granted users to a classifier-guarded mode.
@@ -1392,14 +1660,16 @@ export function registerSessionRoutes(
       piConfig: gatedPiConfig,
       grokConfig: gatedGrokConfig,
       deepSeekConfig: gatedDeepSeekConfig,
+      copilotConfig: gatedCopilotConfig,
     } = await _clampExternalCliBypassForOwner(
       owner,
-      body.codexConfig,
-      body.geminiConfig,
-      body.antigravityConfig,
-      body.piConfig,
-      body.grokConfig,
-      body.deepSeekConfig
+      launchBody.codexConfig,
+      launchBody.geminiConfig,
+      launchBody.antigravityConfig,
+      launchBody.piConfig,
+      launchBody.grokConfig,
+      launchBody.deepSeekConfig,
+      launchBody.copilotConfig
     );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const truecolorEnabled = await ctx.getTruecolorEnabled();
@@ -1414,7 +1684,7 @@ export function registerSessionRoutes(
       model,
       claudeMode: effectiveClaudeMode,
       allowedTools: claudeModeConfig.allowedTools,
-      openCodeConfig: mode === 'opencode' ? body.openCodeConfig : undefined,
+      openCodeConfig: mode === 'opencode' ? launchBody.openCodeConfig : undefined,
       codexConfig:
         mode === 'codex'
           ? localCodexCommand !== undefined
@@ -1425,14 +1695,16 @@ export function registerSessionRoutes(
       antigravityConfig: mode === 'antigravity' ? gatedAntigravityConfig : undefined,
       piConfig: mode === 'pi' ? gatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? gatedGrokConfig : undefined,
+      copilotConfig: mode === 'copilot' ? gatedCopilotConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? gatedDeepSeekConfig : undefined,
-      ompConfig: resolveOmpConfigForCreate(mode, workingDir, body.ompConfig),
+      ompConfig: resolveOmpConfigForCreate(mode, workingDir, launchBody.ompConfig),
       resumeSessionId: validatedResumeId,
       envOverrides: await clampEnvOverridesForOwner(owner, body.envOverrides),
       effort: body.effort,
       truecolorEnabled,
       checkpointEnabled,
       claudeSessionStartHookReady,
+      advisorModel: body.advisorModel,
       remote,
       tmuxHistoryLimit: terminalHistoryConfig.tmuxHistoryLimit,
       terminalBufferConfig: {
@@ -1456,8 +1728,9 @@ export function registerSessionRoutes(
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
     // Pre-seed the agent skill's preamble cache so its §0 bootstrap is a two-line
-    // loader (see seedAgentSessionPreamble). Local claude sessions only; best-effort.
-    if (getCli(mode)?.capabilities.agentSkillInjection && !remote && (await ctx.getAgentSkillEnabled())) {
+    // loader (see seedAgentSessionPreamble). Local sessions of a CLI that takes the
+    // skill; best-effort.
+    if (agentSkillDir(getCli(mode)?.capabilities) && !remote && (await ctx.getAgentSkillEnabled())) {
       await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
         console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
       );
@@ -2122,6 +2395,10 @@ export function registerSessionRoutes(
     const { id } = req.params as { id: string };
     const { input, useMux, seq, clientId, wait, waitTimeout } = parseBody(SessionInputWithLimitSchema, req.body);
     const session = findSessionOrFail(ctx, id, req);
+    if (session.assistantInputLocked)
+      return reply
+        .code(409)
+        .send(createErrorResponse(ApiErrorCode.CONFLICT, 'Assistant owns session input; take control in Assistants'));
 
     const inputStr = String(input);
     if (inputStr.length > MAX_INPUT_LENGTH) {
@@ -2226,7 +2503,9 @@ export function registerSessionRoutes(
           // A DUPLICATE has no new turn coming, so it answers from the current state
           // instead of blocking for a transition that already happened.
           requireTransition: !duplicate,
-          currentSignal: duplicate ? currentSignalFor(session, workerDead) : undefined,
+          // The `...ForWait` variant, as on GET .../wait: a screen-read dialog the first
+          // delivery raised is a level, and a retry asking for `blocked` must find it.
+          currentSignal: duplicate ? currentSignalForWait(session, workerDead, until) : undefined,
         });
       } catch (err) {
         if (err instanceof WaitCapacityError) {
@@ -2242,7 +2521,7 @@ export function registerSessionRoutes(
     const stopDeathWatch = wantsWait ? watchForDeadWorker(ctx.mux, session, id) : () => {};
 
     // Write input to PTY. Direct write is synchronous; writeViaMux
-    // (tmux send-keys) is fire-and-forget to avoid blocking the HTTP response.
+    // (tmux paste + Enter) is fire-and-forget to avoid blocking the HTTP response.
     // Every write here is `fromUser`: this route carries a person's prompt, or an
     // agent's on their behalf, so it may name the tab (Ralph, respawn, cron and
     // approvals write through the session directly and never say so).
@@ -2265,7 +2544,7 @@ export function registerSessionRoutes(
     // A plain prompt (`<text>\r`) goes through the mux even when the caller did not
     // ask for it: written straight into the pane it arrives as one burst, and Claude
     // Code takes a long burst as a paste whose `\r` becomes a newline, so the prompt
-    // sat unsent (see isPlainPromptInput). The mux path types the text, presses Enter
+    // sat unsent (see isPlainPromptInput). The mux path pastes the text, presses Enter
     // separately and arms the SubmitVerifier. An explicit `useMux: false` keeps the
     // raw write for a caller that really wants it.
     const autoMux = useMux === undefined && isPlainPromptInput(inputStr);
@@ -2410,7 +2689,7 @@ export function registerSessionRoutes(
         abortSignal: abort.signal,
         requireTransition: query.fresh === '1' || query.fresh === 'true',
         // Read BEFORE awaiting: this is the state the caller is asking about.
-        currentSignal: currentSignalFor(session, await workerIsDead(ctx.mux, session)),
+        currentSignal: currentSignalForWait(session, await workerIsDead(ctx.mux, session), until),
       });
 
       return {
@@ -2518,45 +2797,57 @@ export function registerSessionRoutes(
 
   // ========== Send Named Key (tmux send-keys -H) ==========
   // Sends raw hex bytes to tmux pane for keys like Shift+Enter / Ctrl+Enter.
-  // Uses send-keys -H (hex) to inject 0x0a (line feed) which Claude Code's
-  // Ink input recognizes as "insert newline" vs 0x0d (carriage return = submit).
+  // Uses send-keys -H (hex) to inject a newline chord: 0x0a (line feed) by default, or the CLI's
+  // own `capabilities.newline`. Claude Code's Ink input recognizes 0x0a as "insert newline" vs
+  // 0x0d (carriage return = submit).
 
   app.post('/api/sessions/:id/send-key', async (req) => {
     const { id } = req.params as { id: string };
     const body = req.body as Record<string, unknown>;
     const key = typeof body?.key === 'string' ? body.key : '';
 
-    // Map key names to hex byte sequences
-    const KEY_HEX_MAP: Record<string, string[]> = {
-      'S-Enter': ['0a'], // \n (line feed)
-      'C-Enter': ['0a'], // \n (line feed)
-    };
-    const hex = KEY_HEX_MAP[key];
-    if (!hex) {
+    if (key !== 'S-Enter' && key !== 'C-Enter') {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Key not allowed: ${key}`);
     }
 
     const session = findSessionOrFail(ctx, id, req);
+    if (session.assistantInputLocked)
+      throw { statusCode: 409, body: createErrorResponse(ApiErrorCode.CONFLICT, 'Assistant owns session input') };
     session.cancelCheckpoint('manual-takeover');
     const muxName = session.muxName;
     if (!muxName) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'No tmux session');
     }
 
+    // Key names map to hex byte sequences. Ctrl+Enter is always a line feed; Shift+Enter is the
+    // CLI's own newline chord (`capabilities.newline`, default line feed), so a CLI that wants
+    // Esc+Enter declares it in the registry instead of being special-cased here.
+    const NEWLINE_HEX: Record<NewlineSequence, string[]> = {
+      'line-feed': ['0a'], // \n
+      'esc-enter': ['1b', '0d'], // ESC CR, the Alt/Option+Enter chord
+    };
+    const hex =
+      key === 'C-Enter'
+        ? NEWLINE_HEX['line-feed']
+        : NEWLINE_HEX[getCli(session.mode)?.capabilities.newline ?? 'line-feed'];
+
     try {
       // Route through the dedicated Codeman socket — bare `tmux` would target the
       // user's default server and never find this session (same #80 regression class).
-      await new Promise<void>((resolve, reject) => {
-        execFile(
-          'tmux',
-          ['-L', ctx.mux.muxSocket, 'send-keys', '-H', '-t', muxName, ...hex],
-          { timeout: 5000 },
-          (err) => {
-            if (err) reject(err);
-            else resolve();
-          }
-        );
-      });
+      await session.performAuxiliaryInput(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            execFile(
+              'tmux',
+              ['-L', ctx.mux.muxSocket, 'send-keys', '-H', '-t', muxName, ...hex],
+              { timeout: 5000 },
+              (err) => {
+                if (err) reject(err);
+                else resolve();
+              }
+            );
+          })
+      );
     } catch (err) {
       console.error('[Server] send-key failed:', err);
       return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, 'tmux send-keys failed');
@@ -2693,6 +2984,14 @@ export function registerSessionRoutes(
     if (!isExternalCliTranscriptMode(session.mode)) return session.terminalBuffer;
 
     const muxName = session.muxName;
+    // A repainting full-screen TUI (copilot) streams absolute cursor moves, not lines, so
+    // neither the byte buffer nor the scrollback can be segmented; read the pane's visible
+    // screen instead, falling through when there is no tmux pane to ask.
+    if (transcriptNeedsScreenCapture(session.mode) && muxName) {
+      const screen = ctx.mux.capturePaneText?.(muxName) ?? null;
+      if (screen !== null) return screen;
+    }
+
     let liveMuxBuffer: string | null = null;
 
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
@@ -3023,7 +3322,14 @@ export function registerSessionRoutes(
     // where a real rollout file is the better source.
     if (isExternalCliTranscriptMode(session.mode)) {
       const externalQuery = req.query as { context?: string };
-      const blocks = parseExternalCliTranscript(session.terminalBuffer, session.mode);
+      // A repainting full-screen TUI (copilot) streams absolute cursor moves, not lines, so the
+      // buffer cannot be segmented; read the pane's visible screen instead, and fall back to the
+      // buffer when there is no tmux pane to ask (direct PTY, tests).
+      const screen =
+        transcriptNeedsScreenCapture(session.mode) && session.muxName
+          ? (ctx.mux.capturePaneText?.(session.muxName) ?? null)
+          : null;
+      const blocks = parseExternalCliTranscript(screen ?? session.terminalBuffer, session.mode);
       return {
         text: getLastTranscriptResponse(blocks),
         timestamp: '',
@@ -3309,10 +3615,20 @@ export function registerSessionRoutes(
   //   tail=<bytes> - Only return last N bytes (faster initial load)
   //   frame=1     - COD-187 live mirror: ONLY the current visible frame
   //   full=1       - Explicitly request the entire tmux scrollback (COD-47)
+  //   alt=recording - With full=1: if the pane is in the alternate screen, load
+  //                  the visible frame over the byte recording instead
   app.get('/api/sessions/:id/terminal', async (req, reply) => {
     const routeStartedAt = performance.now();
     const { id } = req.params as { id: string };
-    const query = req.query as { tail?: string; frame?: string; lines?: string; capture?: string; full?: string };
+    const query = req.query as {
+      tail?: string;
+      frame?: string;
+      mirror?: string;
+      lines?: string;
+      capture?: string;
+      full?: string;
+      alt?: string;
+    };
     const session = findSessionOrFail(ctx, id, req);
 
     // COD-187 (live mirror): `frame=1` returns ONLY the current visible frame —
@@ -3326,7 +3642,23 @@ export function registerSessionRoutes(
     if (query.frame === '1') {
       const frameMuxName = session.muxName;
       let frame: string | null = null;
-      if (frameMuxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
+      // A live remote wrapper already receives the current visible screen over
+      // its persistent SSH attachment. Browser mirrors can capture that locally
+      // instead of opening an extra SSH channel on every selection/reconcile.
+      // Canonical history and default frame callers still capture remotely.
+      if (query.mirror === '1' && frameMuxName && session.remote) {
+        if (typeof ctx.mux.captureLivePaneFrame === 'function') {
+          frame = await ctx.mux.captureLivePaneFrame(frameMuxName);
+        } else if (typeof ctx.mux.captureActivePaneBuffer === 'function' && !(await ctx.mux.isPaneDead(frameMuxName))) {
+          frame = ctx.mux.captureActivePaneBuffer(frameMuxName);
+        }
+      }
+      if (
+        (frame === null || frame.length === 0) &&
+        frameMuxName &&
+        session.remote &&
+        typeof ctx.mux.captureRemotePaneBuffer === 'function'
+      ) {
         frame = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, frameMuxName, {
           visibleFrame: true,
           owner: ownerFor(req),
@@ -3355,16 +3687,15 @@ export function registerSessionRoutes(
     // Requests WITHOUT it — shell selection/tab switches (`tail=`) and legacy
     // no-param callers — keep the fast visible-frame capture.
     const tailBytes = query.tail ? parseInt(query.tail, 10) : 0;
-    const isFullReload = query.full === '1' || tailBytes <= 0;
+    let isFullReload = query.full === '1' || tailBytes <= 0;
     // COD-187 (history view lazy load): `lines=N` bounds the full-history
     // capture to the last N lines — the fast first page. The frontend expands
     // to the unbounded capture only when the user scrolls to the partial top.
-    const rawLines = query.lines ? parseInt(query.lines, 10) : 0;
-    const lastLines =
-      Number.isFinite(rawLines) && rawLines > 0 ? Math.min(100_000, Math.max(100, rawLines)) : undefined;
+    const rawLines = query.lines && /^\d+$/.test(query.lines) ? Number(query.lines) : 0;
+    let lastLines = Number.isFinite(rawLines) && rawLines > 0 ? Math.min(100_000, Math.max(100, rawLines)) : undefined;
     // COD-187 claude expansion: the history view's requests (`lines=N` first
     // page, `capture=1` full expansion) are capture-only for EVERY mode.
-    const isCaptureRequest = lastLines !== undefined || query.capture === '1';
+    let isCaptureRequest = lastLines !== undefined || query.capture === '1';
 
     // Prepend the live tmux pane buffer so tab-switch replay shows the current
     // on-screen frame, not just the accumulated byte history. This matters for
@@ -3396,12 +3727,15 @@ export function registerSessionRoutes(
     // execSync's 1MB default (ENOBUFS).
     const { tmuxHistoryLimit, terminalBufferMaxBytes } = await ctx.getTerminalHistoryConfig();
     const captureStartedAt = performance.now();
-    const captureOpts: PaneCaptureOptions =
+    // `lines` bounds the history a full capture reads (a grid tile sends its own
+    // scrollback size; COD-187's history view sends its first page), never more
+    // than the configured history limit. The visible-frame path reads no history.
+    let captureOpts: PaneCaptureOptions =
       isFullReload || isCaptureOnlyTuiMode || isCaptureRequest
         ? {
             fullHistory: true,
             lastLines,
-            historyLimitLines: tmuxHistoryLimit,
+            historyLimitLines: captureHistoryLines(query.lines, tmuxHistoryLimit),
             maxCaptureBytes: terminalBufferMaxBytes,
           }
         : {};
@@ -3413,6 +3747,8 @@ export function registerSessionRoutes(
     // not replace the session's whole scrollback).
     let liveMuxBuffer: string | null = null;
     let remoteCaptureFailed = false;
+    // Set when a shell's `alt=recording` load falls back to the byte recording.
+    let recordingFallback = false;
     if (muxName && session.remote && typeof ctx.mux.captureRemotePaneBuffer === 'function') {
       liveMuxBuffer = await ctx.mux.captureRemotePaneBuffer(session.remote, session.id, muxName, {
         fullHistory: true,
@@ -3426,6 +3762,22 @@ export function registerSessionRoutes(
     }
     if (liveMuxBuffer === null && muxName && typeof ctx.mux.captureActivePaneBuffer === 'function') {
       liveMuxBuffer = ctx.mux.captureActivePaneBuffer(muxName, captureOpts);
+      // tmux adds no history while a pane is in the alternate screen, and a
+      // nested tmux client (a Docker case, or `tmux` run by hand in a shell)
+      // holds its pane there for good, so the full capture above is one screen
+      // plus whatever came before. The byte recording still carries the
+      // scrollback, so a caller that opts in (a shell's automatic load,
+      // `alt=recording`) gets the old visible-frame load over it, tailed, rather
+      // than losing everything above the screen. Only reached when the remote
+      // tmux (COD-180, above) did not supply the history.
+      if (isFullReload && query.alt === 'recording' && captureOpts.capturedAlternateOn === true) {
+        recordingFallback = true;
+        isFullReload = false;
+        isCaptureRequest = false;
+        lastLines = undefined;
+        captureOpts = {};
+        liveMuxBuffer = ctx.mux.captureActivePaneBuffer(muxName, captureOpts);
+      }
     }
     const captureFinishedAt = performance.now();
     const hasLiveMuxBuffer = liveMuxBuffer !== null && liveMuxBuffer.length > 0;
@@ -3447,6 +3799,7 @@ export function registerSessionRoutes(
     const isExplicitFullReload = query.full === '1' || query.full === 'true';
     const captureOnly =
       (isExplicitFullReload || isCaptureOnlyTuiMode || isShellFullReload || isCaptureRequest) &&
+      !recordingFallback &&
       !(session.remote && remoteCaptureFailed);
     // `source` doubles as the frontend's reconcile safety gate: only a
     // 'mux-full-history' response may REPLACE a terminal's contents
@@ -3484,6 +3837,31 @@ export function registerSessionRoutes(
     let truncationReason: 'capped' | 'tail' | null = null;
     let cleanBuffer: string;
 
+    // A `lines=` bound shallower than tmux's history left the older lines in
+    // tmux: an intentional partial read, so 'tail', and a later pull with a
+    // deeper (or no) bound recovers them. Without this a bounded window looks
+    // like the whole history to the client. The byte cap below still wins.
+    // Only a bound the CLIENT set and below the configured ceiling counts:
+    // without `lines=` the bound is the ceiling itself, and on tmux before 3.7
+    // a live pane can hold more than a lowered ceiling, which no request can
+    // read, so calling that a recoverable cut would offer a button that can
+    // never return more.
+    // `historyLinesCut` tells the client this happened, apart from any byte
+    // cut below: `fullSize` counts only what tmux returned, so the bytes a
+    // later `tail` cut are not all that is left, and the client must not name
+    // them as the remainder.
+    const capturedHistoryLines = captureOpts.capturedHistoryLines;
+    const historyLinesCut =
+      isFullCapture &&
+      captureOpts.historyLimitLines !== undefined &&
+      captureOpts.historyLimitLines < tmuxHistoryLimit &&
+      capturedHistoryLines !== undefined &&
+      capturedHistoryLines > captureOpts.historyLimitLines;
+    if (historyLinesCut) {
+      truncated = true;
+      truncationReason = 'tail';
+    }
+
     // Cap the payload EARLY — before the regex normalization passes below run
     // over it. A full-history tmux capture can be tens of MB of scrollback;
     // normalizing all of it would stall the event loop only to discard most
@@ -3514,21 +3892,9 @@ export function registerSessionRoutes(
         ? rawBuffer
         : stripInkRedrawBloat(rawBuffer);
 
-    // Strip alt-screen toggles and scrollback-erase from Codex/Claude byte
-    // streams. xterm.js obeys them by switching to its scrollback-less alt
-    // buffer and wiping saved lines, so conversation history disappears on tab
-    // switch. Same gate as the live-stream strip in session.ts.
-    if (isAltScreenStripMode(session.mode)) {
-      strippedBuffer = strippedBuffer
-        .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
-        .replace(ERASE_SCROLLBACK_PATTERN, '')
-        .replace(MOUSE_TRACKING_PATTERN, '');
-    } else if (isMuxAltScreenOnlyStripMode(session.mode, session.usesMux)) {
-      // tmux-backed shell/opencode/antigravity: drop tmux's own client smcup only.
-      // A byte buffer recorded before the live-side strip existed can still carry
-      // it, and one replayed `\x1b[?1049h` re-parks xterm in the alt buffer (#205).
-      strippedBuffer = strippedBuffer.replace(ALT_SCREEN_TOGGLE_PATTERN, '');
-    }
+    // Same strip as the live stream (session.ts), so a buffer recorded before the
+    // live-side strip existed cannot re-park xterm on replay. See stripReplayBuffer.
+    strippedBuffer = stripReplayBuffer(strippedBuffer, session.mode, session.usesMux);
 
     if (tailBytes > 0 && strippedBuffer.length > tailBytes) {
       // Fast path: tail from the end, skip expensive banner search on full 2MB buffer.
@@ -3593,6 +3959,9 @@ export function registerSessionRoutes(
       fullSize,
       truncated,
       truncationReason,
+      // The `lines=` bound left older lines in tmux (see above): the remainder
+      // is more than `fullSize - retainedBytes`, by an amount unknown here.
+      historyLinesCut,
       // `retainedBytes` is what this response actually carries; `fullSize` is
       // what existed before the cut. The gap is what the indicator reports.
       retainedBytes: cleanBuffer.length,
@@ -3618,6 +3987,15 @@ export function registerSessionRoutes(
       captureCols: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.cols : undefined,
       captureRows: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.rows : undefined,
       ...remoteCaptureDegradedFields(ctx, session),
+      // Rows tmux holds above the visible frame, which is the most a `full=1`
+      // pull can add. `truncated` measures the BYTE stream, and for a pane that
+      // keeps no scrollback (a fullscreen CLI in the alternate screen) the bytes
+      // a tail cut drops are old repaints that no request can bring back, so a
+      // client must not offer to load them. Absent when the pane was not read,
+      // and for a remote session: its local pane hosts the remote tmux client in
+      // the alternate screen, so it always reports 0, while a `full=1` load reads
+      // the real scrollback from the remote tmux (COD-180, `captureRemotePaneBuffer`).
+      paneHistoryLines: hasLiveMuxBuffer && !session.remote ? captureOpts.capturedHistoryLines : undefined,
     };
   });
 
@@ -3898,14 +4276,17 @@ export function registerSessionRoutes(
       antigravityConfig,
       piConfig,
       grokConfig,
+      copilotConfig,
       deepSeekConfig,
       ompConfig,
       envOverrides,
       effort,
+      advisorModel,
       parentSessionId,
       tabGroupId,
       agentOrigin,
       customModel,
+      worktree,
     } = parseBody(QuickStartSchema, req.body);
 
     // Resolved ONCE here: the same value labels a case directory this request creates
@@ -3942,6 +4323,16 @@ export function registerSessionRoutes(
       : (await readDockerCases(CODEMAN_CONFIG_DIR)).find(
           (item) => item.name === caseName && canAccessOwned(getAuthUser(req), item.owner)
         );
+    // Worktrees are local only (src/git-worktrees.ts): refused BEFORE a remote host is woken or a
+    // container is touched, since neither branch below could honour it.
+    if (worktree && (remoteCase || dockerCase)) {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        remoteCase
+          ? 'worktree is not available for remote (SSH) cases: the repository is on another machine'
+          : 'worktree is not available for Docker cases: git would run on this machine over a workspace the container can write'
+      );
+    }
     if (remoteCase) {
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
@@ -3958,12 +4349,14 @@ export function registerSessionRoutes(
       if (
         (envOverrides && Object.keys(envOverrides).length > 0) ||
         effort ||
+        advisorModel ||
         modelOverride !== undefined ||
         (codexConfig && mode !== 'codex') ||
         geminiConfig ||
         antigravityConfig ||
         piConfig ||
         grokConfig ||
+        copilotConfig ||
         deepSeekConfig ||
         ompConfig ||
         openCodeConfig ||
@@ -3971,7 +4364,7 @@ export function registerSessionRoutes(
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, modelOverride, per-CLI config, and custom model endpoints are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
+          'envOverrides, effort, advisorModel, modelOverride, per-CLI config, and custom model endpoints are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
         );
       }
 
@@ -4025,11 +4418,13 @@ export function registerSessionRoutes(
       if (
         (envOverrides && Object.keys(envOverrides).length > 0) ||
         effort ||
+        advisorModel ||
         codexConfig ||
         geminiConfig ||
         antigravityConfig ||
         piConfig ||
         grokConfig ||
+        copilotConfig ||
         deepSeekConfig ||
         ompConfig ||
         openCodeConfig ||
@@ -4037,7 +4432,7 @@ export function registerSessionRoutes(
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, per-CLI config, and custom model endpoints are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
+          'envOverrides, effort, advisorModel, per-CLI config, and custom model endpoints are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
         );
       }
 
@@ -4147,6 +4542,7 @@ export function registerSessionRoutes(
             antigravityConfig,
             piConfig,
             grokConfig,
+            copilotConfig,
             deepSeekConfig,
           } as unknown as Record<string, unknown>)
         );
@@ -4184,9 +4580,42 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'case path is outside your workspace');
     }
 
+    // Bounded probe of a local case folder: a linked case can sit on a network mount
+    // that stopped answering, and a synchronous check there froze the whole server.
+    // Only a DEFINITE absence may scaffold a new case; "did not answer" must not
+    // create one over the top of where the real case is mounted.
+    const localCaseState = remote || docker ? undefined : await probePathKind(resolvedCasePath, { pastCap: true });
+    if (localCaseState === 'unknown') {
+      return createErrorResponse(
+        ApiErrorCode.OPERATION_FAILED,
+        describeUnknownPath('Case folder', resolvedCasePath, { pastCap: true })
+      );
+    }
+
+    // Where the session runs: the case folder, or one of its git worktrees. A worktree is only
+    // ever USED here (created through POST /api/cases/:name/worktrees), so a case that does not
+    // exist yet is a 404 rather than a scaffold, and the worktree must be a registered, managed
+    // one, every path component a real directory (src/git-worktrees.ts).
+    let workspacePath = resolvedCasePath;
+    if (worktree) {
+      if (localCaseState === 'absent') {
+        return createErrorResponse(ApiErrorCode.NOT_FOUND, `Case "${caseName}" not found`);
+      }
+      if (localCaseState !== 'directory') {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Case path is not a folder');
+      }
+      const caseRepo = await resolveCaseRepository(resolvedCasePath, {
+        dockerWorkspaces: (await readDockerCases(CODEMAN_CONFIG_DIR)).map((c) => c.hostWorkspacePath).filter(Boolean),
+      });
+      if (!caseRepo.ok) return createErrorResponse(ApiErrorCode[caseRepo.code], caseRepo.message);
+      const managed = await resolveManagedWorktree(caseRepo.repo, worktree);
+      if (!managed.ok) return createErrorResponse(ApiErrorCode[managed.code], managed.message);
+      workspacePath = managed.path;
+    }
+
     // Create case folder and CLAUDE.md if it doesn't exist (only for non-linked, non-remote,
     // non-docker cases — docker workspaces are scaffolded in their own block below)
-    if (!remote && !docker && !existsSync(resolvedCasePath)) {
+    if (localCaseState === 'absent') {
       try {
         mkdirSync(resolvedCasePath, { recursive: true });
         mkdirSync(join(resolvedCasePath, 'src'), { recursive: true });
@@ -4242,19 +4671,21 @@ export function registerSessionRoutes(
       // of its own. Skipped for remote cases — resolvedCasePath is a REMOTE path that
       // doesn't exist on the local filesystem.
       if (getCli(mode)?.capabilities.hooks === 'always') {
-        await applyWorkspaceHooks(resolvedCasePath, await ctx.getWorkspaceHooksEnabled());
+        await applyWorkspaceHooks(workspacePath, await ctx.getWorkspaceHooksEnabled());
       } else {
-        await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
+        await refreshStaleCodemanHooks(workspacePath).catch(() => {});
       }
     }
 
     // Agent skill injection (docs/agent-control-plan.md §2): ADD-ONLY on create,
-    // marker-guarded (a user's own skills/codeman is never touched). Claude mode only
-    // (`.claude/skills/` is a Claude Code surface); skipped for remote cases, whose
-    // casePath lives on another host. Docker cases qualify: hostWorkspacePath is a
-    // real host dir and the skill crosses the bind mount like the rest of `.claude/`.
-    if (!remote && getCli(mode)?.capabilities.agentSkillInjection && (await ctx.getAgentSkillEnabled())) {
-      await injectAgentSkill(resolvedCasePath);
+    // marker-guarded (a user's own copy is never touched). Each CLI that takes the
+    // skill gets it in the directory it scans (`capabilities.agentSkillDir`:
+    // `.claude/skills` for claude, `.agents/skills` for most others); skipped for
+    // remote cases, whose casePath lives on another host. Docker cases qualify:
+    // hostWorkspacePath is a real host dir and the skill crosses the bind mount.
+    const quickStartSkillDir = agentSkillDir(getCli(mode)?.capabilities);
+    if (!remote && quickStartSkillDir && (await ctx.getAgentSkillEnabled())) {
+      await injectAgentSkill(workspacePath, quickStartSkillDir);
     }
 
     // Docker cases: the workspace is a REAL host dir bind-mounted into the container.
@@ -4287,33 +4718,46 @@ export function registerSessionRoutes(
     // docker — the docker workspace is a real host dir, so the settings file crosses
     // the bind mount and the in-container claude reads it). Remote was rejected above.
     if (getCli(mode)?.capabilities.model.source === 'claude-settings-file' && modelOverride !== undefined) {
-      await updateCaseModel(resolvedCasePath, modelOverride || null);
+      await updateCaseModel(workspacePath, modelOverride || null);
     }
 
     // Strip stale disk entries for keys this request is actively setting (Claude only —
     // see POST /api/sessions for full rationale).
     // Same chain, same replacement as the create path above: byte-identical, drift-proof.
     if (!isExternalCliMode(mode) && !remote && envOverrides && Object.keys(envOverrides).length > 0) {
-      await stripCaseEnvKeys(resolvedCasePath, Object.keys(envOverrides));
+      await stripCaseEnvKeys(workspacePath, Object.keys(envOverrides));
     }
 
     // Create a new session with the case as working directory
     // Apply global Nice priority config and model config from settings
     const niceConfig = await ctx.getGlobalNiceConfig();
     const qsModelConfig = await ctx.getModelConfig();
+    // Synced App Settings launch defaults, as on the create path: local launches only, so
+    // never a remote or Docker case, and never a custom model endpoint launch.
+    const qsRequestConfigs = {
+      openCodeConfig,
+      codexConfig,
+      geminiConfig,
+      antigravityConfig,
+      piConfig,
+      grokConfig,
+      copilotConfig,
+      deepSeekConfig,
+      ompConfig,
+    };
+    const qsLaunchConfigs =
+      remote || docker ? qsRequestConfigs : await applyLaunchDefaults(mode, qsRequestConfigs, !!customModel);
+    // ⚠️ The model is read from a bag WITHOUT ompConfig, as it always was here: quick-start
+    // has never taken omp's session model from ompConfig (the create path does). Kept as
+    // found rather than changed in passing.
+    const { ompConfig: qsLaunchOmpConfig, ...qsModelConfigs } = qsLaunchConfigs;
     // See the create path for why this is a capability rather than a mode ladder.
     const qsModelSource = getCli(mode)?.capabilities.model;
     const qsModel =
       qsModelSource?.source === 'flag'
-        ? (legacyConfigForMode(mode, {
-            openCodeConfig,
-            codexConfig,
-            geminiConfig,
-            antigravityConfig,
-            piConfig,
-            grokConfig,
-            deepSeekConfig,
-          } as unknown as Record<string, unknown>)?.[qsModelSource.param ?? 'model'] as string | undefined)
+        ? (legacyConfigForMode(mode, qsModelConfigs as unknown as Record<string, unknown>)?.[
+            qsModelSource.param ?? 'model'
+          ] as string | undefined)
         : qsModelSource?.source === 'claude-settings-file'
           ? qsModelConfig?.defaultModel || undefined
           : undefined;
@@ -4327,18 +4771,20 @@ export function registerSessionRoutes(
       piConfig: qsGatedPiConfig,
       grokConfig: qsGatedGrokConfig,
       deepSeekConfig: qsGatedDeepSeekConfig,
+      copilotConfig: qsGatedCopilotConfig,
     } = await _clampExternalCliBypassForOwner(
       owner,
-      codexConfig,
-      geminiConfig,
-      antigravityConfig,
-      piConfig,
-      grokConfig,
-      deepSeekConfig
+      qsLaunchConfigs.codexConfig,
+      qsLaunchConfigs.geminiConfig,
+      qsLaunchConfigs.antigravityConfig,
+      qsLaunchConfigs.piConfig,
+      qsLaunchConfigs.grokConfig,
+      qsLaunchConfigs.deepSeekConfig,
+      qsLaunchConfigs.copilotConfig
     );
     // Same owner clamp for env overrides as POST /api/sessions (upstream 74194e4f).
     const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
-    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig);
+    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, workspacePath, qsLaunchOmpConfig);
 
     // Custom Model Endpoint Profiles, applied AT CREATE TIME (docs/custom-model-endpoints-plan.md)
     // rather than via the dedicated restart-in-place route (POST /api/sessions/:id/custom-
@@ -4444,7 +4890,7 @@ export function registerSessionRoutes(
         customModel.modelId,
         qsCustomModelSessionId,
         cmContextLength,
-        resolvedCasePath
+        workspacePath
       );
       if (!cmApplied) {
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
@@ -4494,7 +4940,7 @@ export function registerSessionRoutes(
 
     const qsSessionOptions: ConstructorParameters<typeof Session>[0] = {
       id: qsCustomModelSessionId,
-      workingDir: resolvedCasePath,
+      workingDir: workspacePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
       mux: ctx.mux,
       useMux: true,
@@ -4504,7 +4950,7 @@ export function registerSessionRoutes(
       claudeMode: qsEffectiveClaudeMode,
       allowedTools: qsClaudeModeConfig.allowedTools,
       owner,
-      openCodeConfig: mode === 'opencode' ? openCodeConfig : undefined,
+      openCodeConfig: mode === 'opencode' ? qsLaunchConfigs.openCodeConfig : undefined,
       codexConfig:
         mode === 'codex'
           ? qsLocalCodexCommand !== undefined
@@ -4515,6 +4961,7 @@ export function registerSessionRoutes(
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
       piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
+      copilotConfig: mode === 'copilot' ? qsGatedCopilotConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
       ompConfig: qsResolvedOmpConfig,
       envOverrides: qsCustomModelEnvOverrides,
@@ -4522,6 +4969,7 @@ export function registerSessionRoutes(
       truecolorEnabled: qsTruecolorEnabled,
       checkpointEnabled: qsCheckpointEnabled,
       claudeSessionStartHookReady: qsClaudeSessionStartHookReady,
+      advisorModel,
       remote,
       docker,
       resumeSessionId: dockerResumeId,
@@ -4563,7 +5011,7 @@ export function registerSessionRoutes(
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
     if (getCli(mode)?.capabilities.ralph && !remote && !docker && ctx.store.getConfig().ralphEnabled) {
-      autoConfigureRalph(session, resolvedCasePath, ctx);
+      autoConfigureRalph(session, workspacePath, ctx);
       if (!session.ralphTracker.enabled) {
         session.ralphTracker.enable();
         session.ralphTracker.enableAutoEnable(); // Allow re-enabling on restart
@@ -4578,8 +5026,9 @@ export function registerSessionRoutes(
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
     // Pre-seed the agent skill's preamble cache so its §0 bootstrap is a two-line
-    // loader (see seedAgentSessionPreamble). Local claude sessions only; best-effort.
-    if (getCli(mode)?.capabilities.agentSkillInjection && !remote && !docker && (await ctx.getAgentSkillEnabled())) {
+    // loader (see seedAgentSessionPreamble). Local sessions of a CLI that takes the
+    // skill; best-effort.
+    if (agentSkillDir(getCli(mode)?.capabilities) && !remote && !docker && (await ctx.getAgentSkillEnabled())) {
       await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
         console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
       );
@@ -4629,28 +5078,33 @@ export function registerSessionRoutes(
         ).catch(() => {});
       }
 
-      // Save lastUsedCase to settings for TUI/web sync
-      try {
-        const settingsFilePath = SETTINGS_PATH;
-        let settings: Record<string, unknown> = {};
+      // Save lastUsedCase to settings for TUI/web sync. It is a key of the server-wide
+      // settings.json, readable by every user through GET /api/settings, so a non-admin's
+      // case name is not written there in multi-user mode (writes are admin-only, like
+      // PUT /api/settings). isAdmin is always true in single-user mode.
+      if (isAdmin(req)) {
         try {
-          settings = JSON.parse(await fs.readFile(settingsFilePath, 'utf-8'));
+          const settingsFilePath = SETTINGS_PATH;
+          let settings: Record<string, unknown> = {};
+          try {
+            settings = JSON.parse(await fs.readFile(settingsFilePath, 'utf-8'));
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          }
+          settings.lastUsedCase = caseName;
+          const dir = dirname(settingsFilePath);
+          if (!existsSync(dir)) {
+            mkdirSync(dir, { recursive: true });
+          }
+          // Use async write to avoid blocking event loop
+          fs.writeFile(settingsFilePath, JSON.stringify(settings, null, 2)).catch((err) => {
+            // Non-critical but log for debugging
+            console.warn('[Server] Failed to save settings (lastUsedCase):', err);
+          });
         } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
-        settings.lastUsedCase = caseName;
-        const dir = dirname(settingsFilePath);
-        if (!existsSync(dir)) {
-          mkdirSync(dir, { recursive: true });
-        }
-        // Use async write to avoid blocking event loop
-        fs.writeFile(settingsFilePath, JSON.stringify(settings, null, 2)).catch((err) => {
           // Non-critical but log for debugging
-          console.warn('[Server] Failed to save settings (lastUsedCase):', err);
-        });
-      } catch (err) {
-        // Non-critical but log for debugging
-        console.warn('[Server] Failed to prepare settings update:', err);
+          console.warn('[Server] Failed to prepare settings update:', err);
+        }
       }
 
       return {
@@ -4660,6 +5114,7 @@ export function registerSessionRoutes(
         ...(tabGroupId || tabLayoutSnapshot.placementSource === 'case-default'
           ? { tabLayout: tabLayoutSnapshot.layout, tabPlacements: tabLayoutSnapshot.placements }
           : {}),
+        ...(worktree ? { worktree, workingDir: workspacePath } : {}),
         ...(customModel ? { modelSwapInProgress: qsCustomModelSwapInProgress } : {}),
       };
     } catch (err) {
@@ -5631,7 +6086,54 @@ export function registerSessionRoutes(
   // ═══════════════════════════════════════════════════════════════
 
   const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif']);
+  // Single-sourced from the attachment registry (what the file viewer can also play),
+  // so an uploaded video is a type that previews. 3gp/mkv are deliberately out: they
+  // would upload but not preview, and a phone's camera roll produces neither.
+  const ALLOWED_VIDEO_EXTS = new Set([...VIDEO_ATTACHMENT_EXTENSIONS].map((e) => `.${e}`));
+  const VIDEO_MIME_EXT: Record<string, string> = {
+    mp4: '.mp4',
+    quicktime: '.mov',
+    'x-m4v': '.m4v',
+    webm: '.webm',
+    ogg: '.ogv',
+  };
   // The per-file size cap (MAX_PASTE_IMAGE_BYTES) is enforced by @fastify/multipart (registered in server.ts).
+
+  /** Write buffered upload bytes into the session's upload dir. Null: the dir is not a real directory. */
+  async function writeBufferedUpload(workingDir: string, ext: string, bytes: Buffer, stem = '') {
+    const uploadDir = await ensureUploadDir(workingDir);
+    if (!uploadDir) return null;
+    const { filename, filepath, fh } = await openPasteFile(uploadDir, ext, stem);
+    try {
+      await fh.writeFile(bytes);
+    } finally {
+      await fh.close();
+    }
+    return { path: filepath, filename };
+  }
+
+  /**
+   * Write buffered upload bytes for a session: a remote (SSH) session's land in
+   * `{workingDir}/.claude-images` on the REMOTE host over ssh (COD-517, shared
+   * symlink-safe remote writer), never on this host; a local session's go through
+   * writeBufferedUpload. Null: the local upload dir is not a real directory.
+   */
+  async function writeSessionUpload(
+    workingDir: string,
+    remote: SessionRemote | undefined,
+    ext: string,
+    bytes: Buffer,
+    stem = ''
+  ) {
+    if (!remote) return writeBufferedUpload(workingDir, ext, bytes, stem);
+    // Date.now() collides on same-ms uploads from two tabs; the hex suffix keeps
+    // concurrent pastes distinct, and the `paste-` prefix is what the GC matches.
+    const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${stem ? `-${stem}` : ''}${ext}`;
+    const imageDir = pathPosix.join(workingDir, '.claude-images');
+    const filepath = pathPosix.join(imageDir, filename);
+    await writeRemotePasteImage(remote, imageDir, filepath, bytes);
+    return { path: filepath, filename };
+  }
 
   app.post('/api/sessions/:id/paste-image', async (req, reply) => {
     // CSRF defense: state-changing routes must come from same origin.
@@ -5666,16 +6168,48 @@ export function registerSessionRoutes(
     }
 
     const { id } = req.params as { id: string };
+    // `?kind=video` selects the disk-streamed path (see below). It is read here so the
+    // rate check draws on the right bucket before any work: videos get 3/min, images 30.
+    const isVideo = (req.query as { kind?: string }).kind === 'video';
 
-    // Rate limit per (IP, sessionId): 30/min. Defends against disk-fill DoS
-    // — even an authenticated attacker can otherwise loop large image POSTs.
-    if (!consumePasteToken(`${req.ip}:${id}`)) {
+    // Rate limit per (IP, sessionId). Defends against disk-fill DoS — even an
+    // authenticated client can otherwise loop large uploads. Videos get their own,
+    // far lower bucket because the per-file cap is 1GB (see the bucket constants).
+    const rateKey = `${req.ip}:${id}`;
+    if (!(isVideo ? consumeVideoToken(rateKey) : consumePasteToken(rateKey))) {
       reply.code(429);
       reply.header('Retry-After', '60');
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Rate limit exceeded (30 uploads/min per session)');
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        isVideo
+          ? 'Rate limit exceeded (3 video uploads/min per session)'
+          : 'Rate limit exceeded (30 uploads/min per session)'
+      );
     }
 
     const session = findSessionOrFail(ctx, id, req);
+
+    // Resolve SSH metadata before any filesystem access. Remote workspaces are
+    // paths on another host; never fall back to writing them on this host.
+    const remote = getSessionRemote(session);
+    if (session.remote && !remote) {
+      reply.code(400);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid remote session connection metadata');
+    }
+
+    // The upload is written under session.workingDir (ensureUploadDir below), and
+    // a live session's workspace can sit on a network mount that stopped answering.
+    // Probe it bounded before the first disk touch, as #516 requires for a path the
+    // user named, so one dead mount cannot freeze a libuv threadpool worker per
+    // upload. Only "unknown" (the mount is not answering) is refused here, the way
+    // the create route does; absent / not-a-directory keep ensureUploadDir's own
+    // errors, since a live session's workspace should be neither.
+    if ((await probePathKind(session.workingDir, { pastCap: true })) === 'unknown') {
+      return createErrorResponse(
+        ApiErrorCode.OPERATION_FAILED,
+        describeUnknownPath('Workspace', session.workingDir, { pastCap: true })
+      );
+    }
 
     if (!req.isMultipart()) {
       reply.code(400);
@@ -5688,9 +6222,17 @@ export function registerSessionRoutes(
     // boundary scanner with several bugs: literal boundary matches anywhere in
     // body, LF-only clients silently corrupted the last byte (hard-coded \r\n
     // offsets), no part-count cap.
+    // `?kind=video` (read above for the rate check) is the ONLY way onto the video
+    // path: it selects the larger, disk-streamed budget before the part is seen
+    // (busboy takes its limits up front), and it admits video types alone, so an
+    // image can never ride the video cap through memory. Without it the route is
+    // byte-identical to the image-only version. Truncation is checked on the stream
+    // below rather than thrown, since the file is being written as it arrives.
     let part: import('@fastify/multipart').MultipartFile | undefined;
     try {
-      part = await req.file();
+      part = await req.file(
+        isVideo ? { limits: { fileSize: MAX_PASTE_VIDEO_BYTES }, throwFileSizeLimit: false } : undefined
+      );
     } catch (err: unknown) {
       reply.code(413);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, getErrorMessage(err) || 'Invalid multipart payload');
@@ -5703,6 +6245,82 @@ export function registerSessionRoutes(
       reply.code(400);
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Unexpected field "${part.fieldname}", expected "image"`);
     }
+
+    if (isVideo) {
+      // Video streams to this host's disk as it arrives; a remote (SSH) session's
+      // workspace is on another host, which only the image path writes to (over ssh).
+      if (remote) {
+        await finished(part.file.resume()).catch(() => {});
+        reply.code(400);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Video upload is not available for a remote (SSH) case');
+      }
+      let ext = '';
+      if (part.filename) {
+        const origExt = extname(part.filename).toLowerCase();
+        if (ALLOWED_VIDEO_EXTS.has(origExt)) ext = origExt;
+      }
+      const videoMime = (part.mimetype || '').toLowerCase().match(/^video\/(mp4|quicktime|x-m4v|webm|ogg)$/);
+      if (videoMime) ext = VIDEO_MIME_EXT[videoMime[1]] ?? ext;
+      if (!ext) {
+        await finished(part.file.resume()).catch(() => {});
+        reply.code(400);
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `Unsupported video type. Allowed: ${[...ALLOWED_VIDEO_EXTS].join(', ')}`
+        );
+      }
+      const uploadDir = await ensureUploadDir(session.workingDir);
+      if (!uploadDir) {
+        await finished(part.file.resume()).catch(() => {});
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, `${UPLOADS_DIR} is not a regular directory`);
+      }
+      const { filename, filepath, fh } = await openPasteFile(uploadDir, ext);
+      // Written as it arrives: a phone video is far too large to buffer the way an
+      // image is. The container is judged on the first 12 bytes as soon as they are
+      // in, so a mislabeled upload stops touching disk at its first chunk; the rest
+      // of the body is drained unwritten (as busboy does past its own size limit),
+      // which is what lets the answer reach the client. A transfer that dies midway
+      // (the phone left the network) leaves no partial file behind.
+      const head = Buffer.alloc(12);
+      let headLen = 0;
+      let mislabeled = false;
+      try {
+        for await (const chunk of part.file) {
+          if (mislabeled) continue;
+          if (headLen < head.length) {
+            headLen += chunk.copy(head, headLen, 0, head.length - headLen);
+            mislabeled = headLen === head.length && !imageMagicMatchesExt(head, ext);
+            if (mislabeled) continue;
+          }
+          // writeFile loops until the whole chunk is on disk; a bare write() may be short.
+          await fh.writeFile(chunk);
+        }
+      } catch (err: unknown) {
+        await fs.unlink(filepath).catch(() => {});
+        throw err;
+      } finally {
+        await fh.close();
+      }
+      let failure: { status: number; message: string } | null = null;
+      if (headLen === 0) failure = { status: 400, message: 'Empty file' };
+      else if (!imageMagicMatchesExt(head.subarray(0, headLen), ext)) {
+        console.warn(
+          `[paste-image] video magic mismatch: filename=${JSON.stringify(part.filename)} mime=${JSON.stringify(part.mimetype)} declaredExt=${ext} magic=${head.subarray(0, headLen).toString('hex')}`
+        );
+        failure = { status: 415, message: `Video bytes do not match declared type ${ext}` };
+      } else if (part.file.truncated) {
+        const maxMb = Math.round(MAX_PASTE_VIDEO_BYTES / (1024 * 1024));
+        failure = { status: 413, message: `File too large (max ${maxMb}MB)` };
+      }
+      if (failure) {
+        await fs.unlink(filepath).catch(() => {});
+        reply.code(failure.status);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, failure.message);
+      }
+      return { path: filepath, filename };
+    }
+
     let imageBytes: Buffer;
     try {
       imageBytes = await part.toBuffer();
@@ -5716,12 +6334,52 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Empty file');
     }
 
+    // Dispatch mirrors the client's _promptAttachKind: an image MIME type takes
+    // the image path whatever the name says, a document extension (the MIME a
+    // phone gives a .md is anyone's guess) takes the document branch, anything
+    // else the image path exactly as before, HEIC sniff included. See CLAUDE.md.
+    const origExt = part.filename ? extname(part.filename).toLowerCase() : '';
+    const imageMime = /^image\//i.test(part.mimetype || '');
+    if (!imageMime && ALLOWED_DOCUMENT_EXTS.has(origExt)) {
+      if (!imageMagicMatchesExt(imageBytes, origExt)) {
+        // The first bytes of a text file are user content, so for text the log
+        // names the failure and never the bytes; a signature is safe to print.
+        // A text refusal names the encoding, since an Excel or Notepad export
+        // (UTF-16 with a BOM, or Windows-1252) is not a corrupt file.
+        const isText = TEXT_UPLOAD_EXTS.has(origExt);
+        const bom = imageBytes.length >= 2 ? imageBytes.readUInt16BE(0) : 0;
+        const utf16 = bom === 0xfffe || bom === 0xfeff;
+        const detail = isText
+          ? `reason=${utf16 ? 'utf16-bom' : imageBytes.includes(0) ? 'nul-byte' : 'not-utf8'}`
+          : `magic=${imageBytes.subarray(0, 12).toString('hex')}`;
+        console.warn(
+          `[paste-image] document mismatch: filename=${JSON.stringify(part.filename)} mime=${JSON.stringify(part.mimetype)} declaredExt=${origExt} size=${imageBytes.length} ${detail}`
+        );
+        reply.code(415);
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          isText
+            ? `This ${origExt} file is ${utf16 ? 'UTF-16 text, not UTF-8' : 'not UTF-8 text'}; save it as UTF-8 and attach it again`
+            : `File bytes do not match declared type ${origExt}`
+        );
+      }
+      const saved = await writeSessionUpload(
+        session.workingDir,
+        remote,
+        origExt,
+        imageBytes,
+        sanitizeUploadStem(part.filename)
+      );
+      if (!saved) {
+        reply.code(403);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, `${UPLOADS_DIR} is not a regular directory`);
+      }
+      return saved;
+    }
+
     // Determine extension from filename or Content-Type.
     let ext = '.png';
-    if (part.filename) {
-      const origExt = extname(part.filename).toLowerCase();
-      if (ALLOWED_IMAGE_EXTS.has(origExt)) ext = origExt;
-    }
+    if (ALLOWED_IMAGE_EXTS.has(origExt)) ext = origExt;
     const mimeMatch = (part.mimetype || '').toLowerCase().match(/^image\/(png|jpeg|jpg|webp|gif|bmp|heic|heif)$/);
     if (mimeMatch) {
       const map: Record<string, string> = {
@@ -5762,6 +6420,15 @@ export function registerSessionRoutes(
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Could not convert HEIC image to JPEG');
       }
     } else if (!imageMagicMatchesExt(imageBytes, ext)) {
+      // A foreign extension with no image MIME (a script, an HTML page, a video
+      // without its flag) was never going to be an image: say so, rather than
+      // the ".png" the default extension would name. Decided only HERE, after
+      // the sniff, so anything the image path ever accepted by its bytes (a
+      // HEIC under a generic name) still is.
+      if (origExt && !ALLOWED_IMAGE_EXTS.has(origExt) && !imageMime) {
+        reply.code(400);
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Unsupported file type: ${origExt}`);
+      }
       // Sniff actual bytes — a polyglot HTML/PNG would otherwise pass and
       // serve back with image/png MIME. Log the real header so format
       // mismatches can be pinned down without a reproduce-and-guess loop. The
@@ -5773,76 +6440,12 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, `Image bytes do not match declared type ${ext}`);
     }
 
-    if (ext === '.heic' || ext === '.heif') {
-      try {
-        imageBytes = await convertHeicToJpeg(imageBytes);
-        ext = '.jpg';
-      } catch (err: unknown) {
-        console.warn(
-          `[paste-image] HEIC conversion failed: filename=${JSON.stringify(part.filename)} mime=${JSON.stringify(part.mimetype)} error=${getErrorMessage(err)}`
-        );
-        reply.code(415);
-        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Could not convert HEIC image to JPEG');
-      }
+    const saved = await writeSessionUpload(session.workingDir, remote, ext, imageBytes);
+    if (!saved) {
+      reply.code(403);
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, `${UPLOADS_DIR} is not a regular directory`);
     }
-
-    // Date.now() collides on same-ms uploads from two tabs (last-write wins
-    // silently). Append 8 hex chars so concurrent pastes get distinct names.
-    const filename = `paste-${Date.now()}-${randomBytes(4).toString('hex')}${ext}`;
-    const remote = getSessionRemote(session);
-    const imageDir = remote
-      ? pathPosix.join(session.workingDir, '.claude-images')
-      : join(session.workingDir, '.claude-images');
-    const filepath = remote ? pathPosix.join(imageDir, filename) : join(imageDir, filename);
-
-    if (remote) {
-      await writeRemotePasteImage(remote, imageDir, filepath, imageBytes);
-    } else {
-      // Save to {workingDir}/.claude-images/
-      // Refuse symlinks at imageDir — an agent or postinstall script could plant
-      // `.claude-images -> ~/.ssh/` and redirect future writes outside workingDir.
-      // We lstat (not stat) so we see the symlink itself. Use mkdir without
-      // `recursive` so the leaf creation does not follow a symlink either, and
-      // O_EXCL|O_NOFOLLOW on the file open so the write itself is symlink-safe.
-      try {
-        const dirStat = await fs.lstat(imageDir);
-        if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-          reply.code(403);
-          return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
-        }
-      } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        // Non-recursive mkdir: does not follow symlinks for the leaf.
-        // session.workingDir is guaranteed to exist (live session).
-        try {
-          await fs.mkdir(imageDir);
-        } catch (mkErr: unknown) {
-          // Concurrent uploads (a batch of photos) race to create .claude-images —
-          // the losers get EEXIST. Treat an already-present REAL directory as
-          // success, but re-verify it isn't a symlink a racing actor planted
-          // (preserve the symlink-safety guarantee above).
-          if ((mkErr as NodeJS.ErrnoException).code !== 'EEXIST') throw mkErr;
-          const raceStat = await fs.lstat(imageDir);
-          if (raceStat.isSymbolicLink() || !raceStat.isDirectory()) {
-            reply.code(403);
-            return createErrorResponse(ApiErrorCode.INVALID_INPUT, '.claude-images is not a regular directory');
-          }
-        }
-      }
-      // O_EXCL: refuse to overwrite (collision is impossible with random suffix,
-      // but defends against TOCTOU). O_NOFOLLOW: refuse if filepath is a symlink.
-      const fh = await fs.open(
-        filepath,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
-      );
-      try {
-        await fh.writeFile(imageBytes);
-      } finally {
-        await fh.close();
-      }
-    }
-
-    return { path: filepath, filename };
+    return saved;
   });
 
   // Returned so the server can own the registry's LIFETIME (drop state when a session is

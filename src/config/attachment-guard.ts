@@ -72,7 +72,7 @@ export interface AttachmentGuardConfig {
 
 export type ResolvedUploadDirectory =
   | { kind: 'workspace'; canonicalDir: string }
-  | { kind: 'trusted'; canonicalDir: string };
+  | { kind: 'trusted'; canonicalDir: string; agentDirectory?: string };
 
 export class UploadDirectoryResolutionError extends Error {
   constructor(
@@ -215,6 +215,40 @@ async function resolveUploadDirectory(
     canonicalWorkspace = await fs.realpath(workingDir);
   } catch {
     throw rejectedUploadDirectory();
+  }
+  // COD-523: operator-owned mappings avoid an unsupported workspace symlink
+  // in cloud-synced workspaces. Invalid configuration must never fall back to
+  // creating local storage. Browser-writable settings cannot grant this trust.
+  const workspaceRoots = process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
+  if (workspaceRoots?.trim()) {
+    let mappings: unknown;
+    try {
+      mappings = JSON.parse(workspaceRoots);
+    } catch {
+      throw rejectedUploadDirectory();
+    }
+    if (!mappings || typeof mappings !== 'object' || Array.isArray(mappings)) {
+      throw rejectedUploadDirectory();
+    }
+    if (Object.hasOwn(mappings, canonicalWorkspace)) {
+      const mappedRoot = (mappings as Record<string, unknown>)[canonicalWorkspace];
+      if (authUser.role !== 'admin' || typeof mappedRoot !== 'string' || !isAbsolute(mappedRoot)) {
+        throw rejectedUploadDirectory();
+      }
+      try {
+        const canonicalDir = await fs.realpath(mappedRoot);
+        if (canonicalDir !== mappedRoot || !(await fs.stat(canonicalDir)).isDirectory()) {
+          throw rejectedUploadDirectory();
+        }
+        if (!(await getTrustedAttachmentRoots()).includes(canonicalDir)) {
+          throw rejectedUnconfiguredUploadDirectory();
+        }
+        return { kind: 'trusted', canonicalDir, agentDirectory: canonicalDir };
+      } catch (err) {
+        if (err instanceof UploadDirectoryResolutionError) throw err;
+        throw rejectedUploadDirectory();
+      }
+    }
   }
   const attachmentsDir = join(canonicalWorkspace, '.codeman-attachments');
 

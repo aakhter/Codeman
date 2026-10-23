@@ -46,7 +46,7 @@ function loadTerminalMixin(): Record<string, unknown> {
     requestAnimationFrame: vi.fn(),
     CodemanApp: FakeCodemanApp,
     window: { addEventListener: vi.fn(), removeEventListener: vi.fn(), innerWidth: 1600 },
-    document: { addEventListener: vi.fn() },
+    document: { addEventListener: vi.fn(), visibilityState: 'visible' },
     fetch: (...args: unknown[]) => currentFetch(...args),
   });
   vm.runInContext(source, context);
@@ -76,6 +76,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
     getTerminalDimensions: () => ({ cols: 120, rows: 40 }),
     terminal: { cols: 120, rows: 40, resize: vi.fn() },
     fitAddon: { fit: vi.fn() },
+    activeSessionId: SESSION,
     detachedSessions: new Set<string>(),
     isSoloWindow: false,
     _lastResizeDims: null as { cols: number; rows: number } | null,
@@ -96,7 +97,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 
 describe('detached sessions own their pane size', () => {
   it('the dashboard does not resize a session showing in its own window', async () => {
-    const { app } = makeApp();
+    const { app, fetchMock } = makeApp();
     (app.detachedSessions as Set<string>).add(SESSION);
     const changed = await app.sendResize(SESSION);
 

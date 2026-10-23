@@ -90,6 +90,8 @@ delete process.env.CLAUDE_CONFIG_DIR;
 delete process.env.CODEMAN_INSTANCE;
 delete process.env.CODEMAN_DATA_DIR;
 delete process.env.CODEMAN_TMUX_SOCKET;
+// Operator upload mappings must not leak from the live service into isolated tests.
+delete process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
 // Docker Compose binds cases outside HOME. Leaving this set makes route tests
 // write into the deployment's real case root instead of their temp HOME.
 delete process.env.CODEMAN_CASES_PATH;

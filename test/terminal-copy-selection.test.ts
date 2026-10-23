@@ -141,7 +141,14 @@ describe('smart-copy wiring invariants', () => {
     // resolves `this[shortcut.action]`, so merely having a registry entry would make
     // the copy action dispatchable. The equivalent guard is an explicit skip set that
     // the document capture loop consults before matching.
-    expect(APP_SOURCE).toContain("const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set(['copyTerminalSelection']);");
+    // The set also lists the tile-grid chords (tile-grid.js dispatches those itself).
+    expect(APP_SOURCE).toMatch(/const NON_DOCUMENT_SHORTCUT_ACTIONS = new Set\(\[\s*'copyTerminalSelection',/);
     expect(APP_SOURCE).toContain('if (NON_DOCUMENT_SHORTCUT_ACTIONS.has(shortcut.action)) continue;');
+    const actionsBlock = APP_SOURCE.slice(
+      APP_SOURCE.indexOf('_shortcutActions() {'),
+      APP_SOURCE.indexOf('isUserBoundShortcutEvent(e) {')
+    );
+    expect(actionsBlock.length).toBeGreaterThan(0);
+    expect(actionsBlock).not.toContain('copyTerminalSelection');
   });
 });

@@ -9,6 +9,8 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { registerAssistantTokenAuth } from './assistant-auth.js';
+import type { AssistantStore } from '../../assistant-store.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { StaleExpirationMap } from '../../utils/index.js';
 import type { AuthSessionRecord } from '../ports/auth-port.js';
@@ -17,12 +19,14 @@ import {
   AUTH_SESSION_TTL_MS,
   MAX_AUTH_SESSIONS,
   AUTH_FAILURE_MAX,
+  AUTH_IP_FAILURE_MAX,
   AUTH_FAILURE_WINDOW_MS,
 } from '../../config/auth-config.js';
 import { getHookSecret, HOOK_SECRET_HEADER } from '../../config/hook-secret.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import { findUser, setPassword, touchLastLogin, verifyPassword } from '../../user-store.js';
 import { webviewCapabilities } from '../../webview-capabilities.js';
+import { capabilityFromHtmlViewPath, htmlViewCapabilities } from '../../html-view-capabilities.js';
 import {
   capabilityFromProxyPath,
   capabilityFromReferer,
@@ -184,6 +188,20 @@ function hasValidWebviewCapability(req: FastifyRequest, basePath = ''): boolean 
 }
 
 /**
+ * Whether a request is a GET for a rendered HTML file (`/html-view/<cap>/...`) with
+ * a live capability. Same reasoning as the web-tab proxy: the page is sandboxed into
+ * an opaque origin, so its asset requests carry no session cookie. Read-only by
+ * construction (safe methods only), and the Host allowlist still applies. OPTIONS
+ * is the page's CORS preflight, which registerSecurityHeaders answers itself and
+ * never hands to a route.
+ */
+function hasValidHtmlViewCapability(req: FastifyRequest): boolean {
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') return false;
+  const cap = capabilityFromHtmlViewPath((req.url ?? '').split('?')[0]);
+  return !!cap && htmlViewCapabilities.resolve(cap) !== undefined;
+}
+
+/**
  * A web-tab frame that navigated itself off the proxy prefix (see
  * isLostWebviewFrameNavigation). It cannot authenticate: opaque origin, no cookie,
  * no capability left in the URL. Answer with the static recovery page here, BEFORE
@@ -281,7 +299,13 @@ function matchesRegisteredRoute(req: FastifyRequest, url: string): boolean {
  *
  * @returns AuthState for lifecycle management (dispose on server stop)
  */
-export function registerAuthMiddleware(app: FastifyInstance, https: boolean, basePath = ''): AuthState {
+export function registerAuthMiddleware(
+  app: FastifyInstance,
+  https: boolean,
+  basePath = '',
+  assistantStore?: AssistantStore
+): AuthState {
+  registerAssistantTokenAuth(app, assistantStore);
   const state: AuthState = {
     authSessions: null,
     authFailures: null,
@@ -350,6 +374,10 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean, bas
   const expectedHeader = 'Basic ' + Buffer.from(`${authUsername}:${authPassword}`).toString('base64');
 
   app.addHook('onRequest', (req, reply, done) => {
+    if (req.assistantPrincipal) {
+      done();
+      return;
+    }
     const bypass = checkHookSecretBypass(req, reply, hookSecretFailures);
     if (bypass === 'bypass') {
       done();
@@ -365,6 +393,11 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean, bas
 
     // Web-tab proxy, authenticated by the capability in the path, not the cookie.
     if (hasValidWebviewCapability(req, basePath)) {
+      done();
+      return;
+    }
+    // Rendered HTML file, likewise authenticated by its capability.
+    if (hasValidHtmlViewCapability(req)) {
       done();
       return;
     }
@@ -427,7 +460,7 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean, bas
 
     // Rate limit only requests that failed to authenticate on this attempt.
     const failures = authFailures.get(clientIp) ?? 0;
-    if (failures >= AUTH_FAILURE_MAX) {
+    if (failures >= AUTH_IP_FAILURE_MAX) {
       sendAuthRateLimit(reply, authFailures, clientIp);
       return;
     }
@@ -496,6 +529,7 @@ function registerMultiUserAuthHook(
   };
 
   app.addHook('onRequest', async (req, reply) => {
+    if (req.assistantPrincipal) return;
     const bypass = checkHookSecretBypass(req, reply, hookSecretFailures);
     if (bypass === 'bypass' || bypass === 'rejected') return;
 
@@ -507,6 +541,8 @@ function registerMultiUserAuthHook(
     // ownership against the identity BOUND TO THE CAPABILITY, which is stricter
     // than re-deriving it from a request that carries no credentials.
     if (hasValidWebviewCapability(req, basePath)) return;
+    // Rendered HTML file, likewise authenticated by its capability.
+    if (hasValidHtmlViewCapability(req)) return;
     // A web-tab frame that lost its prefix: hand it back to its tab, no credentials involved.
     if (serveLostWebviewFrame(req, reply)) return;
 
@@ -551,7 +587,7 @@ function registerMultiUserAuthHook(
     // Per-IP pre-gate bounds scrypt CPU cost from one source (does NOT gate on the
     // per-username bucket here; see below).
     const ipFail = authFailures.get(clientIp) ?? 0;
-    if (ipFail >= AUTH_FAILURE_MAX) {
+    if (ipFail >= AUTH_IP_FAILURE_MAX) {
       sendAuthRateLimit(reply, authFailures, clientIp);
       return;
     }
@@ -711,6 +747,16 @@ export function registerSecurityHeaders(app: FastifyInstance, https: boolean, ba
     // are not CORS-checked). Falling through lets the proxy route reply with the
     // right headers.
     if (req.method === 'OPTIONS' && !hasValidWebviewCapability(req, basePath)) {
+      // A rendered HTML page (`/html-view/<cap>/...`) is opaque-origin for the same
+      // reason, so a fetch() of its own `data.json` with a non-safelisted header
+      // preflights with `Origin: null`. Answer it here, read-only: the route serves
+      // GET and HEAD only, and no credentials are involved (`*` is valid for both).
+      if (hasValidHtmlViewCapability(req)) {
+        reply.header('Access-Control-Allow-Origin', '*');
+        reply.header('Access-Control-Allow-Methods', 'GET, HEAD');
+        reply.header('Access-Control-Allow-Headers', '*');
+        reply.header('Access-Control-Max-Age', '600');
+      }
       reply.code(204).send();
       done();
       return;

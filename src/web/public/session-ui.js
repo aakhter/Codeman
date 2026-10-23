@@ -15,7 +15,7 @@
  * PR B2: the single source for every non-Claude, non-Shell run mode's launch
  * shape, consumed by `_runCliMode()` below. Before this table existed, each of
  * `runOpenCode`/`runCodex`/`runGemini`/`runAntigravity`/`runPi`/`runOmp`/
- * `runGrok`/`runDeepSeek` was a ~45-line copy of the same probe/launch/select
+ * `runGrok`/`runDeepSeek`/`runCopilot` was a ~45-line copy of the same probe/launch/select
  * skeleton with only the CLI-specific pieces below actually differing — eight
  * near-identical bodies guaranteed to drift, exactly what the CLI registry's
  * own no-id-branching rule exists to prevent server-side.
@@ -42,6 +42,10 @@ const RUN_MODE_LAUNCH = {
     label: 'Codex',
     installHint: 'Codex CLI not found. Install with: npm install -g @openai/codex',
     supportsCustomModel: true,
+    // COD-446: the saved Codex profile (approvals, animations, render mode)
+    // also applies to a REMOTE quick-start instance; every other CLI's config
+    // is local-only.
+    applyConfigOnRemote: true,
     buildConfig: (globalSettings) => ({
       codexConfig: {
         dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
@@ -87,6 +91,16 @@ const RUN_MODE_LAUNCH = {
     supportsCustomModel: true,
     buildConfig: () => null,
   },
+  copilot: {
+    label: 'GitHub Copilot',
+    installHint: 'GitHub Copilot CLI not found. Install with: npm install -g @github/copilot',
+    // Custom endpoints go in through Copilot's BYOK env vars (COPILOT_PROVIDER_*).
+    supportsCustomModel: true,
+    // Sends `copilotConfig: { allowAll: true }` the way grok sends `alwaysApprove: true`:
+    // Codeman sessions exist for autonomous work, so the Run button opts into `--yolo`.
+    // The multi-user clamp forces it back off for non-granted owners server-side.
+    buildConfig: () => ({ copilotConfig: { allowAll: true } }),
+  },
   grok: {
     runMethod: 'runGrok',
     label: 'Grok',
@@ -102,7 +116,7 @@ const RUN_MODE_LAUNCH = {
   deepseek: {
     runMethod: 'runDeepSeek',
     label: 'DeepSeek',
-    installHint: 'DeepSeek Harness CLI (dsh) not found. Install with: npm install -g @deepseek-ai/dsh',
+    installHint: 'DeepSeek Harness CLI (dsh) not found. Install with: npm install -g @deepseek-ai/dsh && (command -v pnpm >/dev/null || npm install -g pnpm)',
     // The two-part availability check is deliberate. `dsh` being installed is
     // not enough — DeepSeek ships no terminal front door, so a box can have a
     // perfect binary and nothing a pane can run.
@@ -135,6 +149,40 @@ const RUN_MODE_LAUNCH = {
 /** How often the OPEN case picker re-reads /api/cases (it also refreshes once on open). */
 const CASE_PICKER_REFRESH_MS = 5000;
 
+/**
+ * Action rows at the bottom of the toolbar case picker. They replaced the "+"
+ * and gear buttons that sat beside the picker (owner, 1.36.0 beta): the same two
+ * actions, one click away, without two extra controls in the toolbar, and the git
+ * worktrees of the selected case joined them. The arrow keys reach them after the
+ * last case; Enter or a click runs `run`.
+ */
+const CASE_PICKER_ACTIONS = [
+  { id: 'add', icon: '+', label: 'New or link a case…', run: (app) => app.showCreateCaseModal() },
+  { id: 'settings', icon: '\u2699', label: 'Case settings…', run: (app) => app.toggleCaseSettings() },
+  // The selected case's git worktrees (openWorktreeModal below): a row here rather than a
+  // toolbar button, for the same reason the two above replaced theirs.
+  { id: 'worktrees', icon: '⑂', label: 'Git worktrees…', run: (app) => app.openWorktreeModal() },
+];
+
+/** A worktree name the server accepts (src/git-worktrees.ts `worktreeNameError`), checked before the POST. */
+const WORKTREE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * The Codeman-managed worktree a working directory IS: `{ caseName, name, path }` when it is
+ * exactly `<case path>/.claude/worktrees/<name>` of a local case in `cases`, else null. Lexical
+ * on purpose (the browser cannot resolve links): the server re-checks every removal against the
+ * case's own repository, so a stale or wrong match can only be refused, never act elsewhere.
+ */
+function managedWorktreeOfDir(workingDir, cases) {
+  if (typeof workingDir !== 'string') return null;
+  const m = /^(.+)\/\.claude\/worktrees\/([^/]+)\/?$/.exec(workingDir);
+  if (!m || !WORKTREE_NAME_RE.test(m[2]) || m[2].includes('..')) return null;
+  const owner = (cases || []).find(
+    (c) => c && c.path === m[1] && c.location !== 'remote' && c.location !== 'docker'
+  );
+  return owner ? { caseName: owner.name, name: m[2], path: workingDir.replace(/\/$/, '') } : null;
+}
+
 const EXTERNAL_CLI_MODES = new Set(Object.keys(RUN_MODE_LAUNCH));
 const BUILT_IN_RUN_MODES = new Set(['claude', 'shell', ...Object.keys(RUN_MODE_LAUNCH)]);
 
@@ -148,6 +196,13 @@ function registryCliById(id) {
 
 function isExternalCliRunMode(mode) {
   return EXTERNAL_CLI_MODES.has(mode) || registryCliById(mode)?.kind === 'agent';
+}
+
+// Does this session lack the Claude-only features (Respawn, Ralph)? The registry's
+// `capabilities.external`, the flag the server's isExternalCliMode() reads. Not
+// isExternalCliRunMode(): that picks a launch path, and claude is `kind: 'agent'` too.
+function isExternalCliSession(mode) {
+  return registryCliById(mode)?.external ?? isExternalCliRunMode(mode);
 }
 
 Object.assign(CodemanApp.prototype, {
@@ -177,6 +232,17 @@ Object.assign(CodemanApp.prototype, {
     const effort = globalSettings?.thinkingEffort;
     const valid = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
     return valid.includes(effort) ? effort : undefined;
+  },
+
+  /**
+   * Resolve the advisor model for new Claude sessions from global settings.
+   * Returns 'fable' | 'opus' | 'sonnet', or undefined (= leave it to the CLI's own
+   * /advisor choice). Sent as the `advisorModel` payload field; the backend merges it
+   * into the launch's `claude --settings` JSON, so /advisor still switches it in-session.
+   */
+  getAdvisorSetting(globalSettings) {
+    const advisor = globalSettings?.claudeAdvisorModel;
+    return ['fable', 'opus', 'sonnet'].includes(advisor) ? advisor : undefined;
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -342,13 +408,32 @@ Object.assign(CodemanApp.prototype, {
 
     const options = this.filterCasePickerOptions(this.getCasePickerOptions(), this._casePickerFilter || '');
     const selectedName = select.value || 'testcase';
-    const maxIndex = Math.max(0, options.length - 1);
+    // The arrow keys walk the cases, then the action rows under them.
+    const maxIndex = options.length + CASE_PICKER_ACTIONS.length - 1;
     this._casePickerActiveIndex = Math.min(Math.max(this._casePickerActiveIndex || 0, 0), maxIndex);
 
+    const actionRows = CASE_PICKER_ACTIONS.map((action, i) => {
+      const index = options.length + i;
+      const active = index === this._casePickerActiveIndex;
+      return `
+          <button
+            type="button"
+            id="quickStartCaseOption-${index}"
+            class="case-combobox-action ${active ? 'active' : ''}"
+            role="option"
+            aria-selected="false"
+            data-case-action="${action.id}">
+            <span class="case-combobox-action-icon" aria-hidden="true">${action.icon}</span>
+            <span class="case-combobox-option-label">${escapeHtml(action.label)}</span>
+          </button>
+        `;
+    }).join('');
+    const actionsBlock = `<div class="case-combobox-actions" role="presentation">${actionRows}</div>`;
+
     if (options.length === 0) {
-      list.innerHTML = '<div class="case-combobox-empty">No cases match</div>';
+      list.innerHTML = '<div class="case-combobox-empty">No cases match</div>' + actionsBlock;
       list.classList.remove('hidden');
-      input.removeAttribute('aria-activedescendant');
+      input.setAttribute('aria-activedescendant', `quickStartCaseOption-${this._casePickerActiveIndex}`);
       return;
     }
 
@@ -371,9 +456,20 @@ Object.assign(CodemanApp.prototype, {
           </button>
         `;
       })
-      .join('');
+      .join('') + actionsBlock;
     list.classList.remove('hidden');
     input.setAttribute('aria-activedescendant', `quickStartCaseOption-${this._casePickerActiveIndex}`);
+  },
+
+  /** Run a case picker action row (`CASE_PICKER_ACTIONS`): close the list first, then act. */
+  runCasePickerAction(id) {
+    const action = CASE_PICKER_ACTIONS.find((a) => a.id === id);
+    if (!action) return;
+    const select = document.getElementById('quickStartCase');
+    if (select) this.updateCasePickerInput(select.value);
+    this.closeCasePicker();
+    document.getElementById('quickStartCaseSearch')?.blur?.();
+    action.run(this);
   },
 
   selectQuickStartCase(caseName, { save = true } = {}) {
@@ -404,11 +500,32 @@ Object.assign(CodemanApp.prototype, {
     const picker = document.getElementById('quickStartCasePicker');
     if (!select || !input || !list || !picker || input.dataset.listenerAdded) return;
 
+    // COD-527: a touch tap opens or closes the list WITHOUT focusing the box.
+    // Focus selected its text (Android then floats its Copy / Web search menu)
+    // and let KeyboardHandler's focusin scrollInputIntoView() centre this
+    // bottom-toolbar box, shifting the whole screen up until it blurred.
+    // Cancelling pointerdown suppresses the tap's focus; the click that follows
+    // is then skipped. Mouse and keyboard still focus, select and filter.
+    input.addEventListener('pointerdown', event => {
+      this._casePickerTouchTap = event.pointerType === 'touch';
+      if (!this._casePickerTouchTap) return;
+      event.preventDefault();
+      if (this._casePickerOpen) {
+        this.updateCasePickerInput(select.value);
+        this.closeCasePicker();
+      } else {
+        this.openCasePicker('');
+      }
+    });
     input.addEventListener('focus', () => {
       input.select?.();
       this.openCasePicker('');
     });
-    input.addEventListener('click', () => {
+    input.addEventListener('click', event => {
+      if (event?.pointerType === 'touch' || this._casePickerTouchTap) {
+        this._casePickerTouchTap = false;
+        return;
+      }
       input.select?.();
       this.openCasePicker('');
     });
@@ -419,18 +536,26 @@ Object.assign(CodemanApp.prototype, {
       const options = this.filterCasePickerOptions(this.getCasePickerOptions(), this._casePickerFilter || input.value);
       if (event.key === 'ArrowDown') {
         event.preventDefault();
-        this._casePickerActiveIndex = Math.min((this._casePickerActiveIndex || 0) + 1, Math.max(0, options.length - 1));
+        this._casePickerActiveIndex = Math.min(
+          (this._casePickerActiveIndex || 0) + 1,
+          options.length + CASE_PICKER_ACTIONS.length - 1
+        );
         this._casePickerOpen ? this.renderCasePickerList() : this.openCasePicker(input.value);
       } else if (event.key === 'ArrowUp') {
         event.preventDefault();
         this._casePickerActiveIndex = Math.max((this._casePickerActiveIndex || 0) - 1, 0);
         this._casePickerOpen ? this.renderCasePickerList() : this.openCasePicker(input.value);
       } else if (event.key === 'Enter') {
-        const option = options[this._casePickerActiveIndex || 0];
+        const index = this._casePickerActiveIndex || 0;
+        const option = options[index];
+        const action = this._casePickerOpen ? CASE_PICKER_ACTIONS[index - options.length] : undefined;
         if (option) {
           event.preventDefault();
           this.selectQuickStartCase(option.name);
           this.run?.();
+        } else if (action) {
+          event.preventDefault();
+          this.runCasePickerAction(action.id);
         }
       } else if (event.key === 'Escape') {
         event.preventDefault();
@@ -443,6 +568,11 @@ Object.assign(CodemanApp.prototype, {
     });
     list.addEventListener('mousedown', event => event.preventDefault());
     list.addEventListener('click', event => {
+      const action = event.target.closest?.('.case-combobox-action');
+      if (action?.dataset?.caseAction) {
+        this.runCasePickerAction(action.dataset.caseAction);
+        return;
+      }
       const option = event.target.closest?.('.case-combobox-option');
       if (option?.dataset?.case) {
         this.selectQuickStartCase(option.dataset.case);
@@ -579,6 +709,9 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async saveLastUsedCase(caseName) {
+    // Multi-user non-admin: lastUsedCase is a key of the server-wide settings.json, whose
+    // PUT is admin-only (403), so it is not sent (_settingsReadOnly, settings-ui.js).
+    if (this._settingsReadOnly?.()) return;
     try {
       await fetch('/api/settings', {
         method: 'PUT',
@@ -599,10 +732,7 @@ Object.assign(CodemanApp.prototype, {
    *  normal idempotent SSE handler remains the single state-upsert path. */
   async _ensureCreatedSessionVisible(sessionId, sessionSnapshot, tabLayout, tabPlacements) {
     if (!sessionId) return;
-    if (tabLayout) {
-      if (this._tabLayoutEditCoordinator?.hasPending()) this._tabLayoutSsePending = true;
-      else this._applyTabLayout(tabLayout, tabPlacements);
-    }
+    if (tabLayout) this._applyTabLayout(tabLayout);
 
     let session = sessionSnapshot;
     if (!session && !this.sessions?.has(sessionId)) {
@@ -613,12 +743,21 @@ Object.assign(CodemanApp.prototype, {
     }
 
     if (session?.id) this._onSessionCreated(session);
+    // A session this tab's Run created joins an open tile grid (tile-grid.js),
+    // so Run's selectSession() below focuses its tile instead of leaving the
+    // grid. Only here: sessions created elsewhere arrive by session:created.
+    this._joinTileGridFromRun?.(sessionId);
     // session:created normally uses the debounced renderer. The direct POST path
     // needs the tab in the DOM before selectSession() marks it active.
     this._renderSessionTabsImmediate?.();
   },
 
-  /** Run using the selected mode (Claude Code, OpenCode, Codex, Gemini, or Antigravity) */
+  /**
+   * Run using the selected mode (Claude Code, OpenCode, Codex, Gemini, or Antigravity).
+   * `options` comes from the tab group menu's "New session": `count` overrides
+   * the instance steppers for this launch only, `tabGroupId` rides every create
+   * request so the server places the session in that group.
+   */
   async run(options = {}) {
     if (this._runInFlight) return;
 
@@ -662,8 +801,18 @@ Object.assign(CodemanApp.prototype, {
     this._runMode = mode;
     try { localStorage.setItem('codeman_runMode', mode); } catch {}
     this._applyRunMode();
-    // Sync to server for cross-device persistence
-    this._apiPut('/api/settings', { runMode: mode }).catch(() => {});
+    // Sync to server for cross-device persistence. Not for a non-admin in multi-user mode,
+    // where settings.json is server-wide and its PUT admin-only: the mode is kept as their own
+    // on this device and wins over the server's on the next load (_rememberOwnSetting,
+    // settings-ui.js). A PUT refused that way (sent before the role was known) marks the page
+    // read-only for the writes after it (_noteSettingsWriteRefusal).
+    if (this._settingsReadOnly?.()) {
+      this._rememberOwnSetting?.('runMode', mode);
+    } else {
+      this._apiPut('/api/settings', { runMode: mode })
+        .then((res) => this._noteSettingsWriteRefusal?.(res))
+        .catch(() => {});
+    }
     // Close menu
     document.getElementById('runModeMenu')?.classList.remove('active');
   },
@@ -1086,7 +1235,7 @@ Object.assign(CodemanApp.prototype, {
    *
    * Routes through run() itself, via a temporary `_runMode` swap, rather than a
    * parallel dispatch table: that is what gives this the same in-flight lock
-   * every other Run click gets (CLAUDE.md, Run launch synchronization — the lock
+   * every other Run click gets (src/web/CLAUDE.md, Run launch synchronization — the lock
    * exists so a double click cannot create duplicate sessions with the same
    * `w<n>-<case>` name, and it guards the OTHER direction too: without it, the
    * main Run button could start a second concurrent launch while this one was
@@ -1842,19 +1991,6 @@ Object.assign(CodemanApp.prototype, {
     input.value = Math.max(1, current - 1);
   },
 
-  // Shell count stepper functions
-  incrementShellCount() {
-    const input = document.getElementById('shellCount');
-    const current = parseInt(input.value) || 1;
-    input.value = Math.min(20, current + 1);
-  },
-
-  decrementShellCount() {
-    const input = document.getElementById('shellCount');
-    const current = parseInt(input.value) || 1;
-    input.value = Math.max(1, current - 1);
-  },
-
   // Next free <prefix><n> index for a case's session tabs (e.g. w1-<case>,
   // w2-<case> for agents, s1-<case> for shells), shared by the local and
   // remote/docker launch paths so all tabs follow the same naming convention.
@@ -1902,11 +2038,15 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async runClaude(options = {}) {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const tabCount = options.count ?? this._readTabCount();
+    // `options.worktree` ({ caseName, name, path }, from the worktree modal): the session runs in
+    // that git worktree of the case and its tab is named after the worktree.
+    const wt = options.worktree || null;
+    const caseName = wt ? wt.caseName : document.getElementById('quickStartCase').value || 'testcase';
+    const nameBase = wt ? wt.name : caseName;
+    const tabCount = this._readTabCount(options.count);
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
-      `Starting ${tabCount} Claude session(s) in ${caseName}...`
+      `Starting ${tabCount} Claude session(s) in ${wt ? `worktree ${wt.name} of ` : ''}${caseName}...`
     );
     // Focus terminal NOW, in the synchronous user-gesture context (button click).
     // iOS Safari ignores programmatic focus() after any await, so this must happen
@@ -1915,21 +2055,32 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.focus();
 
     try {
-      // Get case path first
-      const caseRes = await fetch(`/api/cases/${caseName}`);
-      let caseData = (await caseRes.json())?.data ?? {};
+      let caseData;
+      if (wt) {
+        // A worktree is local by construction (the server refuses one for a remote or Docker
+        // case) and its folder came from the worktree list: no case lookup, never a scaffold.
+        caseData = { path: wt.path, location: 'local' };
+      } else {
+        // Get case path first
+        const caseRes = await fetch(`/api/cases/${caseName}`);
+        const caseLookup = await caseRes.json();
+        caseData = caseLookup?.data ?? {};
 
-      // Create the case if it doesn't exist
-      if (!caseData.path) {
-        const createCaseRes = await fetch('/api/cases', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: caseName, description: '' })
-        });
-        const createCaseData = await createCaseRes.json();
-        if (!createCaseData.success) throw new Error(createCaseData.error || 'Failed to create case');
-        // API returns { success, data: { case: { name, path } } }
-        caseData = createCaseData.data.case;
+        // Create the case only when the server says it does not exist. Any other
+        // failure (a linked folder on a mount that is not answering) must not
+        // scaffold a same-name local case that would then shadow the real one.
+        if (!caseData.path) {
+          if (caseLookup?.errorCode !== 'NOT_FOUND') throw new Error(caseLookup?.error || 'Case lookup failed');
+          const createCaseRes = await fetch('/api/cases', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: caseName, description: '' })
+          });
+          const createCaseData = await createCaseRes.json();
+          if (!createCaseData.success) throw new Error(createCaseData.error || 'Failed to create case');
+          // API returns { success, data: { case: { name, path } } }
+          caseData = createCaseData.data.case;
+        }
       }
 
       const selectedCase = (this.cases || []).find(c => c.name === caseName);
@@ -2009,8 +2160,8 @@ Object.assign(CodemanApp.prototype, {
 
       let firstSessionId = null;
 
-      // Find the highest existing w-number for THIS case to avoid duplicates
-      const startNumber = this._nextCaseSessionStartNumber(caseName);
+      // Find the highest existing w-number for THIS case (or worktree) to avoid duplicates
+      const startNumber = this._nextCaseSessionStartNumber(nameBase);
 
       // Get global Ralph tracker setting
       const ralphEnabled = this.isRalphTrackerEnabledByDefault();
@@ -2018,7 +2169,7 @@ Object.assign(CodemanApp.prototype, {
       // Create all sessions in parallel for speed
       const sessionNames = [];
       for (let i = 0; i < tabCount; i++) {
-        sessionNames.push(`w${startNumber + i}-${caseName}`);
+        sessionNames.push(`w${startNumber + i}-${nameBase}`);
       }
 
       // Build env overrides from global + case settings (case overrides global)
@@ -2027,6 +2178,7 @@ Object.assign(CodemanApp.prototype, {
       const envOverrides = this.buildEnvOverrides(caseSettings, globalSettings);
       const hasEnvOverrides = Object.keys(envOverrides).length > 0;
       const effort = this.getEffortSetting(globalSettings);
+      const advisorModel = this.getAdvisorSetting(globalSettings);
       const useOpus1m = caseSettings.opusContext1m || globalSettings.opusContext1mEnabled;
       // Explicit Claude Model choice (App Settings) wins over the legacy 1M Opus toggle.
       const modelOverride = globalSettings.claudeModel || (useOpus1m ? 'opus[1m]' : '');
@@ -2044,6 +2196,7 @@ Object.assign(CodemanApp.prototype, {
             ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
             ...(hasEnvOverrides ? { envOverrides } : {}),
             ...(effort ? { effort } : {}),
+            ...(advisorModel ? { advisorModel } : {}),
             ...(modelOverride !== undefined ? { modelOverride } : {}),
           })
         }).then(r => r.json())
@@ -2129,34 +2282,48 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async runShell(options = {}) {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const requestedCount = options.count ?? parseInt(document.getElementById('shellCount').value);
-    const shellCount = Math.min(20, Math.max(1, requestedCount || 1));
+    // `options.worktree`: see runClaude.
+    const wt = options.worktree || null;
+    const caseName = wt ? wt.caseName : document.getElementById('quickStartCase').value || 'testcase';
+    const nameBase = wt ? wt.name : caseName;
+    // Run Shell reads the toolbar's one instance stepper, like every other run*();
+    // its own second `− 1 +` group (#shellCount) was removed (#428).
+    const shellCount = this._readTabCount(options.count);
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
-      `Starting ${shellCount} Shell session(s) in ${caseName}...`,
+      `Starting ${shellCount} Shell session(s) in ${wt ? `worktree ${wt.name} of ` : ''}${caseName}...`,
       '1;33'
     );
 
     try {
-      // Get the case path
-      const caseRes = await fetch(`/api/cases/${caseName}`);
-      let caseData = (await caseRes.json())?.data ?? {};
+      let caseData;
+      if (wt) {
+        // Local by construction, folder from the worktree list (see runClaude).
+        caseData = { path: wt.path, location: 'local' };
+      } else {
+        // Get the case path
+        const caseRes = await fetch(`/api/cases/${caseName}`);
+        const caseLookup = await caseRes.json();
+        caseData = caseLookup?.data ?? {};
 
-      // Create the case if it doesn't exist
-      if (!caseData.path) {
-        const createCaseRes = await fetch('/api/cases', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: caseName, description: '' })
-        });
-        const createCaseData = await createCaseRes.json();
-        if (!createCaseData.success) throw new Error(createCaseData.error || 'Failed to create case');
-        // API returns { success, data: { case: { name, path } } }
-        caseData = createCaseData.data.case;
+        // Create the case only when the server says it does not exist. Any other
+        // failure (a linked folder on a mount that is not answering) must not
+        // scaffold a same-name local case that would then shadow the real one.
+        if (!caseData.path) {
+          if (caseLookup?.errorCode !== 'NOT_FOUND') throw new Error(caseLookup?.error || 'Case lookup failed');
+          const createCaseRes = await fetch('/api/cases', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: caseName, description: '' })
+          });
+          const createCaseData = await createCaseRes.json();
+          if (!createCaseData.success) throw new Error(createCaseData.error || 'Failed to create case');
+          // API returns { success, data: { case: { name, path } } }
+          caseData = createCaseData.data.case;
+        }
       }
 
-      const selectedCase = (this.cases || []).find(c => c.name === caseName);
+      const selectedCase = wt ? null : (this.cases || []).find(c => c.name === caseName);
       const isRemoteCase =
         caseData.location === 'remote' ||
         caseData.location === 'docker' ||
@@ -2199,13 +2366,13 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
 
-      // Find the highest existing s-number for THIS case to avoid duplicates
-      const startNumber = this._nextCaseSessionStartNumber(caseName, 's');
+      // Find the highest existing s-number for THIS case (or worktree) to avoid duplicates
+      const startNumber = this._nextCaseSessionStartNumber(nameBase, 's');
 
       // Create all shell sessions in parallel
       const sessionNames = [];
       for (let i = 0; i < shellCount; i++) {
-        sessionNames.push(`s${startNumber + i}-${caseName}`);
+        sessionNames.push(`s${startNumber + i}-${nameBase}`);
       }
 
       // Step 1: Create all sessions in parallel
@@ -2274,8 +2441,8 @@ Object.assign(CodemanApp.prototype, {
    * their try block, to put the count in the opening banner: `#tabCount` ships
    * unconditionally today, but a throw here would escape the launch-error path.
    */
-  _readTabCount() {
-    return Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount')?.value) || 1));
+  _readTabCount(override) {
+    return Math.min(20, Math.max(1, override ?? (parseInt(document.getElementById('tabCount')?.value) || 1)));
   },
 
   /**
@@ -2341,16 +2508,19 @@ Object.assign(CodemanApp.prototype, {
         buildConfig: () => null,
       });
     if (!entry) throw new Error(`Unknown run mode: ${mode}`);
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    // `options.worktree`: see runClaude. Quick-start resolves it server-side (`worktree`), so the
+    // session starts through the same path as any other, only in the worktree's folder.
+    const wt = options.worktree || null;
+    const caseName = wt ? wt.caseName : document.getElementById('quickStartCase').value || 'testcase';
     // Remote/docker cases run the CLI on the OTHER side, so skip the local
-    // status probe. SSH remote Codex still needs its launch flags; Docker and
-    // remote environment overrides remain excluded.
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
+    // status probe. SSH remote Codex still needs its launch flags
+    // (applyConfigOnRemote); Docker and remote environment overrides remain excluded.
+    const _runLoc = wt ? 'local' : (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const tabCount = options.count ?? this._readTabCount();
+    const tabCount = this._readTabCount(options.count);
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
-      `Starting ${tabCount} ${entry.label} session(s) in ${caseName}...`
+      `Starting ${tabCount} ${entry.label} session(s) in ${wt ? `worktree ${wt.name} of ` : ''}${caseName}...`
     );
     // Focus in sync gesture context (see runClaude comment)
     this.terminal.focus();
@@ -2379,14 +2549,17 @@ Object.assign(CodemanApp.prototype, {
       // into `claude --settings`); none of these CLIs has an /effort. Each of
       // the eight bodies this launcher replaced carried that rule as a comment.
       const firstSessionId = await this._launchQuickStartInstances(
-        caseName,
+        // Only names the tabs (`w<n>-<name>`): a worktree session is named after the worktree.
+        wt ? wt.name : caseName,
         tabCount,
         entry.label,
         (sessionName) => ({
           caseName,
           mode,
           sessionName,
-          ...(_runLoc === 'remote' && mode === 'codex' ? (entry.buildConfig(globalSettings) || {}) : {}),
+          ...(_runLoc === 'remote' && entry.applyConfigOnRemote ? (entry.buildConfig(globalSettings) || {}) : {}),
+          ...(wt ? { worktree: wt.name } : {}),
+          ...(options.tabGroupId ? { tabGroupId: options.tabGroupId } : {}),
           ...(isRemote ? {} : {
             ...(entry.buildConfig(globalSettings) || {}),
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
@@ -2443,6 +2616,10 @@ Object.assign(CodemanApp.prototype, {
     return this._runCliMode('deepseek', options);
   },
 
+  async runCopilot() {
+    return this._runCliMode('copilot');
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // Session Options Modal
@@ -2497,6 +2674,14 @@ Object.assign(CodemanApp.prototype, {
     if (tab) tab.classList.toggle('tab-show-detach', !!on);
   },
 
+  /** Copy the open session's working folder (Session Options > Session > Working folder). */
+  async copySessionPath() {
+    const session = this.sessions.get(this.editingSessionId);
+    if (!session?.workingDir) return;
+    const ok = await this._copyText(session.workingDir);
+    this.showToast(ok ? 'Path copied' : 'Copy failed', ok ? 'success' : 'error');
+  },
+
   openSessionOptions(sessionId) {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -2508,7 +2693,7 @@ Object.assign(CodemanApp.prototype, {
     if (detachToggle) detachToggle.checked = this.hasTabDetachOverride(sessionId);
 
     // Reset to an appropriate tab — Summary for external CLIs (Respawn/Ralph are Claude-only)
-    const isAltMode = isExternalCliRunMode(session.mode);
+    const isAltMode = isExternalCliSession(session.mode);
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -2575,6 +2760,7 @@ Object.assign(CodemanApp.prototype, {
     // Populate auto-resume on usage limit (token pause control)
     document.getElementById('modalAutoResumeEnabled').checked = session.autoResumeEnabled ?? false;
     this.updateAutoResumeStatus(sessionId);
+    this.updatePromptCacheStatus(sessionId);
     document.getElementById('modalImageWatcherEnabled').checked = session.imageWatcherEnabled ?? true;
     document.getElementById('modalFlickerFilterEnabled').checked = session.flickerFilterEnabled ?? false;
 
@@ -2592,6 +2778,19 @@ Object.assign(CodemanApp.prototype, {
       document.getElementById('modalSessionName').value = session.name || '';
       document.getElementById('modalSessionName').placeholder = 'Auto (directory name)';
     }
+
+    // Working folder: the path the CLI was launched in on the Codeman host
+    const _pathEl = document.getElementById('modalSessionPath');
+    _pathEl.textContent = session.workingDir || '';
+    _pathEl.title = session.workingDir || '';
+    document.getElementById('modalSessionPathCopy').disabled = !session.workingDir;
+    // A remote session's workingDir is the REMOTE path; a docker session's is the
+    // host bind-mount source the container sees.
+    document.getElementById('modalSessionPathDesc').textContent = session.remote
+      ? "Where this session's CLI runs, on the remote host it reaches over SSH, not on this machine."
+      : session.docker
+        ? "On the machine hosting Codeman, mounted into the Docker container this session's CLI runs in."
+        : "Where this session's CLI runs, on the machine hosting Codeman.";
 
     // Initialize color picker with current session color
     const currentColor = session.color || 'default';
@@ -2711,34 +2910,59 @@ Object.assign(CodemanApp.prototype, {
     return typeof confirmed === 'string' ? confirmed : name;
   },
 
+  /**
+   * Write an inline rename, one PUT per session at a time, in the order the
+   * user made them. The editor can be reopened (or cancelled, or replaced by a
+   * group rename) while a PUT is in flight, so the write lives here rather than
+   * in the editor: a confirmed name is applied locally even after its editor is
+   * gone, and the "already that name" check runs only once the earlier writes
+   * have landed, so confirming the name still on screen is a real write.
+   * Resolves { status: 'confirmed' | 'failed' | 'deleted' }; never rejects,
+   * and reports a failed write itself, since its editor may be gone by then.
+   * `_inlineRenamePending` holds the newest queued name per session, so an
+   * editor reopened over a write in flight starts from that name rather than
+   * the one the server has not replaced yet.
+   */
   _queueInlineSessionName(sessionId, desiredName) {
-    this._inlineRenameWriteQueues ??= new Map();
-    const queues = this._inlineRenameWriteQueues;
-    const previous = queues.get(sessionId) || Promise.resolve();
-    const task = previous.then(async () => {
+    this._inlineRenameWrites ??= new Map();
+    this._inlineRenamePending ??= new Map();
+    const writes = this._inlineRenameWrites;
+    const pending = this._inlineRenamePending;
+    pending.set(sessionId, desiredName);
+    // Chained from a settled promise, so one rejected write cannot stop the
+    // writes queued behind it.
+    const prev = (writes.get(sessionId) || Promise.resolve()).catch(() => {});
+    const task = prev.then(async () => {
       const session = this.sessions.get(sessionId);
       if (!session) return { status: 'deleted' };
-      if (session.name === desiredName) {
-        return { status: 'confirmed', name: session.name, wrote: false };
-      }
-
+      if (session.name === desiredName) return { status: 'confirmed' };
       let confirmed = null;
       try {
         confirmed = await this._putSessionName(sessionId, desiredName);
       } catch {
-        // Keep queue failures as values so a later desired write still runs.
+        // A failure is a value, so a later write in the chain still runs.
       }
       if (!this.sessions.has(sessionId)) return { status: 'deleted' };
-      if (confirmed === null) return { status: 'failed' };
-
-      this._applyLocalSessionName(sessionId, confirmed);
-      this.renderSessionTabs();
-      return { status: 'confirmed', name: confirmed, wrote: true };
+      if (confirmed === null) {
+        this.showToast('Failed to rename', 'error');
+        return { status: 'failed' };
+      }
+      try {
+        this._applyLocalSessionName(sessionId, confirmed);
+        this.renderSessionTabs();
+      } catch (err) {
+        // The server holds the name; a local repaint failing is not a failed write.
+        console.error('[rename] applying the confirmed name failed', err);
+      }
+      return { status: 'confirmed' };
     });
-    queues.set(sessionId, task);
-    void task.then(() => {
-      if (queues.get(sessionId) === task) queues.delete(sessionId);
-    });
+    writes.set(sessionId, task);
+    const cleanup = () => {
+      if (writes.get(sessionId) !== task) return;
+      writes.delete(sessionId);
+      pending.delete(sessionId);
+    };
+    task.then(cleanup, cleanup);
     return task;
   },
 
@@ -2849,6 +3073,27 @@ Object.assign(CodemanApp.prototype, {
       el.textContent = '';
       el.classList.remove('active');
     }
+  },
+
+  /**
+   * Session Options → Respawn → "Prompt cache": the main conversation's cache state as
+   * Claude Code reports it on the statusline (`session.promptCache`, v2.1.251+), worded by
+   * the pure `CodemanPromptCache.format` (constants.js). Refreshed on open and on the
+   * `session:promptCache` SSE event while the modal shows that session.
+   */
+  updatePromptCacheStatus(sessionId) {
+    const el = document.getElementById('promptCacheStatus');
+    if (!el || this.editingSessionId !== sessionId) return;
+    const session = this.sessions.get(sessionId);
+    el.textContent = window.CodemanPromptCache.format(session?.promptCache, Date.now(), session?.statusLineExporter);
+  },
+
+  _onSessionPromptCache(data) {
+    const { sessionId, ...promptCache } = data;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.promptCache = promptCache;
+    this.updatePromptCacheStatus(sessionId);
   },
 
   async toggleSessionImageWatcher() {
@@ -3066,7 +3311,11 @@ Object.assign(CodemanApp.prototype, {
     tabName.classList.add('tab-name-renaming');
 
     const currentName = this.getSessionName(session);
-    const parsed = parseSessionPrefix(session.name);
+    // A rename still in flight is the user's last word, not the name the
+    // server has yet to replace: start from it, and compare against it below.
+    const shownName = this._inlineRenamePending?.get(sessionId) ?? session.name;
+    const renameInFlight = shownName !== session.name;
+    const parsed = parseSessionPrefix(shownName);
     const originalContent = tabName.textContent;
     const originalChildren = [...tabName.childNodes].map((node) => node.cloneNode(true));
     const restoreOriginalChildren = () => {
@@ -3087,17 +3336,17 @@ Object.assign(CodemanApp.prototype, {
 
     const input = document.createElement('input');
     input.type = 'text';
-    input.value = parsed ? parsed.suffix : (session.name || '');
+    input.value = parsed ? parsed.suffix : (shownName || '');
     input.placeholder = parsed ? 'Add description...' : currentName;
     input.className = 'tab-rename-input';
     // 80px is tuned for the narrow header tab; a full-width sidebar row can and
-    // should give the whole line to the input.
-    const renameWidth = tabName.closest('.tab-rail')
-      ? 'auto'
-      : this.isSessionSidebarActive?.()
-        ? '100%'
-        : '80px';
-    input.style.cssText = `width: ${renameWidth}; min-width: 0; font-size: 0.75rem; padding: 2px 4px; background: var(--bg-input); border: 1px solid var(--accent); border-radius: 3px; color: var(--text); outline: none;`;
+    // should give the whole line to the input. The header editor may shrink to
+    // nothing, while a rail or sidebar row always keeps room to type.
+    const inRail = !!tabName.closest('.tab-rail');
+    const inSidebar = !inRail && !!this.isSessionSidebarActive?.();
+    const renameWidth = inRail ? 'auto' : inSidebar ? '100%' : '80px';
+    const renameMinWidth = inRail || inSidebar ? '4rem' : '0';
+    input.style.cssText = `width: ${renameWidth}; min-width: ${renameMinWidth}; font-size: 0.75rem; padding: 2px 4px; background: var(--bg-input); border: 1px solid var(--accent); border-radius: 3px; color: var(--text); outline: none;`;
 
     tabName.appendChild(input);
     input.focus();
@@ -3149,21 +3398,20 @@ Object.assign(CodemanApp.prototype, {
 
       const suffix = input.value.trim();
       const fullName = parsed ? parsed.prefix + (suffix ? ': ' + suffix : '') : suffix;
-      if (fullName === session.name) {
-        restoreOriginalChildren();
-      } else {
-        tabName.textContent = fullName || originalContent;
-      }
+      // An unchanged confirm puts the old label back, unless the editor opened
+      // over a rename in flight: that label was repainted from the server's
+      // older name, so show the in-flight name rather than make it look lost.
+      if (fullName === shownName && !renameInFlight) restoreOriginalChildren();
+      else tabName.textContent = fullName || originalContent;
 
-      // Skip the API call if the session vanished between focus and blur.
-      const stillExists = this.sessions.has(sessionId);
-      if (stillExists) {
+      // Skip the API call if the session vanished between focus and blur. The
+      // queue applies the confirmed name to this.sessions before the re-render
+      // below repaints from it (see _applyLocalSessionName()).
+      if (this.sessions.has(sessionId)) {
         const result = await this._queueInlineSessionName(sessionId, fullName);
         if (invalidated || this._activeRename !== renameHandle || !this.sessions.has(sessionId)) return;
-        if (result.status === 'failed') {
-          restoreOriginalChildren();
-          this.showToast('Failed to rename', 'error');
-        }
+        // The queue reports a failure itself; the editor only puts its label back.
+        if (result.status === 'failed') restoreOriginalChildren();
       }
       // Re-render tabs to restore full tab structure
       completeCurrentRename();
@@ -3502,7 +3750,7 @@ Object.assign(CodemanApp.prototype, {
 
       // Close on outside click (one-shot listener)
       const closeHandler = (e) => {
-        if (!popover.contains(e.target) && !e.target.classList.contains('btn-case-settings')) {
+        if (!popover.contains(e.target) && !e.target.closest?.('.case-combobox-action')) {
           popover.classList.add('hidden');
           document.removeEventListener('click', closeHandler);
         }
@@ -3580,6 +3828,16 @@ Object.assign(CodemanApp.prototype, {
   resetCaseModalFields() {
     document.getElementById('newCaseName').value = '';
     document.getElementById('newCaseDescription').value = '';
+    // Custom folder starts off each time, and is not offered to a non-admin in multi-user mode: the
+    // server refuses it (it writes outside the cases directory and into the shared registry).
+    const customToggle = document.getElementById('newCaseCustomPathToggle');
+    if (customToggle) customToggle.checked = false;
+    const customPath = document.getElementById('newCasePath');
+    if (customPath) customPath.value = '';
+    const me = window.__codemanUser || {};
+    const customRow = document.getElementById('newCaseCustomPathToggleRow');
+    if (customRow) customRow.style.display = me.multiUser && me.role !== 'admin' ? 'none' : '';
+    this.toggleNewCaseCustomPath();
     document.getElementById('linkCaseName').value = '';
     document.getElementById('linkCasePath').value = '';
     const remoteFields = [
@@ -3811,6 +4069,71 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /**
+   * Custom-folder row for Create New: shows or hides the parent-folder field, and keeps it and the
+   * Docker option mutually exclusive (a Docker case has its own workspace flow, and the quick-create
+   * route has no `path`).
+   */
+  toggleNewCaseCustomPath() {
+    const custom = document.getElementById('newCaseCustomPathToggle');
+    const docker = document.getElementById('newCaseDocker');
+    const row = document.getElementById('newCaseCustomPathRow');
+    if (!custom || !row) return;
+    row.style.display = custom.checked ? '' : 'none';
+    // The "under ~/codeman-cases" wording is wrong while a custom folder is picked.
+    const blurb = document.getElementById('newCaseBlurb');
+    if (blurb) {
+      blurb.textContent = custom.checked
+        ? 'A fresh workspace in a folder you choose, scaffolded with its own CLAUDE.md.'
+        : 'A fresh workspace under ~/codeman-cases, scaffolded with its own CLAUDE.md.';
+    }
+    const nameHint = document.getElementById('newCaseNameHint');
+    if (nameHint) {
+      nameHint.textContent = custom.checked
+        ? 'Letters, numbers, hyphens, underscores only. Created inside the parent folder below.'
+        : 'Letters, numbers, hyphens, underscores only. Created in ~/codeman-cases/';
+    }
+    custom.disabled = !!docker?.checked;
+    custom.title = docker?.checked ? 'Not available for a Docker case' : '';
+    if (docker) {
+      docker.disabled = custom.checked;
+      docker.title = custom.checked ? 'Not available with a custom folder' : '';
+    }
+    this.updateNewCasePathPreview();
+  },
+
+  /** The folder the case would be created in: the parent field plus the case name. */
+  _newCaseTargetPath() {
+    const rawParent = (document.getElementById('newCasePath')?.value || '').trim();
+    const name = (document.getElementById('newCaseName')?.value || '').trim();
+    if (!rawParent || !name) return '';
+    // Trailing slashes off, but `/` stays the root rather than becoming an empty path.
+    const parent = rawParent.replace(/\/+$/, '');
+    return `${parent}/${name}`;
+  },
+
+  updateNewCasePathPreview() {
+    const hint = document.getElementById('newCasePathPreview');
+    if (!hint) return;
+    const target = this._newCaseTargetPath();
+    hint.textContent = target ? `Will create: ${target}` : 'Pick the folder the new case folder should be created inside.';
+  },
+
+  openNewCasePathPicker() {
+    const input = document.getElementById('newCasePath');
+    PathPicker.open({
+      title: 'Choose the folder to create the case in',
+      initialPath: input.value.trim(),
+      directoriesOnly: true,
+      onSelect: (path) => {
+        input.value = path;
+        this.updateNewCasePathPreview();
+        input.focus();
+        input.setSelectionRange(path.length, path.length);
+      },
+    });
+  },
+
   async createCase() {
     const name = document.getElementById('newCaseName').value.trim();
     const description = document.getElementById('newCaseDescription').value.trim();
@@ -3828,11 +4151,18 @@ Object.assign(CodemanApp.prototype, {
     // One-click "Run in Docker": create the case folder AND a container, then start
     // a session inside it. Optional expandable settings override the defaults.
     const inDocker = document.getElementById('newCaseDocker')?.checked;
+    const customFolder = !inDocker && document.getElementById('newCaseCustomPathToggle')?.checked;
+    if (customFolder && !(document.getElementById('newCasePath')?.value || '').trim()) {
+      this.showToast('Choose the folder to create the case in', 'error');
+      return;
+    }
     const endpoint = inDocker ? '/api/cases/docker-quickcreate' : '/api/cases';
     const localSelection = this._readCaseCodexCommandFromForm('local');
     const payload = inDocker
       ? { name, description, ...this._collectDockerQuickSettings() }
-      : { name, description, ...localSelection };
+      : customFolder
+        ? { name, description, ...localSelection, path: this._newCaseTargetPath() }
+        : { name, description, ...localSelection };
 
     try {
       const res = await fetch(endpoint, {
@@ -3854,7 +4184,9 @@ Object.assign(CodemanApp.prototype, {
           // Start a session INSIDE the container (routes through quick-start).
           await this.runClaude();
         } else {
-          this.showToast(`Case "${name}" created`, 'success');
+          // The server's path is the folder actually created (~ expanded, symlinks resolved).
+          const createdIn = data.data?.case?.path || payload.path;
+          this.showToast(customFolder ? `Case "${name}" created in ${createdIn}` : `Case "${name}" created`, 'success');
         }
       } else {
         this.showToast(data.error || 'Failed to create case', 'error');
@@ -5909,6 +6241,16 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async saveCaseOrder(order) {
+    // Multi-user non-admin: the case order is ONE server-wide list (settings.json caseOrder)
+    // and PUT /api/cases/order is admin-only (403), so the move is not sent: say why, and put
+    // the list back the way the server orders it.
+    if (this._settingsReadOnly?.()) {
+      this.showToast('Server-wide settings can only be changed by an admin', 'warning');
+      const select = document.getElementById('quickStartCase');
+      await this.loadQuickStartCases(select?.value);
+      this.renderCaseManageList();
+      return;
+    }
     try {
       await fetch('/api/cases/order', {
         method: 'PUT',
@@ -6087,6 +6429,404 @@ Object.assign(CodemanApp.prototype, {
     modal.classList.add('from-mobile');
     // Remove animation class after it plays
     setTimeout(() => modal.classList.remove('from-mobile'), 300);
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Git worktrees of a case (src/git-worktrees.ts, routes/worktree-routes.ts)
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // One dialog per case: its worktrees (Open, Remove), and a form for a new one that starts a
+  // session in it at once. Sessions start through run() with `options.worktree`, so every run
+  // mode keeps its own launch path (POST /api/sessions for claude and shell, quick-start with
+  // `worktree` for the rest). Everything git or the user named (worktree and branch names, paths,
+  // git's own refusals) renders through textContent and carries data-i18n-skip.
+
+  /** Open the worktree dialog for `caseName` (default: the case selected in the toolbar). */
+  openWorktreeModal(caseName) {
+    const modal = document.getElementById('worktreeModal');
+    const name = caseName || document.getElementById('quickStartCase')?.value || '';
+    if (!modal || !name) return;
+    this._worktreeCase = name;
+    this._worktreeData = null;
+    this._worktreeRemoveConfirm = null;
+    this._worktreeRemoveError = null;
+    const caseLabel = document.getElementById('worktreeModalCase');
+    if (caseLabel) caseLabel.textContent = name;
+    for (const id of ['worktreeName', 'worktreeBranch', 'worktreeBase']) {
+      const input = document.getElementById(id);
+      if (input) input.value = '';
+    }
+    this._setWorktreeFormError('');
+    this._fillWorktreeModeSelect();
+    this._renderWorktreeList();
+    modal.classList.add('active');
+    void this._loadWorktrees();
+    // Not on a touch device: focusing the field raises the on-screen keyboard over the list.
+    const touch = typeof MobileDetection !== 'undefined' && MobileDetection.isTouchDevice?.();
+    if (!touch) setTimeout(() => document.getElementById('worktreeName')?.focus?.(), 50);
+  },
+
+  /** The phone case sheet's Worktrees button: the selected case's worktrees. */
+  showWorktreesFromMobile() {
+    this.closeMobileCasePicker();
+    this.openWorktreeModal();
+  },
+
+  closeWorktreeModal() {
+    const modal = document.getElementById('worktreeModal');
+    // Called on every Escape (app.js): a no-op unless the dialog is open.
+    if (!modal || !modal.classList.contains('active')) return;
+    modal.classList.remove('active');
+    this._worktreeCase = null;
+    this._worktreeLoadSeq = (this._worktreeLoadSeq || 0) + 1;
+  },
+
+  _worktreesUrl(caseName, suffix = '') {
+    return `/api/cases/${encodeURIComponent(caseName)}/worktrees${suffix}`;
+  },
+
+  /** A JSON call that keeps the server's error text, which `_apiJson()` drops. */
+  async _worktreeRequest(path, opts = {}) {
+    const res = await this._api(path, opts);
+    if (!res) return { ok: false, error: 'Codeman did not answer.' };
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* an empty or non-JSON body: the status says enough */
+    }
+    if (res.ok && body?.success !== false) return { ok: true, data: body?.data ?? body };
+    return { ok: false, status: res.status, error: body?.error || `Request failed (${res.status})` };
+  },
+
+  async _loadWorktrees() {
+    const caseName = this._worktreeCase;
+    if (!caseName) return;
+    const seq = (this._worktreeLoadSeq = (this._worktreeLoadSeq || 0) + 1);
+    this._setWorktreeStatus('Loading worktrees…');
+    const r = await this._worktreeRequest(this._worktreesUrl(caseName));
+    if (seq !== this._worktreeLoadSeq || caseName !== this._worktreeCase) return;
+    this._worktreeData = r.ok ? r.data : null;
+    this._setWorktreeStatus(r.ok ? '' : r.error, !r.ok);
+    // A case that cannot list worktrees (not a repository, a Docker or remote case) cannot get one.
+    const createBtn = document.getElementById('worktreeCreateBtn');
+    if (createBtn) createBtn.disabled = !r.ok;
+    this._renderWorktreeList();
+  },
+
+  _setWorktreeStatus(text, isError = false) {
+    const el = document.getElementById('worktreeStatus');
+    if (!el) return;
+    el.textContent = text || '';
+    el.hidden = !text;
+    el.classList.toggle('worktree-status-error', !!isError);
+  },
+
+  _setWorktreeFormError(text) {
+    const el = document.getElementById('worktreeFormError');
+    if (!el) return;
+    el.textContent = text || '';
+    el.hidden = !text;
+  },
+
+  /** Every enabled, installed run mode, the shell last; the Run button's mode preselected. */
+  _fillWorktreeModeSelect() {
+    const select = document.getElementById('worktreeMode');
+    if (!select) return;
+    // Every launchable registry entry (agents and the shell), as data: no id is branched on here.
+    const modes = [];
+    for (const cli of registryCliCatalog()) {
+      if (cli.enabled && cli.available !== false) modes.push({ id: cli.id, label: cli.label });
+    }
+    if (modes.length === 0) {
+      // A cached page from before the registry catalogue: the built-in modes.
+      modes.push({ id: 'claude', label: 'Claude Code' });
+      for (const [id, entry] of Object.entries(RUN_MODE_LAUNCH)) modes.push({ id, label: entry.label });
+      modes.push({ id: 'shell', label: 'Terminal / Shell' });
+    }
+    select.replaceChildren(
+      ...modes.map((m) => {
+        const option = document.createElement('option');
+        option.value = m.id;
+        option.textContent = m.label;
+        return option;
+      })
+    );
+    const current = this._runMode || 'claude';
+    select.value = modes.some((m) => m.id === current) ? current : modes[0].id;
+  },
+
+  _selectedWorktreeMode() {
+    return document.getElementById('worktreeMode')?.value || this._runMode || 'claude';
+  },
+
+  _renderWorktreeList() {
+    const list = document.getElementById('worktreeList');
+    if (!list) return;
+    list.replaceChildren();
+    const data = this._worktreeData;
+    if (!data) return;
+    for (const wt of data.worktrees) list.appendChild(this._buildWorktreeRow(wt));
+    if (!data.worktrees.some((wt) => wt.managed)) {
+      const empty = document.createElement('div');
+      empty.className = 'worktree-empty';
+      empty.textContent = 'No worktrees yet. Create one below.';
+      list.appendChild(empty);
+    }
+  },
+
+  _buildWorktreeRow(wt) {
+    const row = document.createElement('div');
+    row.className = 'worktree-row' + (wt.managed ? ' worktree-row--managed' : '');
+    const head = document.createElement('div');
+    head.className = 'worktree-row-head';
+
+    const label = document.createElement('span');
+    label.className = 'worktree-row-name';
+    label.setAttribute('data-i18n-skip', '');
+    label.textContent = wt.managed ? `⑂ ${wt.name}` : wt.path.split('/').pop() || wt.path;
+    head.appendChild(label);
+
+    const badge = (text, extra = '', skip = false) => {
+      const b = document.createElement('span');
+      b.className = `worktree-badge${extra ? ` ${extra}` : ''}`;
+      if (skip) b.setAttribute('data-i18n-skip', '');
+      b.textContent = text;
+      head.appendChild(b);
+    };
+    if (wt.branch) badge(wt.branch, 'worktree-badge-branch', true);
+    else if (wt.detached) badge('detached HEAD', 'worktree-badge-branch');
+    if (wt.main) badge('main checkout');
+    else if (!wt.managed) badge('not created by Codeman', 'worktree-badge-dim');
+    if (wt.locked) badge('locked', 'worktree-badge-warn');
+    if (wt.prunable) badge('missing', 'worktree-badge-warn');
+    if (wt.sessionCount > 0) {
+      badge(`${wt.sessionCount} session${wt.sessionCount === 1 ? '' : 's'}`, 'worktree-badge-live');
+    }
+
+    if (wt.managed) {
+      const actions = document.createElement('span');
+      actions.className = 'worktree-row-actions';
+      // A worktree whose folder is gone (`prunable`) cannot host a session, but Remove still
+      // clears git's record of it, which is what frees its name for a new worktree.
+      if (!wt.prunable) {
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'wt-btn wt-btn-sm';
+        open.textContent = 'Open';
+        open.title = 'Start a session in this worktree';
+        open.addEventListener('click', () => void this.openWorktreeSession(wt.name));
+        actions.appendChild(open);
+      }
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'wt-btn wt-btn-sm wt-btn-danger';
+      remove.textContent = 'Remove…';
+      remove.addEventListener('click', () => this.confirmWorktreeRemoval(wt.name));
+      actions.appendChild(remove);
+      head.appendChild(actions);
+    }
+    row.appendChild(head);
+
+    // A managed worktree's folder is always `.claude/worktrees/<name>` of the case: say just that,
+    // so the long repository prefix (already on the main row) is not repeated on every row.
+    const path = document.createElement('div');
+    path.className = 'worktree-row-path';
+    path.setAttribute('data-i18n-skip', '');
+    path.textContent = wt.managed ? `.claude/worktrees/${wt.name}` : this._shortenHomePath(wt.path);
+    path.title = wt.path;
+    row.appendChild(path);
+
+    if (wt.managed && this._worktreeRemoveConfirm === wt.name) row.appendChild(this._buildWorktreeRemoveConfirm(wt));
+    return row;
+  },
+
+  _buildWorktreeRemoveConfirm(wt) {
+    const box = document.createElement('div');
+    box.className = 'worktree-remove-confirm';
+    const note = document.createElement('p');
+    note.className = 'worktree-remove-note';
+    note.textContent = wt.prunable
+      ? 'Its folder is gone. Removing it clears the record git keeps of it, so the name can be used again.'
+      : 'git worktree remove refuses while the worktree has uncommitted or untracked files. Codeman never forces it.';
+    box.appendChild(note);
+
+    let checkbox = null;
+    if (wt.branch) {
+      const lbl = document.createElement('label');
+      lbl.className = 'worktree-remove-branch';
+      checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      const text = document.createElement('span');
+      text.textContent = 'Also delete its branch (git branch -d keeps a branch that is not merged)';
+      lbl.append(checkbox, text);
+      box.appendChild(lbl);
+    }
+
+    if (this._worktreeRemoveError?.name === wt.name) {
+      const err = document.createElement('pre');
+      err.className = 'worktree-remove-error';
+      err.setAttribute('data-i18n-skip', '');
+      err.textContent = this._worktreeRemoveError.text;
+      box.appendChild(err);
+    }
+
+    const buttons = document.createElement('div');
+    buttons.className = 'worktree-remove-buttons';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'wt-btn wt-btn-sm';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => this.cancelWorktreeRemoval());
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'wt-btn wt-btn-sm wt-btn-danger';
+    confirm.textContent = 'Remove worktree';
+    confirm.addEventListener('click', async () => {
+      confirm.disabled = true;
+      try {
+        await this.removeWorktreeFromModal(wt.name, !!checkbox?.checked);
+      } finally {
+        confirm.disabled = false;
+      }
+    });
+    buttons.append(cancel, confirm);
+    box.appendChild(buttons);
+    return box;
+  },
+
+  confirmWorktreeRemoval(name) {
+    this._worktreeRemoveConfirm = name;
+    this._worktreeRemoveError = null;
+    this._renderWorktreeList();
+  },
+
+  cancelWorktreeRemoval() {
+    this._worktreeRemoveConfirm = null;
+    this._worktreeRemoveError = null;
+    this._renderWorktreeList();
+  },
+
+  async removeWorktreeFromModal(name, deleteBranch) {
+    const caseName = this._worktreeCase;
+    if (!caseName) return;
+    const r = await this.removeCaseWorktree(caseName, name, deleteBranch);
+    if (caseName !== this._worktreeCase) return;
+    if (!r.ok) {
+      this._worktreeRemoveError = { name, text: r.error };
+      this._renderWorktreeList();
+      return;
+    }
+    this._worktreeRemoveConfirm = null;
+    this._worktreeRemoveError = null;
+    await this._loadWorktrees();
+  },
+
+  /** DELETE one worktree (never forced); shared by the dialog and Close Session. Toasts the outcome. */
+  async removeCaseWorktree(caseName, name, deleteBranch) {
+    const query = deleteBranch ? '?deleteBranch=true' : '';
+    const r = await this._worktreeRequest(this._worktreesUrl(caseName, `/${encodeURIComponent(name)}${query}`), {
+      method: 'DELETE',
+    });
+    if (r.ok) {
+      const removed = r.data?.removed || { name };
+      if (removed.branchError) {
+        this.showToast?.(
+          `Worktree ${removed.name} removed. Branch ${removed.branch} kept: ${removed.branchError}`,
+          'warning'
+        );
+      } else if (removed.branchDeleted) {
+        this.showToast?.(`Worktree ${removed.name} and branch ${removed.branch} removed`, 'success');
+      } else {
+        this.showToast?.(`Worktree ${removed.name} removed`, 'success');
+      }
+    }
+    return r;
+  },
+
+  async createWorktreeFromModal() {
+    const caseName = this._worktreeCase;
+    if (!caseName) return;
+    const name = (document.getElementById('worktreeName')?.value || '').trim();
+    const branch = (document.getElementById('worktreeBranch')?.value || '').trim();
+    const base = (document.getElementById('worktreeBase')?.value || '').trim();
+    if (!WORKTREE_NAME_RE.test(name) || name.includes('..') || /\.(lock)?$/i.test(name)) {
+      this._setWorktreeFormError(
+        'Name: letters, digits, ".", "_" and "-", starting with a letter or digit, at most 64 characters.'
+      );
+      return;
+    }
+    this._setWorktreeFormError('');
+    const mode = this._selectedWorktreeMode();
+    const btn = document.getElementById('worktreeCreateBtn');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await this._worktreeRequest(this._worktreesUrl(caseName), {
+        method: 'POST',
+        body: { name, ...(branch ? { branch } : {}), ...(base ? { base } : {}) },
+      });
+      if (caseName !== this._worktreeCase) return;
+      if (!r.ok) {
+        this._setWorktreeFormError(r.error);
+        return;
+      }
+      const created = r.data.worktree;
+      this.showToast?.(`Worktree ${created.name} created on branch ${created.branch}`, 'success');
+      this.closeWorktreeModal();
+      await this._launchInWorktree({ caseName, name: created.name, path: created.path }, mode);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  },
+
+  async openWorktreeSession(name) {
+    const caseName = this._worktreeCase;
+    const wt = this._worktreeData?.worktrees?.find((w) => w.managed && w.name === name);
+    if (!caseName || !wt) return;
+    const mode = this._selectedWorktreeMode();
+    this.closeWorktreeModal();
+    await this._launchInWorktree({ caseName, name, path: wt.path }, mode);
+  },
+
+  /**
+   * Start ONE session of `mode` in a worktree through run(), the Run button's own entry (its
+   * launch lock, its per-mode paths), with the same temporary `_runMode` swap the custom-model
+   * entries use, so the Run button's chosen mode is untouched afterwards.
+   */
+  async _launchInWorktree(worktree, mode) {
+    if (this._runInFlight) {
+      this.showToast?.('A launch is already in progress', 'info');
+      return;
+    }
+    const previous = this._runMode;
+    this._runMode = mode || previous;
+    try {
+      await this.run({ count: 1, worktree });
+    } finally {
+      this._runMode = previous;
+    }
+  },
+
+  /** The Codeman-managed worktree a session runs in, or null (see managedWorktreeOfDir). */
+  _managedWorktreeOfSession(session) {
+    if (!session || session.remote || session.docker) return null;
+    return managedWorktreeOfDir(session.workingDir, this.cases);
+  },
+
+  /**
+   * Close Session's "Kill & remove worktree", once the session is gone. git's refusal (a dirty
+   * tree) is the answer: the worktree stays, and the toast says why and opens the dialog.
+   */
+  async _removeWorktreeAfterClose(wt, deleteBranch) {
+    const r = await this.removeCaseWorktree(wt.caseName, wt.name, deleteBranch);
+    if (r.ok) {
+      if (this._worktreeCase === wt.caseName) void this._loadWorktrees();
+      return;
+    }
+    this.showToast?.(`Worktree ${wt.name} was kept: ${r.error}`, 'error', {
+      duration: 15000,
+      action: { label: 'Worktrees…', onClick: () => this.openWorktreeModal(wt.caseName) },
+    });
   },
 });
 

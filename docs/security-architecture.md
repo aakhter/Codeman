@@ -150,7 +150,7 @@ by presence in a server‑side map, so they cannot be forged offline.
 
 ### Rate limiting / lockout recovery
 
-Failed auth is tracked **per IP**: 10 failures → `429`, with a 15‑minute decay.
+Failed logins are tracked **per IP**: 50 failures (`AUTH_IP_FAILURE_MAX`) → `429`, with a 15‑minute decay. In multi-user mode a separate **per-username** bucket still returns `429` after 10 failed guesses (`AUTH_FAILURE_MAX`), so the wider per-IP cap (COD-524, for automated clients behind one egress IP) does not widen guessing against any one account.
 The QR path has its own separate limiter.
 
 The lockout check sits **after** the cookie/credential checks (step 4, not first).
@@ -356,8 +356,9 @@ checked before the global download bound and before the range, `nosniff`) and re
 the `/root` and `/etc` trees, extendable via `attachmentBlockedPaths` /
 `CODEMAN_ATTACHMENT_BLOCKED_PATHS`) on every request. Unlike the workspace file
 routes, attachments are intentionally **cross‑workspace** — so the effective gate
-is the blocklist + a 6‑extension allowlist (`png/pdf/docx/pptx/md/txt`), not
-realpath containment.
+is the blocklist + an extension allowlist (`SUPPORTED_ATTACHMENT_EXTENSIONS` in
+`src/attachment-registry.ts`: images, pdf/docx/pptx/xlsx, audio/video, md/txt and
+other text), not realpath containment.
 
 Two registration paths, with **different trust**:
 
@@ -403,8 +404,36 @@ document enclave, and the one case where uploaded bytes leave the workspace.
 - A bad entry is never a startup failure — it is dropped, and with no valid roots
   the symlink form is simply unavailable.
 
+For cloud-synced workspaces where symlinks are unsupported, operators can instead set
+`CODEMAN_ATTACHMENT_WORKSPACE_ROOTS` to a JSON object mapping exact canonical workspace
+paths to exact canonical roots already approved by `CODEMAN_TRUSTED_ATTACHMENT_ROOTS`.
+For example: `{"/work/project":"/data/attachments"}`. This environment-only mapping
+retains the same admin-only, dedicated-enclave and exact-root guards. It takes precedence
+over a workspace `.codeman-attachments` entry; no workspace directory is created.
+Malformed mapping configuration fails closed. Restart the service after changing its
+environment. Existing history keeps logical `.codeman-attachments/` paths and guarded
+external-file routes; new uploads provide agents the canonical absolute file path.
+Unmapped workspaces retain their current upload behavior. Removing a mapping can make
+its existing uploads unavailable, so retain the previous mapping for rollback.
+
 Implementation: `isDedicatedAttachmentEnclave` / `parseTrustedAttachmentRoots` /
 `resolveLocalUploadDirectory` in `src/config/attachment-guard.ts`.
+**Folder grid grants** (`POST /api/sessions/:id/folders`, `src/folder-listing.ts`)
+follow the explicit-POST trust level: a deliberate, Origin‑guarded request, allowed
+cross‑workspace subject to the same guard (blocklist on the folder AND on every
+listed file, `confineToWorkspace` when set, hidden entries and unsupported types
+left out). The grant is an id for a resolved folder; files are served by
+`folderId` + a bare file name only (no `/`, `..` or NUL, supported type), and each
+request re‑runs `resolveServableAttachmentPath` on the joined path, so a file that
+was swapped for a symlink to a blocked target after listing is still refused.
+The file a symlink resolves to is held to the attachment gate as well (supported
+extension, regular file), so a supported-looking name cannot serve an arbitrary
+file, and a FIFO or device node is never opened.
+In multi‑user mode a regular user is held to the filesystem path picker's rule
+(`folderAllowedForUser`): the folder, and again each served file after symlink
+resolution, must sit inside their own `userSpacePath` or the session's
+`workingDir`, else 403. User spaces live inside `homedir()`, so without it one user
+could list and read another's space.
 
 ### SSE log‑tail route — intentional extra read roots
 
@@ -582,7 +611,18 @@ A saved dashboard URL renders as a tab, served through Codeman's own origin at `
 - **The proxy is exempt from cookie auth and the Origin/CSRF guard, and that is deliberate.** The iframe is sandboxed without `allow-same-origin`, so it is opaque‑origin: its requests are cross‑site, meaning the `SameSite=lax` session cookie is never attached and its writes and WS upgrades arrive with `Origin: null`. The credential is instead a 192‑bit capability in the path, minted only by an authenticated `POST /api/webviews/:id/open`, held in memory (a restart invalidates every one), rolling TTL, bound to the minting user, and granting nothing but "relay bytes to this one saved URL". ⚠️ **The Host allowlist is NOT bypassed**, so DNS‑rebinding protection is unaffected. A second `Referer`‑keyed form exists for root‑absolute assets and is the only exemption decided by a request‑supplied header, so it is fenced to safe methods on non‑`/api`, non‑`/ws`, non‑`/q` paths. Edges pinned by `test/webview-auth-exemption.test.ts`.
 - **The lost‑frame recovery page is the third unauthenticated 200, and the only one decided by request headers alone.** The proxy's runtime shim masks `/webview/<cap>/` off the page's own URL so a single‑page app routes on the path it expects; a navigation the page then starts itself (`location.reload()`, a root‑absolute `location.href`) lands on Codeman's root with no capability anywhere, no cookie (opaque origin) and a Referer naming the masked page. `serveLostWebviewFrame()` in `middleware/auth.ts` recognises it by shape (`GET`/`HEAD`, `Sec-Fetch-Dest: iframe` or `frame`, `Accept: text/html`, `Sec-Fetch-Mode: navigate` or absent) and answers, BEFORE the credential checks and without counting an auth failure, with a static page whose only content is a `postMessage` of the lost path to the parent tab (`default-src 'none'` plus the hash of that one script, `no-store`, `referrer: no-referrer`, no reflected input). It is fenced to paths that are NOT registered routes and never `/api/`, `/ws/` or `/q/`, with one carve‑out: `/` itself, because the landing page masks to exactly `/` and its reload otherwise rendered Codeman's app shell inside the web tab. `/` is admitted only when the request carries neither the `codeman_session` cookie nor an `Authorization` header: nothing in Codeman frames its own root and a sandboxed frame has neither, while a framed `/` that does carry credentials still gets the shell. On a passwordless install no auth hook runs, so the index route applies the same test itself (`isLostWebviewRootFrame`). ⚠️ Known property, accepted rather than mitigated: those headers are trivially set by a non‑browser client, so an unauthenticated caller can distinguish a registered route (401) from a non‑route (200) and enumerate the route table; the routes are public in `docs/api-reference.md`, so nothing is learned. Pinned by `test/webview-auth-exemption.test.ts` (password) and `test/webview-lost-root-frame.test.ts` (passwordless).
 - **Sandboxed by default; `allow-same-origin` is an explicit per‑dashboard opt‑in.** A proxied page is same‑origin with Codeman, so without the sandbox its JavaScript could read the Codeman document and call the agent‑spawning API. ⚠️ In BOTH modes the `Authorization` header and the `codeman_session` cookie are stripped before the upstream request, because a trusted (same‑origin) frame makes the browser attach Codeman's own Basic‑auth credentials to every proxied request; forwarding them would hand `CODEMAN_PASSWORD` to the dashboard.
+- **Rendered HTML files (`/html-view/<capability>/`) are the other capability-gated route that skips cookie auth.** A clicked `.html` file renders through it so an agent's report can be viewed from any device. The exemption is narrower than the proxy's: `GET`/`HEAD` only (plus the page's CORS preflight, which `registerSecurityHeaders` answers itself with `Access-Control-Allow-Methods: GET, HEAD` and never hands to a route), the capability in the path only (no `Referer` form), and it is a separate store, so a web-tab capability never opens a page and vice versa. The capability is minted by an authenticated `POST /api/sessions/:id/html-view` (session ownership via `findSessionOrFail`, the attachment guard for out-of-workspace files), held in memory with a rolling TTL and revoked with the web-tab ones on logout, admin logout and user deletion. Every response carries `Content-Security-Policy: sandbox` without `allow-same-origin`, so the page is opaque-origin even when opened as a top-level tab and cannot read Codeman's document, cookies or API. **Network access is open, by the owner's decision (2026-10-13):** that `sandbox` directive is the whole policy (it replaces Codeman's own `default-src 'self'` CSP and carries no fetch directive), so a rendered page behaves like a file opened from disk in a browser. What a page CAN do: load scripts, styles, fonts, images and media from any host (an agent's dashboard pulling Chart.js from a CDN), make fetch, XHR, WebSocket, beacon and form requests to any host, and read the files of its own folder through its capability. What it CANNOT do: act as Codeman's origin, read Codeman's cookies or document, use Codeman's API (a write arrives with `Origin: null` and the Origin guard refuses it; a read's response stays unreadable, because Codeman answers CORS only for its own localhost origins, and with a password set the request carries no session cookie either), or read any folder other than its own. The accepted consequence is that a page can send what it can read, its own folder, to any host, which is why the folder rules below are the boundary that matters. `Referrer-Policy: no-referrer` keeps the capability URL out of the `Referer` the page's third-party requests carry. Pinned by the exact-header test in `test/routes/html-view-routes.test.ts`. It may read its own directory tree (non-dot, asset-allowlisted, realpath-confined, blocklist applied; the dot and extension rules hold for the symlink-resolved target as well as the requested name), so minting is refused for an HTML file in a hidden directory or directly in a broad root (`/`, home, `/tmp`, `/var/tmp` and `$TMPDIR`, the cases and user-space roots, a drive's mount point) or in a directory above one (`/home`, `/Users`). Pinned by `test/routes/html-view-routes.test.ts` and the html-view block in `test/webview-auth-exemption.test.ts`.
 - **Not an open relay, and not a privilege boundary.** `resolveUpstreamUrl()` refuses anything leaving the saved origin, and cross‑origin redirects are handed back unchanged rather than followed. The proxy does reach whatever the SERVER can reach, which is not an escalation for someone who already commands `--dangerously-skip-permissions` agents, but in multi‑user mode it means a non‑admin's dashboard is fetched from the server's network position. Saved URLs are validated to plain http(s) with no embedded credentials, and there is deliberately **no magic‑link path**: terminal output can never create a webview (the mistake the attachment scanner had to be walled off from). The one refused destination class is link‑local and cloud‑metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `168.63.129.16`, `100.100.100.200`, `metadata.google.internal`): `webview-egress-policy.ts` refuses them at save time, and `webview-egress.ts` re‑judges the RESOLVED address at connect time through a `lookup` hook on the proxy's undici Agent and on its WebSocket client, so a DNS name pointing into those ranges is refused as well. Loopback and RFC1918 stay allowed on purpose. Capabilities are revoked on logout, admin logout and user deletion, and proxied responses carry `Referrer-Policy: same-origin` so a dashboard cannot hand the capability‑bearing URL to a third‑party host it links.
+
+---
+
+## 10c. Webhook notifications (outbound channel)
+
+Opt-in and off by default: the server POSTs the Web Push events (permission prompts, questions, idle, errors, respawn blocked, crash-loop breaker, Ralph completion) to one URL an admin configures, formatted for ntfy, Slack, Discord or generic JSON. Source: `src/webhook-notify.ts`, routes in `src/web/routes/webhook-routes.ts`. User guide: [`wiki/Notifications-And-Approvals.md`](wiki/Notifications-And-Approvals.md).
+
+- **A second server-side outbound channel through the web-tab egress guard (§10b).** Delivery goes through `webviewFetch`, so link-local and cloud-metadata targets are refused at save time and again on the RESOLVED address at connect time; redirects are not followed (`redirect: 'manual'`) and each send is bounded by a 5 s timeout. Loopback and RFC1918 stay allowed on purpose (a self-hosted ntfy is the point), so **Send test** works as a blind reachability probe (status, refused or timed out, never a response body) for whoever may call it. Web tabs already give that caller full LAN reach with bodies, so nothing new is exposed.
+- **The URL is a bearer secret** (anyone holding a Slack or Discord webhook URL can post as it). It lives in `~/.codeman/webhook.json` (0600, tmp+rename), is kept out of `settings.json` (which every logged-in user reads through `GET /api/settings`), is never returned (`GET /api/webhook` gives scheme + host only), and never appears in a log line, a delivery result or an error message.
+- **It carries session data to a third party.** Titles and bodies include session names, tool names and error text, all agent- or user-controlled, so Discord gets `allowed_mentions: { parse: [] }` and Slack's `& < >` are escaped: agent output cannot ping a channel. In multi-user mode all three routes are admin-only and the channel is instance-wide: it receives every user's session events, the same reach an admin's own Web Push has, which means non-admins' session details leave the box at the admin's choice.
 
 ---
 

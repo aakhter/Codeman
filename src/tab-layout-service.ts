@@ -61,6 +61,12 @@ interface TabLayoutServiceDeps {
   readWebviews(): Promise<readonly TabLayoutWebviewRecord[]>;
   broadcast(event: string, data: unknown): void;
   broadcastSessionOrder(change: SessionOrderProjectionChange): void;
+  /**
+   * The synced `spawnedTabsFollowParent` setting, read at every creation. Off (or
+   * absent), a spawned session lands after its parent once and is hand-placed
+   * from then on; on, it keeps following its parent until moved by hand.
+   */
+  childrenFollowParent?(): boolean | Promise<boolean>;
   now?: () => string;
 }
 
@@ -239,6 +245,47 @@ function validateOperationRequest(value: unknown): asserts value is TabLayoutSem
     default:
       throw new TabLayoutValidationError('unknown tab layout operation');
   }
+}
+
+/**
+ * Hand-place a just-created child where normalization put it (right after its
+ * parent), so it stops following. A session that does not follow anything is
+ * left alone.
+ */
+function pinCreatedChild(layout: TabLayout, sessionId: string, metadata: readonly TabRefMetadata[]): TabLayout {
+  const item = metadata.find((fact) => fact.kind === 'session' && fact.id === sessionId);
+  const parentId = item?.parentSessionId;
+  if (!item?.ownerValid || !parentId) return layout;
+  const refs = [...layout.groups.flatMap((group) => group.refs), ...layout.ungrouped];
+  const ref = refs.find((candidate) => candidate.kind === 'session' && candidate.id === sessionId);
+  const parentStored = refs.some((candidate) => candidate.kind === 'session' && candidate.id === parentId);
+  const parentValid = metadata.some((fact) => fact.kind === 'session' && fact.id === parentId && fact.ownerValid);
+  if (!ref || ref.placement === 'manual' || !parentStored || !parentValid) return layout;
+  const pinned = setManualPlacement(layout, ref, true);
+  // Normalization put the child right after its parent's FOLLOWING block, i.e.
+  // ahead of the siblings pinned before it. Step past those (and their
+  // descendants) so a fan-out keeps creation order.
+  const parentOf = new Map<string, string>();
+  for (const fact of metadata) {
+    if (fact.kind === 'session' && fact.ownerValid && fact.parentSessionId) parentOf.set(fact.id, fact.parentSessionId);
+  }
+  const descendsFromParent = (id: string): boolean => {
+    let current = parentOf.get(id);
+    for (let hops = 0; current !== undefined && hops <= parentOf.size; hops++) {
+      if (current === parentId) return true;
+      current = parentOf.get(current);
+    }
+    return false;
+  };
+  const isChild = (candidate: TabRef): boolean => candidate.kind === 'session' && candidate.id === sessionId;
+  const group = pinned.groups.find((candidate) => candidate.refs.some(isChild));
+  const container = group ? group.refs : pinned.ungrouped;
+  const from = container.findIndex(isChild);
+  let to = from;
+  while (to + 1 < container.length && container[to + 1].kind === 'session' && descendsFromParent(container[to + 1].id))
+    to++;
+  if (to === from) return pinned;
+  return moveRef(pinned, { kind: 'session', id: sessionId }, { groupId: group?.id ?? null, index: to }, metadata);
 }
 
 export class TabLayoutService {
@@ -719,6 +766,7 @@ export class TabLayoutService {
     register?: RegisterTabLayoutSession
   ): Promise<TabLayoutSnapshot> {
     return this.withOwner(owner, async () => {
+      const follow = (await this.deps.childrenFollowParent?.()) === true;
       let rollback: (() => void) | void = undefined;
       try {
         rollback = register?.();
@@ -817,6 +865,11 @@ export class TabLayoutService {
             placementSource = undefined;
           }
         }
+
+        // A child placed by its lineage keeps following its parent only while the
+        // synced `spawnedTabsFollowParent` setting is on; otherwise it lands after
+        // its parent once and is pinned `manual` in this same write.
+        if (!targetGroup && eligibleParent && !follow) next = pinCreatedChild(next, sessionId, metadata);
 
         const layout = sameLayout(base, next) ? base : this.prepareCommit(base, next);
         const placements = describeTabPlacements(layout, metadata);

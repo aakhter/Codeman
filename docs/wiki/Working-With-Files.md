@@ -14,9 +14,10 @@ It renders what it can:
 | Kind                     | Behaviour                                                                 |
 | ------------------------ | ------------------------------------------------------------------------- |
 | Text and code            | Plain preview with Lines (line numbers) and Wrap toggles in the header. Long files are truncated in plain preview. |
-| Markdown                 | Rendered by default: headings, tables, code blocks with copy buttons, images and links relative to the file (root-relative ones resolve from the workspace root, as on GitHub). Opened from an attachment card, where the file's folder is unknown, relative images show their alt text and relative links show as plain text. The MD pill in the header flips to source. |
+| Markdown                 | Rendered by default: headings, tables, code blocks with copy buttons, images and links relative to the file (root-relative ones resolve from the workspace root, as on GitHub). Links to another heading of the same file (`[Install](#installation)`) scroll to it, with GitHub's heading names (lower-case, punctuation dropped, repeats numbered `-1`, `-2`), and never leave the page. Opened from an attachment card, where the file's folder is unknown, relative images show their alt text and relative links show as plain text. The MD pill in the header flips to source. |
 | Images                   | Inline.                                                                    |
 | Audio and video          | Inline with a working scrub bar, because range requests are supported.     |
+| Spreadsheets (`.xlsx`)   | Read-only grid, parsed in your browser (never on the server), up to 10 MB. `.xls` and `.ods` are download only. |
 | PDF and Office documents | Converted for preview when a converter is available.                       |
 | Anything else            | Download.                                                                  |
 
@@ -86,9 +87,10 @@ File paths in a session are links. That works in two places:
   render as underlined monospace links.
 
 Clicking one opens it in the preview: images and PDFs render, video and audio play with a
-working scrub bar, documents convert, text shows inline and Markdown renders. The exception is
-a text or Markdown file inside the workspace clicked in the terminal: that opens in the tail
-viewer instead, which follows a file that is still being written.
+working scrub bar, documents convert, text shows inline, Markdown renders and HTML opens as a
+page. The exception is a plain text file (a log, `.txt`, `.json`, code) inside the workspace
+clicked in the terminal: that opens in the tail viewer instead, which follows a file that is
+still being written. A Markdown file always opens rendered, wherever you click it.
 
 Paths **outside** the session's workspace work too, which matters because that is where most
 of an agent's output lands: a screenshot in `/tmp`, a capture in its own scratchpad, a file in
@@ -100,8 +102,24 @@ Outside the workspace the allowlist is images, video, audio, PDF, Office documen
 files, where "text" is the same list the viewer will let you edit: code, config, logs, csv,
 markdown. The reasoning is that a session can already `cat` any of those, so the file suffix
 was never what kept anything secret; the path guard is. Types outside the list (`.svg`,
-`.bmp`) say so rather than failing silently, and `.html` previews as source rather than being
-rendered, so nothing served this way can execute in the page.
+`.bmp`) say so rather than failing silently.
+
+An `.html` file opens as a rendered page by default, with its relative CSS, scripts, images and
+data files. The page is served from a separate `/html-view/...` address in a sandbox with no
+origin of its own, so its scripts can never read Codeman's page, cookies or API.
+
+By the project owner's decision, a rendered page has the same network access as a file you open
+from disk in your browser. It **can** load scripts, styles, fonts, images and media from
+anywhere on the internet (a dashboard that pulls Chart.js from a CDN works), send requests to
+any host, and read the files in its own folder. It **cannot** act as Codeman: it has no access
+to Codeman's page, cookies or API, and no access to any folder other than its own. Since a page
+can send what it can read to any host, open HTML only from sources you trust, as you would on
+your own desktop. The **Page**
+pill in the viewer header switches to the source view (where **Edit** works as for any text
+file), and the viewer falls back to source on its own when a page cannot be rendered: a remote
+(SSH) case, an HTML file inside a hidden folder, or one sitting directly in a broad folder such
+as your home folder or `/tmp` (the page may read the files in its own folder tree, so move it
+into a folder of its own). The raw file routes still serve HTML as a download only.
 
 Text previews are capped at the first 500 lines, fetched as a partial read, so clicking a
 one-gigabyte log does not try to paint one.
@@ -150,18 +168,84 @@ blocks sensitive trees. In multi-user mode a non-admin gets only their own user 
 root, because per-user spaces live inside the home directory and a home-directory root would
 expose everyone.
 
-## Images into a session
+## Files into a session
 
-Paste from the clipboard or drag and drop straight onto the terminal. The image is written
+Paste from the clipboard or drag and drop straight onto the terminal. The file is written
 where the agent can read it and the reference is inserted into your prompt. On a phone, the
-image key in the keyboard bar opens the camera or photo library.
+toolbar's Attach button opens the camera, photo library or files, and puts the path on your
+prompt, where it behaves like text you typed; the Attach button inside the Compose editor
+does the same into the editor. Dropping a video or a document onto the terminal works the
+same way.
 
-HEIC images from an iPhone are converted to JPEG on the way in.
+Images (png, jpg, gif, webp, bmp, heic) are re-encoded on the device before they go up (a GIF
+goes as is, so it keeps its frames), and HEIC from an iPhone is converted to JPEG. Videos (mp4, webm, mov, m4v, ogv) are stored as recorded,
+up to 1 GB each by default (`CODEMAN_MAX_PASTE_VIDEO_BYTES`); they stream to disk rather than
+through server memory. Documents are the office formats (pdf, docx, pptx, xlsx, zip) and the
+text family (txt, md, csv, tsv, json, log, yaml, yml, xml). Each is checked on the way in,
+against its file signature for the binary formats and against its encoding for text (UTF-8,
+no NUL bytes), so a script renamed to `.pdf` is refused while a `.txt` can hold any text at
+all. A text file in another encoding is refused with a message saying it is not UTF-8 (or that
+it is UTF-16, which Excel's "Unicode Text" and Notepad's "Unicode" produce); save it as UTF-8
+(in Excel, "CSV UTF-8") and attach it again. Files with script or page extensions (sh, py,
+js, html) are not accepted, since a prompt upload is something for the agent to read, not
+something for Codeman to store and serve. A document keeps a trimmed copy of its original
+name, letters, digits, dot, dash and underscore with anything else turned into a dash, so
+`Q3 report.pdf` is findable as `paste-<time>-<id>-Q3-report.pdf`; a name made entirely of
+other characters saves without one. Uploads are refused for remote (SSH) sessions, whose
+working directory is on the other host.
+
+Uploads land in `.codeman-uploads/` inside the case, next to the code the agent is working
+on, because that is the one path a local agent and a Docker case (whose workspace is mounted
+at the same absolute path) both see the same way. The first upload writes a `.gitignore` of `*` into `.codeman-uploads/`, so the
+directory ignores itself and your repository never picks the files up, while your own ignore file is
+left alone; a `.gitignore` you already had there is never overwritten. Files older than seven
+days are swept hourly, and the directory goes when the last session of the case is closed (a
+session that is only detached keeps it). Earlier releases wrote to `.claude-images/`; that
+directory is still swept and cleaned up the same way for one release so a case in use before
+the move is not left with stray files.
 
 ## Generated artifacts
 
 When an agent produces a file the UI can show (a chart, a diagram, a document), it can
 surface as an artifact attachment rather than a path you have to go and find.
+
+## Git changes
+
+Agents often leave work uncommitted or unpushed. Turn on **App Settings → Header & Panels →
+Bottom bar → Git status** (per device, off by default) and the right of the bottom bar shows
+the active session's repository: `● 3` uncommitted files, `↑ 2` commits not pushed, `⚠` merge
+conflicts, `? 1` a repository git could not read, `✓` when everything is committed and pushed.
+
+Click it for a draggable window, in the style of the File Viewer:
+
+- **Uncommitted changes**, grouped as staged, not staged, untracked and conflicted, each with a
+  status letter (`M` modified, `A` added, `D` deleted, `R` renamed, `?` new, `U` conflict).
+- **Not pushed**: the commits no remote has. A branch with no upstream says so, and so does one whose
+  upstream does not exist on the remote, because it was never pushed or was deleted there ("Upstream
+  not on remote"), which counts every commit on no remote rather than showing a green tick.
+- Files are grouped under their folders, collapsed until you click a folder (a chain of single-child
+  folders is one row, and the folders you opened stay open when the list refreshes). Turn off
+  **App Settings → Header & Panels → Bottom bar → Git status: group files by folder** for a flat
+  list of full paths instead.
+- **Click a file** to see what changed in it, as a unified diff with added and removed lines
+  coloured. Staged files show index versus last commit, not-staged files show working tree
+  versus index, untracked files show as all additions and deleted files as all removals.
+  **Open file** jumps to the File Viewer; **Back** returns to the list. A binary file shows a
+  note instead, and a diff over 400 KB is cut short.
+- A session folder that holds several projects gets one collapsible section per repository
+  found up to two levels down (up to **Git status: max repositories**, 12 by default; the window says
+  when there are more). A repository git could not read, typically a timeout on a slow network
+  share, is listed with the reason and counted as `? N` in the bottom-bar indicator, never silently
+  left out; the **git timeout** setting raises how long it waits. They all start collapsed (each summary line shows its branch and
+  what is outstanding), and the ones you open stay open when the window refreshes; an unrelated repository above the workspace (a dotfiles repo
+  in your home folder) is ignored.
+
+It is read-only and offline: Codeman never fetches, commits or changes the repository, so
+"behind" is as of your last fetch. It is not shown for Docker or remote (SSH) sessions, and a repository at or inside a Docker case
+workspace is skipped even from a local session (a container can write there, and git would run
+that repository's own configuration on the host). The
+data comes from `GET /api/sessions/:id/git-status` and `GET /api/sessions/:id/git-diff`
+(see the [API reference](https://github.com/Ark0N/Codeman/blob/master/docs/api-reference.md)).
 
 ## Gotchas
 

@@ -117,6 +117,60 @@ describe('selectSession acknowledgement gate', () => {
     });
   });
 
+  describe('with the tile grid open (tile-grid.js)', () => {
+    // A plain stand-in for the grid: the branch reads only `open` and `has(id)`.
+    function withGrid(app: ReturnType<typeof makeApp>, tiled: string[]) {
+      const a = app as Record<string, unknown>;
+      a._tileGrid = { open: true, has: (id: string) => tiled.includes(id) };
+      a._selectTiledSession = vi.fn();
+      a.closeTileGrid = vi.fn();
+      a._connectWs = vi.fn();
+      return a;
+    }
+
+    it('a tiled session goes to its tile, never the main terminal, and the tile decides the ack', async () => {
+      const app = withGrid(makeApp('other'), [SID]);
+      await (app.selectSession as (id: string) => Promise<void>)(SID);
+      expect(app._selectTiledSession).toHaveBeenCalledWith(SID, {});
+      expect(app._cleanupPreviousSession).not.toHaveBeenCalled();
+      expect(app._connectWs).not.toHaveBeenCalled();
+      // The branch returns before the main path's own acknowledgement line.
+      expect(app.markIdleAlertSeen).not.toHaveBeenCalled();
+    });
+
+    it('passes `auto` through, so an app-driven focus stays unacknowledged', async () => {
+      const app = withGrid(makeApp('other'), [SID]);
+      await (app.selectSession as (id: string, o: object) => Promise<void>)(SID, { auto: true });
+      expect(app._selectTiledSession).toHaveBeenCalledWith(SID, { auto: true });
+    });
+
+    it('an `auto` selection of a session that is not tiled leaves the grid open and acknowledges nothing', async () => {
+      const app = withGrid(makeApp('other'), []);
+      await (app.selectSession as (id: string, o: object) => Promise<void>)(SID, { auto: true });
+      expect(app.closeTileGrid).not.toHaveBeenCalled();
+      expect(app._cleanupPreviousSession).not.toHaveBeenCalled();
+      expect(app.markIdleAlertSeen).not.toHaveBeenCalled();
+    });
+
+    it('a user-initiated one leaves the grid (remembered) and switches normally, acknowledging', async () => {
+      const app = withGrid(makeApp('other'), []);
+      await (app.selectSession as (id: string) => Promise<void>)(SID).catch(() => {});
+      expect(app.closeTileGrid).toHaveBeenCalledWith({ keepStored: true, reselect: false });
+      expect(app._cleanupPreviousSession).toHaveBeenCalled();
+      expect(app.markIdleAlertSeen).toHaveBeenCalledWith(SID);
+    });
+
+    it('`leaveTiles` leaves it too, without acknowledging an `auto` pick', async () => {
+      const app = withGrid(makeApp('other'), []);
+      await (app.selectSession as (id: string, o: object) => Promise<void>)(SID, {
+        auto: true,
+        leaveTiles: true,
+      }).catch(() => {});
+      expect(app.closeTileGrid).toHaveBeenCalledTimes(1);
+      expect(app.markIdleAlertSeen).not.toHaveBeenCalled();
+    });
+  });
+
   describe('the call sites the app drives itself', () => {
     // Source guard: these call sites are the reason the flag exists. If a refactor
     // moves or reformats them, fail loudly rather than silently going back to
@@ -126,7 +180,7 @@ describe('selectSession acknowledgement gate', () => {
       ['boot restore, first tab fallback', 'this.selectSession(this.sessionOrder[0], { auto: true });'],
       ['solo window opening its target', 'this.selectSession(this.soloSessionId, { auto: true });'],
       ['fallback after the active session is removed', 'this.selectSession(nextSessionId, { auto: true });'],
-      ['a #session=<id> link from another page', 'this.selectSession(id, { auto: true });'],
+      ['a #session=<id> link from another page', 'this.selectSession(id, { auto: true, leaveTiles: true });'],
     ])('%s passes auto: true', (_label, call) => {
       expect(APP_SOURCE).toContain(call);
     });
@@ -137,12 +191,15 @@ describe('selectSession acknowledgement gate', () => {
       // through the tab-layout projection (COD-306) rather than indexing
       // sessionOrder, so this asserts the UNTAGGED call at each site — pinning
       // the old inline literals is what let this guard go stale.
-      const altNumber = APP_SOURCE.slice(APP_SOURCE.indexOf('_activateVisibleTabNumber(number) {'));
-      expect(altNumber.slice(0, 400)).toContain('this.selectSession(ref.id);');
+      const altNumber = APP_SOURCE.slice(APP_SOURCE.indexOf('const target = this._tabAltRefs()[idx];'));
+      expect(altNumber.slice(0, 400)).toContain('this.selectSession(target.id);');
 
-      for (const method of ['nextSession() {', 'prevSession() {']) {
+      for (const [method, call] of [
+        ['nextSession() {', 'this.selectSession(this.sessionOrder[nextIndex]);'],
+        ['prevSession() {', 'this.selectSession(this.sessionOrder[prevIndex]);'],
+      ]) {
         const body = APP_SOURCE.slice(APP_SOURCE.indexOf(method));
-        expect(body.slice(0, 300)).toMatch(/this\.selectSession\((next|prev)Id\);/);
+        expect(body.slice(0, 500)).toContain(call);
       }
 
       // The negative half: no keyboard path may acquire the auto tag. Every

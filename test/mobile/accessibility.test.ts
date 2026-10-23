@@ -1,7 +1,7 @@
-// Port 3207 - Mobile accessibility tests
+// Ephemeral port - Mobile accessibility tests
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import type { Page, BrowserContext } from 'playwright';
-import { PORTS, SELECTORS, KEYBOARD, MIN_TOUCH_TARGET, WAIT } from './helpers/constants.js';
+import { SELECTORS, KEYBOARD, MIN_TOUCH_TARGET, WAIT } from './helpers/constants.js';
 import { createTestServer, stopTestServer } from './helpers/server.js';
 import { createDevicePage, closeAllBrowsers } from './helpers/browser.js';
 import { showKeyboard, hideKeyboard } from './helpers/keyboard-sim.js';
@@ -14,14 +14,14 @@ import {
 import { REPRESENTATIVE_DEVICES } from './devices.js';
 import type { WebServer } from '../src/web/server.js';
 
-const PORT = PORTS.ACCESSIBILITY;
-const BASE_URL = `http://localhost:${PORT}`;
+let baseUrl: string;
 
 describe('Mobile Accessibility', () => {
   let server: WebServer;
 
   beforeAll(async () => {
-    server = await createTestServer(PORT);
+    server = await createTestServer();
+    baseUrl = `http://localhost:${server.boundPort}`;
   });
 
   afterAll(async () => {
@@ -41,7 +41,7 @@ describe('Mobile Accessibility', () => {
 
     it('all visible interactive elements >= 44x44px on phones', async () => {
       const device = REPRESENTATIVE_DEVICES['standard-phone'];
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
 
@@ -66,7 +66,7 @@ describe('Mobile Accessibility', () => {
 
     it('all visible interactive elements >= 44x44px on tablets', async () => {
       const device = REPRESENTATIVE_DEVICES['standard-tablet'];
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
 
@@ -85,7 +85,7 @@ describe('Mobile Accessibility', () => {
 
     it('keyboard accessory bar buttons meet size requirement', async () => {
       const device = REPRESENTATIVE_DEVICES['standard-phone'];
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
 
@@ -120,7 +120,7 @@ describe('Mobile Accessibility', () => {
     const device = REPRESENTATIVE_DEVICES['standard-phone'];
 
     beforeEach(async () => {
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
     });
@@ -161,7 +161,7 @@ describe('Mobile Accessibility', () => {
     const device = REPRESENTATIVE_DEVICES['standard-phone'];
 
     beforeEach(async () => {
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
     });
@@ -231,7 +231,7 @@ describe('Mobile Accessibility', () => {
     const device = REPRESENTATIVE_DEVICES['standard-phone'];
 
     beforeEach(async () => {
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
     });
@@ -293,7 +293,7 @@ describe('Mobile Accessibility', () => {
     const device = REPRESENTATIVE_DEVICES['standard-phone'];
 
     beforeEach(async () => {
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
     });
@@ -356,7 +356,7 @@ describe('Mobile Accessibility', () => {
     const device = REPRESENTATIVE_DEVICES['standard-phone'];
 
     beforeEach(async () => {
-      const result = await createDevicePage(device, BASE_URL, 'chromium');
+      const result = await createDevicePage(device, baseUrl, 'chromium');
       page = result.page;
       context = result.context;
     });

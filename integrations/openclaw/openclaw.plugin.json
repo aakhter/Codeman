@@ -1,0 +1,76 @@
+{
+  "id": "codeman-assistant",
+  "name": "Codeman Assistant",
+  "description": "Private Telegram and WhatsApp requests and conversation-aware follow-ups to a Codeman assistant. OpenClaw remains the default for new topics.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "baseUrl",
+      "assistantId",
+      "accountId",
+      "allowFrom",
+      "tokenEnv"
+    ],
+    "properties": {
+      "baseUrl": {
+        "type": "string"
+      },
+      "assistantId": {
+        "type": "string"
+      },
+      "accountId": {
+        "type": "string"
+      },
+      "allowFrom": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      },
+      "tokenEnv": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      },
+      "mediaRoot": {
+        "type": "string",
+        "description": "Absolute Telegram inbound download directory; attachment forwarding requires a same-host Codeman connection."
+      },
+      "whatsapp": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "accountId",
+          "allowFrom"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,100}$"
+          },
+          "allowFrom": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^\\+[1-9][0-9]{6,14}$"
+            }
+          },
+          "mediaRoot": {
+            "type": "string",
+            "description": "Absolute WhatsApp inbound download directory; same-host forwarding only."
+          }
+        }
+      },
+      "contextRouting": {
+        "type": "boolean",
+        "description": "Route clear unquoted follow-ups using scoped conversation context; defaults to true. Set false for explicit-only routing."
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  }
+}

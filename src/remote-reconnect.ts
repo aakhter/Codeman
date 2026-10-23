@@ -113,10 +113,12 @@ export interface ReconnectSessionView {
    * Tri-state: `true` = transport drop with the agent still running (safe to
    * reattach); `false` = the remote session is gone (the agent exited cleanly
    * via ctrl-c/ctrl-d/exit and the remote tmux tore down); `undefined` =
-   * unknown/unresolvable. The watcher must NOT revive when the remote session
-   * is gone or unknown — a clean exit must never auto-relaunch the agent.
+   * unknown/unresolvable. A missing session may only be resumed separately
+   * after a verified worker reboot; a clean exit never auto-relaunches an agent.
    */
   remoteAlive: boolean | undefined;
+  /** Verified worker boot change; the owner must use an exact resume command. */
+  workerReboot?: boolean;
 }
 
 /**
@@ -180,10 +182,11 @@ export function decideReconnect(input: DecideReconnectInput): ReconnectAction {
   // exiting destroys it). Reviving is ONLY correct for a transport drop: the
   // agent is still running on the remote, so the durable session must still
   // exist. When it is gone (or status is unknown — probe failed/unreachable),
-  // the agent exited intentionally and must not be auto-relaunched (found
+  // no automatic transport reattach is allowed. A verified worker reboot uses
+  // the separate exact-conversation resume path (COD-486). Found
   // live 2026-08-29: remote omp/opencode ctrl-c/ctrl-d auto-respawned fresh
-  // sessions; only claude's `|| --resume` accidentally masked it).
-  if (session.remoteAlive !== true) return { kind: 'skip', reason: 'remote-gone' };
+  // sessions; only claude's `|| --resume` accidentally masked it.
+  if (session.remoteAlive !== true && !session.workerReboot) return { kind: 'skip', reason: 'remote-gone' };
 
   const s = state ?? freshReconnectState();
 

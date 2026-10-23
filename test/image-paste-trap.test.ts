@@ -40,6 +40,8 @@ interface Harness {
   pastedText: string[];
   /** Image batches handed to _uploadAndInsertImages(), one entry per call. */
   uploadedBatches: Array<Array<{ type: string }>>;
+  /** Messages handed to showToast(), one entry per call. */
+  toasts: string[];
   /** How many trap divs are still attached to the fake body. */
   attachedTraps: () => number;
   runTimers: () => void;
@@ -107,7 +109,8 @@ function loadPasteHarness(): Harness {
   app._uploadAndInsertImages = (files: Array<{ type: string }>) => {
     uploadedBatches.push(Array.from(files));
   };
-  app.showToast = () => {};
+  const toasts: string[] = [];
+  app.showToast = (message: string) => toasts.push(message);
 
   (app._handleImagePaste as () => void).call(app);
 
@@ -126,6 +129,7 @@ function loadPasteHarness(): Harness {
     },
     pastedText,
     uploadedBatches,
+    toasts,
     attachedTraps: () => attached.size,
     runTimers: () => {
       const pending = timers.splice(0, timers.length);
@@ -143,6 +147,7 @@ function loadImageInputApp() {
   app.activeSessionId = 'session-1';
   app.showToast = vi.fn();
   app.sendInput = vi.fn(async () => {});
+  app._sendInputAsync = vi.fn();
   app._normalizeImageForUpload = vi.fn(async (file) => file);
   app._uploadPasteImage = vi.fn(async (_sessionId, file: { path: string }) => file.path);
   return app as Record<string, any>;
@@ -179,6 +184,36 @@ describe('Ctrl+V paste trap', () => {
     expect(h.pastedText).toEqual([]);
   });
 
+  it('a paste mixing an image with a refused file uploads the image and says what it skipped', () => {
+    const h = loadPasteHarness();
+
+    h.firePaste({ text: 'shot.png', images: ['image/png', 'application/x-sh'] });
+
+    expect(h.uploadedBatches).toEqual([[{ type: 'image/png' }]]);
+    expect(h.toasts).toEqual(['1 file skipped: unsupported type']);
+  });
+
+  it('a paste whose only file is refused pastes its text instead, without a toast', () => {
+    const h = loadPasteHarness();
+
+    // Copying from a document can carry both: the text is what the user gets.
+    h.firePaste({ text: 'echo hi', images: ['application/x-sh'] });
+
+    expect(h.pastedText).toEqual(['echo hi']);
+    expect(h.uploadedBatches).toEqual([]);
+    expect(h.toasts).toEqual([]);
+  });
+
+  it('a paste of a refused file and no text says so instead of doing nothing', () => {
+    const h = loadPasteHarness();
+
+    h.firePaste({ images: ['application/x-sh'] });
+
+    expect(h.pastedText).toEqual([]);
+    expect(h.uploadedBatches).toEqual([]);
+    expect(h.toasts).toEqual(['Unsupported file type']);
+  });
+
   it('removes the trap and hands focus back after the paste it accepted', () => {
     const h = loadPasteHarness();
 
@@ -199,6 +234,7 @@ describe('image upload insertion policy', () => {
 
     expect(Array.from(paths)).toEqual(['/tmp/first.png', '/tmp/second.png']);
     expect(app.sendInput).not.toHaveBeenCalled();
+    expect(app._sendInputAsync).not.toHaveBeenCalled();
   });
 
   it('preserves terminal insertion by default', async () => {
@@ -207,6 +243,45 @@ describe('image upload insertion policy', () => {
     const paths = await app._uploadAndInsertImages([{ path: '/tmp/legacy.png' }]);
 
     expect(Array.from(paths)).toEqual(['/tmp/legacy.png']);
-    expect(app.sendInput).toHaveBeenCalledWith('/tmp/legacy.png');
+    // The same delivery sendInput() uses (durable queue, useMux for the POST
+    // fallback), but addressed to the session the batch was uploaded to.
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '/tmp/legacy.png', { useMux: true });
+  });
+
+  it('inserts into the session the upload started in, even after a tab switch mid-upload', async () => {
+    const app = loadImageInputApp();
+    // The user switches tabs while the upload is in flight. sendInput() re-read
+    // activeSessionId after the awaits, so the paths used to land in session-2.
+    app._uploadPasteImage = vi.fn(async (_sessionId, file: { path: string }) => {
+      app.activeSessionId = 'session-2';
+      return file.path;
+    });
+
+    await app._uploadAndInsertImages([{ path: '/tmp/shot.png' }]);
+
+    expect(app._uploadPasteImage).toHaveBeenCalledWith('session-1', { path: '/tmp/shot.png' });
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '/tmp/shot.png', { useMux: true });
+    expect(app.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('uploads to and inserts into an explicitly named session', async () => {
+    const app = loadImageInputApp();
+
+    await app._uploadAndInsertImages([{ path: '/tmp/pane-b.png' }], { sessionId: 'session-b' });
+
+    expect(app._uploadPasteImage).toHaveBeenCalledWith('session-b', { path: '/tmp/pane-b.png' });
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-b', '/tmp/pane-b.png', { useMux: true });
+  });
+
+  it('shows the server reason in the toast when an upload fails', async () => {
+    const app = loadImageInputApp();
+    const reason = 'Prompt uploads are not supported for remote (SSH) sessions';
+    app._uploadPasteImage = vi.fn(async () => {
+      throw new Error(reason);
+    });
+
+    await app._uploadAndInsertImages([{ path: '/tmp/shot.png' }]);
+
+    expect(app.showToast).toHaveBeenCalledWith(`1 failed: ${reason}`, 'error');
   });
 });

@@ -43,8 +43,16 @@ payload return `{ "success": true, "data": {} }`.
 
 > Non-JSON endpoints are exempt from the envelope: `GET /api/sessions/:id/file-raw`,
 > `GET /api/sessions/:id/tail-file` (SSE), `GET /api/download`,
-> `GET /api/screenshots/:name`, `GET /q/:code` (QR redirect), and the
-> `GET /ws/sessions/:id/terminal` WebSocket upgrade.
+> `GET /api/screenshots/:name`, `GET /q/:code` (QR redirect),
+> `GET /html-view/:cap/*` (a [rendered HTML file](#rendered-html-files) and its
+> assets), and the `GET /ws/sessions/:id/terminal` WebSocket upgrade.
+>
+> **Deprecated:** `POST /api/screenshots`, `GET /api/screenshots` and
+> `GET /api/screenshots/:name` keep working but log a one-time warning on first
+> use. They are removed in a later MAJOR, after at least one MINOR release that
+> carries this warning (see `docs/versioning-policy.md`). To hand
+> a file to an agent, use `POST /api/sessions/:id/paste-image`, which saves it into
+> that session's workspace.
 
 > The [agent wait endpoints](#long-polling-agent-wait) use the normal envelope but
 > are the only JSON endpoints that deliberately **hold the connection open**, for up
@@ -66,19 +74,111 @@ The single source of truth is `ErrorStatus` / `httpStatusForErrorCode()` in
 `src/types/api.ts`. Clients should branch on `errorCode` (stable) and may rely on
 the HTTP status.
 
-| `errorCode`        | HTTP | Meaning                                             |
-| ------------------ | ---- | --------------------------------------------------- |
-| `INVALID_INPUT`    | 400  | Malformed request / failed validation               |
-| `UNAUTHORIZED`     | 401  | Authentication required or failed                   |
-| `NOT_FOUND`        | 404  | Resource does not exist                             |
-| `SESSION_BUSY`     | 409  | Session is busy                                     |
-| `CONFLICT`         | 409  | Conflicts with current state (e.g. already running) |
-| `ALREADY_EXISTS`   | 409  | Resource already exists                             |
-| `OPERATION_FAILED` | 422  | Well-formed but could not be completed              |
-| `RATE_LIMITED`     | 429  | Too many requests                                   |
-| `INTERNAL_ERROR`   | 500  | Unexpected server error                             |
+| `errorCode` | HTTP | Meaning |
+|-------------|------|---------|
+| `INVALID_INPUT` | 400 | Malformed request / failed validation |
+| `UNAUTHORIZED` | 401 | Authentication required or failed |
+| `FORBIDDEN` | 403 | Signed in, but not allowed (e.g. a non-admin calling an admin-only route in multi-user mode) |
+| `PASSWORD_CHANGE_REQUIRED` | 403 | Multi-user: the user must change their password before anything else |
+| `NOT_FOUND` | 404 | Resource does not exist |
+| `USER_NOT_FOUND` | 404 | Multi-user: no user with that name |
+| `SESSION_BUSY` | 409 | Session is busy |
+| `CONFLICT` | 409 | Conflicts with current state (e.g. already running) |
+| `ALREADY_EXISTS` | 409 | Resource already exists |
+| `USER_EXISTS` | 409 | Multi-user: a user with that name already exists |
+| `LAST_ADMIN` | 409 | Multi-user: refusing to demote, disable or delete the last enabled admin |
+| `OPERATION_FAILED` | 422 | Well-formed but could not be completed |
+| `RATE_LIMITED` | 429 | Too many requests |
+| `INTERNAL_ERROR` | 500 | Unexpected server error |
 
 Adding a new error code is non-breaking; removing or renaming one is a major change.
+
+## Cron jobs
+
+Saved jobs and their launch history are separate from the legacy `/api/scheduled`
+duration-bounded loops. Use `/api/v1/cron/...` in external clients; `/api/cron/...`
+is the unversioned alias. These routes use the response envelope above; the table
+lists the value inside `data` on success.
+
+| Method | Path | Request body | Response `data` |
+| --- | --- | --- | --- |
+| GET | `/api/v1/cron/jobs` | None | `CronJob[]` |
+| POST | `/api/v1/cron/jobs` | Full job definition below | `{ job: CronJob }` |
+| GET | `/api/v1/cron/jobs/:id` | None | `CronJob` |
+| PUT | `/api/v1/cron/jobs/:id` | Partial job definition | `{ job: CronJob }` |
+| DELETE | `/api/v1/cron/jobs/:id` | None | `{}` |
+| PUT | `/api/v1/cron/jobs/:id/enabled` | `{ enabled: boolean }` | `{ job: CronJob }` |
+| POST | `/api/v1/cron/jobs/:id/run` | None | `{ run: CronJobRun, activeAgents: number }` |
+| GET | `/api/v1/cron/jobs/:id/runs` | None | `CronJobRun[]` |
+| GET | `/api/v1/cron/runs` | None | `CronJobRun[]` |
+
+### Job request fields
+
+The create body requires `name`, `agentType`, `workingDir`, `promptMode`,
+`inputMode`, `scheduleType`, `enabled`, and `concurrencyPolicy`. Additional fields
+are required according to the selected prompt and schedule:
+
+| Field | Type / validation |
+| --- | --- |
+| `name` | String, 1–200 characters |
+| `agentType` | A supported session mode (including `shell`) |
+| `workingDir` | Existing, allowed working-directory path |
+| `launchCommand` | Optional single-line string, at most 2000 characters; for shell jobs |
+| `promptMode` | `inline_text` or `prompt_file_path` |
+| `promptText` | Required for `inline_text`; nonempty single-line string, at most 100000 characters |
+| `promptFilePath` | Required for `prompt_file_path`; absolute path inside `workingDir` to a regular file, at most 1 MiB, read when the job fires |
+| `inputMode` | `paste` or `typed` |
+| `scheduleType` | `once`, `interval`, `daily`, or `weekly` |
+| `runAt` | Required for `once`; positive integer Unix timestamp in milliseconds |
+| `intervalMinutes` | Required for `interval`; integer from 1 to 525600 |
+| `dailyTime` | Required for `daily`; `HH:MM` in server-local time |
+| `weeklyDays` | Required for `weekly`; 1–7 weekday integers, 0 (Sunday) through 6 (Saturday) |
+| `weeklyTime` | Required for `weekly`; `HH:MM` in server-local time |
+| `enabled` | Boolean |
+| `concurrencyPolicy` | `warn_only` or `skip_if_same_agent_running`; scheduled runs only |
+| `autoClosePreviousSession` | Optional boolean, default `true`; ignored for `once` |
+| `notes` | Optional string, at most 2000 characters |
+
+`PUT /jobs/:id` accepts any subset of these fields, then validates the merged job.
+When changing `promptMode` or `scheduleType`, supply the fields the new mode needs.
+`Run Now` works even when the job is disabled, bypasses the scheduled concurrency
+policy, and does not change the schedule. `activeAgents` counts live sessions of
+the same agent type, excluding sessions created by this job.
+For recurring jobs with `autoClosePreviousSession` enabled (the default), `Run Now`
+also closes the previous run's session before launching, even if it is still working.
+
+### Job and run response fields
+
+`CronJob` contains the request fields plus server-maintained `id`, optional
+`owner` (multi-user mode), `createdAt`, `updatedAt`, `lastRunAt`, `nextRunAt`,
+`lastStatus`, `lastDueKey`, and optional `completedOnce`. Times are Unix
+milliseconds; `lastRunAt`, `nextRunAt`, `lastStatus`, and `lastDueKey` can be `null`.
+`lastDueKey` is an opaque internal duplicate-launch guard, not a stable API format.
+
+`CronJobRun` contains `id`, `cronJobId`, nullable `sessionId` and `sessionName`,
+`startedAt`, nullable `finishedAt`, `status`, optional `errorMessage`,
+`triggerType` (`scheduled` or `manual_run_now`), and nullable `createdSessionUrl`.
+Run times are also Unix milliseconds. Status is one of `created`,
+`session_started`, `prompt_sent`, `failed`, or `skipped`.
+
+Prompt delivery continues asynchronously after session launch, so `Run Now` can
+return `session_started` before the prompt is sent. Read run history for subsequent
+updates, but do not assume a terminal status will follow: if the session is closed
+during the readiness wait or the server restarts before delivery, the run can remain
+`session_started` indefinitely with `finishedAt: null`.
+`finishedAt` refers to the launch/prompt-delivery attempt, **not completion
+of the agent's task**; `prompt_sent` does not prove that the task succeeded.
+
+In multi-user mode, list/history endpoints filter to accessible jobs. An unknown
+or inaccessible job returns `NOT_FOUND`. Job creation and updates can return
+`403 FORBIDDEN` for a working directory outside the owner's workspace or a shell /
+launch-command job without the required privilege grant. Invalid definitions or
+working directories return `INVALID_INPUT`; launch/delivery failures are recorded
+on the run, so inspect its `status` and `errorMessage` even after an HTTP success.
+
+See [Cron Jobs](wiki/Cron-Jobs.md) for the UI, scheduling, and prompt-file rules.
+See the [complete cron guide](cron-guide.md) for the `cron:runCreated` and
+`cron:runUpdated` SSE events.
 
 ## Long-polling (agent wait)
 
@@ -110,15 +210,19 @@ auto-retried by several clients (silently doubling the polling load), `504` is w
 a genuine tunnel failure looks like, and `204` cannot carry `waitedMs` / `status` /
 `limitPaused`. Reserve error handling for the four codes in the table below.
 
-**2. `stop` and `blocked` fire only for `claude` sessions.** Both come from Claude
-Code hooks, and no other mode installs them: `shell` runs no agent, and the external
-CLIs (`opencode`, `codex`, `gemini`, `antigravity`, `pi`) render their own TUIs and post
-no hooks. For every non-`claude` mode only `idle`, `working` and `exit` are
-accepted, and of those only `exit` is dependable: see the caveats under
-[Signals](#signals) before building on `idle`. Requesting `stop` or `blocked`
-**explicitly** on such a session is a
-`400`; omitting `until` never fails, the server just drops them from the default set
-and echoes the narrowed set back as `wait.until`. Three more places hooks can go
+**2. `stop` fires only for `claude` (and `deepseek`) sessions, `blocked` also for
+`codex`.** Both come from Claude Code hooks, and no other mode installs them: `shell`
+runs no agent, and the external CLIs render their own TUIs and post no hooks
+(`deepseek`'s status bridge reports the same two, see its own docs). The one exception
+is `blocked` on `codex`: Codeman reads codex's approval, question and trust dialogs off
+its screen and raises `blocked` for them (see [Signals](#signals)). For every other mode
+only `idle`, `working` and `exit` are accepted. `exit` is dependable everywhere; `idle` and
+`working` are screen-checked for `opencode`, `gemini`, `pi`, `omp` and `antigravity` (as for `claude` and
+`codex`) and not guaranteed elsewhere: see the caveats under [Signals](#signals) before
+building on `idle`.
+Requesting a signal the session can never emit **explicitly** is a `400` (`stop` on
+`codex` included); omitting `until` never fails, the server just drops them from the
+default set and echoes the narrowed set back as `wait.until`. Three more places hooks can go
 missing even in `claude` mode: a **Docker case** needs
 `CODEMAN_DOCKER_BRIDGE_HOOKS=1`, since a container cannot reach a loopback-bound
 Codeman (without it, only `idle` / `working` / `exit` work); a **remote-SSH
@@ -142,10 +246,10 @@ contract is a **marker unique to each call** (`MARK="DONE_$RANDOM"`, send
 
 | Signal | Source | Actually fires for |
 |--------|--------|--------------------|
-| `idle` | the session's own `idle` event | `claude`: yes, on ❯-prompt detection after activity. `shell`: **once only**, ~500 ms after start, and never again. External CLIs: not guaranteed (they render their own TUIs and readiness is output stabilization) |
-| `working` | the session's own `working` event | `claude` only in practice (spinner and work-keyword detection are Claude output formats) |
-| `stop` | the Claude Code `stop` hook, the definitive end-of-turn signal | `claude` only |
-| `blocked` | a `permission_prompt` or `elicitation_dialog` hook | `claude` only, and rarer than it looks: see below |
+| `idle` | the session's own `idle` event | `claude`: yes, on ❯-prompt detection after activity. `codex`, `opencode`, `gemini`, `pi`, `omp`, `antigravity`: yes, the same screen check through the prompt marker and working line each declares (`capabilities.workDetect`); an `antigravity` session waiting on a shell-command approval stays `working` until it is answered. `shell`: **once only**, ~500 ms after start, and never again. Other external CLIs (`grok`, `deepseek`): not guaranteed (they render their own TUIs and readiness is output stabilization) |
+| `working` | the session's own `working` event | `claude`, plus `codex`, `opencode`, `gemini`, `pi`, `omp` and `antigravity` through the working line each declares. Elsewhere not guaranteed: it rests on generic output heuristics such as a braille spinner glyph |
+| `stop` | the Claude Code `stop` hook, the definitive end-of-turn signal | `claude` (and `deepseek`) only |
+| `blocked` | a `permission_prompt` or `elicitation_dialog` hook; on `codex`, a dialog read off its screen | `claude`, `deepseek` and `codex`; on `claude` rarer than it looks: see below |
 | `exit` | no process is behind the session | every mode |
 
 `stop` is the signal to orchestrate on where it exists; `idle` is a heuristic
@@ -155,9 +259,9 @@ the wait promptly instead of burning the caller's whole timeout on something tha
 can no longer happen). On a `claude` worker, prefer an explicit `until=stop,exit`
 once the session is up: the default set's `idle` also resolves on a spinner pause,
 and on a fresh session the **startup** `idle` (emitted when the CLI first comes up)
-can land inside your first wait window and report a turn that never ran. Measured:
-a session parked on the trust dialog emits no *further* `idle`, so it is the
-startup transition, not the dialog, that produces the false success below.
+can land inside your first wait window and report a turn that never ran. That
+startup `idle` is held while Claude's workspace-trust dialog is on screen (inside
+the 90 s startup window), because the dialog's own ❯ is not a composer.
 
 ⚠️ **`exit` means "nothing is running", which includes "not started yet".** The
 server answers from `pid === null` plus a mux-layer pane-death probe, and that
@@ -182,6 +286,17 @@ asking the user a question. So `until=stop,blocked,exit` is a reasonable belt on
 long turn, but a worker that never comes back is far more likely to be working than
 blocked, and polling `blocked` alone will sit at its timeout.
 
+**`blocked` on `codex` is read off the screen**, because codex has no hooks and is
+launched with its approvals on unless `codexConfig.dangerouslyBypassApprovals` is set.
+A codex pane showing a command, edit or network approval, a question (`request_user_input`)
+or the startup trust prompt raises `blocked` (plus the red alert, push and webhook a Claude
+`permission_prompt` raises, alert-only: answer it in the terminal), and the session reads
+`idle` while it is up. Unlike a hook, this is a level the server keeps reading, so a wait
+for `blocked` that arrives while the dialog is already up answers at once
+(`immediate: true`); a wait that did not ask for `blocked` is unaffected. It clears 2 to 4 s
+after the dialog leaves the screen. `stop` stays a `400` on codex: nothing on a screen says a
+turn ended.
+
 ⚠️ **On a `shell` session, only `exit` and marker-matching are dependable.** A shell
 session emits its one `idle` at startup and then stays `status: "idle"` forever,
 whatever the pane is doing, so it never emits a *transition*. Since send-and-wait
@@ -195,11 +310,11 @@ instead. The same caution applies to the external CLIs.
 Nothing here reports "the agent is ready for a prompt", and no combination of
 `until`/`fresh` synthesizes one. A freshly created session reads as `exit` (above),
 and a `claude` worker in a brand-new case comes up on the CLI's **trust dialog**,
-which contains a ❯ prompt of its own. Send-and-wait posted at that moment types the
-prompt into the dialog, where the `\r` never gets past it, while the session's
-startup `idle` lands inside the wait window: the wait resolves on `idle` in a
-couple of seconds with `timedOut: false`, which looks exactly like a completed
-turn.
+which contains a ❯ of its own. A prompt posted at that moment is typed into the
+dialog, and its `\r` confirms the highlighted `No, exit`: the CLI quits and the
+pane dies, so send-and-wait resolves on `exit`. Codeman holds the session's `idle`
+while the dialog is on screen, so waiting for `idle` before prompting no longer
+clears too early, but that still does not make `idle` a readiness signal.
 
 The reliable sequence is: poll `GET /api/v1/sessions/:id` until `.data.pid` is
 non-null, then `wait-output` for the composer's own marker (`bypass`, the status
@@ -425,7 +540,7 @@ read the timeout as "the worker is wedged" and kill a session that was working f
 
 | `errorCode` | HTTP | When |
 |-------------|------|------|
-| `INVALID_INPUT` | 400 | unknown `until` / `wait` token; `stop` or `blocked` requested explicitly on a mode that installs no hooks (the message names the mode); `regex=` on `/wait-output`; `match` outside 1 to 200 chars; a non-numeric `timeout` |
+| `INVALID_INPUT` | 400 | unknown `until` / `wait` token; `stop` or `blocked` requested explicitly on a mode that can never emit it (`stop` without hooks, `blocked` without hooks or a screen-read dialog; the message names the mode); `regex=` on `/wait-output`; `match` outside 1 to 200 chars; a non-numeric `timeout` |
 | `NOT_FOUND` | 404 | no such session, or one this caller does not own |
 | `SESSION_BUSY` | 409 | this session's waiter cap is full |
 | `RATE_LIMITED` | 429 | a per-owner or process-wide waiter cap is full. Retry later; the session you named is not the problem |
@@ -444,6 +559,127 @@ The per-session cap is a **combined** budget: signal waiters and output waiters
 count against the same 16, not 16 of each. An abandoned request no longer holds its
 slot, because the routes release the waiter when the client disconnects, but a
 client that opens many concurrent waits against one session will still hit the cap.
+
+## Terminal capture (`GET /api/v1/sessions/:id/terminal`)
+
+What a session's terminal shows, for a client to replay: `data.terminalBuffer`,
+with `source` (`mux-visible`, `mux-full-history` or `history`), `truncated`,
+`truncationReason`, `fullSize`, `historyLinesCut` (a `lines=` bound left older
+lines in tmux, so the remainder is more than `fullSize - retainedBytes`), and
+`captureCols`/`captureRows` when the pane's geometry was read. `paneHistoryLines`
+(present when the body is a pane capture whose geometry was read, like
+`captureCols`/`captureRows`, and absent for a remote SSH session, whose local pane
+cannot see the remote history) is the number of scrollback rows tmux holds above the
+visible frame, which is the most a `full=1` request can add. `truncated` describes
+the byte stream instead: for a pane with `paneHistoryLines: 0` (a fullscreen CLI in
+the alternate screen) the bytes a `tail` cut dropped are earlier repaints that no
+request returns. The capture runs synchronous tmux calls on the server; the
+`Server-Timing` header reports `capture`, `prepare` and `total`.
+
+| Query | Meaning |
+|---|---|
+| `full=1` | tmux's scrollback, not only the visible frame (`source: 'mux-full-history'`), ending with a relative cursor move back to the pane's caret. |
+| `tail=<bytes>` | Keep the newest `<bytes>` of the result (`truncationReason: 'tail'` when it cut). |
+| `lines=<n>` | With `full=1` only: read at most `<n>` lines of tmux history above the visible frame. An integer of at least 1, clamped to the configured history limit; absent or malformed, the whole limit (100,000 lines by default), as before. When a bound below the configured limit left older lines in tmux (its `history_size` is deeper), `truncated` is true with `truncationReason: 'tail'`; a byte cap still reports `'capped'`. Without it a full capture reads all of that history before `tail` cuts it, so a client that keeps a fixed number of lines (the tile grid sends its xterm's scrollback plus its rows) should send it. |
+| `alt=recording` | With `full=1` only: if the pane is in the alternate screen (a nested tmux, where tmux keeps no history, or any full-screen app such as vim or less while it is open), answer with the visible frame over the byte recording instead (`source: 'mux-visible'`, `tail` applied as without `full=1`). Shells' automatic loads send it. |
+
+## The `codeman agent` CLI (client over these endpoints)
+
+`codeman agent ls|spawn|send|wait|read|interrupt|rm` (`src/cli-agent.ts`) is the command-line client for the endpoints above, for agents the skill does not reach (a pi or shell session, a machine without `jq`). It adds no route: `spawn` is `POST /api/v1/quick-start` (+ `wait-output` on the mode's `capabilities.composerReadyMark` from the CLI registry, where it declares one), `send` is `POST …/input` with `clientId`+`seq` (and `wait`/`waitTimeout` for `--wait` / `--until <signals>`; `delivered:false` without `duplicate` and `wait.ended` both exit 3 — the CLI never reports a dead worker as done), `wait` is `GET …/wait` (`--until`) or `GET …/wait-output` (`--match`, `from=buffer` by default), `read` is `GET …/last-response` or `GET …/terminal?tail=`, `interrupt` is `POST …/input` with a bare `\u001b`, `rm` is `DELETE …/sessions/:id`. A fire-and-forget `send` to a sleeping wake-on-LAN host reads the route's `buffered` (own line, exit 0) and `dropped` (exit 1: the chunk is gone). An id may be the 8-character form `ls` prints, resolved through `GET /api/v1/sessions`; anything shorter refuses before any request, the same floor as `PARENT_SESSION_ID_MIN_PREFIX`. Every call carries `X-Codeman-Parent-Session`; only `spawn`'s quick-start carries `X-Codeman-Agent-Origin: codeman-agent-cli` (the agent-scratch label must never reach a request that cannot create the case directory). Basic auth comes from `CODEMAN_PASSWORD` or the data dir's `.env`. Server-side error codes are shown verbatim (`INVALID_INPUT: until=stop …` on a hook-less mode is not hidden); exit codes are `0` ok, `1` error, `2` timeout, `3` the session exited, `4` refused by a client-side guard. See the README section "`codeman agent`" for the guards and `test/cli-agent.test.ts` for the pinned behaviour.
+
+`codeman mcp` (`src/mcp-server.ts`) is a Model Context Protocol server on stdio over the same endpoints, for MCP clients: `list_sessions` (`GET /api/v1/sessions`), `start_session` (`POST /api/v1/quick-start` with `X-Codeman-Agent-Origin: codeman-mcp`, then `wait-output` on the mode's ready mark), `send_prompt` (`POST …/input` with `wait`/`waitTimeout`), `wait_for_session` (`GET …/wait` or `…/wait-output`), `read_output` (`GET …/last-response` or `…/terminal?tail=`), `interrupt_session` and `delete_session`. It adds no route. The URL comes from `CODEMAN_API_URL` or `--url`, never a guess; prompting, interrupting and deleting are limited to sessions the process started (or the calling session's own children) unless it runs with `--allow-any-session`. See the README section "MCP server" and `test/mcp-server.test.ts`.
+
+## Prompt uploads (`POST /api/v1/sessions/:id/paste-image`)
+
+A `multipart/form-data` body with one `image` part. The file is written into the
+session's workspace as `<workingDir>/.codeman-uploads/paste-<ms>-<hex>.<ext>`, and
+`data` carries `path` and `filename` for the client to type the path into the
+prompt. The folder is Codeman's own: hidden, created on first use with a
+`.gitignore` containing `*` (written once, never over a file already there), and
+cleaned up the way pasted images always were: `paste-*` files older than 7 days
+go in an hourly sweep, and the folder goes when the last session of that
+workspace is killed. Uploads made before this release sit in `.claude-images/`;
+that folder receives nothing new, and is swept and removed the same way for one
+release. A remote (SSH) session answers 400, since the file would land on the
+Codeman host under a path the remote agent cannot read. A Docker session of an
+owned case is fine, its workspace is bind-mounted at the same absolute path; an
+adopted container (`owned: false`) mounts nothing, so its agent can open the file
+only if the container itself exposes that host path.
+
+The optional query flag `?kind=video` selects a second path for a camera-roll
+video: the file streams to disk instead of being buffered, under a far larger
+per-file cap (`MAX_PASTE_VIDEO_BYTES`, 1 GB by default, env
+`CODEMAN_MAX_PASTE_VIDEO_BYTES`), and only video container types are accepted
+(mp4, webm, mov, m4v, ogv, single-sourced from the file viewer's playable set).
+The container is checked from the first bytes as
+the body arrives; a file whose bytes do not match its declared type is unlinked
+and answered 415, one over the cap is unlinked and answered 413, and a transfer
+that dies midway leaves nothing behind. Because one video can be 1 GB,
+`?kind=video` draws on its own rate limit, 3 uploads per minute per (IP, session),
+beside the 30 per minute the image path keeps; without the flag the route is
+byte-identical to the image-only version, same 50 MB image cap and same 30/min
+bucket. The response shape is unchanged (`path`, `filename`).
+
+Beyond images, the route also accepts documents a user hands an agent to read,
+admitted by the name's extension (the Content-Type a phone attaches to a `.md`
+or `.csv` is unreliable): the office formats `.pdf`, `.docx`, `.pptx`, `.xlsx`,
+`.zip` and the text family `.txt`, `.md`, `.csv`, `.tsv`, `.json`, `.log`,
+`.yaml`, `.yml`, `.xml`. A document is buffered under the same 50 MB image cap,
+its bytes are checked against the extension (a magic-number signature, or UTF-8
+with no NUL byte for text) and answered 415 on a mismatch (for text, an `error`
+saying the file is not UTF-8 text, or UTF-16 text when it opens with a UTF-16
+byte order mark, and to save it as UTF-8), and it is saved under
+a sanitized stem of its name, so `Q3 report.pdf` is findable as
+`paste-<ms>-<hex>-Q3-report.pdf`. A named type that is neither an image nor a
+document (a script, an HTML page, a `.sh`) is refused 400 `Unsupported file
+type`. That refusal is a scope choice, not a security property: `file-raw`
+already serves non-media text inert (`text/plain`, `nosniff`), so this just
+keeps the server from storing what it would serve or an agent could run, and
+html and svg are the ones deliberately kept out.
+
+## Rendered HTML files
+
+An `.html`/`.htm` file renders as a page in a sandbox, in two steps
+(`src/web/routes/html-view-routes.ts`).
+
+**`POST /api/v1/sessions/:id/html-view`** with `{ "path": "<file>" }` (absolute,
+relative to the session's workspace, or `~/` for this host's home, which a Docker
+case refuses with `400` since its `~` is the container's; a non-empty string of at most 4096 characters
+without NUL or line breaks, and no other keys) answers `data: { url }`, a
+`/html-view/<cap>/<file>` URL. The capability grants GET access to the files under
+that file's own folder, so a page's relative CSS, scripts, images and data files
+resolve. It is held in memory only (a restart invalidates it), has a rolling TTL
+(`CODEMAN_WEBVIEW_CAPABILITY_TTL_MS`, default 12 h), is reused for the same folder,
+and is revoked on logout, admin logout and user deletion. Refusals:
+
+- `400`: an invalid body, a remote (SSH) session, or a file that is not HTML (the
+  symlink-resolved name counts too);
+- `404`: no such file;
+- `403`: a file outside the workspace that the attachment guard blocks (a blocked
+  tree, or `attachmentConfineToWorkspace` on), a file in a hidden directory (inside
+  the workspace, one below the workspace root), or a file directly in a folder too
+  broad to serve recursively: `/`, the home folder, `/tmp`, `/var/tmp`, `$TMPDIR`,
+  the cases and user-space roots, a drive's mount point (`/mnt/d`), or any folder
+  above one of those (`/home`, `/Users`).
+
+**`GET /html-view/:cap/*`** serves the page and its assets. It needs no cookie: the
+capability in the path is the credential, because the page runs in an opaque origin
+that never sends one. It is not under `/api`, so it has no `/api/v1` alias and no
+envelope. `GET` and `HEAD` only; a CORS preflight on a live capability is answered
+with `Access-Control-Allow-Methods: GET, HEAD`. What it serves: files under the
+capability's folder whose path (requested and symlink-resolved) has no dot segment
+and whose extension is on an asset allowlist (html, css, js/mjs, json, map, txt,
+csv, md, svg and common image, font, wasm, audio, video and PDF types), never
+outside the folder, never a blocked tree, and, for a folder outside the workspace,
+not while `attachmentConfineToWorkspace` is on. Every response carries
+`Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads`
+as its whole policy (never `allow-same-origin`, so the page cannot read Codeman's
+document, cookies or API, even opened as a top-level tab; and no fetch directive, so
+by the owner's decision the page may load from and send requests to any host), `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Access-Control-Allow-Origin: *`. A `Range`
+request is answered with `206` + `Content-Range` (`416` past the end), like
+`file-raw`. Every refusal is a plain-text `404 Not found`; with a password set, an
+unknown or revoked capability is the auth hook's `401` instead.
 
 ## Session lineage (`parentSessionId`)
 
@@ -470,18 +706,93 @@ also pure decoration: it confers no permission, and a child is unaffected by its
 parent exiting. It appears on session state as `parentSessionId` (absent when
 unresolved) and survives a server restart.
 
+## Session model (`displayModel`)
+
+Session state (`GET /api/v1/sessions`, the `session:updated` event) carries the model a
+session runs as far as the server knows it, for the web UI's session headers:
+
+```json
+"displayModel": { "model": "qwen3.8-27b", "source": "screen" }
+```
+
+`source` is where it came from, strongest first:
+
+| `source`          | Meaning                                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `custom-endpoint` | The session is pointed at a Custom Model Endpoint Profile; its `modelId` answers, whatever the CLI prints. |
+| `statusline`      | Claude's statusLine exporter reported it (`model.display_name`); follows an in-session `/model`.          |
+| `screen`          | Read off the CLI's own footer (`capabilities.modelDetect`, today dsh and codex); follows a switch.      |
+| `config`          | What the CLI's own config pins for the session (`capabilities.modelDetect.configResolver`, today dsh-TUI's route), while its screen names none. |
+| `launch`          | What the session was launched with (`--model`, the app-wide default, `<cli>Config.model`); nothing has reported since. |
+
+Between `statusline` and `screen` the newest report wins. The field is absent when no
+model is known (a shell, a CLI that reports none and was launched without one). `model`
+is display text from a pane or a CLI report: control characters are stripped and it is at
+most 64 characters, but treat it as untrusted text. A `statusline` or `screen` value is
+persisted and restored after a server restart until the next report replaces it; a
+`config` value is read again at every pane start, attach and relaunch instead.
+
+## Prompt cache (`promptCache`)
+
+Claude-mode session state (`GET /api/v1/sessions`) carries the main conversation's
+prompt-cache state as Claude Code last reported it on the statusline (v2.1.251+), with a
+change-only `session:promptCache` event (`{ sessionId, ...promptCache }`):
+
+```json
+"promptCache": { "warm": true, "ttl": "1h", "expiresAt": 1791653039000, "recacheTokensIfCold": 45000, "misses": 2, "expectedRebuilds": 1, "hitRatio": 0.91, "lastMissCauses": ["ttl_expired_1h"], "compactedAt": 1791649439872 }
+```
+
+| Field                 | Meaning                                                                                                   |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `warm`                | Whether the cached prefix is still within its TTL. The only field always present.                         |
+| `ttl`                 | `5m` or `1h`; absent when Claude reported neither.                                                         |
+| `expiresAt`           | Epoch MILLISECONDS when the prefix goes cold (the statusline reports seconds). Absent once cold.           |
+| `recacheTokensIfCold` | Tokens the next request re-writes if the cache has gone cold. Absent right after a compaction.             |
+| `misses`              | Requests that re-processed content the cache already held.                                                |
+| `expectedRebuilds`    | Cache rebuilds that followed a compaction or a clearing of old tool results.                               |
+| `hitRatio`            | Cache read tokens as a fraction of all input tokens this session, 0 to 1.                                  |
+| `lastMissCauses`      | Claude Code's diagnosis of the last miss (e.g. `ttl_expired_1h`, `tools_changed`); untrusted text.         |
+| `compactedAt`         | Epoch MILLISECONDS when the context was compacted or its old tool results cleared: the first warm report without `recacheTokensIfCold` after one that had it. Derived, not reported; dropped at the next request. |
+
+The whole object is absent until the first report, and restored after a server restart
+(so the readout is not blank until the pane's next render) rather than recomputed; a value
+whose `expiresAt` has passed reads as cold. The statusline re-runs when a warm cache hits
+`expiresAt`, so the cold flip arrives on its own. A post-`/clear` conversation switch drops
+it. Shown in Session Options → Respawn and, for sessions without a statusline of their own,
+as a `cache:until HH:MM` / `cache:cold` group in the terminal footer.
+
+Beside it, `statusLineExporter` says whether this launch carries the statusline exporter
+that sends the report, decided when the pane starts: `injected` (it does), `collection-off`
+(Plan Usage was off at launch), `workspace-statusline` (the workspace's
+`.claude/settings.local.json` sets its own `statusLine`, which Codeman never replaces) or
+`remote` (remote and Docker sessions). Absent when unknown.
+
+## Placing a new session in a tab group (`tabGroupId`)
+
+`POST /api/v1/sessions` and `POST /api/v1/quick-start` accept an optional
+`tabGroupId` (1 to 100 characters): the id of a group in the caller's tab layout
+(`GET /api/v1/tab-layout`). The session is created as usual and placed at the end
+of that group in the same layout write; the response then also carries the
+committed layout as `tabLayout`. An id the caller's layout does not contain (a
+deleted group, another user's group) is ignored and the session lands where it
+otherwise would, never a `400`. A malformed value (`null`, an empty string, a
+non-string) is a `400 INVALID_INPUT`. Requests without the field are unchanged.
+
 ## Approvals Inbox
 
 Cross-session queue of prompts waiting on a human (permission dialogs,
-AskUserQuestion questions, idle prompts). Claude-mode sessions only; items are
-in-memory (a server restart drops them; the next prompt re-fires the hook).
+AskUserQuestion questions, idle prompts). Answerable items come from Claude-mode
+sessions only; DeepSeek Harness (its status bridge) and Codex (dialogs read off its
+screen) open **alert-only** items with `answerInTerminal: true`. Items are
+in-memory (a server restart drops them; the next prompt re-fires the hook, and a
+codex dialog still on screen is read again after the pane re-attaches).
 Design: [`approvals-inbox-plan.md`](approvals-inbox-plan.md).
 
 - `GET /api/v1/approvals` → `{ approvals: ApprovalItem[] }`, oldest first,
   ownership-scoped in multi-user mode. `ApprovalItem`: `{ id, sessionId,
   sessionName, kind: 'permission'|'question'|'idle', createdAt, toolName?,
   toolSummary?, message?, cwd?, context?, options?: {n, label}[],
-  acknowledgedAt? }`. `context` is the ANSI-stripped visible pane frame;
+  acknowledgedAt?, answerInTerminal? }`. `context` is the ANSI-stripped visible pane frame;
   `options` is present only when the dialog's numbered choices parsed
   confidently; `acknowledgedAt` marks an item a human has already looked at
   (see `/viewed` below) and tells clients not to re-arm its tab alert. Listing
@@ -495,8 +806,9 @@ Design: [`approvals-inbox-plan.md`](approvals-inbox-plan.md).
   (sends the digit; accepted only when `n` is among the item's parsed
   `options`), or `{ action: 'text', text }` (idle prompts only; submits the
   line as a prompt). `404 NOT_FOUND` when the item is no longer pending,
-  `409 CONFLICT` when the dialog left the screen or another actor answered
-  first, `422 OPERATION_FAILED` when the session refused input.
+  `400 INVALID_INPUT` for an `answerInTerminal` item (`<CLI> approvals must be
+  answered in the terminal`), `409 CONFLICT` when the dialog left the screen or
+  another actor answered first, `422 OPERATION_FAILED` when the session refused input.
 - `POST /api/v1/approvals/:id/dismiss` removes the item without keystrokes.
 - `POST /api/v1/approvals/session/:sessionId/viewed` → `{ sessionId,
   acknowledged: itemId | null }`. Marks the session's pending **idle** item as
@@ -710,6 +1022,110 @@ normal `caseName`/`mode`/etc. body)
   jarring than a full relaunch, and folding it into the one-shot path is
   separate work — see `docs/custom-model-endpoints-plan.md`).
 
+## Creating a case in a custom folder
+
+`POST /api/cases` takes `{ name, description?, path? }`. Without `path` it creates `<cases dir>/<name>` as always. With `path` (absolute, or starting with `~`) the case folder is created at that exact path instead, scaffolded the same way (`CLAUDE.md`, `src/`, `.claude/settings.local.json`), and registered in the linked-cases registry, so it lists, resolves and deletes like a linked case (deleting unlinks; it never removes files). Response: `{ case: { name, path } }`, where `path` is the symlink-resolved folder.
+
+The target is judged before anything is written:
+
+- It must be absolute with no `..` and none of the shell metacharacters a session working directory is rejected for (spaces are fine). `400 INVALID_INPUT` otherwise.
+- It must not be a system directory (`/etc`, `/usr`, `/proc`, ...), the home folder itself, Codeman's own data folder, or a credential/config tree (`~/.ssh`, `~/.aws`, `~/.claude`, ...). Judged on the path as typed and on its symlink-resolved form, against both the given and the symlink-resolved roots. `400`.
+- It must not be the cases directory (the caller's own or the shared one) or a direct child of it, since those are what `GET /api/cases` lists as local cases: a case there is a plain create without `path`. A folder further down is allowed. `400`.
+- Its parent must already exist (one folder is created, never a chain): `404 NOT_FOUND`. A parent that does not answer (an unreachable network mount) or cannot be read is `422 OPERATION_FAILED`, checked through the bounded path probe before anything else touches it.
+- The folder must not exist, or must be an **empty** directory; a folder with contents is Link Existing's job: `409 ALREADY_EXISTS`. A symlink or a plain file at the target is `400`.
+- `409 ALREADY_EXISTS` also for a case name already in use (in the cases dir or the registry) and for a folder that is already a case.
+
+Admin only in multi-user mode (`403`), like `POST /api/cases/link`: it writes outside the cases directory and into the shared, ownerless registry. If anything fails after the first write, what this call created is removed (the whole folder if it created it, otherwise only the scaffold inside the empty folder you picked) and the response is `500`.
+
+## Git status
+
+`GET /api/sessions/:id/git-status` is what the bottom-bar Git indicator and its panel read (Settings → Header & Panels → Bottom bar, per-device, default off). It reports what the session's workspace has not committed or pushed. **Read-only and offline:** it never fetches, pulls, commits or writes (it runs `git status` with `--no-optional-locks`, so it does not even refresh the index), which is why `behind` is as of the last `git fetch`. The session is resolved like every session route (ownership via `findSessionOrFail`; another user's session is `404`). A repository whose root is, or is inside, a Docker case workspace is dropped (from the walk-up, the scan below a folder, and the diff route): a container can write there, and a repository's own clean filter or signature program would run on the host. When a branch's upstream does not exist on the remote (deleted and pruned, or never pushed, as after cloning an empty repository and committing), `upstreamGone` is `true` and the unpushed list falls back to commits on no remote-tracking ref at all.
+
+`GET /api/sessions/:id/git-diff?repo=<repoRoot>&path=<path>&kind=staged|unstaged|untracked|conflicted` returns the unified diff of one file the panel lists (`{ diff, truncated, binary }`; staged is index vs HEAD, unstaged is working tree vs index, untracked is the whole file as additions). It is what opens when you click a file in the Git panel. `repo` and `path` are matched against the current status rather than trusted, so anything the status does not list is `404`. Read-only: it passes `--no-ext-diff --no-textconv` (no external diff or textconv driver runs), but a repository's clean filters still run, as they do for any `git diff`, which is why a repository a container can write to is never inspected (below). Capped at 400 KB, and refused (`400`) for remote and Docker sessions; a repository at or inside a Docker case workspace is not in the status, so it is `404` here.
+
+**Which repositories.** git finds a repository by walking *up* from the session's working directory, so:
+
+- Inside a repository (or at its root): that one repository, whole (a subfolder reports its enclosing repo, `path` says where it is, e.g. `../..`). A nested repo below it is just an untracked folder to the outer one and is not scanned; start the session inside it to see it.
+- **Not** inside one (a folder that holds several projects): every repository found up to **two levels down**, nearest and alphabetical first, at most `maxRepos` of them (default 12, 1 to 50; `reposTruncated` says when there were more and `repoLimit` is the limit that was applied). Dot-folders, `node_modules`, `dist`, `build`, `target`, `vendor`, `venv` and `__pycache__` are skipped, symlinks are never followed, and a repository's own contents are not searched. The list of repositories is re-scanned at most every 30 s; each repository's status is cached for 4 s.
+- A repository that merely sits **above** the workspace and is the home folder or higher (a dotfiles repo in `$HOME`, or `/`) is ignored: its dirty files are not this session's work. A workspace that *is* that repository's root is not ignored.
+- A worktree (whose `.git` is a file) counts as a repository. A submodule's own uncommitted files are not reported, only a changed submodule pointer.
+
+Both routes accept two optional query parameters, which the UI sends from its per-device settings and the server clamps again: `maxRepos` (1 to 50, default 12) and `timeout` (seconds one git command may run, 5 to 120, default 30). An empty or non-numeric value means the default. A repository whose `git status` fails (typically a timeout on a slow network share) is **kept in `repos[]`** with `status.state: 'error'` and the reason in `status.error`, not dropped, so it is visible that something is not being reported.
+
+`data` is `{ state, repos, reposTruncated, repoLimit, checkedAt }` (`repoLimit` in the folder-of-projects case only):
+
+- `state: 'ok'`: `repos[]`, each `{ name, path, status }` where `name` is the repository folder's name, `path` its root relative to the working directory, and `status` is:
+  `branch` (null when `detached`), `upstream`, `ahead`, `behind`, `hasRemote`, `counts` (`staged`, `unstaged`, `untracked`, `conflicted`, `uncommitted` = distinct paths, `stashes`), `files[]` (`path` relative to `repoRoot`, `origPath` for a rename, `index` and `worktree` status letters, `kind`: `staged` \| `unstaged` \| `untracked` \| `conflicted`; a file that is staged *and* modified again appears once per kind), `filesTruncated`, `unpushedCount` (exact) and `unpushed[]` (newest first: `hash`, `author`, `time` in epoch seconds, `subject`), `repoRoot`, `checkedAt`.
+- `state: 'not-a-repo'`: no repository here, above (that counts) or within two levels below.
+- `state: 'unsupported'` with `reason: 'remote' | 'docker'`: those sessions are never inspected (a Docker workspace is writable from inside its sandbox, and git here would run on the host).
+- `state: 'error'` with a short `error` (git missing, timed out, or git's first stderr line with any `user:token@` credentials redacted).
+
+Lists are capped (300 files and 50 commits per repository) while the counts stay exact. A branch with no upstream reports the commits no remote has (`HEAD --not --remotes`); a repository with no remote reports `unpushedCount: 0`, since there is nothing to push to. Concurrent polls of one folder share a single git invocation; `?fresh=1` (what the panel's Refresh button and opening the panel send) skips the short-lived caches, though it still joins a computation already running.
+
+## Git worktrees of a case
+
+A local case whose folder is the top of a git repository can keep **worktrees** at `<case>/.claude/worktrees/<name>`, each on its own branch, so several agents on one repository never share a checkout. This is the layout Claude Code's own `claude --worktree <name>` uses (branch `worktree-<name>`), so either tool finds the other's worktrees. Remote (SSH) and Docker cases are refused with `400 INVALID_INPUT` before git runs, and so is a local case whose folder is at or inside a Docker case workspace: `git worktree add` runs the repository's post-checkout hook and checkout filters on this machine, and a container can write there. A case folder that is not a repository, is a bare repository, or sits below the repository's top level is `400` too. The case resolves the way quick-start resolves it (a linked case is admin-only in multi-user mode, everything else is the caller's own case space; another user's case is `404`), and a case folder on a mount that does not answer is `422 OPERATION_FAILED`, never `404`.
+
+`GET /api/cases/:name/worktrees` lists `git worktree list` for the case's repository:
+
+```json
+{
+  "caseName": "myrepo",
+  "repoRoot": "/home/me/codeman-cases/myrepo",
+  "worktreesDir": "/home/me/codeman-cases/myrepo/.claude/worktrees",
+  "truncated": false,
+  "worktrees": [
+    { "path": "/home/me/codeman-cases/myrepo", "head": "6910cb15…", "branch": "main", "detached": false, "bare": false,
+      "locked": false, "prunable": false, "main": true, "isCase": true, "managed": false, "sessionCount": 0, "sessions": [] },
+    { "path": "/home/me/codeman-cases/myrepo/.claude/worktrees/fix-login", "branch": "worktree-fix-login",
+      "main": false, "isCase": false, "managed": true, "name": "fix-login",
+      "sessionCount": 1, "sessions": [{ "id": "2a568379-…", "name": "w1-fix-login" }] }
+  ]
+}
+```
+
+`managed` is `true` only for `<repoRoot>/.claude/worktrees/<name>`: those are the ones Codeman starts sessions in and removes; any other worktree of the repository is listed for information. `sessionCount` counts live sessions of every owner running in that worktree (a session belongs to the deepest worktree holding its folder), `sessions` lists the ones the caller may see. `lockReason`/`prunableReason` appear when git reports them.
+
+`POST /api/cases/:name/worktrees` with `{ name, branch?, base? }` creates one (`201`, `{ worktree: { name, path, branch, base, head, excludeAdded, warnings } }`):
+
+- `name`: 1 to 64 characters of `A-Z a-z 0-9 . _ -`, starting with a letter or digit, no `..`, not ending in `.` or `.lock`. `400` otherwise.
+- `branch`: the NEW branch, default `worktree-<name>`. Letters, digits, `.`, `_`, `-`, `/`, then `git check-ref-format --branch` must accept it unchanged. An existing branch is `409 ALREADY_EXISTS` (never reset), and so is a name whose folder already exists.
+- `base`: where the branch starts, default `HEAD` (the case's current commit): a branch, tag or commit, resolved before anything is written (`400` when it is not a commit, which includes an empty repository).
+- `excludeAdded` lists the lines appended to the repository's local `info/exclude` (in the real common git dir, never a tracked `.gitignore`) when git did not already ignore them: `/.claude/worktrees/`, so the main checkout does not show the worktrees as untracked, `/.claude/settings.local.json`, the hooks file Codeman writes for every claude session, which would otherwise make `git worktree remove` refuse, and the agent skill copy (`/.claude/skills/codeman/`, `/.agents/skills/codeman/`: every skills folder the CLI registry names) that sessions get while `agentSkillEnabled` is on, for the same reason.
+- A symlinked `.claude` or `.claude/worktrees` directory is refused (`400`): a repository cannot redirect the worktree outside itself.
+
+`DELETE /api/cases/:name/worktrees/:worktree[?deleteBranch=true]` removes a managed worktree with `git worktree remove` **without `--force`**: git refuses a worktree with modified or untracked files (or a locked one), and that refusal is the answer, `409 CONFLICT` with git's own words in `error`. A live session at or inside the worktree is `409` as well. With `deleteBranch=true` the branch is deleted with `git branch -d`, never `-D`, so an unmerged branch is kept: the response is still `200`, with `branchDeleted: false` and git's reason in `branchError`. Response: `{ removed: { name, path, branch, branchDeleted, branchError? } }`. A folder git does not list as a worktree of this repository, or a symlink in its place, is `404`/`400`. A worktree that is, sits inside, or holds a Docker case workspace is `400` too (git would run inside a folder the container writes, and the removal would delete that workspace under it). A managed worktree whose folder is gone (deleted by hand; the list reports it `prunable`) is still removable: git then only drops its record, which is what frees the name for a new worktree. A session never starts in one.
+
+**Starting a session in a worktree** goes through the normal create paths: `POST /api/quick-start` takes `worktree: "<name>"` next to `caseName` and runs the session (and the hooks, the agent skill and `modelOverride`) in the worktree folder; the response adds `worktree` and `workingDir`. It is refused for remote and Docker cases (`400`), for a worktree that is not a registered, managed one (`404`), and for a case that does not exist (`404`: a worktree launch never scaffolds a case). `POST /api/sessions` takes the worktree path as `workingDir` like any other folder.
+
+## Settings
+
+`~/.codeman/settings.json` is one file for the whole server: the synced App Settings (feature switches, the plan-usage collection switch `showPlanUsageLimits`, `runMode`, `respawnPresets`, `tunnelEnabled`, ...), plus `modelConfig`, `caseOrder` and `lastUsedCase`. Reads are open to every signed-in user; in multi-user mode a non-admin reads it without what is the admin's (`voiceSettings.apiKey`, the Deepgram key an admin saved, and the admin's case names in `caseOrder` and `lastUsedCase`). **In multi-user mode every write is admin only:** for a non-admin the routes below answer `403 FORBIDDEN` before the body is even validated, so nothing is written, no watcher is toggled and no tunnel is started. Single-user mode is unaffected.
+
+| Method | Path                          | Body                                 | Notes |
+| ------ | ----------------------------- | ------------------------------------ | ----- |
+| `GET`  | `/api/settings`               | none                                 | The stored settings object. Never writes. For a non-admin in multi-user mode, without `voiceSettings.apiKey`, `caseOrder` and `lastUsedCase`. |
+| `PUT`  | `/api/settings`               | partial settings (strict schema)     | Merged into the stored file; services (watchers, tunnel, tmux history limit) reconcile to the merged result. `403 FORBIDDEN` for a non-admin in multi-user mode. A tunnel enable without `CODEMAN_PASSWORD` is refused separately (`403 OPERATION_FAILED`, resend with `acknowledgeUnauthTunnel: true`). |
+| `GET`  | `/api/execution/model-config` | none                                 | `modelConfig` (cron's and the plan orchestrator's default model). |
+| `PUT`  | `/api/execution/model-config` | `{ defaultModel?, agentTypeOverrides?, ... }` | Replaces `modelConfig`. `403 FORBIDDEN` for a non-admin in multi-user mode. |
+| `PUT`  | `/api/cases/order`            | `{ order: string[] }`                | The one case order every user's `GET /api/cases` is sorted by. `403 FORBIDDEN` for a non-admin in multi-user mode. |
+| `PUT`  | `/api/config`                 | `{ pollIntervalMs?, defaultTimeoutMs?, maxConcurrentSessions?, respawn? }` (strict) | The process-wide app config in `state.json`. `403 FORBIDDEN` for a non-admin in multi-user mode. |
+
+A non-admin's `POST /api/quick-start` and `POST /api/ralph-loop/start` work as before but do not record their case as `lastUsedCase` (a server-wide key).
+
+### System operations
+
+The same multi-user rule covers the operations that act on the whole server. For a non-admin:
+
+| Method | Path                          | Multi-user non-admin |
+| ------ | ----------------------------- | -------------------- |
+| `POST` | `/api/system/update`          | `403 FORBIDDEN` (the update restarts the server under every user) |
+| `POST` | `/api/system/span-displays`   | `403 FORBIDDEN` (opens a window on the server's desktop) |
+| `POST` | `/api/tunnel/qr/regenerate`   | `403 FORBIDDEN` (it clears every user's outstanding QR login code) |
+| `POST` | `/api/cleanup-state`          | `403 FORBIDDEN` (drops every user's stale session records) |
+| `POST` | `/api/auth/revoke`            | Revokes only the caller's own login sessions: the bare form (`{}`) signs them out everywhere, and a `sessionToken` is revoked only when it is theirs. For an admin, and in single-user mode, the bare form still revokes every login session |
+| `GET`  | `/api/tunnel/info`            | `authSessions` lists only the caller's own logins |
+
 ## CLI management
 
 Read and write the CLI registry (`docs/cli-registry.md`). Every **write** route answers `403 FORBIDDEN` while `cliManagementEnabled` is off (the default), and for a non-admin in multi-user mode. A write that would overwrite a `clis.json` which does not parse, or which has group/world permission bits, is refused with `409 CONFLICT` and a message naming the fix; the file is left untouched.
@@ -722,6 +1138,45 @@ Read and write the CLI registry (`docs/cli-registry.md`). Every **write** route 
 | `POST`   | `/api/clis`                   | `{ id, label, shortBadge, binaries, argv, enabled? }`   | Create a custom entry. `409 ALREADY_EXISTS` for a stock id or an existing custom id. `enabled` defaults to `true`. |
 | `PUT`    | `/api/clis/custom/:id`        | `{ label, shortBadge, binaries, argv, enabled? }`       | Replace an existing custom entry. An absent `enabled` keeps the entry's current state. `400` for a stock id, `404` for an unknown one. |
 | `DELETE` | `/api/clis/:id`               | none                                                    | Delete a custom entry. `400` for a stock id, `404` for an unknown one.                                  |
+
+## MCP server sync
+
+Copies MCP servers between the agent CLIs' own user-level config files (`docs/cli-registry.md`, "MCP server sync"). **Opt-in:** both routes answer `403 FORBIDDEN` while the synced `mcpSyncEnabled` setting is off (the default), and for a non-admin in multi-user mode, because the routes write files in the server user's home. A second `POST` while one is running answers `409 CONFLICT`.
+
+| Method | Path            | Body | Notes                                                                                                                   |
+| ------ | --------------- | ---- | ----------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/mcp-sync` | none | Dry run. Same result shape as `POST`, with `applied: false`; nothing is written.                                        |
+| `POST` | `/api/mcp-sync` | none | Adds each server a CLI is missing to that CLI's config file. Never edits or removes a server. `500` on an unexpected error. |
+
+Result (`data`):
+
+- `applied` — `false` for the dry run.
+- `targets[]` — one per enabled CLI that declares an MCP config, including GitHub Copilot CLI (`id: "copilot"`; it is a run mode that declares its own `mcpConfig`, and a sync-only target takes its place only while that run mode is disabled): `id`, `label`, `file`, `status`, `error?`, `servers` (names it already has), `added` (names added, or that would be), `skipped` (names its dialect cannot express, e.g. SSE for Codex and Antigravity).
+  - `status`: `ok`; `absent` (not installed and no config file, so not read or created); `skipped` (the CLI's relocation env var, e.g. `CODEX_HOME`, is set to a relative path in the server's environment, so its file cannot be located safely and is neither read nor written); `unreadable` (the file exists but cannot be parsed safely, so it is not written); `failed` (a read or write error, the file may be unchanged).
+  - `error` says why a target is not `ok`. A parse failure is reported by position only (`not valid TOML (line 3, column 21)`, `not valid JSON`), never with text from the file.
+  - `file` honours each CLI's own relocation env var as the server process sees it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME`, and `COPILOT_HOME` for the sync-only Copilot CLI); see `docs/cli-registry.md`.
+- `conflicts[]` — names defined differently by different CLIs. Existing definitions are kept; the first CLI's is copied where the name is missing.
+- `disabled[]` — names left out because every definition is switched off in its own CLI (codex `enabled = false`, opencode `enabled: false`, antigravity `disabled: true`).
+- `unsupported[]` — labels of enabled agent CLIs with no known MCP config file (nothing is guessed).
+  - Only installed CLIs are listed: one that is not installed is left out, as a supported CLI that is not installed reads `absent`.
+
+The result carries server **names** only, never `env` values, `headers` or file content. Each changed file keeps its previous content as `<file>.codeman-bak` (overwritten by each sync); a file that receives servers carrying `env` or `headers` is left mode `0600`.
+
+## Webhook notifications
+
+Posts the Web Push events to ntfy, Slack, Discord or a generic JSON URL (Settings → Notifications). Off by default. The webhook URL is a bearer secret (anyone holding a Slack/Discord URL can post as it), so it lives in `~/.codeman/webhook.json` (0600), is **never returned**, and is kept out of `settings.json`. All three routes answer `403` for a non-admin in multi-user mode.
+
+| Method | Path                 | Body                                         | Notes |
+| ------ | -------------------- | -------------------------------------------- | ----- |
+| `GET`  | `/api/webhook`       | none                                         | `{ enabled, kind, scope, hasUrl, urlMasked, lastResult }`. `urlMasked` is scheme + host only. `lastResult` is the last delivery (`ok`, `status?`, `error?`, `at`) or `null`. |
+| `PUT`  | `/api/webhook`       | `{ enabled?, kind?, scope?, url? }` (strict) | `kind`: `ntfy` \| `slack` \| `discord` \| `generic`. `scope`: `attention` (skip "response complete") \| `all`. An absent `url` keeps the saved one; `""` clears it. `400` for a non-http(s) URL, `user:pass@`, a link-local or cloud-metadata target, or enabling with no URL. |
+| `POST` | `/api/webhook/test`  | none                                         | Sends one message with the saved config, even while disabled. `200` with `data.ok` telling whether the webhook accepted it; `400` if no URL is saved. |
+
+Delivery goes through the same egress guard as web tabs (refused on the resolved address too), does not follow redirects, times out after 5 s, sends the same event for the same session at most once per 3 s, and has at most 5 requests in flight. Error text never contains the URL.
+
+## Diagnostics
+
+`GET /api/doctor[?category=core|office|other]` returns the `codeman doctor --json` report (`platform`, `summary`, `tools[]` with `status` `ok` \| `missing` \| `outdated` \| `skipped` \| `error`, `version`, `path`, `installHint`). The probe engine is synchronous, so it runs in a child process of the same entry script, never on the server's event loop (30 s timeout). It names install paths and versions, so it is admin only in multi-user mode (`403`). `400` for an unknown category, `500` if the child produces no report.
 
 ## Voice dictation
 
