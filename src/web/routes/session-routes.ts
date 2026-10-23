@@ -44,6 +44,7 @@ import {
 } from '../../session.js';
 import type { PaneCaptureOptions } from '../../mux-interface.js';
 import { SseEvent } from '../sse-events.js';
+import { registerAgentSessionRoutes } from './agent-session-routes.js';
 import { webviewCapabilities } from '../../webview-capabilities.js';
 import { htmlViewCapabilities } from '../../html-view-capabilities.js';
 import {
@@ -1258,6 +1259,7 @@ export function registerSessionRoutes(
     ) => void;
   } = {}
 ): RemoteWakeRegistry {
+  registerAgentSessionRoutes(app, ctx);
   // Wake-on-LAN for sleeping remote hosts (see remote-wake.ts). One registry per
   // route registration (= one web server) — the same shape as the process-wide
   // `sessionWaits` singleton, but without the global.

@@ -338,7 +338,8 @@ export interface TerminalMultiplexer extends EventEmitter {
   /**
    * Send input to a session via tmux send-keys.
    */
-  sendInput(sessionId: string, input: string): Promise<boolean>;
+  /** beforeDispatch is an internal conditional Enter-only guard, invoked without an await before spawning. */
+  sendInput(sessionId: string, input: string, options?: { beforeDispatch?: () => boolean }): Promise<boolean>;
   /** Literal bracketed paste plus explicit Enter; no retries after partial delivery. */
   sendNotesInput?(sessionId: string, text: string, canWrite?: () => boolean): Promise<boolean>;
 
@@ -346,7 +347,11 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Submit one checkpoint command with duplicate-safe text/Enter acknowledgements.
    * Unlike generic input, the failed transport stage remains observable.
    */
-  sendCheckpointCommand(sessionId: string, input: string): Promise<CommandDeliveryResult>;
+  sendCheckpointCommand(
+    sessionId: string,
+    input: string,
+    options?: { beforeDispatch?: () => boolean }
+  ): Promise<CommandDeliveryResult>;
 
   // ========== Metadata ==========
 

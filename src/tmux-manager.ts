@@ -4752,7 +4752,8 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * - `Enter` key is sent as a SEPARATE tmux invocation after a small delay
    * - Ink (Claude CLI) needs text and Enter split to avoid treating Enter as a newline
    */
-  async sendInput(sessionId: string, input: string): Promise<boolean> {
+  async sendInput(sessionId: string, input: string, options?: { beforeDispatch?: () => boolean }): Promise<boolean> {
+    if (options?.beforeDispatch && input !== '\r') return false;
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.error(
@@ -4763,7 +4764,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
     // TEST MODE: No-op — don't send input to real tmux sessions
     if (IS_TEST_MODE) {
-      return true;
+      return options?.beforeDispatch?.() ?? true;
     }
 
     console.log(
@@ -4813,6 +4814,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
         );
       } else if (hasCarriageReturn) {
         // Enter only
+        if (options?.beforeDispatch && !options.beforeDispatch()) return false;
         await execAsync(`${this.tmux()} send-keys -t "${session.muxName}" Enter`, {
           timeout: EXEC_TIMEOUT_MS,
         });
@@ -4830,7 +4832,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * stages. Each stage gets one bounded retry; an acknowledged text stage is
    * never repeated merely because Enter failed.
    */
-  async sendCheckpointCommand(sessionId: string, input: string): Promise<CommandDeliveryResult> {
+  async sendCheckpointCommand(
+    sessionId: string,
+    input: string,
+    options?: { beforeDispatch?: () => boolean }
+  ): Promise<CommandDeliveryResult> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return { ok: false, stage: 'text', error: `no session found for ${sessionId}`, attempt: 1 };
@@ -4842,7 +4848,11 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     // Normal vitest instances remain a no-op for tmux safety. A deliberately
     // injected executor exercises this exact production adapter without
     // touching the user's tmux server.
-    if (IS_TEST_MODE && !this.checkpointExecutor) return { ok: true, attempt: 1 };
+    if (IS_TEST_MODE && !this.checkpointExecutor) {
+      return options?.beforeDispatch && !options.beforeDispatch()
+        ? { ok: false, stage: 'text', error: 'checkpoint delivery cancelled before dispatch', attempt: 1 }
+        : { ok: true, attempt: 1 };
+    }
 
     const hasCarriageReturn = input.includes('\r');
     const textPart = input.replace(/\r/g, '').replace(/\n/g, '').trimEnd();
@@ -4865,6 +4875,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     ): Promise<{ ok: true } | { ok: false; result: CommandDeliveryResult }> => {
       for (let attempt = 1; attempt <= 2; attempt++) {
         deliveryAttempt = Math.max(deliveryAttempt, attempt);
+        if (options?.beforeDispatch && !options.beforeDispatch()) {
+          return {
+            ok: false,
+            result: { ok: false, stage, error: 'checkpoint delivery cancelled before dispatch', attempt },
+          };
+        }
         try {
           await execute(command);
           return { ok: true };
