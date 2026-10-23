@@ -661,7 +661,9 @@ describe('Focus section on the rail (COD-509)', () => {
     const puts = installFetch();
     const app = makeApp();
     openRowMenu(app, 's4');
+    // 'Notes' leads every session row menu: COD-481's session notes (downstream).
     expect(menuLabels()).toEqual([
+      'Notes',
       'Session options',
       'Remove from Focus',
       'Move to "Core"',

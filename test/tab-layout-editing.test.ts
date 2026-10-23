@@ -614,12 +614,14 @@ describe('row actions in the vertical rail', () => {
     installFetch();
     const flat = makeApp({ ...serverLayout(), groups: [], ungrouped: [s('s1'), s('s2'), s('s3')] });
     flat.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s1') }, 's1');
-    expect(menuLabels()).toEqual(['Session options', 'Add to Focus', 'Move to new group', 'Close session']);
+    // 'Notes' leads every session row menu: COD-481's session notes (downstream).
+    expect(menuLabels()).toEqual(['Notes', 'Session options', 'Add to Focus', 'Move to new group', 'Close session']);
     flat.closeTabRailActionMenu();
 
     const app = makeApp();
     app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s2') }, 's2');
     expect(menuLabels()).toEqual([
+      'Notes',
       'Session options',
       'Add to Focus',
       'Move down',
@@ -633,7 +635,7 @@ describe('row actions in the vertical rail', () => {
     document.documentElement.setAttribute('data-tab-orientation', 'horizontal');
     app._fullRenderSessionTabs();
     app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s2') }, 's2');
-    expect(menuLabels()).toEqual(['Session options', 'Close session']);
+    expect(menuLabels()).toEqual(['Notes', 'Session options', 'Close session']);
   });
 
   it('quotes group names, so a group called "New group" or "ungrouped" reads apart from the fixed entries', () => {
@@ -647,6 +649,7 @@ describe('row actions in the vertical rail', () => {
     });
     app.openTabRailActionMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: row('s2') }, 's2');
     expect(menuLabels()).toEqual([
+      'Notes',
       'Session options',
       'Add to Focus',
       'Move to "ungrouped"',
@@ -1002,7 +1005,7 @@ describe('child session placement in the row menu', () => {
       openMenu(app, id);
       expect(note()).toBeNull();
       expect(menuLabels()).not.toContain('Follow parent again');
-      expect(menuLabels()[0]).toBe('Session options');
+      expect(menuLabels().slice(0, 2)).toEqual(['Notes', 'Session options']);
       app.closeTabRailActionMenu();
     }
   });
@@ -1031,6 +1034,7 @@ describe('child session placement in the row menu', () => {
     openMenu(app, 's1');
     // 'Add to Focus' is #582's Focus section, offered on every row.
     expect(menuLabels()).toEqual([
+      'Notes',
       'Session options',
       'Add to Focus',
       'Move down',
