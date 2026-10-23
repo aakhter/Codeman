@@ -1,5 +1,17 @@
 # aicodeman
 
+## 1.44.1
+
+### Patch Changes
+
+- **Bounded session inspection and guarded submission (COD-529).** Add agent inspect with bounded UTF-8 transcript evidence and expiring scoped cursors, plus stage and single-use hash-confirmed submit. Native incremental evidence and exact composer verification initially support local Codex; other CLIs return labeled pane snapshots. Checkpoint, notes, verifier and terminal-report paths preserve guarded drafts.
+
+  **Integration and case settings.** Retain the upstream 1.44.0 input runner, multiline prompt delivery, keep-warm tracking, config backups, terminal/mobile fixes and file-viewer improvements while reconciling the local fork. Improve case-group option contrast (COD-540), keep the Case settings selector while removing the duplicate Edit Case control (COD-544), restore spreadsheet preview content hashing (COD-542), and pin newest-load-wins file previews (COD-543).
+
+  **Delivery.** Record direct commit/merge/push as the default for user-owned Bitbucket repositories, and correct the installed Jira CLI example. Deploy the build, matching runtime manifest, lockfile and packaged skill together with journaled rollback (COD-546).
+
+  **Session rail (COD-545).** Keep the vertical session rail compact, with clearer session labels and less visual clutter.
+
 ## 1.44.0
 
 ### Minor Changes
