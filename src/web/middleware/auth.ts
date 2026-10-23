@@ -459,8 +459,11 @@ export function registerAuthMiddleware(
     }
 
     // Rate limit only requests that failed to authenticate on this attempt.
+    // Single-user has no per-username bucket and every tunnelled client is 127.0.0.1
+    // (no trustProxy), so this bucket is the only cap on guessing the one password:
+    // it stays at AUTH_FAILURE_MAX. Only the multi-user pre-gate is wider (COD-538).
     const failures = authFailures.get(clientIp) ?? 0;
-    if (failures >= AUTH_IP_FAILURE_MAX) {
+    if (failures >= AUTH_FAILURE_MAX) {
       sendAuthRateLimit(reply, authFailures, clientIp);
       return;
     }
@@ -585,7 +588,9 @@ function registerMultiUserAuthHook(
 
     // 2. Basic Auth against the user store (scrypt verify).
     // Per-IP pre-gate bounds scrypt CPU cost from one source (does NOT gate on the
-    // per-username bucket here; see below).
+    // per-username bucket here; see below). Wider than AUTH_FAILURE_MAX: it refuses
+    // even a correct password, so behind a shared egress IP (NAT, a tunnel) a narrow
+    // cap would let a few wrong guesses lock everyone out.
     const ipFail = authFailures.get(clientIp) ?? 0;
     if (ipFail >= AUTH_IP_FAILURE_MAX) {
       sendAuthRateLimit(reply, authFailures, clientIp);

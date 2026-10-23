@@ -150,7 +150,7 @@ by presence in a server‑side map, so they cannot be forged offline.
 
 ### Rate limiting / lockout recovery
 
-Failed logins are tracked **per IP**: 50 failures (`AUTH_IP_FAILURE_MAX`) → `429`, with a 15‑minute decay. In multi-user mode a separate **per-username** bucket still returns `429` after 10 failed guesses (`AUTH_FAILURE_MAX`), so the wider per-IP cap (COD-524, for automated clients behind one egress IP) does not widen guessing against any one account.
+Failed logins are tracked **per IP**: 10 failures (`AUTH_FAILURE_MAX`) → `429`, with a 15‑minute decay. Single-user mode has no other bucket, and behind a tunnel every client is `127.0.0.1` (no `trustProxy`), so this is the only cap on guessing the one password (COD-538). Multi-user mode replaces it with a wider per-IP **pre-gate** of 50 failures (`AUTH_IP_FAILURE_MAX`, COD-524), checked before the scrypt verify, plus a **per-username** bucket (multi-user only) that answers `429` from the 10th failed guess (`AUTH_FAILURE_MAX`; the count is incremented before the check), so the wider per-IP cap does not widen guessing against any one account.
 The QR path has its own separate limiter.
 
 The lockout check sits **after** the cookie/credential checks (step 4, not first).
