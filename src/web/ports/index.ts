@@ -18,3 +18,4 @@ export type { TabLayoutPort } from './tab-layout-port.js';
 export type { AgentActivityControllerPort, AgentActivityPort } from './agent-activity-port.js';
 
 export type { SessionNotesPort } from './session-notes-port.js';
+export type { KeepWarmPort } from './keep-warm-port.js';

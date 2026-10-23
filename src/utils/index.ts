@@ -29,6 +29,7 @@ export { stringSimilarity, fuzzyPhraseMatch, todoContentHash } from './string-si
 export { compileFileQuery, matchFileQuery } from './file-query.js';
 export type { FileQueryMatcher } from './file-query.js';
 export { assertNever } from './type-safety.js';
+export { toSingleLine } from './single-line.js';
 export { wrapWithNice } from './nice-wrapper.js';
 export { resolveLocalShell, loginShellArgs } from './shell-resolver.js';
 export {
@@ -86,6 +87,7 @@ export {
   getCopilotNotFoundMessage,
   getCopilotCliVersion,
 } from './copilot-cli-resolver.js';
+export { readCopilotPlanUsage, resolveCopilotToken } from './copilot-plan-usage.js';
 export {
   boundedPathExists,
   describeUnknownPath,

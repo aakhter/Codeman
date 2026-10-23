@@ -59,6 +59,7 @@ import type {
   AuthPort,
   TabLayoutPort,
   AgentActivityPort,
+  KeepWarmPort,
 } from '../ports/index.js';
 import { AUTH_COOKIE_NAME } from '../middleware/auth.js';
 import { QR_AUTH_FAILURE_MAX } from '../../config/tunnel-config.js';
@@ -238,7 +239,7 @@ export function settingsForNonAdmin(settings: unknown): unknown {
 
 export function registerSystemRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort & AgentActivityPort
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort & AgentActivityPort & KeepWarmPort
 ): void {
   const windowStatesPath = dataPath('subagent-window-states.json');
   const parentMapPath = dataPath('subagent-parents.json');
@@ -1214,6 +1215,15 @@ export function registerSystemRoutes(
       const subagentTrackingEnabled = (merged.subagentTrackingEnabled as boolean) ?? true;
       if ('subagentTrackingEnabled' in settings) ctx.agentActivity.setTrackingEnabled(subagentTrackingEnabled);
       toggleService(subagentTrackingEnabled, subagentWatcher, 'Subagent watcher');
+      // The prompt-cache keep-warm keeps its default and cap in memory; a changed default or cap
+      // makes it re-read them and re-evaluate every session now rather than at its next cache report.
+      // Compared on `merged`, not tested for in the body: the browser sends both keys on every save.
+      if (
+        merged.promptCacheKeepWarm !== existing.promptCacheKeepWarm ||
+        merged.promptCacheKeepWarmMaxHours !== existing.promptCacheKeepWarmMaxHours
+      ) {
+        ctx.keepWarm.rescheduleAll();
+      }
 
       // Handle ultracode/workflow run watcher toggle dynamically (default OFF).
       // Either the docked panel OR the floating windows keep the watcher running.

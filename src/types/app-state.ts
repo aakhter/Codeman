@@ -130,7 +130,11 @@ export interface AppState {
   sessionOrder?: string[];
   /** Owner-scoped authoritative grouped tab layouts. */
   tabLayouts?: Record<string, TabLayout>;
-  /** Owner-and-case scoped default session group. null means intentional Ungrouped. */
+  /**
+   * Per-case default session group, keyed by the tab-layout owner key, then case
+   * name. A group id from that owner's layout, or null for an intentional
+   * Ungrouped choice. Read and written only through TabLayoutService.
+   */
   caseDefaultGroups?: Record<string, Record<string, string | null>>;
   /** Owner-private reusable Codex command profiles. */
   codexCommandProfiles?: Record<string, CodexCommandProfile[]>;

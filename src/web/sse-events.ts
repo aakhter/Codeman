@@ -5,7 +5,7 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * 162 event constants organized by category:
+ * 163 event constants organized by category:
  * - **Core** (1): init
  * - **Transport** (1): sse:heartbeat
  * - **Session lifecycle** (26): created, updated, deleted, terminal, idle, working, parked, resumed, promptCache, ...
@@ -132,6 +132,8 @@ export const SessionParked = 'session:parked' as const;
 export const SessionResumed = 'session:resumed' as const;
 /** Prompt-cache state of one session's main conversation changed (`{ sessionId, ...PromptCacheStatus }`). */
 export const SessionPromptCache = 'session:promptCache' as const;
+/** The prompt-cache keep-warm's status for one session changed (`{ sessionId, ...KeepWarmStatus }`). */
+export const SessionKeepWarm = 'session:keepWarm' as const;
 
 // ─── Session: Ralph ──────────────────────────────────────────────────────────
 
@@ -559,6 +561,7 @@ export const SseEvent = {
   SessionParked,
   SessionResumed,
   SessionPromptCache,
+  SessionKeepWarm,
 
   // Session: Ralph
   SessionRalphLoopUpdate,

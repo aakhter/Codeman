@@ -30,6 +30,7 @@ import {
   ClonePreflightSchema,
   LinkCaseSchema,
   CaseOrderSchema,
+  CaseDefaultGroupSchema,
   RemoteCaseLinkSchema,
   RemoteHostSchema,
   UpdateCaseSchema,
@@ -41,7 +42,6 @@ import {
   DockerExportSchema,
   DockerImportSchema,
   DockerQuickCreateSchema,
-  CaseDefaultGroupSchema,
 } from '../schemas.js';
 import { exportDockerCase, importDockerBundle, listDockerExports, exportBundleName } from '../../docker-export.js';
 import {
@@ -54,7 +54,7 @@ import {
 import type { GitRemoteProbe, GitUrlParse } from '../../git-clone.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
 import { prepareNewCasePath } from '../case-path.js';
-import { boundedPathExists, describeUnknownPath, probePath } from '../../utils/index.js';
+import { boundedPathExists, describeUnknownPath, probePath, probePathKind } from '../../utils/index.js';
 import { readAgentCaseMarker, type AgentCaseMarker } from '../../agent-case-marker.js';
 import { settingsWriteBlocker, writeHooksConfig } from '../../hooks-config.js';
 import {
@@ -76,6 +76,7 @@ import { canUsernameRunPrivilegedCommands } from '../../user-store.js';
 import type { AuthUser, CaseCodexCommandSelectionMetadata } from '../../types.js';
 import { SseEvent } from '../sse-events.js';
 import type { EventPort, ConfigPort, SessionPort, TabLayoutPort } from '../ports/index.js';
+import { TabLayoutValidationError } from '../../tab-layout.js';
 import type { FastifyRequest } from 'fastify';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { dataPath, getDataDir } from '../../config/instance.js';
@@ -387,6 +388,29 @@ async function ensureCaseImage(
       broadcast(SseEvent.DockerImageBuildFailed, { name, image: sessionDocker.image, error: getErrorMessage(err) })
     );
   return { ok: true, imageBuilding: true };
+}
+
+/**
+ * Is `name` a case the caller can see (the same rules as GET /api/cases and
+ * resolveCasePath): an owned remote or Docker case, a linked case (admin or
+ * single-user only), or a directory in the caller's own case space. Bounded:
+ * a case folder on a mount that stopped answering still counts as there, like
+ * the case list keeps listing it.
+ */
+async function caseVisibleToCaller(name: string, req: FastifyRequest): Promise<boolean> {
+  if (!SAFE_CASE_NAME.test(name)) return false;
+  const user = getAuthUser(req);
+  if ((await readRemoteCases(CODEMAN_CONFIG_DIR)).some((c) => c.name === name && canAccessOwned(user, c.owner))) {
+    return true;
+  }
+  if ((await readDockerCases(CODEMAN_CONFIG_DIR)).some((c) => c.name === name && canAccessOwned(user, c.owner))) {
+    return true;
+  }
+  const linkedCases = await readLinkedCases();
+  if (linkedCases[name] && (!isMultiUserMode() || isAdmin(req)))
+    return (await probePath(linkedCases[name])) !== 'absent';
+  const kind = await probePathKind(join(resolveCasesDir(user), name));
+  return kind === 'directory' || kind === 'unknown';
 }
 
 function createCaseSelectionMetadata(ctx: Pick<ConfigPort, 'store'>) {
@@ -751,18 +775,6 @@ export function registerCaseRoutes(
 
   const validateCaseName = (req: FastifyRequest, name: string): boolean =>
     Boolean(validatePathWithinBase(name, resolveCasesDir(getAuthUser(req))));
-
-  const readDefaultGroupResponse = async (req: FastifyRequest, name: string) => {
-    const owner = ownerLayoutKey(ownerFor(req));
-    const snapshot = await ctx.tabLayouts.getSnapshot(owner);
-    const groups = snapshot.layout.groups.map(({ id, name: groupName }) => ({ id, name: groupName }));
-    let groupId = ctx.store.getCaseDefaultGroup(owner, name);
-    if (typeof groupId === 'string' && !groups.some((group) => group.id === groupId)) {
-      ctx.store.setCaseDefaultGroup(owner, name, null);
-      groupId = null;
-    }
-    return { groupId: groupId ?? null, groups };
-  };
 
   // ═══════════════════════════════════════════════════════════════
   // Case CRUD (list, create, link, detail, fix-plan)
@@ -2253,6 +2265,19 @@ export function registerCaseRoutes(
   app.delete('/api/cases/:name', async (req): Promise<ApiResponse<{ name: string }>> => {
     const { name } = req.params as { name: string };
     const user = getAuthUser(req);
+    // The caller's default session group for this case goes with it (best-effort:
+    // a stale value is ignored at creation anyway).
+    // An admin deleting another user's remote/Docker case clears that owner's too.
+    const forgetCaseDefault = async (caseOwner?: string): Promise<void> => {
+      const owners = new Set([ownerLayoutKey(ownerFor(req)), ...(caseOwner ? [ownerLayoutKey(caseOwner)] : [])]);
+      for (const owner of owners) {
+        try {
+          await ctx.tabLayouts.forgetCaseDefaultGroup(owner, name);
+        } catch {
+          /* never blocks the delete */
+        }
+      }
+    };
 
     if (!validatePathWithinBase(name, resolveCasesDir(user))) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
@@ -2262,13 +2287,14 @@ export function registerCaseRoutes(
     // docker case is skipped so control falls through to the caller's own local delete.
     // canAccessOwned is all-true for admins/single-user, so flag-OFF stays byte-identical.
     const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
-    if (remoteCases.some((item) => item.name === name && canAccessOwned(user, item.owner))) {
+    const remoteCase = remoteCases.find((item) => item.name === name && canAccessOwned(user, item.owner));
+    if (remoteCase) {
       await writeRemoteCases(
         CODEMAN_CONFIG_DIR,
         remoteCases.filter((item) => !(item.name === name && canAccessOwned(user, item.owner)))
       );
-      ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
       ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'remote-unlinked' });
+      await forgetCaseDefault(remoteCase.owner);
       return { success: true, data: { name } };
     }
 
@@ -2279,7 +2305,6 @@ export function registerCaseRoutes(
         CODEMAN_CONFIG_DIR,
         dockerCases.filter((item) => item !== dockerCase)
       );
-      ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
       // Best-effort `docker rm -f` the per-case container (case-delete is the
       // explicit teardown that removes it; the bind-mounted workspace survives).
       // An ADOPTED container is skipped entirely: unlinking the case must leave
@@ -2302,6 +2327,7 @@ export function registerCaseRoutes(
           .catch(() => {});
       }
       ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'docker-unlinked' });
+      await forgetCaseDefault(dockerCase.owner);
       return { success: true, data: { name } };
     }
 
@@ -2313,9 +2339,9 @@ export function registerCaseRoutes(
       delete linkedCases[name];
       try {
         await fs.writeFile(LINKED_CASES_FILE, JSON.stringify(linkedCases, null, 2));
-        ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
         ctx.store.deleteCaseCodexCommandSelection(codexProfileOwner(ownerFor(req)), name);
         ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'unlinked' });
+        await forgetCaseDefault();
         return { success: true, data: { name } };
       } catch (err) {
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
@@ -2330,12 +2356,48 @@ export function registerCaseRoutes(
 
     try {
       await fs.rm(casePath, { recursive: true, force: true });
-      ctx.store.deleteCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
       ctx.store.deleteCaseCodexCommandSelection(codexProfileOwner(ownerFor(req)), name);
       ctx.broadcast(SseEvent.CaseDeleted, { name, type: 'deleted' });
+      await forgetCaseDefault();
       return { success: true, data: { name } };
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
+    }
+  });
+
+  // ========== Default session group ==========
+
+  /**
+   * The tab group new sessions of this case land in when the create request names
+   * no group and no parent places them. Scoped to the caller's own tab layout: the
+   * options are their groups, and a stored id that is no longer one of them reads
+   * as Ungrouped (null); the read writes nothing (the next creation for the case
+   * forgets it). Not admin-gated in multi-user mode: the
+   * value is per owner (like the layout it points into), never server-wide.
+   */
+  app.get('/api/cases/:name/default-group', async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!(await caseVisibleToCaller(name, req))) {
+      return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, `Case "${name}" not found`));
+    }
+    const view = await ctx.tabLayouts.caseDefaultGroup(ownerLayoutKey(ownerFor(req)), name);
+    return { success: true, data: { caseName: name, ...view } };
+  });
+
+  app.put('/api/cases/:name/default-group', async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const { groupId } = parseBody(CaseDefaultGroupSchema, req.body, 'Invalid default group');
+    if (!(await caseVisibleToCaller(name, req))) {
+      return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, `Case "${name}" not found`));
+    }
+    try {
+      const view = await ctx.tabLayouts.setCaseDefaultGroup(ownerLayoutKey(ownerFor(req)), name, groupId);
+      return { success: true, data: { caseName: name, ...view } };
+    } catch (err) {
+      if (err instanceof TabLayoutValidationError) {
+        return reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'That tab group does not exist'));
+      }
+      throw err;
     }
   });
 
@@ -2368,85 +2430,6 @@ export function registerCaseRoutes(
     } catch (err) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, getErrorMessage(err));
     }
-  });
-
-  app.get('/api/cases/:name/default-group', async (req) => {
-    const { name } = req.params as { name: string };
-    if (!validateCaseName(req, name)) {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
-    }
-
-    // Fold ownership INTO the match (don't early-return): a non-owned same-named remote/
-    // docker case is skipped so control falls through to the caller's own LOCAL case
-    // (remote/docker names are globally unique, local names per-user). No metadata is
-    // disclosed for a foreign case. canAccessOwned is allow-all for admins/single-user.
-    const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);
-    const remoteCase = remoteCases.find((item) => item.name === name && canAccessOwned(getAuthUser(req), item.owner));
-    if (remoteCase) {
-      const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === remoteCase.hostId);
-      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
-      return {
-        name,
-        path: remoteDisplayPath({ username: host.username, host: host.host, path: remoteCase.remotePath }),
-        hasClaudeMd: false,
-        location: 'remote',
-        remote: {
-          hostId: host.id,
-          host: host.host,
-          username: host.username,
-          path: remoteCase.remotePath,
-        },
-      };
-    }
-
-    const dockerCase = (await readDockerCases(CODEMAN_CONFIG_DIR)).find(
-      (item) => item.name === name && canAccessOwned(getAuthUser(req), item.owner)
-    );
-    if (dockerCase) {
-      const host = (await readDockerHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === dockerCase.hostId);
-      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Docker host not found');
-      const container = dockerCase.container ?? dockerContainerName(dockerCase.name);
-      return {
-        name,
-        path: dockerDisplayPath({ container, path: dockerCase.hostWorkspacePath }),
-        hasClaudeMd: await boundedPathExists(join(dockerCase.hostWorkspacePath, 'CLAUDE.md')),
-        location: 'docker',
-        docker: {
-          hostId: host.id,
-          container,
-          image: host.image,
-          path: dockerCase.hostWorkspacePath,
-          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
-          network: host.network ?? 'bridge',
-          ...(dockerCase.owned === false ? { owned: false } : {}),
-        },
-      };
-    }
-
-    const casePath = await resolveCasePath(name, getAuthUser(req));
-    if (!(await boundedPathExists(casePath))) {
-      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
-    }
-    return readDefaultGroupResponse(req, name);
-  });
-
-  app.put('/api/cases/:name/default-group', async (req) => {
-    const { name } = req.params as { name: string };
-    if (!validateCaseName(req, name)) {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid case name');
-    }
-    if (!(await resolveAccessibleCase(req, name))) {
-      return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Case not found');
-    }
-    const { groupId } = parseBody(CaseDefaultGroupSchema, req.body, 'Invalid default group');
-    const owner = ownerLayoutKey(ownerFor(req));
-    const snapshot = await ctx.tabLayouts.getSnapshot(owner);
-    const groups = snapshot.layout.groups.map(({ id, name: groupName }) => ({ id, name: groupName }));
-    if (groupId !== null && !groups.some((group) => group.id === groupId)) {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Default group does not exist');
-    }
-    ctx.store.setCaseDefaultGroup(owner, name, groupId);
-    return { groupId, groups };
   });
 
   app.get('/api/cases/:name', async (req) => {

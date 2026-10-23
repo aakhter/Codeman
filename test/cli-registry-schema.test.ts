@@ -524,3 +524,12 @@ describe('COD-471 overlays.remote.tmuxMouseAtStartupSeconds', () => {
     }
   });
 });
+
+describe('observed mouse-tracking wheel policy', () => {
+  it('advertises and validates tracked Codex forwarding without a fictitious minimum version (local: COD-464 measured mouse-tracking pacing)', () => {
+    const codex = STOCK_CLIS.find((e) => e.id === 'codex')!;
+    expect(codex.capabilities.wheelForward).toEqual({ mode: 'mouse-tracking', rows: 3 });
+    expect(CliEntrySchema.safeParse(codex).success).toBe(true);
+    expect(codex.capabilities.transcriptPageKeys).toBe(true);
+  });
+});

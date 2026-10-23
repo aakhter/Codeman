@@ -52,6 +52,7 @@
 **Operating it**
 
 - [Running As A Service](Running-As-A-Service)
+- [Config Backups](Config-Backups)
 - [Troubleshooting](Troubleshooting)
 - [FAQ](FAQ)
 - [Contributing](Contributing)
