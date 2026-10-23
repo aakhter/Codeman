@@ -697,6 +697,16 @@ describe('Focus section on the rail (COD-509)', () => {
     expect((document.activeElement as HTMLElement).dataset.focusKey).toBe('session:s4');
   });
 
+  it('a web tab becoming active marks its shortcut current at once', () => {
+    installFetch();
+    const app = makeApp();
+    expect(shortcut('webview:w1')!.getAttribute('aria-current')).toBe('false');
+    app.activeWebviewId = 'w1';
+    app._updateActiveWebviewTab();
+    expect(shortcut('webview:w1')!.getAttribute('aria-current')).toBe('true');
+    expect(shortcut('session:s4')!.getAttribute('aria-current')).toBe('false');
+  });
+
   it('"Remove from Focus" on a shortcut removes only the shortcut', async () => {
     const puts = installFetch();
     const app = makeApp();

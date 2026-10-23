@@ -518,6 +518,7 @@ Object.assign(CodemanApp.prototype, {
       tab.setAttribute('aria-current', 'false');
     }
     this._syncTabTreeSelection?.(container);
+    this._renderTabFocus?.();
   },
 
   // ── Opening / closing ─────────────────────────────────────────────────────
