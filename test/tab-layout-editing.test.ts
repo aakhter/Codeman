@@ -741,6 +741,23 @@ describe('web tab rows', () => {
     expect(app.showWebviewModal).not.toHaveBeenCalled();
   });
 
+  it('Escape from a flat-rail web-tab menu hands focus back to the row (#582 merge-time fix)', () => {
+    installFetch();
+    const app = makeApp({ ...serverLayout(), groups: [], ungrouped: [s('s1'), s('s2'), s('s3'), w('w1')] });
+    const web = document.querySelector<HTMLElement>('.session-tab[data-webview-id="w1"]')!;
+    expect(web.getAttribute('role')).toBe('tab');
+    web.focus();
+    // Shift+F10 / the menu key reach a flat-rail row as a contextmenu event.
+    app.handleWebviewTabContextMenu(
+      { preventDefault() {}, stopPropagation() {}, type: 'contextmenu', currentTarget: web },
+      'w1'
+    );
+    expect(menuLabels()).toContain('Web tab settings');
+    key(document.activeElement!, 'Escape');
+    expect(document.querySelector('.tab-rail-action-menu')).toBeNull();
+    expect((document.activeElement as HTMLElement).dataset.webviewId).toBe('w1');
+  });
+
   it('moves down past the sessions that follow the moved one', async () => {
     const puts = installFetch();
     const app = makeApp({

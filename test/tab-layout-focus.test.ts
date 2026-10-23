@@ -684,6 +684,19 @@ describe('Focus section on the rail (COD-509)', () => {
     expect(row('s4').closest('[data-tab-group-id="gy"]')).not.toBeNull();
   });
 
+  it('Escape from a shortcut menu hands focus back to the shortcut', () => {
+    installFetch();
+    const app = makeApp();
+    shortcut('session:s4')!.focus();
+    openShortcutMenu(app, 'session:s4');
+    expect(document.activeElement?.closest('.tab-rail-action-menu')).not.toBeNull();
+    document.activeElement!.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    );
+    expect(document.querySelector('.tab-rail-action-menu')).toBeNull();
+    expect((document.activeElement as HTMLElement).dataset.focusKey).toBe('session:s4');
+  });
+
   it('"Remove from Focus" on a shortcut removes only the shortcut', async () => {
     const puts = installFetch();
     const app = makeApp();
