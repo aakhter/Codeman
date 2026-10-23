@@ -507,16 +507,6 @@ Object.assign(CodemanApp.prototype, {
         tab.setAttribute('aria-selected', 'false');
       }
     }
-    for (const tab of container.querySelectorAll('.session-tab[data-focus-webview-id]')) {
-      tab.classList.remove('active');
-      tab.removeAttribute('aria-selected');
-      tab.setAttribute('aria-current', tab.dataset.focusWebviewId === this.activeWebviewId ? 'page' : 'false');
-    }
-    for (const tab of container.querySelectorAll('.session-tab[data-focus-session-id]')) {
-      tab.classList.remove('active');
-      tab.removeAttribute('aria-selected');
-      tab.setAttribute('aria-current', 'false');
-    }
     this._syncTabTreeSelection?.(container);
     this._renderTabFocus?.();
   },

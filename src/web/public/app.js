@@ -2267,7 +2267,7 @@ class CodemanApp {
     const container = this.$('sessionTabs');
     if (!container) return;
     for (const tab of container.querySelectorAll(
-      `.session-tab[data-id="${CSS.escape(id)}"], .session-tab[data-focus-session-id="${CSS.escape(id)}"]`
+      `.session-tab[data-id="${CSS.escape(id)}"]`
     )) {
       tab.classList.toggle('detached', on);
     }
@@ -8323,7 +8323,7 @@ class CodemanApp {
 
   _updateTerminalLoadTab(sessionId) {
     const tabs = this.$('sessionTabs')?.querySelectorAll(
-      `.session-tab[data-id="${CSS.escape(sessionId)}"], .session-tab[data-focus-session-id="${CSS.escape(sessionId)}"]`
+      `.session-tab[data-id="${CSS.escape(sessionId)}"]`
     );
     if (!tabs?.length) return;
     const loadState = this.terminalLoadStates.get(sessionId);
