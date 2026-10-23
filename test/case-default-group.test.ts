@@ -107,6 +107,12 @@ function createHarness(options: { layouts?: Record<string, TabLayout>; live?: Se
     caseDefaults,
     now: () => '2026-10-22T12:00:00.000Z',
   });
+  // Local fork (COD-320): sessionCreated resolves to a TabLayoutSnapshot ({ layout, placements });
+  // these assertions read its layout, which is what upstream's version resolves to directly.
+  const realSessionCreated = service.sessionCreated.bind(service);
+  (
+    service as unknown as { sessionCreated: (...args: Parameters<typeof realSessionCreated>) => Promise<TabLayout> }
+  ).sessionCreated = async (...args) => (await realSessionCreated(...args)).layout;
   const register = (fact: SessionFact) =>
     vi.fn(() => {
       live.set(fact.id, fact);

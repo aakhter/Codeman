@@ -231,12 +231,21 @@ describe('Read My Mind ignores the nudge', () => {
   });
 });
 
+/**
+ * Local fork (COD-514): `Session.write` stamps a submit only once the bytes reached a pty,
+ * so these clock tests give the session a stand-in one.
+ */
+function withFakePty(session: Session): Session {
+  (session as unknown as { ptyProcess: { write: (data: string) => void } }).ptyProcess = { write: () => {} };
+  return session;
+}
+
 describe('the two submit clocks on a Session', () => {
   it('a nudge moves lastSubmitAt but not lastRealPromptAt, from the write and from the hook', () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(NOW);
-      const session = new Session({ workingDir: '/tmp' });
+      const session = withFakePty(new Session({ workingDir: '/tmp' }));
       session.write('real prompt\r', { fromUser: true });
       expect(session.lastRealPromptAt).toBe(NOW);
 
@@ -280,7 +289,7 @@ describe('the two submit clocks on a Session', () => {
    * endKeepAliveTurn) or on any other submit, never by a short clock alone.
    */
   it('the keep-alive window survives the nudge and a bare Enter, and ends on any other submit', () => {
-    const session = new Session({ workingDir: '/tmp' });
+    const session = withFakePty(new Session({ workingDir: '/tmp' }));
     session.beginKeepAliveTurn(KEEP_WARM_TURN_WINDOW_MS);
     session.write(`${KEEP_WARM_NUDGE}\r`);
     session.write('\r');

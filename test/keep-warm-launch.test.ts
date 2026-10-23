@@ -76,11 +76,13 @@ describe('every launch decides the opt-out and records it', () => {
     expect(body).toContain(
       'const idleCompactionOff = await this._resolveIdleCompactionOptOut(mode, statusLine, keepWarm, spawnedByAgent);'
     );
-    expect(body).toMatch(/statusLineCommand,\n\s+idleCompactionOff,\n\s+sessionName: cliName,/);
+    // Local fork: createSession names the CLI `cliName ?? name`.
+    expect(body).toMatch(/statusLineCommand,\n\s+idleCompactionOff,\n\s+sessionName: cliName( \?\? name)?,/);
   });
 
   it('createSession records it on the new mux record, next to statusLine', () => {
-    expect(methodSlice(tmux, 'async createSession(')).toMatch(/name,\n\s+statusLine,\n\s+idleCompactionOff,\n\s+};/);
+    // Local fork: the Headroom routing fields sit between `name` and `statusLine`.
+    expect(methodSlice(tmux, 'async createSession(')).toMatch(/\n\s+statusLine,\n\s+idleCompactionOff,\n\s+};/);
   });
 
   it('respawnPane re-records it on the surviving mux record', () => {

@@ -124,7 +124,7 @@ describe('file viewer back/forward', () => {
   });
 
   it('steps back and forward without recording the step as a new entry', async () => {
-    const { app, back, fwd } = loadApp();
+    const { app, back, fwd, elements } = loadApp();
     await app.openFilePreview('/ws/a.pdf', 's1');
     await app.openFilePreview('/ws/b.pdf', 's1');
     await app.openFilePreview('/ws/c.pdf', 's1');
@@ -136,7 +136,8 @@ describe('file viewer back/forward', () => {
       '/ws/c.pdf',
     ]);
     expect(app.filePreviewHistory.index).toBe(1);
-    expect(app.filePreviewDetachUrl).toContain(encodeURIComponent('/ws/b.pdf'));
+    // Local fork: no detach URL (the Open in new tab action is filePreviewOpenNewTab); the title shows the file.
+    expect((elements.filePreviewTitle as { textContent: string }).textContent).toBe('/ws/b.pdf');
     expect(fwd.disabled).toBe(false);
 
     await app.stepFilePreviewHistory(-1);

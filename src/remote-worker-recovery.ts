@@ -42,6 +42,8 @@ export function createWorkerRecoveryRecord(state: SessionState) {
       sessionId: state.id,
       mode: state.mode ?? 'shell',
       resumeSessionId: record.claudeResumeId ?? state.resumeSessionId,
+      // SessionState.keepWarm is the keep-warm readout; the launch option is the opt-in.
+      keepWarm: state.keepWarmEnabled,
     },
     state.nativeResumeId ?? null
   );

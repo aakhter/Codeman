@@ -24,6 +24,25 @@ function method(file: string, signature: string): (this: unknown, data: Record<s
   return new Function('data', source.slice(bodyStart, end)) as (data: Record<string, unknown>) => void;
 }
 
+/**
+ * Local fork: the session-event handlers delegate status and the stuck timer to
+ * `_applySessionActivityEvent(data, transition, refresh)`, so it is sliced out too.
+ */
+function activityMethod(): (
+  this: unknown,
+  data: Record<string, unknown>,
+  transition?: string,
+  refresh?: boolean
+) => unknown {
+  const signature = "_applySessionActivityEvent(data, transition = 'updated', refresh = true)";
+  const source = readFileSync(resolve(PUBLIC, 'app.js'), 'utf8');
+  const start = source.indexOf(`  ${signature} {`);
+  expect(start).toBeGreaterThan(-1);
+  const bodyStart = source.indexOf('{', start) + 1;
+  const end = source.indexOf('\n  }\n', bodyStart);
+  return new Function('data', "transition = 'updated'", 'refresh = true', source.slice(bodyStart, end)) as never;
+}
+
 function makeApp() {
   const notifications: string[] = [];
   const app = {
@@ -43,6 +62,9 @@ function makeApp() {
       app.pendingHooks.delete(sessionId);
       app.tabAlerts.delete(sessionId);
     },
+    _applySessionActivityEvent: activityMethod(),
+    _isFullSessionSnapshot: () => false,
+    _refreshSessionActivitySurfaces() {},
     onIdle: method('app.js', '_onSessionIdle(data)'),
     onWorking: method('app.js', '_onSessionWorking(data)'),
     onStop: method('settings-ui.js', '_onHookStop(data)'),
@@ -95,11 +117,13 @@ describe('the keep-alive turn spends nothing on the page', () => {
     expect(app.notifications).toEqual([]);
   });
 
-  it('a real stop still clears and notifies', () => {
+  // Local fork: a stop never clears prompt state on the page (a stop can arrive before a newer
+  // permission/question hook); the sequenced server `approval:resolved` event owns that clear.
+  it('a real stop still notifies, and leaves the clear to approval:resolved', () => {
     const app = makeApp();
     app.pendingHooks.set(SESSION, new Set(['idle_prompt']));
     app.onStop({ sessionId: SESSION });
-    expect(app.pendingHooks.has(SESSION)).toBe(false);
+    expect(app.pendingHooks.has(SESSION)).toBe(true);
     expect(app.notifications).toEqual(['hook-stop']);
   });
 });

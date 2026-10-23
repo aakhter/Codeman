@@ -3625,7 +3625,7 @@ class CodemanApp {
         const sessionId = pathLink.dataset.sessionId || this.activeSessionId;
         const target = pathLink.dataset.linkified ? this._resolveLinkedFilePath?.(filePath, sessionId) : filePath;
         if (filePath && pathLink.dataset.folder) this.openFolderGrid(target || filePath, sessionId);
-        else if (filePath && this._isExternalPreviewPath(target || filePath, sessionId)) {
+        else if (filePath && this._isExternalPreviewPath?.(target || filePath, sessionId)) {
           this.openExternalPathPreview(target || filePath, sessionId)?.catch?.((err) => console.error('External path preview failed:', err));
         } else if (filePath) this.openFilePreview(target || filePath, sessionId);
         return;

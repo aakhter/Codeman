@@ -269,10 +269,11 @@ describe('sendInput line breaks', () => {
     await spaced.sendInput('s1', '  \n\t\n  fix it\nnow\r');
     expect(bufferText(spaced.ran[0])).toBe('  fix it\nnow');
 
-    // Without an Enter, what is left is one line, so it is typed like any other.
+    // Without an Enter, what is left is one line, so it is typed like any other
+    // (local COD-501: `send-keys -l --`, so a leading hyphen is never read as a flag).
     const typed = managerWithSession();
     await typed.sendInput('s1', '\n\njust type');
-    expect(typed.ran).toEqual([expect.stringMatching(/ send-keys -t "codeman-abc12345" -l 'just type'$/)]);
+    expect(typed.ran).toEqual([expect.stringMatching(/ send-keys -t "codeman-abc12345" -l -- 'just type'$/)]);
   });
 
   it('leaves single-line input as it was: pasted with Enter, typed without', async () => {
@@ -284,6 +285,6 @@ describe('sendInput line breaks', () => {
     const typed = managerWithSession();
     await typed.sendInput('s1', 'just type');
     expect(typed.ran).toHaveLength(1);
-    expect(typed.ran[0]).toMatch(/ send-keys -t "codeman-abc12345" -l 'just type'$/);
+    expect(typed.ran[0]).toMatch(/ send-keys -t "codeman-abc12345" -l -- 'just type'$/);
   });
 });

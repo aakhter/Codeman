@@ -71,7 +71,9 @@ describe('response viewer behavior', () => {
     link?.dispatchEvent(click);
 
     expect(click.defaultPrevented).toBe(true);
-    expect(app.openFilePreview).toHaveBeenCalledWith(relativePath, sessionId);
+    // Upstream #665 turns a path-shaped markdown href into an `rv-path` link that opens the
+    // file by its (workspace-confined) absolute path before the COD-246 relative fallback runs.
+    expect(app.openFilePreview).toHaveBeenCalledWith(absolutePath, sessionId);
   });
 
   it.each([

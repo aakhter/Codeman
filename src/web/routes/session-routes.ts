@@ -330,40 +330,12 @@ const inferAccessibleLocalCaseName = async (req: FastifyRequest, workingDir: str
   )?.[0];
 };
 
-const SAFE_CASE_NAME = /^[a-zA-Z0-9_-]+$/;
-
 /** `<repo>/.claude/worktrees/<name>`: the layout Claude Code's own worktree feature creates. */
 const CLAUDE_WORKTREE_PATH = /^(.*)\/\.claude\/worktrees\/([^/]+)\/?$/;
 
 /** Did the committed layout put this session in a named group (not Ungrouped)? */
 function landedInGroup(layout: TabLayout | undefined, sessionId: string): boolean {
   return !!layout?.groups.some((group) => group.refs.some((ref) => ref.kind === 'session' && ref.id === sessionId));
-}
-
-/**
- * The case a POST /api/sessions `workingDir` belongs to, for its default session
- * group: a direct child of the caller's case space, or (admin / single-user, as
- * GET /api/cases lists them) a linked case's exact path, or a Claude worktree
- * (`<case>/.claude/worktrees/<name>`) of either. Lexical only: the browser sends
- * the path the case list gave it, and this must never touch a possibly-dead
- * mount. Anything else is no case, which keeps today's placement.
- */
-async function inferLocalCaseName(req: FastifyRequest, workingDir: string): Promise<string | undefined> {
-  // The Git worktrees modal launches Claude through this route in the worktree, and every other CLI
-  // through quick-start with the case name: both are sessions of that case.
-  const resolved = resolvePath(workingDir);
-  const target = CLAUDE_WORKTREE_PATH.exec(resolved)?.[1] || resolved;
-  const user = getAuthUser(req);
-  if (dirname(target) === resolvePath(resolveCasesDir(user))) {
-    const name = basename(target);
-    if (SAFE_CASE_NAME.test(name)) return name;
-  }
-  if (isMultiUserMode() && !isAdmin(req)) return undefined;
-  const linked = await readJsonConfig<Record<string, string>>(LINKED_CASES_FILE, 'linked cases', {});
-  for (const [name, path] of Object.entries(linked)) {
-    if (SAFE_CASE_NAME.test(name) && typeof path === 'string' && resolvePath(path) === target) return name;
-  }
-  return undefined;
 }
 
 // Pre-compiled regex for terminal buffer cleaning (avoids per-request compilation)
@@ -1763,8 +1735,12 @@ export function registerSessionRoutes(
     });
 
     // Only a named workingDir: without one the session starts in the server's own cwd, which is no case.
+    // Upstream #676 also places a Claude worktree session (`<case>/.claude/worktrees/<name>`) by its
+    // case; the case itself goes through the same accessible-case check (Docker workspaces excluded).
+    const worktreeRoot =
+      !remote && body.workingDir ? CLAUDE_WORKTREE_PATH.exec(resolvePath(workingDir))?.[1] : undefined;
     const placementCase =
-      placementCaseName ?? (remote || !body.workingDir ? undefined : await inferLocalCaseName(req, workingDir));
+      placementCaseName ?? (worktreeRoot ? await inferAccessibleLocalCaseName(req, worktreeRoot) : undefined);
     const creationOptions = {
       ...(placementCase ? { caseName: placementCase } : {}),
       ...(body.tabGroupId ? { tabGroupId: body.tabGroupId } : {}),

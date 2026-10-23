@@ -5180,8 +5180,8 @@ Object.assign(CodemanApp.prototype, {
 
     if (!overlay || !bodyEl) return;
 
-    this._recordFilePreviewHistory(filePath, sessionId, attachmentId, options);
-    this._bindFilePreviewChrome();
+    this._recordFilePreviewHistory?.(filePath, sessionId, attachmentId, options);
+    this._bindFilePreviewChrome?.();
 
     // Only the newest load may write: paging ←/→ through a folder starts the next
     // load while the previous one still awaits its fetch, and its late answer would
@@ -5210,7 +5210,7 @@ Object.assign(CodemanApp.prototype, {
     // Show overlay with loading state
     overlay.classList.add('visible');
     this._restorePreviewSize();
-    this._applyFilePreviewExpanded();
+    this._applyFilePreviewExpanded?.();
     const displayPath = typeof options.displayPath === 'string' && options.displayPath ? options.displayPath : filePath;
     titleEl.textContent = displayPath;
     bodyEl.innerHTML = '<div class="binary-message">Loading...</div>';
@@ -7292,7 +7292,7 @@ Object.assign(CodemanApp.prototype, {
         h.index = h.entries.length - 1;
       }
     }
-    this._updateFilePreviewHistoryNav();
+    this._updateFilePreviewHistoryNav?.();
   },
 
   /** Back (-1) / forward (+1) through the previews opened in this overlay session. */
@@ -7340,7 +7340,7 @@ Object.assign(CodemanApp.prototype, {
   /** Expand button: fill the screen, remembered across opens. */
   toggleFilePreviewExpanded() {
     this._setFilePreviewPref('expanded', !this._filePreviewPref('expanded'));
-    this._applyFilePreviewExpanded();
+    this._applyFilePreviewExpanded?.();
   },
 
   _applyFilePreviewExpanded() {
@@ -7500,7 +7500,7 @@ Object.assign(CodemanApp.prototype, {
     if (this.folderGrid) this.folderGrid.index = null;
     this._updateFolderPreviewNav?.(null);
     this.filePreviewHistory = null;
-    this._updateFilePreviewHistoryNav();
+    this._updateFilePreviewHistoryNav?.();
     const overlay = this.$('filePreviewOverlay');
     if (overlay) {
       overlay.classList.remove('visible');

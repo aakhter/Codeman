@@ -743,7 +743,9 @@ export function registerCaseRoutes(
           container,
           image: host.image,
           path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
           network: host.network ?? 'bridge',
+          ...(dockerCase.owned === false ? { owned: false } : {}),
         },
       };
     }

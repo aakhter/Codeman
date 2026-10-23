@@ -224,8 +224,9 @@ describe('Case Management default group structure', () => {
     expect(html).toContain('id="caseEditDefaultGroup"');
     expect(html).toContain('<option value="">Ungrouped</option>');
     expect(html).toContain('Place future sessions for this case in this group');
-    expect(html).not.toContain('id="caseDefaultGroup"');
-    expect(html).not.toContain('id="caseDefaultGroupMobile"');
+    // Upstream #676 adds its own Case settings selector (caseDefaultGroup / caseDefaultGroupMobile,
+    // pinned by test/case-default-group-ui.test.ts); the Edit Case control stays the ONE in this surface.
+    expect(html.match(/id="caseEditDefaultGroup"/g) ?? []).toHaveLength(1);
   });
 
   it('loads the Edit Case control from the server and saves it through the case update', () => {

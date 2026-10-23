@@ -115,6 +115,30 @@ vi.mock('node:fs/promises', async () => {
   };
 });
 
+/**
+ * Local fork (COD-212): `reconcileSessions()` lists panes with the async `exec`
+ * (promisified), not `execSync`. Answer `list-panes -a` with `panes`, everything else empty.
+ */
+function mockAsyncListPanes(panes: string, panePid = ''): void {
+  vi.mocked(exec).mockImplementation(
+    (cmd: string, optionsOrCallback?: unknown, maybeCallback?: unknown): ReturnType<typeof exec> => {
+      const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+      const stdout =
+        typeof cmd === 'string' && cmd.includes(' list-panes -a ')
+          ? panes
+          : panePid && typeof cmd === 'string' && cmd.includes('#{pane_pid}')
+            ? `${panePid}\n`
+            : '';
+      if (typeof callback === 'function') {
+        setImmediate(() =>
+          (callback as (err: null, result: { stdout: string; stderr: string }) => void)(null, { stdout, stderr: '' })
+        );
+      }
+      return { on: vi.fn(), kill: vi.fn(), pid: 12345 } as unknown as ReturnType<typeof exec>;
+    }
+  );
+}
+
 describe('TmuxManager (unit)', () => {
   let manager: TmuxManager;
   const mockedExecSync = vi.mocked(execSync);
@@ -1528,6 +1552,8 @@ describe('TmuxManager (unit)', () => {
         }
         return '';
       });
+      // Local fork (COD-212): the pane pid is read through the async `exec`.
+      mockAsyncListPanes('', '4242');
       const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
       const nonTestManager = new NonTestTmuxManager();
 
@@ -1537,7 +1563,19 @@ describe('TmuxManager (unit)', () => {
           workingDir: '/project',
           mode: 'shell',
         });
-        const commands = mockedExecSync.mock.calls.map(([cmd]) => String(cmd));
+        // Local fork (COD-212): respawn-pane runs through the async `exec`, the prefix-table
+        // reset through `execSync`, so the order is compared across both mocks.
+        const timeline = [
+          ...mockedExecSync.mock.calls.map(([cmd], i) => ({
+            cmd: String(cmd),
+            at: mockedExecSync.mock.invocationCallOrder[i],
+          })),
+          ...mockedExec.mock.calls.map(([cmd], i) => ({
+            cmd: String(cmd),
+            at: mockedExec.mock.invocationCallOrder[i],
+          })),
+        ].sort((a, b) => a.at - b.at);
+        const commands = timeline.map((entry) => entry.cmd);
         expect(commands).toContain(`tmux -L 'codeman' unbind-key -a -T prefix`);
         const bind = commands.indexOf(`tmux -L 'codeman' bind-key -T prefix 'C-a' send-prefix`);
         expect(bind).toBeGreaterThan(commands.indexOf(`tmux -L 'codeman' unbind-key -a -T prefix`));
@@ -1558,6 +1596,8 @@ describe('TmuxManager (unit)', () => {
         }
         return '';
       });
+      // Local fork (COD-212): reconcileSessions lists panes through the async `exec`.
+      mockAsyncListPanes(panes);
     }
 
     it('reduces it at boot too, for sessions that survived an upgrade', async () => {
@@ -1585,7 +1625,7 @@ describe('TmuxManager (unit)', () => {
       try {
         await nonTestManager.reconcileSessions();
         const commands = mockedExecSync.mock.calls.map(([cmd]) => String(cmd));
-        expect(commands.some((c) => c.includes(' list-panes -a '))).toBe(true);
+        expect(mockedExec.mock.calls.some(([c]) => String(c).includes(' list-panes -a '))).toBe(true);
         expect(commands.filter((c) => /show-options -gv prefix|list-keys|unbind-key|bind-key/.test(c))).toEqual([]);
       } finally {
         nonTestManager.destroy();
@@ -2054,6 +2094,8 @@ describe('TmuxManager (unit)', () => {
         }
         return '';
       });
+      // Local fork (COD-212): reconcileSessions lists panes through the async `exec`.
+      mockAsyncListPanes(String(mockedExecSync.getMockImplementation()?.("tmux -L 'codeman' list-panes -a ")));
       const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
       const nonTestManager = new NonTestTmuxManager();
 
@@ -2080,7 +2122,7 @@ describe('TmuxManager (unit)', () => {
         });
 
         // The directory comes from the same list-panes call, as its last field.
-        const listCalls = mockedExecSync.mock.calls
+        const listCalls = mockedExec.mock.calls
           .map(([cmd]) => cmd)
           .filter((cmd): cmd is string => typeof cmd === 'string' && cmd.includes(' list-panes '));
         expect(listCalls).toHaveLength(1);
@@ -2099,6 +2141,7 @@ describe('TmuxManager (unit)', () => {
         }
         return '';
       });
+      mockAsyncListPanes(['codeman-aaaa1111|101|0|||/private/tmp', 'codeman-bbbb2222|102|0|||/tmp'].join('\n'));
       try {
         const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
         const nonTestManager = new NonTestTmuxManager();
