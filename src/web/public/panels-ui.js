@@ -5183,11 +5183,15 @@ Object.assign(CodemanApp.prototype, {
     this._recordFilePreviewHistory?.(filePath, sessionId, attachmentId, options);
     this._bindFilePreviewChrome?.();
 
-    // Only the newest load may write: paging ←/→ through a folder starts the next
-    // load while the previous one still awaits its fetch, and its late answer would
-    // put the previous file's text under the next file's title.
-    const load = (this._filePreviewLoad = (this._filePreviewLoad || 0) + 1);
-    const stale = () => load !== this._filePreviewLoad;
+    // Only the newest load may write (COD-543): paging ←/→ through a folder, or
+    // back/forward, starts the next load while the previous one still awaits its
+    // fetch, and its late answer would put the previous file's text under the next
+    // file's title. The guard is the identity of `previewState` (assigned below,
+    // before the first await): every await in this flow, and in the helpers it hands
+    // the state to, re-checks `this.filePreviewState !== previewState`. That also
+    // covers a close and the URI/external resolvers, which replace or null the
+    // state. Upstream's load counter (`stale()`, #659) is the same rule; it is not
+    // kept as a second mechanism. test/file-preview-newest-load-wins.test.ts pins it.
 
     // Stop any previous live-refresh poller before switching documents.
     this._stopFilePreviewPolling();
