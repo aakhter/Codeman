@@ -111,6 +111,7 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
 
   afterEach(async () => {
     delete process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS;
+    delete process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS;
     delete process.env.CODEMAN_ATTACHMENT_CONFINE;
     resetTrustedAttachmentRootsForTests();
     attachmentRegistry.clearSession(harness.ctx._sessionId);
@@ -203,6 +204,45 @@ describe('POST /api/sessions/:id/attachments/upload (COD-241)', () => {
       expect(external.statusCode).toBe(403);
     } finally {
       await fs.rm(unrelated, { force: true });
+      await fs.rm(trusted, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads, reconstructs history, reads and deletes from a mapped enclave with no workspace symlink', async () => {
+    const trusted = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'codeman-upload-mapped-')));
+    process.env.CODEMAN_TRUSTED_ATTACHMENT_ROOTS = trusted;
+    process.env.CODEMAN_ATTACHMENT_WORKSPACE_ROOTS = JSON.stringify({ [await fs.realpath(workdir)]: trusted });
+    resetTrustedAttachmentRootsForTests();
+    try {
+      const upload = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/upload`,
+        headers: MULTIPART_HEADERS,
+        payload: uploadBody(BOUNDARY, 'Mapped.pdf', 'application/pdf', PDF_BYTES),
+      });
+      expect(upload.statusCode).toBe(200);
+      const data = JSON.parse(upload.body).data;
+      expect(data.agentPath.startsWith(`${trusted}/`)).toBe(true);
+      expect(await fs.readFile(data.agentPath)).toEqual(PDF_BYTES);
+      attachmentRegistry.clearSession(harness.ctx._sessionId);
+      const history = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments`,
+      });
+      const item = JSON.parse(history.body).data.items[0];
+      expect(item.missing).toBe(false);
+      expect(item.relativePath).toMatch(/^\.codeman-attachments\/Mapped-/);
+      const raw = await harness.app.inject({ method: 'GET', url: item.rawUrl });
+      expect(raw.rawPayload).toEqual(PDF_BYTES);
+      const removed = await harness.app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/${harness.ctx._sessionId}/attachments/uploaded?path=${encodeURIComponent(item.relativePath)}`,
+        headers: { host: 'codeman.test', origin: 'http://codeman.test' },
+      });
+      expect(removed.statusCode).toBe(200);
+      await expect(fs.stat(data.agentPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.lstat(join(workdir, '.codeman-attachments'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
       await fs.rm(trusted, { recursive: true, force: true });
     }
   });

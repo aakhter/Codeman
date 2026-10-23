@@ -404,6 +404,18 @@ document enclave, and the one case where uploaded bytes leave the workspace.
 - A bad entry is never a startup failure — it is dropped, and with no valid roots
   the symlink form is simply unavailable.
 
+For cloud-synced workspaces where symlinks are unsupported, operators can instead set
+`CODEMAN_ATTACHMENT_WORKSPACE_ROOTS` to a JSON object mapping exact canonical workspace
+paths to exact canonical roots already approved by `CODEMAN_TRUSTED_ATTACHMENT_ROOTS`.
+For example: `{"/work/project":"/data/attachments"}`. This environment-only mapping
+retains the same admin-only, dedicated-enclave and exact-root guards. It takes precedence
+over a workspace `.codeman-attachments` entry; no workspace directory is created.
+Malformed mapping configuration fails closed. Restart the service after changing its
+environment. Existing history keeps logical `.codeman-attachments/` paths and guarded
+external-file routes; new uploads provide agents the canonical absolute file path.
+Unmapped workspaces retain their current upload behavior. Removing a mapping can make
+its existing uploads unavailable, so retain the previous mapping for rollback.
+
 Implementation: `isDedicatedAttachmentEnclave` / `parseTrustedAttachmentRoots` /
 `resolveLocalUploadDirectory` in `src/config/attachment-guard.ts`.
 **Folder grid grants** (`POST /api/sessions/:id/folders`, `src/folder-listing.ts`)

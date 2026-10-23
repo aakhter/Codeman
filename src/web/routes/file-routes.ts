@@ -2949,7 +2949,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Failed to register upload');
     }
 
-    const agentPath = pathPosix.join('.codeman-attachments', diskName);
+    const agentPath =
+      uploadDirectory.kind === 'trusted' && uploadDirectory.agentDirectory
+        ? dest
+        : pathPosix.join('.codeman-attachments', diskName);
     const routes = buildAttachmentRoutes(id, attachmentId, ext);
     return {
       success: true,
