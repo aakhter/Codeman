@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { open, readdir, stat } from 'node:fs/promises';
+import { open, opendir, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { LRUMap } from './utils/lru-map.js';
@@ -125,16 +125,21 @@ async function listRecentCodexRollouts(codexHome: string, now = new Date()): Pro
   return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-async function readCodexRolloutMeta(path: string): Promise<Pick<CodexRolloutFile, 'cwd' | 'originator'>> {
-  const cached = rolloutMetaCache.get(path);
+async function readCodexRolloutMeta(
+  path: string,
+  maxBytes?: number
+): Promise<Pick<CodexRolloutFile, 'cwd' | 'originator'>> {
+  const cached = maxBytes === undefined ? rolloutMetaCache.get(path) : undefined;
   if (cached) return cached;
   const metadata: Pick<CodexRolloutFile, 'cwd' | 'originator'> = {};
   const handle = await open(path, 'r').catch(() => undefined);
   if (!handle) return metadata;
   try {
-    const buffer = Buffer.alloc(131072);
+    const buffer = Buffer.alloc(maxBytes ?? 131072);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    for (const line of buffer.subarray(0, bytesRead).toString('utf8').split('\n')) {
+    const complete = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
+    complete.pop();
+    for (const line of complete) {
       try {
         const row = JSON.parse(line) as {
           type?: string;
@@ -152,7 +157,7 @@ async function readCodexRolloutMeta(path: string): Promise<Pick<CodexRolloutFile
     await handle.close();
   }
   // A newly created rollout may not have flushed identity metadata yet.
-  if (metadata.cwd || metadata.originator) rolloutMetaCache.set(path, metadata);
+  if (maxBytes === undefined && (metadata.cwd || metadata.originator)) rolloutMetaCache.set(path, metadata);
   return metadata;
 }
 
@@ -302,15 +307,79 @@ export async function findOwnedCodexConversation(
   return resolveCodexConversation({ ...options, codexHome: canonicalizeCodexHome(options.codexHome) }, false);
 }
 
+/** Optional hard budget for an inspection caller: exhausting it proves nothing. */
+export interface CodexAttributionBudget {
+  maxEntries: number;
+  maxBytes: number;
+}
+async function listBoundedCodexRollouts(
+  codexHome: string,
+  budget: CodexAttributionBudget,
+  explicitIds: readonly (string | undefined)[],
+  sessionId: string
+): Promise<CodexRolloutFile[] | undefined> {
+  const directories = [{ path: join(codexHome, 'sessions'), depth: 0 }];
+  const files: CodexRolloutFile[] = [];
+  let entries = 0;
+  let scanned = 131072; // Reserve a final complete metadata verification.
+  while (directories.length) {
+    const directory = directories.pop()!;
+    const handle = await opendir(directory.path).catch(() => undefined);
+    if (!handle) return undefined;
+    for await (const entry of handle) {
+      if (++entries > budget.maxEntries) return undefined;
+      const path = join(directory.path, entry.name);
+      if (entry.isDirectory()) {
+        if (directory.depth >= 8) return undefined;
+        directories.push({ path, depth: directory.depth + 1 });
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        const id = basename(path).match(UUID_AT_END)?.[1];
+        if (explicitIds.length && !explicitIds.includes(id)) continue;
+        const info = await stat(path).catch(() => undefined);
+        if (!info) return undefined;
+        const size = Math.min(info.size, 4096);
+        if (scanned + size > budget.maxBytes) return undefined;
+        scanned += size;
+        const header = await open(path, 'r').catch(() => undefined);
+        if (!header) return undefined;
+        let mayMatch = explicitIds.length > 0;
+        try {
+          const bytes = Buffer.alloc(size);
+          const { bytesRead } = await header.read(bytes, 0, size, 0);
+          // A bounded prefix is only a cheap negative filter, never proof. A
+          // candidate still needs a complete parsed metadata row below and an
+          // independent final verification before it may be attributed.
+          mayMatch ||= bytes
+            .subarray(0, bytesRead)
+            .toString('utf8')
+            .includes(JSON.stringify(`codeman_${sessionId}`));
+        } finally {
+          await header.close();
+        }
+        if (!mayMatch) continue;
+        const metadataBytes = Math.min(info.size, 131072);
+        if (scanned + metadataBytes > budget.maxBytes) return undefined;
+        scanned += metadataBytes;
+        files.push({ path, id, mtimeMs: info.mtimeMs, ...(await readCodexRolloutMeta(path, metadataBytes)) });
+      }
+    }
+  }
+  return files;
+}
+
 /** Assistant binding never uses prompt timestamps, newest-file, or cwd-only guesses. */
 export async function findExactCodexConversation(
-  options: CodexConversationIdentityOptions
+  options: CodexConversationIdentityOptions,
+  budget?: CodexAttributionBudget
 ): Promise<ActiveCodexConversation | undefined> {
   const codexHome = canonicalizeCodexHome(options.codexHome);
   invalidateCodexConversationInventory(codexHome);
-  const files = await listCodexRollouts(codexHome);
   const explicitIds = [...new Set([options.resumeSessionId, options.nativeResumeId].filter(Boolean))];
   if (explicitIds.length > 1) return undefined;
+  const files = budget
+    ? await listBoundedCodexRollouts(codexHome, budget, explicitIds, options.sessionId)
+    : await listCodexRollouts(codexHome);
+  if (!files) return undefined;
   const candidates = explicitIds.length
     ? files.filter((file) => file.id === explicitIds[0])
     : files.filter((file) => file.originator === `codeman_${options.sessionId}`);

@@ -1139,6 +1139,32 @@ describe('TmuxManager (unit)', () => {
       return testManager;
     }
 
+    it('checks conditional checkpoint dispatch again before Enter and before a retry', async () => {
+      let allowed = true;
+      const commands: string[] = [];
+      const testManager = checkpointManager(async (command) => {
+        commands.push(command);
+        allowed = false;
+      });
+      await expect(
+        testManager.sendCheckpointCommand('checkpoint-id', '/compact\r', { beforeDispatch: () => allowed })
+      ).resolves.toMatchObject({ ok: false, stage: 'enter' });
+      expect(commands).toHaveLength(1);
+      testManager.destroy();
+      allowed = true;
+      const retried: string[] = [];
+      const failing = checkpointManager(async (command) => {
+        retried.push(command);
+        allowed = false;
+        throw new Error('write failed');
+      });
+      await expect(
+        failing.sendCheckpointCommand('checkpoint-id', '/compact\r', { beforeDispatch: () => allowed })
+      ).resolves.toMatchObject({ ok: false, stage: 'text' });
+      expect(retried).toHaveLength(1);
+      failing.destroy();
+    });
+
     it('acknowledges text then Enter through the production adapter boundary', async () => {
       const commands: string[] = [];
       const testManager = checkpointManager(async (command) => void commands.push(command));

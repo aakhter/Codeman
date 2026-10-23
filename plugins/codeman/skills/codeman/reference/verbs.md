@@ -767,3 +767,10 @@ case, a cloned repo or a worktree never appears there.
 Confirm cleanup with `GET /api/v1/sessions`, never with `/api/v1/sessions/unified`
 (that one folds in transcript history from the whole machine and will keep showing
 your worker forever).
+
+### Bounded inspection and guarded stage/submit
+
+For recent evidence with opaque incremental cursors, or typing a prompt without Enter
+and confirming its unchanged composer before one submission, load
+[inspection-and-staging.md](inspection-and-staging.md). `send --no-enter` alone does
+not issue a guarded receipt.

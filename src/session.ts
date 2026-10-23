@@ -29,6 +29,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { promptSha256, readGuardedCodexSnapshot, type GuardedInputSnapshot } from './agent-staging.js';
 import { workerResumeOptions } from './remote-worker-recovery.js';
 import { basename } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
@@ -137,6 +138,7 @@ import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { getCli } from './config/cli-registry/registry.js';
 import { legacyResumeSlot } from './session-cli-registry-bridge.js';
 import { SubmitVerifier, exactPromptStillInComposer } from './session-submit-verifier.js';
+import { isKeyboardTerminalInput } from './terminal-input-classifier.js';
 import { KEEP_WARM_NUDGE } from './prompt-cache-keepwarm.js';
 import { compileVersionRegex } from './config/cli-registry/patterns.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
@@ -1730,6 +1732,8 @@ export class Session extends EventEmitter {
 
   /** Set the owning username (used by recovery to restore ownership). */
   set owner(username: string | undefined) {
+    // Ownership changes permanently fence in-flight input, including change-and-restore.
+    if (this._owner !== username) this._guardedPaneRevision++;
     this._owner = username;
   }
 
@@ -1855,6 +1859,7 @@ export class Session extends EventEmitter {
 
   /** Run one pane start, attach or relaunch with {@link paneLifecycleInFlight} raised. */
   private async _withPaneLifecycle<T>(op: () => Promise<T>): Promise<T> {
+    this._guardedPaneRevision++;
     this._paneLifecycleOps++;
     try {
       return await op();
@@ -1881,6 +1886,7 @@ export class Session extends EventEmitter {
    * Ark0N/Codeman#446 review; both now persist on their success path.
    */
   private clearPaneExitForNewPane(): void {
+    this._guardedPaneRevision++;
     this.setPaneExit(undefined);
     if (this._muxSession) this._mux?.clearPaneExit?.(this._muxSession.muxName);
   }
@@ -5298,7 +5304,12 @@ export class Session extends EventEmitter {
     prompt: string,
     options?: { model?: string; onProgress?: (info: { tokens?: number; status?: string }) => void }
   ): Promise<{ result: string; cost: number }> {
+    if (this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      throw new Error('Guarded submission in progress');
+    }
     if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
+    this._guardedPaneRevision++;
     return new Promise((resolve, reject) => {
       if (this.ptyProcess) {
         reject(new Error('Session already has a running process'));
@@ -6045,6 +6056,101 @@ export class Session extends EventEmitter {
    * input could disappear while the caller believed it had been delivered.
    */
   private _assistantInputGuard: ((permit?: string) => boolean) | undefined;
+  private readonly _inspectionInstance = uuidv4();
+  private _guardedPaneRevision = 0;
+  private _guardedInputRevision = 0;
+  private _guardedSubmitInFlight = false;
+  /** No content: notes must not implicitly submit a draft, even after a lost stage ACK. */
+  private _guardedDraftGeneration: string | undefined;
+  /** Ephemeral identity; never persisted or derived from a possibly reused pid alone. */
+  get inspectionGeneration(): string {
+    return `${this._inspectionInstance}:${this._guardedPaneRevision}:${this.owner ?? ''}`;
+  }
+  /** Reports and empty writes do not edit a draft. Unknown/mixed input remains keyboard-bearing. */
+  private _observeGuardedKeyboardInput(data: string, preserveDraft = false): void {
+    if (!data || !isKeyboardTerminalInput(data)) return;
+    this._guardedInputRevision++;
+    if (!preserveDraft) this._guardedDraftGeneration = undefined;
+  }
+  /** Screen evidence only for a characterized local composer, otherwise fail closed. */
+  guardedInputSnapshot(): GuardedInputSnapshot | null {
+    return this._readGuardedInputSnapshot(false);
+  }
+  private _readGuardedInputSnapshot(allowLease: boolean): GuardedInputSnapshot | null {
+    if (
+      this._isStopped ||
+      this._closing ||
+      this.paneLifecycleInFlight ||
+      this._assistantPendingWrites ||
+      (!allowLease && this._guardedSubmitInFlight) ||
+      !this.assistantInputAllowed() ||
+      this.remote ||
+      this.docker ||
+      this.paneExit ||
+      getCli(this.mode)?.capabilities.nativeAssistantProfile !== 'codex' ||
+      !this._muxSession
+    )
+      return null;
+    const screen = this._mux?.capturePaneBuffer?.(this._muxSession.muxName);
+    if (!screen) return null;
+    if (classifyCodexRenderedState(screen) !== 'input-ready') return null;
+    const composer = readGuardedCodexSnapshot(screen);
+    return composer === null
+      ? null
+      : {
+          generation: this.inspectionGeneration,
+          revision: this._guardedInputRevision,
+          composerSha: promptSha256(composer),
+        };
+  }
+  /** Type a guarded draft without leaving an earlier Enter verifier armed. */
+  async stageGuardedInput(message: string): Promise<boolean> {
+    if (/[\r\n]/.test(message)) return false;
+    if (this._assistantPendingWrites || this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      return false;
+    }
+    if (!this.assistantInputAllowed()) return false;
+    // A verifier armed by an earlier send must not submit a same-prefix staged
+    // draft before its receipt is explicitly confirmed.
+    this.cancelAssistantSubmitVerification();
+    this.cancelCheckpoint('guarded-stage');
+    const generation = this.inspectionGeneration;
+    const writing = this.writeViaMux(message, { fromUser: true });
+    // writeViaMux enters its pending window synchronously. Keep the fence even
+    // if delivery fails: an unacknowledged transport may already have typed it.
+    this._guardedDraftGeneration = generation;
+    return writing;
+  }
+  /** One conditional Enter, with no automatic submit verifier or replay on failure. */
+  async submitGuardedInput(expected: GuardedInputSnapshot): Promise<boolean> {
+    const matches = (current: GuardedInputSnapshot | null): boolean =>
+      !!current &&
+      current.generation === expected.generation &&
+      current.revision === expected.revision &&
+      current.composerSha === expected.composerSha;
+    if (!matches(this.guardedInputSnapshot()) || !this._mux || !this._muxSession) return false;
+    this._guardedSubmitInFlight = true;
+    let dispatched = false;
+    try {
+      const sent = await this._mux.sendInput(this.id, '\r', {
+        beforeDispatch: () => {
+          if (!matches(this._readGuardedInputSnapshot(true))) return false;
+          this._guardedInputRevision++;
+          dispatched = true;
+          return true;
+        },
+      });
+      if (sent && dispatched) {
+        this._guardedDraftGeneration = undefined;
+        this._assistantLastInputAt = Date.now();
+        this._emitSubmittedPrompt(this._trackSubmit('\r', { fromUser: true }));
+      }
+      return sent && dispatched;
+    } finally {
+      this._guardedSubmitInFlight = false;
+    }
+  }
   private _assistantPendingWrites = 0;
   private _assistantLastInputAt = 0;
   setAssistantInputGuard(guard: (permit?: string) => boolean): void {
@@ -6057,13 +6163,20 @@ export class Session extends EventEmitter {
     return this._assistantLastInputAt;
   }
   get assistantInputLocked(): boolean {
-    return !this.assistantInputAllowed();
+    return this._guardedSubmitInFlight || !this.assistantInputAllowed();
   }
   assistantInputAllowed(permit?: string): boolean {
     return this._assistantInputGuard?.(permit) ?? true;
   }
   async performAuxiliaryInput(operation: () => Promise<void>): Promise<void> {
+    if (this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      throw new Error('Guarded submission in progress');
+    }
     if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
+    // The opaque callback cannot prove an edit. The send-key route reports its
+    // actual keyboard bytes through trackUserInput after delivery.
+    this._guardedInputRevision++;
     this._assistantLastInputAt = Date.now();
     this._assistantPendingWrites++;
     try {
@@ -6101,7 +6214,12 @@ export class Session extends EventEmitter {
   }
 
   write(data: string, options: SessionWriteOptions = {}): boolean {
+    if (this._guardedSubmitInFlight) {
+      this._observeGuardedKeyboardInput(data, true);
+      return false;
+    }
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._observeGuardedKeyboardInput(data);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
     this._assistantLastInputAt = Date.now();
@@ -6159,6 +6277,7 @@ export class Session extends EventEmitter {
    * separator. Reports submissions like a write would (a line feed never is one).
    */
   trackUserInput(data: string): void {
+    this._observeGuardedKeyboardInput(data);
     if (!this._acceptsPrompts) return;
     this._emitSubmittedPrompt(this._submittedPromptTracker.feed(data));
   }
@@ -6180,6 +6299,8 @@ export class Session extends EventEmitter {
    * their prompt must count as real and alert normally.
    */
   markPromptSubmitted(prompt?: string): void {
+    this._guardedDraftGeneration = undefined;
+    this._guardedInputRevision++;
     if (prompt !== undefined && prompt.trim() !== KEEP_WARM_NUDGE) this._keepAliveTurnUntil = 0;
     this._stampSubmit();
   }
@@ -6260,11 +6381,41 @@ export class Session extends EventEmitter {
 
   /** Explicit private-note submission preserves literal multiline content using bracketed paste. */
   async writeNotesInput(text: string, canWrite: () => boolean = () => true): Promise<boolean> {
+    if (this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      return false;
+    }
     if (this._isStopped || !canWrite()) return false;
     if (this._notesInputInFlight) throw new SessionNotesInputBusyError();
+    // A note includes Enter. It cannot take over an outstanding guarded draft;
+    // only explicit edits/submission or a new lifecycle release that fence.
+    if (this._guardedDraftGeneration === this.inspectionGeneration) {
+      this._guardedInputRevision++;
+      return false;
+    }
+    if (this._closing || this.paneLifecycleInFlight || this.paneExit || !this.assistantInputAllowed()) return false;
+    if (this._assistantPendingWrites) return false;
+    const operationRevision = ++this._guardedInputRevision;
+    const operationGeneration = this.inspectionGeneration;
+    const mux = this._mux;
+    const muxSession = this._muxSession;
     this._notesInputInFlight = true;
+    this._assistantPendingWrites++;
     try {
-      const eligible = () => !this._isStopped && canWrite();
+      // The transport checks synchronously immediately before paste and Enter.
+      // Revalidate after every await, including a pane/owner change-and-restore.
+      const eligible = () =>
+        !this._isStopped &&
+        !this._closing &&
+        !this.paneLifecycleInFlight &&
+        !this.paneExit &&
+        !this._guardedSubmitInFlight &&
+        this.assistantInputAllowed() &&
+        this._guardedInputRevision === operationRevision &&
+        this.inspectionGeneration === operationGeneration &&
+        this._mux === mux &&
+        this._muxSession === muxSession &&
+        canWrite();
       const paste = '\x1b[200~' + text + '\x1b[201~';
       if (this._mux && this._muxSession) {
         if (!this._mux.sendNotesInput) return false;
@@ -6274,6 +6425,7 @@ export class Session extends EventEmitter {
       }
       if (!this.ptyProcess) return false;
       const transport = this.ptyProcess;
+      if (!eligible()) return false;
       transport.write(paste);
       await new Promise((resolve) => setTimeout(resolve, 50));
       if (this.ptyProcess !== transport || !eligible()) return false;
@@ -6281,6 +6433,7 @@ export class Session extends EventEmitter {
       this._emitSubmittedPrompt(this._trackSubmit(paste + '\r', { fromUser: true }));
       return true;
     } finally {
+      this._assistantPendingWrites--;
       this._notesInputInFlight = false;
     }
   }
@@ -6302,7 +6455,12 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string, options: SessionWriteOptions = {}): Promise<boolean> {
+    if (this._guardedSubmitInFlight) {
+      this._observeGuardedKeyboardInput(data, true);
+      return false;
+    }
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
+    this._observeGuardedKeyboardInput(data);
     this._assistantPendingWrites++;
     try {
       if (this._mux && this._muxSession) {
@@ -6334,75 +6492,95 @@ export class Session extends EventEmitter {
    * unchanged; checkpoint orchestration receives the exact failed stage.
    */
   async writeCheckpointViaMux(data: string): Promise<CommandDeliveryResult> {
+    if (this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      return { ok: false, stage: 'text', error: 'Guarded submission in progress', attempt: 1 };
+    }
     if (!this.assistantInputAllowed())
       return { ok: false, stage: 'text', error: 'Assistant owns session input', attempt: 1 };
-    const checkpointRunId = this._autoOps.activeCheckpointRunId;
-    const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
-    const isClear = checkpointCommand === '/clear';
-    const isCodexFreshThread = this.mode === 'codex' && (isClear || checkpointCommand === '/new');
-    if (isClear) {
-      this._checkpointAwaitingInstantClear = true;
-      this._checkpointInstantClearBaseline = this._checkpointReadyFingerprint;
-      this._checkpointDirectPtySawClear = false;
-    }
-    if (isCodexFreshThread) {
-      const baselineId = this._checkpointCodexConversationId;
-      const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
-      const baselineIds = await this._findRecentOwnedCodexConversationIds({
-        codexHome,
-        sessionId: this.id,
-      });
-      if (
-        this._isStopped ||
-        (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)
-      ) {
+    this._guardedDraftGeneration = undefined;
+    const operationRevision = ++this._guardedInputRevision;
+    const operationGeneration = this.inspectionGeneration;
+    this._assistantPendingWrites++;
+    try {
+      const checkpointRunId = this._autoOps.activeCheckpointRunId;
+      const canDispatch = (): boolean =>
+        !this._isStopped &&
+        !this._guardedSubmitInFlight &&
+        this.assistantInputAllowed() &&
+        this.inspectionGeneration === operationGeneration &&
+        this._guardedInputRevision === operationRevision &&
+        (checkpointRunId === undefined || checkpointRunId === this._autoOps.activeCheckpointRunId);
+      const checkpointCommand = data.replace(/[\r\n]/g, '').trim();
+      const isClear = checkpointCommand === '/clear';
+      const isCodexFreshThread = this.mode === 'codex' && (isClear || checkpointCommand === '/new');
+      if (isClear) {
+        this._checkpointAwaitingInstantClear = true;
+        this._checkpointInstantClearBaseline = this._checkpointReadyFingerprint;
+        this._checkpointDirectPtySawClear = false;
+      }
+      if (isCodexFreshThread) {
+        const baselineId = this._checkpointCodexConversationId;
+        const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || '/tmp', '.codex');
+        const baselineIds = await this._findRecentOwnedCodexConversationIds({
+          codexHome,
+          sessionId: this.id,
+        });
+        if (!canDispatch()) {
+          return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
+        }
+        this._checkpointCodexFreshBaselineId = baselineId;
+        this._checkpointCodexFreshBaselineIds =
+          baselineId && !baselineIds.includes(baselineId) ? [...baselineIds, baselineId] : baselineIds;
+        this._checkpointCodexFreshTransitionArmed = true;
+      }
+      if (!canDispatch()) {
         return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
       }
-      this._checkpointCodexFreshBaselineId = baselineId;
-      this._checkpointCodexFreshBaselineIds =
-        baselineId && !baselineIds.includes(baselineId) ? [...baselineIds, baselineId] : baselineIds;
-      this._checkpointCodexFreshTransitionArmed = true;
-    }
-    if (this._isStopped || (checkpointRunId !== undefined && checkpointRunId !== this._autoOps.activeCheckpointRunId)) {
-      return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
-    }
-    if (this._mux && this._muxSession) {
-      const result = await this._mux.sendCheckpointCommand(this.id, data);
-      if (result.ok) {
-        // Codex fresh-thread commands intentionally do not update lastSubmitAt:
-        // they are not viewer-history prompts, but successful delivery still
-        // invalidates pending idle decisions.
-        if (isCodexFreshThread) {
-          this._terminalActivityEpoch++;
-          this.emit('terminalActivity');
-        } else this._trackSubmit(data, {});
-      }
-      if (isClear && !result.ok) {
-        this._checkpointAwaitingInstantClear = false;
-        this._checkpointInstantClearBaseline = null;
-      }
-      return result;
-    }
-    // Claude retains its direct-PTY fallback. Codex and the other external
-    // CLIs require tmux and cannot claim delivery without it.
-    if (this.mode === 'claude' && this.ptyProcess) {
-      try {
-        this.ptyProcess.write(data);
-        this._trackSubmit(data, {});
-        return { ok: true, attempt: 1 };
-      } catch (err) {
-        if (isClear) {
+      if (this._mux && this._muxSession) {
+        const result = await this._mux.sendCheckpointCommand(this.id, data, { beforeDispatch: canDispatch });
+        if (result.ok) {
+          this._assistantLastInputAt = Date.now();
+          // Codex fresh-thread commands intentionally do not update lastSubmitAt:
+          // they are not viewer-history prompts, but successful delivery still
+          // invalidates pending idle decisions.
+          if (isCodexFreshThread) {
+            this._terminalActivityEpoch++;
+            this.emit('terminalActivity');
+          } else this._trackSubmit(data, {});
+        }
+        if (isClear && !result.ok) {
           this._checkpointAwaitingInstantClear = false;
           this._checkpointInstantClearBaseline = null;
         }
-        return { ok: false, stage: 'text', error: getErrorMessage(err), attempt: 1 };
+        return result;
       }
+      // Claude retains its direct-PTY fallback. Codex and the other external
+      // CLIs require tmux and cannot claim delivery without it.
+      if (this.mode === 'claude' && this.ptyProcess) {
+        try {
+          if (!canDispatch())
+            return { ok: false, stage: 'text', error: 'checkpoint run cancelled before delivery', attempt: 1 };
+          this.ptyProcess.write(data);
+          this._assistantLastInputAt = Date.now();
+          this._trackSubmit(data, {});
+          return { ok: true, attempt: 1 };
+        } catch (err) {
+          if (isClear) {
+            this._checkpointAwaitingInstantClear = false;
+            this._checkpointInstantClearBaseline = null;
+          }
+          return { ok: false, stage: 'text', error: getErrorMessage(err), attempt: 1 };
+        }
+      }
+      if (isClear) {
+        this._checkpointAwaitingInstantClear = false;
+        this._checkpointInstantClearBaseline = null;
+      }
+      return { ok: false, stage: 'text', error: 'no terminal transport', attempt: 1 };
+    } finally {
+      this._assistantPendingWrites--;
     }
-    if (isClear) {
-      this._checkpointAwaitingInstantClear = false;
-      this._checkpointInstantClearBaseline = null;
-    }
-    return { ok: false, stage: 'text', error: 'no terminal transport', attempt: 1 };
   }
 
   /**
@@ -6430,7 +6608,12 @@ export class Session extends EventEmitter {
         this._isStopped || !this._mux || !this._muxSession
           ? null
           : this._mux.capturePaneText?.(this._muxSession.muxName),
-      sendEnter: () => (this.assistantInputAllowed() ? this._mux?.sendInput(this.id, '\r') : undefined),
+      sendEnter: () => {
+        // A refused timer must not resume Enter retries once the guarded lease
+        // ends; its caller now has a consumed receipt and must inspect first.
+        if (this._guardedSubmitInFlight) this._submitVerifier?.cancel();
+        return this.writeViaMux('\r');
+      },
       // ⚠ NO fallback glyph here, unlike the screen-reading probe elsewhere in this file.
       // Only claude, codex, pi, opencode, omp, gemini and antigravity declare a promptGlyph; the other modes would fall back
       // to claude's `❯`, which is ALSO starship's default shell prompt (and pure's, and
@@ -6500,6 +6683,7 @@ export class Session extends EventEmitter {
   private _acceptsTerminalViewerSizing = true;
 
   private _suspendTerminalViewerSizing(): void {
+    this._guardedPaneRevision++;
     this._acceptsTerminalViewerSizing = false;
     this._terminalSizing.clear();
     this._terminalResizeRequestSequence += 1;
@@ -6689,6 +6873,10 @@ export class Session extends EventEmitter {
 
   // Legacy method for sending input - wraps runPrompt
   async sendInput(input: string): Promise<void> {
+    if (this._guardedSubmitInFlight) {
+      this._guardedInputRevision++;
+      throw new Error('Guarded submission in progress');
+    }
     if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
     this._status = 'busy';
     this._markActivity(true);

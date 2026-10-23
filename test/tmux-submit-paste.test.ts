@@ -222,6 +222,31 @@ describe('sendInput line breaks', () => {
     return argvOf(setBufferCmd.replace(/^.*? set-buffer /, `${FAKE_TMUX} set-buffer `)).at(-1) as string;
   }
 
+  it('checks guarded Enter immediately before the inputRunner dispatch', async () => {
+    const manager = managerWithSession();
+    try {
+      let allowed = false;
+      let checks = 0;
+      const beforeDispatch = () => {
+        checks++;
+        expect(manager.ran).toEqual([]);
+        return allowed;
+      };
+      expect(await manager.sendInput('s1', '\r', { beforeDispatch })).toBe(false);
+      expect(manager.ran).toEqual([]);
+      allowed = true;
+      expect(await manager.sendInput('s1', '\r', { beforeDispatch })).toBe(true);
+      expect(checks).toBe(2);
+      expect(manager.ran).toEqual([expect.stringMatching(/ send-keys -t "codeman-abc12345" Enter$/)]);
+      manager.ran = [];
+      expect(await manager.sendInput('s1', 'draft\r', { beforeDispatch })).toBe(false);
+      expect(checks).toBe(2);
+      expect(manager.ran).toEqual([]);
+    } finally {
+      manager.destroy();
+    }
+  });
+
   it('submits a multi-line prompt as one paste with its line breaks, then Enter', async () => {
     const manager = managerWithSession();
     expect(await manager.sendInput('s1', 'line one\nline two\n\nparagraph three\r')).toBe(true);
