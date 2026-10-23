@@ -1,10 +1,12 @@
 /** @fileoverview Notes share guarded input fences without changing literal paste delivery. */
 import { expect, it, vi } from 'vitest';
 import { Session } from '../src/session.js';
+import { GuardedStageStore } from '../src/agent-staging.js';
+import { isKeyboardTerminalInput } from '../src/terminal-input-classifier.js';
 import { formatPaneSnapshot, TmuxManager } from '../src/tmux-manager.js';
 
-function target() {
-  let composer = 'hello';
+function target(initialComposer = 'hello') {
+  let composer = initialComposer;
   const writes: string[] = [];
   const mux = {
     isAvailable: () => true,
@@ -18,7 +20,7 @@ function target() {
     sendInput: vi.fn(async (_id: string, text: string, options?: { beforeDispatch?: () => boolean }) => {
       if (options?.beforeDispatch && !options.beforeDispatch()) return false;
       writes.push(text);
-      composer += text;
+      if (isKeyboardTerminalInput(text)) composer += text;
       return true;
     }),
     sendNotesInput: vi.fn(async (_id: string, text: string, eligible: () => boolean) => {
@@ -260,6 +262,129 @@ it('protects the whole pending stage window and keeps its fence after a transpor
     expect(mux.sendNotesInput).not.toHaveBeenCalled();
   } finally {
     release?.();
+    await session.stop(false);
+  }
+});
+
+const guardedReportInputs = [
+  ['focus in', '\x1b[I'],
+  ['focus out', '\x1b[O'],
+  ['SGR mouse', '\x1b[<0;10;5M'],
+  ['SGR release', '\x1b[<0;10;5m'],
+  ['X10 mouse', '\x1b[M !!'],
+  ['combined reports', '\x1b[I\x1b[<64;10;5M\x1b[O'],
+  ['empty', ''],
+] as const;
+const keyboardInputs = [
+  ['text', 'edit'],
+  ['focus then text', '\x1b[Oedit'],
+  ['text then mouse', 'edit\x1b[<0;10;5M'],
+  ['focus then Enter', '\x1b[O\r'],
+  ['Escape', '\x1b'],
+  ['arrow', '\x1b[A'],
+  ['control', '\x03'],
+  ['truncated SGR', '\x1b[<0;10;5'],
+  ['truncated X10', '\x1b[M !'],
+  ['X10 control button', '\x1b[M\r!!'],
+  ['X10 control coordinate', '\x1b[M \x1b!'],
+  ['X10-shaped arrow', '\x1b[M\x1b[A'],
+  ['report with extra payload', '\x1b[I\x1b[<0;10;5Mpayload'],
+] as const;
+
+async function applyTerminalInput(session: Session, path: string, data: string) {
+  if (path === 'write') session.write(data, { fromUser: true });
+  if (path === 'writeViaMux') await session.writeViaMux(data, { fromUser: true });
+  if (path === 'trackUserInput') session.trackUserInput(data);
+  if (path === 'auxiliary')
+    await session.performAuxiliaryInput(async () => {
+      session.trackUserInput(data);
+    });
+}
+
+for (const path of ['write', 'writeViaMux', 'trackUserInput', 'auxiliary']) {
+  it.each(guardedReportInputs)(`preserves the guarded draft fence for ${path} %s`, async (_label, data) => {
+    const { session, mux } = target('');
+    const access = session as unknown as { ptyProcess: { write: (input: string) => void } | null };
+    access.ptyProcess = { write: () => {} };
+    try {
+      const store = new GuardedStageStore();
+      const receipt = await store.stage(
+        {
+          id: session.id,
+          snapshot: () => session.guardedInputSnapshot(),
+          write: (text) => session.stageGuardedInput(text),
+          submit: (expected) => session.submitGuardedInput(expected),
+        },
+        'owner',
+        'guarded draft'
+      );
+      expect(receipt.stageId).toBeTruthy();
+      const revision = session.guardedInputSnapshot()!.revision;
+      await applyTerminalInput(session, path, data);
+      if (path !== 'auxiliary') expect(session.guardedInputSnapshot()?.revision).toBe(revision);
+      expect(await session.writeNotesInput('private note')).toBe(false);
+      expect(mux.sendNotesInput).not.toHaveBeenCalled();
+    } finally {
+      access.ptyProcess = null;
+      await session.stop(false);
+    }
+  });
+  it.each(keyboardInputs)(`releases the draft fence for ${path} keyboard-bearing %s`, async (_label, data) => {
+    const { session } = target();
+    const access = session as unknown as { ptyProcess: { write: (input: string) => void } | null };
+    access.ptyProcess = { write: () => {} };
+    try {
+      await session.stageGuardedInput('draft');
+      const revision = session.guardedInputSnapshot()!.revision;
+      await applyTerminalInput(session, path, data);
+      expect(session.guardedInputSnapshot()?.revision).not.toBe(revision);
+      expect(await session.writeNotesInput('private note')).toBe(true);
+    } finally {
+      access.ptyProcess = null;
+      await session.stop(false);
+    }
+  });
+}
+
+it('keeps a receipt usable after pure focus reports, with composer proof still checked at Enter', async () => {
+  const { session } = target('');
+  const store = new GuardedStageStore();
+  const staged = {
+    id: session.id,
+    snapshot: () => session.guardedInputSnapshot(),
+    write: (text: string) => session.stageGuardedInput(text),
+    submit: (expected: Parameters<Session['submitGuardedInput']>[0]) => session.submitGuardedInput(expected),
+  };
+  try {
+    const receipt = await store.stage(staged, 'owner', 'draft');
+    await session.writeViaMux('\x1b[I\x1b[O', { fromUser: true });
+    await expect(store.submit(staged, 'owner', receipt.stageId, receipt.sha256)).resolves.toMatchObject({
+      submitted: true,
+    });
+  } finally {
+    await session.stop(false);
+  }
+});
+
+it('still refuses a report-only mouse change when the composer caret no longer matches its receipt', async () => {
+  const { session, mux } = target('');
+  const store = new GuardedStageStore();
+  const staged = {
+    id: session.id,
+    snapshot: () => session.guardedInputSnapshot(),
+    write: (text: string) => session.stageGuardedInput(text),
+    submit: (expected: Parameters<Session['submitGuardedInput']>[0]) => session.submitGuardedInput(expected),
+  };
+  try {
+    const receipt = await store.stage(staged, 'owner', 'draft');
+    await session.writeViaMux('\x1b[<0;10;5M', { fromUser: true });
+    vi.spyOn(mux, 'capturePaneBuffer').mockImplementation(() =>
+      formatPaneSnapshot(['› draft', '  GPT-6-Luna default · ~/case'], { cols: 100, rows: 20, cursorX: 3, cursorY: 0 })
+    );
+    await expect(store.submit(staged, 'owner', receipt.stageId, receipt.sha256)).rejects.toThrow('Staged composer');
+    expect(await session.writeNotesInput('private note')).toBe(false);
+    expect(mux.sendNotesInput).not.toHaveBeenCalled();
+  } finally {
     await session.stop(false);
   }
 });

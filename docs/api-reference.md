@@ -628,8 +628,13 @@ paint can still make submit refuse until exact verification becomes possible.
 Private-note delivery shares the same input revision, pending-write and lease
 guards, rechecking eligibility before its literal paste and Enter. Notes refuse
 while a guarded draft is outstanding, including an unacknowledged stage attempt;
-only explicit input/recovery, an acknowledged guarded submit or a new pane/owner
-generation releases that in-memory fence. No prompt content is stored for it.
+only explicit keyboard input/recovery, an acknowledged guarded submit or a new
+pane/owner generation releases that in-memory fence. Complete allowlisted focus
+and mouse reports and empty writes preserve the fence and input revision; mixed
+or unknown sequences remain keyboard-bearing. Exact composer/caret checks still
+reject a mouse-moved caret. Opaque auxiliary operations invalidate receipt
+revisions but preserve the draft fence until their keyboard bytes are reported.
+No prompt content is stored for it.
 
 Submit consumes an owned receipt before awaited delivery, verifies the caller,
 confirmation hash, expiry, lifecycle/input revisions and exact composer/caret,

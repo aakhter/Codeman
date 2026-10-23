@@ -136,6 +136,7 @@ import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { getCli } from './config/cli-registry/registry.js';
 import { legacyResumeSlot } from './session-cli-registry-bridge.js';
 import { SubmitVerifier, exactPromptStillInComposer } from './session-submit-verifier.js';
+import { isKeyboardTerminalInput } from './terminal-input-classifier.js';
 import { compileVersionRegex } from './config/cli-registry/patterns.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
@@ -5963,6 +5964,12 @@ export class Session extends EventEmitter {
   get inspectionGeneration(): string {
     return `${this._inspectionInstance}:${this._guardedPaneRevision}:${this.owner ?? ''}`;
   }
+  /** Reports and empty writes do not edit a draft. Unknown/mixed input remains keyboard-bearing. */
+  private _observeGuardedKeyboardInput(data: string, preserveDraft = false): void {
+    if (!data || !isKeyboardTerminalInput(data)) return;
+    this._guardedInputRevision++;
+    if (!preserveDraft) this._guardedDraftGeneration = undefined;
+  }
   /** Screen evidence only for a characterized local composer, otherwise fail closed. */
   guardedInputSnapshot(): GuardedInputSnapshot | null {
     return this._readGuardedInputSnapshot(false);
@@ -6065,7 +6072,8 @@ export class Session extends EventEmitter {
       throw new Error('Guarded submission in progress');
     }
     if (!this.assistantInputAllowed()) throw new Error('Assistant owns session input');
-    this._guardedDraftGeneration = undefined;
+    // The opaque callback cannot prove an edit. The send-key route reports its
+    // actual keyboard bytes through trackUserInput after delivery.
     this._guardedInputRevision++;
     this._assistantLastInputAt = Date.now();
     this._assistantPendingWrites++;
@@ -6105,12 +6113,11 @@ export class Session extends EventEmitter {
 
   write(data: string, options: SessionWriteOptions = {}): boolean {
     if (this._guardedSubmitInFlight) {
-      this._guardedInputRevision++;
+      this._observeGuardedKeyboardInput(data, true);
       return false;
     }
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
-    this._guardedDraftGeneration = undefined;
-    this._guardedInputRevision++;
+    this._observeGuardedKeyboardInput(data);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
     this._assistantLastInputAt = Date.now();
@@ -6159,8 +6166,7 @@ export class Session extends EventEmitter {
    * separator. Reports submissions like a write would (a line feed never is one).
    */
   trackUserInput(data: string): void {
-    this._guardedDraftGeneration = undefined;
-    this._guardedInputRevision++;
+    this._observeGuardedKeyboardInput(data);
     if (!this._acceptsPrompts) return;
     this._emitSubmittedPrompt(this._submittedPromptTracker.feed(data));
   }
@@ -6328,12 +6334,11 @@ export class Session extends EventEmitter {
    */
   async writeViaMux(data: string, options: SessionWriteOptions = {}): Promise<boolean> {
     if (this._guardedSubmitInFlight) {
-      this._guardedInputRevision++;
+      this._observeGuardedKeyboardInput(data, true);
       return false;
     }
     if (!this.assistantInputAllowed(options.assistantPermit)) return false;
-    this._guardedDraftGeneration = undefined;
-    this._guardedInputRevision++;
+    this._observeGuardedKeyboardInput(data);
     this._assistantPendingWrites++;
     try {
       if (this._mux && this._muxSession) {
