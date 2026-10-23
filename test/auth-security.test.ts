@@ -47,7 +47,7 @@ async function getSessionCookie(baseUrl: string): Promise<string> {
 }
 
 async function exhaustAuthFailures(baseUrl: string, prefix: string): Promise<void> {
-  for (let i = 0; i < AUTH_IP_FAILURE_MAX; i++) {
+  for (let i = 0; i < AUTH_FAILURE_MAX; i++) {
     const res = await fetch(`${baseUrl}/api/status`, {
       headers: { Authorization: basicAuthHeader(TEST_USER, `${prefix}-${i}`) },
     });
@@ -208,17 +208,21 @@ describe('Auth Security', () => {
       expect(res.headers.get('retry-after')).toMatch(/^\d+$/);
     });
 
-    it('leaves per-IP headroom above the per-account cap before throttling (COD-524)', async () => {
-      // A client behind one egress IP (C3 connectivity) retries more than a person
-      // does, so the per-IP login bucket is wider than the per-account one.
-      expect(AUTH_IP_FAILURE_MAX).toBe(50);
+    it('keeps single-user mode at AUTH_FAILURE_MAX per IP: it has no per-username bucket (COD-538)', async () => {
+      // Behind a tunnel every client is 127.0.0.1 (no trustProxy), so in single-user
+      // mode the per-IP bucket is the only cap on guessing the one password.
+      // AUTH_IP_FAILURE_MAX is for the multi-user pre-gate only.
       expect(AUTH_IP_FAILURE_MAX).toBeGreaterThan(AUTH_FAILURE_MAX);
-      for (let i = 0; i <= AUTH_FAILURE_MAX; i++) {
+      for (let i = 0; i < AUTH_FAILURE_MAX; i++) {
         const res = await fetch(`${rateBaseUrl}/api/status`, {
-          headers: { Authorization: basicAuthHeader(TEST_USER, `cod524-${i}`) },
+          headers: { Authorization: basicAuthHeader(TEST_USER, `cod538-${i}`) },
         });
         expect(res.status).toBe(401);
       }
+      const res = await fetch(`${rateBaseUrl}/api/status`, {
+        headers: { Authorization: basicAuthHeader(TEST_USER, 'cod538-over') },
+      });
+      expect(res.status).toBe(429);
     });
 
     it('should allow an existing valid session cookie during auth failure lockout', async () => {
