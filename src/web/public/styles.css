@@ -6770,6 +6770,10 @@ html[data-skin="og"] .welcome-primary:hover {
   display: none;
 }
 
+.btn-notes-mobile {
+  display: none;
+}
+
 /* Mobile Attach button (wrapper holds the button and its file input) - hidden on
    desktop; the phone block in mobile.css shows it */
 .btn-attach-mobile-wrap {
