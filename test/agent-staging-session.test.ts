@@ -392,6 +392,11 @@ it('stages authorized multiline only with bracketed paste enabled and never emit
       writes.push(value);
       return true;
     },
+    sendGuardedText: async (_id: string, value: string, eligible: () => boolean) => {
+      if (!eligible()) return false;
+      writes.push(value);
+      return true;
+    },
   };
   const session = new Session({
     workingDir: '/tmp',

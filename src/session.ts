@@ -6081,12 +6081,12 @@ export class Session extends EventEmitter {
   guardedInputSnapshot(): GuardedInputSnapshot | null {
     return this._readGuardedInputSnapshot(false);
   }
-  private _readGuardedInputSnapshot(allowLease: boolean): GuardedInputSnapshot | null {
+  private _readGuardedInputSnapshot(allowLease: boolean, ownPendingWrite = false): GuardedInputSnapshot | null {
     if (
       this._isStopped ||
       this._closing ||
       this.paneLifecycleInFlight ||
-      this._assistantPendingWrites ||
+      this._assistantPendingWrites !== (ownPendingWrite ? 1 : 0) ||
       (!allowLease && this._guardedSubmitInFlight) ||
       !this.assistantInputAllowed() ||
       this.remote ||
@@ -6127,12 +6127,45 @@ export class Session extends EventEmitter {
     this.cancelAssistantSubmitVerification();
     this.cancelCheckpoint('guarded-stage');
     const generation = this.inspectionGeneration;
+    if (message.includes('\n')) {
+      const mux = this._mux,
+        muxSession = this._muxSession;
+      const initial = this.guardedInputSnapshot();
+      if (!mux?.sendGuardedText || !muxSession || !initial || initial.composerSha !== promptSha256('')) return false;
+      this._observeGuardedKeyboardInput(message);
+      const revision = this._guardedInputRevision;
+      this._assistantPendingWrites++;
+      this._guardedDraftGeneration = generation;
+      try {
+        const sent = await mux.sendGuardedText(this.id, message, () => {
+          const snapshot = this._readGuardedInputSnapshot(false, true);
+          return (
+            this._mux === mux &&
+            this._muxSession === muxSession &&
+            snapshot?.generation === generation &&
+            snapshot.revision === revision &&
+            snapshot.composerSha === promptSha256('') &&
+            mux.isBracketedPasteEnabled?.(muxSession.muxName) === true
+          );
+        });
+        if (sent) {
+          this._assistantLastInputAt = Date.now();
+          this._lastHumanInputAt = Date.now();
+          this._keepAliveTurnUntil = 0;
+          // Feed literal draft bytes without stamping lastSubmitAt for its LF.
+          if (this._acceptsPrompts) this._submittedPromptTracker.feed('\x1b[200~' + message + '\x1b[201~');
+        }
+        return sent;
+      } finally {
+        this._assistantPendingWrites--;
+      }
+    }
     const writing = this.writeViaMux(message, { fromUser: true });
-    // writeViaMux enters its pending window synchronously. Keep the fence even
-    // if delivery fails: an unacknowledged transport may already have typed it.
+    // Keep the fence even when delivery fails or the acknowledgement is ambiguous.
     this._guardedDraftGeneration = generation;
     return writing;
   }
+
   /** One conditional Enter, with no automatic submit verifier or replay on failure. */
   async submitGuardedInput(expected: GuardedInputSnapshot): Promise<boolean> {
     const matches = (current: GuardedInputSnapshot | null): boolean =>

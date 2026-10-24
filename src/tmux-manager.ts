@@ -4856,6 +4856,29 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
+  /** Literal guarded text paste: recheck after buffer loading, immediately before delivery. */
+  async sendGuardedText(sessionId: string, text: string, beforeDispatch: () => boolean): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !isValidMuxName(session.muxName) || text.includes('\r')) return false;
+    const run = this.inputRunner();
+    if (!run) return beforeDispatch();
+    const commands = buildPasteTextCommands(this.tmux(), session.muxName, text);
+    try {
+      await run(commands.set);
+      // There is no await between this check and the paste invocation. In particular,
+      // a pane reset or a bracketed-paste-mode change while filling the buffer refuses LF.
+      if (this.sessions.get(sessionId) !== session || !beforeDispatch()) {
+        await run(commands.discard).catch(() => undefined);
+        return false;
+      }
+      await run(commands.paste.replace(' paste-buffer -p ', ' paste-buffer -p -r '));
+      return true;
+    } catch {
+      await run(commands.discard).catch(() => undefined);
+      return false;
+    }
+  }
+
   /**
    * Send input directly to a tmux session.
    *
@@ -5354,7 +5377,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (!target) return false;
     try {
       return (
-        execSync(`${this.tmux()} display-message -p -t ${shellescape(target)} '#{bracketed_paste}'`, {
+        execSync(`${this.tmux()} display-message -p -t ${shellescape(target)} '#{bracket_paste_flag}'`, {
           encoding: 'utf8',
           timeout: EXEC_TIMEOUT_MS,
         }).trim() === '1'

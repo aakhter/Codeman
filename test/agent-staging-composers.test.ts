@@ -134,3 +134,49 @@ it('excludes dim Claude placeholder text and rejects extra dialog rows below the
   expect(staging.readGuardedComposerSnapshot(frame(rows, 2, 1), 'claude')).toBe('');
   expect(staging.readGuardedComposerSnapshot(frame([...rows, '  Enter to confirm'], 2, 1), 'claude')).toBeNull();
 });
+
+it('refuses a live Claude braille spinner even with the idle-looking composer below it', () => {
+  expect(
+    staging.readGuardedComposerSnapshot(
+      frame(
+        [
+          '⠙ Thinking…',
+          '────────────────',
+          '❯ hello',
+          '────────────────',
+          '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ],
+        7,
+        2
+      ),
+      'claude'
+    )
+  ).toBeNull();
+});
+
+it('uses the caret to prove the mandatory gap when tmux trims an empty prompt row', () => {
+  expect(staging.readGuardedComposerSnapshot(frame(['›', '  GPT-6-Luna default · ~/case'], 2, 0), 'codex')).toBe('');
+  expect(staging.readGuardedComposerSnapshot(frame(['›', '  GPT-6-Luna default · ~/case'], 3, 0), 'codex')).toBeNull();
+  const rows = ['────────────────', '❯', '────────────────', '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+  expect(staging.readGuardedComposerSnapshot(frame(rows, 2, 1), 'claude')).toBe('');
+  expect(staging.readGuardedComposerSnapshot(frame(rows, 3, 1), 'claude')).toBeNull();
+});
+
+it('permits one opaque customized status line before the final Claude cycle footer', () => {
+  expect(
+    staging.readGuardedComposerSnapshot(
+      frame(
+        [
+          '────────────────',
+          '❯\u00a0\x1b[2mTry an edit\x1b[0m',
+          '────────────────',
+          '  project:repo | model:claude | tokens:20%',
+          '  ⏵⏵ auto mode on (shift+tab to cycle)',
+        ],
+        2,
+        1
+      ),
+      'claude'
+    )
+  ).toBe('');
+});

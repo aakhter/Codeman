@@ -354,6 +354,8 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   /** beforeDispatch is an internal conditional Enter-only guard, invoked without an await before spawning. */
   sendInput(sessionId: string, input: string, options?: { beforeDispatch?: () => boolean }): Promise<boolean>;
+  /** Literal draft paste without Enter; guard runs after awaited buffer creation. */
+  sendGuardedText?(sessionId: string, text: string, beforeDispatch: () => boolean): Promise<boolean>;
   /** Literal bracketed paste plus explicit Enter; no retries after partial delivery. */
   sendNotesInput?(sessionId: string, text: string, canWrite?: () => boolean): Promise<boolean>;
 

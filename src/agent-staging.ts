@@ -4,7 +4,7 @@
  * A receipt is consumed synchronously before verification/delivery, including failures.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { stripAnsi } from './utils/regex-patterns.js';
+import { stripAnsi, SPINNER_PATTERN } from './utils/regex-patterns.js';
 import { visibleWidth } from './tui/tui-ansi.js';
 export const STAGE_MAX_BYTES = 8192;
 export const promptSha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -144,6 +144,7 @@ export function readGuardedComposerSnapshot(
       composer = [first, ...plain.slice(start + 1, end + 1).map((line) => line.slice(2).trimEnd())].join('\n');
     }
     prefix = plain[start].match(/^(\s*›[ \u00a0])/)?.[1];
+    if (!prefix && /^\s*›$/.test(plain[start]) && composer === '') prefix = `${plain[start]} `;
   } else if (profile === 'claude') {
     // The bordered composer and permission-cycle footer distinguish it from trust/approval menus.
     for (let i = plain.length - 1; i >= 0; i--)
@@ -155,23 +156,21 @@ export function readGuardedComposerSnapshot(
     const border = plain.findIndex((line, index) => index > start && /^─{4,}\s*$/.test(line));
     if (border < 0) return null;
     const footer = plain.slice(border + 1).filter((line) => line.trim());
+    // A user-configured statusLine may occupy one opaque row before the final
+    // permission-cycle footer; it is display data, never authorization or prompt text.
+    if (footer.length < 1 || footer.length > 2 || !/^\s*[⏵⏸]+ .*\(shift\+tab to cycle\)\s*$/.test(footer.at(-1)!))
+      return null;
     if (
-      footer.length < 1 ||
-      footer.length > 3 ||
-      !footer.some((line) => /\(shift\+tab to cycle\)/.test(line)) ||
-      footer.some(
-        (line) =>
-          !/^\s*(?:[⏵⏸]+ .*\(shift\+tab to cycle\)|\? for shortcuts|(?:Opus|Sonnet|Haiku|Fable) \S.*(?:ctx:|context))/.test(
-            line
-          )
-      )
+      plain
+        .slice(0, start - 1)
+        .some((line) => SPINNER_PATTERN.test(line) || /(?:esc to interrupt|[✻✽✶✳✢·∗] .*[.…])/i.test(line))
     )
       return null;
-    if (plain.slice(0, start - 1).some((line) => /(?:esc to interrupt|[✻✽✶✳✢·] .*[.…])/i.test(line))) return null;
     end = border - 1;
     if ((!multiline && end !== start) || plain.slice(start + 1, end + 1).some((line) => line && !line.startsWith('  ')))
       return null;
     prefix = plain[start].match(/^(❯[ \u00a0]?)/)?.[1];
+    if (plain[start] === '❯') prefix = '❯ ';
     composer = [
       withoutDimText(rows[start])
         .slice(prefix?.length ?? 0)
