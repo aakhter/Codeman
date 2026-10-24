@@ -301,7 +301,7 @@ export class LocalTerminal {
         throw new Error('Pane or composer changed before paste');
       if (message.includes('\n') && !current.pane.bracketedPaste)
         throw new Error('Multiline staging requires active bracketed paste mode immediately before dispatch');
-      await this.tmux(target, ['paste-buffer', '-p', '-d', '-b', buffer, '-t', before.pane.id]);
+      await this.tmux(target, ['paste-buffer', '-p', '-r', '-d', '-b', buffer, '-t', before.pane.id]);
     } catch (error) {
       throw new Error(
         `Staging delivery failed or ambiguous; inspect before trying again: ${error instanceof Error ? error.message : String(error)}`

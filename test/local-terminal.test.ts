@@ -234,6 +234,7 @@ describe('local guarded stage and submit', () => {
     });
     expect(composer).toBe('one\ntwo');
     expect(calls.find((c) => c.args[2] === 'paste-buffer')!.args).toContain('-p');
+    expect(calls.find((c) => c.args[2] === 'paste-buffer')!.args).toContain('-r');
     expect(calls.some((c) => c.args[2] === 'send-keys')).toBe(false);
     await terminal.submit({ ...options, stageId: receipt.stageId, confirmSha: receipt.sha256 });
     expect(calls.filter((c) => c.args[2] === 'send-keys')).toHaveLength(1);
