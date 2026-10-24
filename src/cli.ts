@@ -30,6 +30,8 @@ import {
 import type { AgentSkillDir } from './config/cli-registry/types.js';
 import { getCli, listClis } from './config/cli-registry/registry.js';
 import { registerAgentCommands } from './cli-agent.js';
+import { registerHistoryCommands } from './cli-history.js';
+import { registerLocalCommands } from './cli-local.js';
 import { resolveMcpConfig, runMcpStdio } from './mcp-server.js';
 import { getSessionManager } from './session-manager.js';
 import { getTaskQueue } from './task-queue.js';
@@ -543,6 +545,9 @@ skillCmd
 // ============ Agent Commands (session-to-session, any CLI mode) ============
 
 registerAgentCommands(program);
+// Local operator tools never add arbitrary file or tmux target access to HTTP.
+registerHistoryCommands(program);
+registerLocalCommands(program);
 
 // ============ MCP server (any MCP client drives Codeman) ============
 

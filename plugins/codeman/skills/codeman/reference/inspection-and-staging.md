@@ -2,8 +2,9 @@
 
 Use these commands inside a Codeman session. They use its authenticated HTTP API;
 no direct tmux access, second transport, or session-bridge installation is required.
-They supplement `send`, `wait` and `read`. They do not establish full parity with
-session-bridge or retire that skill.
+They supplement `send`, `wait` and `read`. Saved transcript queries and explicit
+external tmux targets use the native [local session tools](local-session-tools.md),
+which replace the separate session-bridge installation.
 
 ## Inspect recent evidence
 
@@ -49,13 +50,16 @@ codeman agent stage "$SID" --message-file /tmp/codeman-message.txt --json
 codeman agent submit "$SID" --stage-id "$STAGE_ID" --confirm-sha "$SHA256" --json
 ```
 
-Stage types the file contents **without Enter**. The file must be regular, UTF8,
-one printable line, at most 8192 bytes, with no control characters or trailing
-whitespace/newline. It initially supports a local Codex composer with a recognized
-footer and an exact, unwrapped line/caret capture. Unknown, working, modal,
-wrapped, remote/container and shell composers are refused. A customized footer or
+Stage types the file contents **without Enter**. The file must be regular UTF8,
+at most 8192 bytes; one terminal newline is normalized. Terminal control characters
+and trailing whitespace are refused. Multiline text additionally requires the
+explicit `--multiline` option and active bracketed-paste mode in the target.
+The server requires a characterized local Codex or Claude composer, exact logical
+rows and caret evidence. Unknown, working, modal, ambiguously wrapped,
+remote/container and shell composers are refused. A customized footer or
 unsupported character-width rendering can also make verification unavailable.
-Self-targets are refused by the CLI.
+Self-targets are refused by the CLI. If the complete draft does not fit a verifiable
+composer, write a workspace file and stage a short instruction referencing it.
 
 The receipt stores a hash and ephemeral identities, never prompt content. It
 expires after two minutes; capacity is 1024 live receipts. Stage delivery can

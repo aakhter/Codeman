@@ -41,16 +41,40 @@ DeepSeek Harness worker on a local qwen model and a Claude Code worker power on 
 
 ![A real codeman skill run: one short prompt typed into Claude Code, the tile grid powering on, then a DeepSeek Harness worker on a local qwen model and a Claude Code worker powering on as new tiles, with lineage lines from the lead to both](https://raw.githubusercontent.com/Ark0N/Codeman/master/docs/images/codeman-skill-crt-20261010.gif)
 
+## Saved history and explicit local terminals
+
+The packaged skill also replaces session-bridge for saved Codex transcripts and
+explicit local tmux targets. These commands run on the local machine without a
+Codeman server; arbitrary file paths and tmux targets are never HTTP API inputs.
+
+```bash
+codeman history read --root-session-id <codex-uuid> --topic 'decision' \
+  --after 2026-10-01 --before 2026-10-24 --max-bytes 65536 --json
+codeman local inspect --tmux-socket <socket-name> --target <pane-id> --json
+codeman agent spawn --mode codex --working-dir /absolute/project --json
+```
+
+History follows child conversations, preserves complete matching turns and reports
+incomplete evidence and scan budgets. Use `--file` for an explicit saved rollout or
+`--session-id` for native conversation lookup. Omitting the case from `agent spawn`
+preserves the current project; an explicit named case keeps quick-start behavior.
+
+Local `stage`/`submit` support characterized Codex and Claude composers with exact
+content/caret checks and private one-shot receipts. Multiline input needs explicit
+`--multiline` and active bracketed paste. Unknown composers fail closed. Local
+snapshots do not serialize unrelated tmux writers; prefer `agent` commands for
+managed sessions. See the packaged [local operator reference](../../skills/codeman/reference/local-session-tools.md).
+
 ## Install it
 
 Pick one route. The skill only acts inside a Codeman session, so a global install is safe.
 
-| How                | Command                                                                         | Scope |
-| ------------------ | ------------------------------------------------------------------------------- | ----- |
-| Skills CLI         | `npx skills add Ark0N/Codeman --skill codeman -g`                               | Global, any skills-aware agent. The way to give it to pi. |
-| Claude Code plugin | `/plugin marketplace add Ark0N/Codeman`, then `/plugin install codeman@codeman` | Global, through Claude Code's plugin manager. `/plugin update codeman` follows releases. |
-| Bundled CLI        | `codeman skill install`                                                         | Global, at `~/.claude/skills/codeman`. |
-| Bundled CLI        | `codeman skill install --case <name> [--mode <mode>]`                           | One case. `--mode codex` (or any other run mode) writes it where that CLI looks for skills. |
+| How                | Command                                                                         | Scope                                                                                                                                                                                                                           |
+| ------------------ | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Skills CLI         | `npx skills add Ark0N/Codeman --skill codeman -g`                               | Global, any skills-aware agent. The way to give it to pi.                                                                                                                                                                       |
+| Claude Code plugin | `/plugin marketplace add Ark0N/Codeman`, then `/plugin install codeman@codeman` | Global, through Claude Code's plugin manager. `/plugin update codeman` follows releases.                                                                                                                                        |
+| Bundled CLI        | `codeman skill install`                                                         | Global, at `~/.claude/skills/codeman`.                                                                                                                                                                                          |
+| Bundled CLI        | `codeman skill install --case <name> [--mode <mode>]`                           | One case. `--mode codex` (or any other run mode) writes it where that CLI looks for skills.                                                                                                                                     |
 | Web UI             | **App Settings → Agents & CLIs → All agent CLIs → Codeman Agent Skill**         | Injects it into each case when a session is created, where that session's CLI looks: `.claude/skills/` for Claude Code, `.agents/skills/` for Codex, Gemini CLI, OpenCode, Antigravity, Grok, DeepSeek and OMP. Off by default. |
 
 Use the plugin **or** `codeman skill install`, not both: a Claude Code with both lists the
@@ -75,15 +99,15 @@ that directory. Remove them per case with `codeman skill uninstall --case <name>
 
 These prompts work as written:
 
-| You say                                                                                   | What happens |
-| ----------------------------------------------------------------------------------------- | ------------ |
-| "What sessions are running right now?"                                                     | Lists them with name, mode and status. Read-only. |
-| "Use codeman to start 5 claude workers, one per TODO item."                                | One worker per item, each handed its task, answers gathered as they finish. |
-| "Start a shell worker on the `myapp` case, run the test suite, tell me if it passes."      | Spawns, waits on a completion marker, reads the exit code, cleans up. |
-| "Spin up 3 workers for lint, typecheck and tests, run them in parallel, report failures."  | One session per task, all started first, then gathered as each finishes. |
-| "Have a claude worker summarize `src/session.ts`, then close it."                          | Spawns, waits until the worker is ready, sends and waits, reads the answer, deletes the session. |
-| "Have a DeepSeek Harness worker build search and a claude worker build checkout."          | A mixed fleet: one worker per CLI, started in one go. |
-| "Watch session w4 and tell me if it gets stuck on a permission prompt."                    | Blocks on the `blocked` signal and brings the question to **you**. |
+| You say                                                                                   | What happens                                                                                     |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| "What sessions are running right now?"                                                    | Lists them with name, mode and status. Read-only.                                                |
+| "Use codeman to start 5 claude workers, one per TODO item."                               | One worker per item, each handed its task, answers gathered as they finish.                      |
+| "Start a shell worker on the `myapp` case, run the test suite, tell me if it passes."     | Spawns, waits on a completion marker, reads the exit code, cleans up.                            |
+| "Spin up 3 workers for lint, typecheck and tests, run them in parallel, report failures." | One session per task, all started first, then gathered as each finishes.                         |
+| "Have a claude worker summarize `src/session.ts`, then close it."                         | Spawns, waits until the worker is ready, sends and waits, reads the answer, deletes the session. |
+| "Have a DeepSeek Harness worker build search and a claude worker build checkout."         | A mixed fleet: one worker per CLI, started in one go.                                            |
+| "Watch session w4 and tell me if it gets stuck on a permission prompt."                   | Blocks on the `blocked` signal and brings the question to **you**.                               |
 
 Sessions the agent creates are deleted when it is done, so you can watch the tabs appear and
 disappear in the dashboard while it works.
@@ -146,13 +170,13 @@ The skill checks for both and says so instead of acting.
 
 ## What is in the skill
 
-| File | Contents |
-| ---- | -------- |
-| [`SKILL.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/SKILL.md) | Safety rules, the fast path (start N workers, task them, collect the answers) and the verb index. Always loaded. |
-| [`reference/verbs.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/verbs.md) | Every verb in detail: readiness, send-and-wait, markers, interrupts, cleanup. Loaded on demand. |
-| [`reference/recipes.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/recipes.md) | Worked flows: claude, DeepSeek Harness and shell workers, fan-out, watching a blocked worker, messaging. Loaded on demand. |
-| [`reference/endpoints.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/endpoints.md) | Endpoint tables, error codes, the signals each mode emits, capacity limits. Loaded on demand. |
-| [`reference/messaging.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/messaging.md) | Talking to claude workers directly through Claude Code's cross-session messaging. Loaded on demand. |
+| File                                                                                                           | Contents                                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| [`SKILL.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/SKILL.md)                             | Safety rules, the fast path (start N workers, task them, collect the answers) and the verb index. Always loaded.           |
+| [`reference/verbs.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/verbs.md)         | Every verb in detail: readiness, send-and-wait, markers, interrupts, cleanup. Loaded on demand.                            |
+| [`reference/recipes.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/recipes.md)     | Worked flows: claude, DeepSeek Harness and shell workers, fan-out, watching a blocked worker, messaging. Loaded on demand. |
+| [`reference/endpoints.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/endpoints.md) | Endpoint tables, error codes, the signals each mode emits, capacity limits. Loaded on demand.                              |
+| [`reference/messaging.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/messaging.md) | Talking to claude workers directly through Claude Code's cross-session messaging. Loaded on demand.                        |
 
 Only `SKILL.md` sits in the agent's context; the references load when a job needs them, so a
 quick run stays quick.

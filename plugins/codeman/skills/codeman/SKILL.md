@@ -8,11 +8,27 @@ description: >-
   read their output, and clean up; where available, message claude workers directly
   (Claude Code cross-session messaging). Use when asked to orchestrate or parallelize
   work across Codeman sessions, get a second opinion from another CLI or model, watch
-  another session, or start and manage workers. Only usable inside a Codeman-managed
-  session (CODEMAN_MUX=1); refuse to act otherwise.
+  another session, start and manage workers, retrieve saved Codex conversation history
+  (including child sessions with topic/date filters), or inspect and deliberately
+  stage/submit to an explicit local tmux target. Live API operations require a
+  Codeman-managed session (CODEMAN_MUX=1). Offline history and explicit local operator
+  commands do not require the server and never infer a target.
 ---
 
 # Driving Codeman from inside a session
+
+**Saved history or an explicit external tmux target?** Read
+[local session tools](reference/local-session-tools.md) and use `codeman history`
+or `codeman local`. These native local-only commands replace the session-bridge
+skill. They do not use the API bootstrap below and do not authorize arbitrary
+filesystem or tmux targets through HTTP. Prefer `codeman agent` for managed peers;
+never switch to a local input transport to bypass an API refusal.
+
+**A worker in the current project?** Use `codeman agent spawn --mode codex --json`
+(or the requested mode). Omitting the case preserves the caller's current directory;
+`--working-dir <directory>` chooses an existing project explicitly. A named case
+still uses case quick-start. Keep any created session ID returned on a startup
+failure and decide its cleanup explicitly; never retry an ambiguous spawn blindly.
 
 You are an agent running inside a Codeman-managed terminal session. Codeman is the
 server that spawned you; its HTTP API can start, prompt, watch, and delete other
@@ -36,7 +52,7 @@ Bounded inspection and guarded stage/submit load only when needed from
 This skill works the same whichever CLI you are: Codeman puts it where each CLI looks
 for skills (`.claude/skills/` for Claude Code, `.agents/skills/` for Codex, Gemini CLI,
 OpenCode, Antigravity, Grok, DeepSeek and OMP). A **pi** or **shell** worker never gets
-it, but has the same environment: tell it *"other sessions: `codeman agent --help`"*.
+it, but has the same environment: tell it _"other sessions: `codeman agent --help`"_.
 That bundled CLI (`ls`, `spawn`, `send`, `wait`, `read`, `inspect`, `stage`, `submit`, `interrupt`, `rm`) is the same
 verbs over the same endpoints, with the guards below (no control bytes, no self-delete,
 no guessed URL) enforced in code, and it is also your own way through when this
@@ -44,7 +60,7 @@ machine has no `jq` for the preamble below.
 
 ## 0. Guard and bootstrap
 
-If `CODEMAN_MUX` is not `1`, **stop and say so**. Do not guess an API URL; a server
+For live API operations, if `CODEMAN_MUX` is not `1`, **stop and say so**. Do not guess an API URL; a server
 you are not part of is not yours to drive.
 
 Two failures come from your CLI, not from Codeman: name them to the user instead of
@@ -435,7 +451,7 @@ Why it is built this way, all of it load-bearing:
 
 - **It still fails closed.** A missing or truncated file means `delete_session` is
   undefined, and an undefined function is "command not found", which deletes nothing.
-  ⚠️ This argument covers accidents, NOT a hostile file: a *complete* attacker-written
+  ⚠️ This argument covers accidents, NOT a hostile file: a _complete_ attacker-written
   preamble can define `delete_session` and set the stamp, and sourcing executes it. What
   defends against that is the path choice in the next bullet, not this one. Never
   hand-roll a `DELETE` of your own, which is the one thing that would route around this.
@@ -449,7 +465,7 @@ Why it is built this way, all of it load-bearing:
 - **Not `/tmp`.** On a shared machine `/tmp` is world-writable, so another local user
   can pre-create the exact path you are about to `.` and have their code run as you.
   `$HOME`-derived paths are not world-writable, and the file is written 0600 anyway.
-  The file holds the credential-*recovery code*, not a recovered password.
+  The file holds the credential-_recovery code_, not a recovered password.
 - **Never put `$$` in a `clientId`.** It changes per call, so the "resend the identical
   request" loop in §5.3 would stop being a duplicate and would **retype the prompt**,
   submitting the turn twice. Use the fixed literal `$CID`.
@@ -575,7 +591,7 @@ Three things to know before you spawn one:
   questions separately (`available` = the binary, `runnable` = a profile that can drive a
   pane); a spawn without one fails with `OPERATION_FAILED` rather than falling back.
 - **Do not task it on the strength of a `stop` alone.** The harness reports `idle` at
-  boot ~300 ms *before* its composer paints (measured 2.26 s vs 2.56 s), so a `sendwait`
+  boot ~300 ms _before_ its composer paints (measured 2.26 s vs 2.56 s), so a `sendwait`
   fired straight after `quick-start` resolves on that boot signal, reports a turn that
   never ran, and leaves the prompt in a pane that was not yet taking input. Letting
   `spawn_worker` gate on readiness is what steps past that edge; it is not optional.
@@ -588,23 +604,23 @@ Three things to know before you spawn one:
 
 One row per job. Acting on this table alone is correct; the §5 links are the detail.
 
-| I want to | Call | Detail |
-|-----------|------|--------|
-| start a worker **where the work is** | `POST /api/v1/quick-start {"caseName":…}`, which **creates** `~/codeman-cases/<name>` unless the name is already a case. Any other path (a git worktree): `POST /api/v1/sessions {"workingDir":…}` then `POST /api/v1/sessions/:id/interactive`. Both install hooks by default, so expect full signals in either, and **verify** rather than assume. N workers means N worktrees | [§5.1](reference/verbs.md#51-where-to-spawn) |
-| know a new worker can accept a prompt | `GET .../wait-output?match=shift+tab&from=buffer` (urlencode the `+`); a `deepseek` worker draws `❯` instead, and its boot `stop` fires ~300 ms BEFORE that, so never read the signal as readiness | [§5.2](reference/verbs.md#52-readiness) |
-| deliver a task **and** know when it finished | `POST .../input` with `"input":"…\r"`, `clientId`, `seq`, `"wait":true`. Resolves on `stop`, so it is trustworthy where the signal is real: claude mode with hooks (installed by default, but the operator can disable it and remote sessions never get them) and `deepseek` mode through its status bridge. Costs the worker one billed turn | [§5.3](reference/verbs.md#53-send-a-task-and-wait) |
-| know a hook-less worker finished | it has no `stop`, and `wait:true` there resolves on flapping `idle` **without erroring**: make it print a split, unique marker and `wait-output` on that instead | [§5.5](reference/verbs.md#55-markers-for-hook-less-workers) |
-| read the answer | `GET .../last-response`, **polled** (claude, codex and deepseek write a transcript; empty for the other modes) | [§5.4](reference/verbs.md#54-read-the-answer) |
-| know if it is alive | `GET .../wait?until=exit&timeout=1000`: an immediate `signal:"exit"` means dead. `status` and `pid` both lie | [§5.6](reference/verbs.md#56-alive-and-stuck) |
-| know if it is stuck | `GET .../active-tools` and `GET .../run-summary` are structured and free; two `terminal?tail=` samples are the crude fallback | [§5.6](reference/verbs.md#56-alive-and-stuck) |
-| make a runaway worker stop | `POST .../input {"input":"\u001b"}` (ESC, **no** `\r`). Deleting the session would destroy the conversation instead | [§5.7](reference/verbs.md#57-interrupt-without-destroying) |
-| resume a worker halted on a usage limit | `POST .../auto-resume {"enabled":true}`. Respawn and Ralph are **not** the remedy: respawn runs `/clear` | [§5.8](reference/verbs.md#58-usage-limits) |
-| give a worker big input | write a file into its workspace with your own tools and send one short line pointing at it. The composer takes 65536 characters, and `send` takes one line | [§5.9](reference/verbs.md#59-big-input-via-the-workspace) |
-| watch N workers at once | one in-flight wait per worker (per-session waiter cap 16); fan-out shapes differ for claude and shell | [§5.10](reference/verbs.md#510-fan-out) |
-| find yourself, list what exists | `GET /api/v1/sessions`, match your `$SELF` by **prefix** | [§5.11](reference/verbs.md#511-list-and-find-yourself) |
-| read or record what the user wants | `GET/PUT .../intent`, and `POST .../readmymind` to predict | [§5.12](reference/verbs.md#512-read-my-mind) |
-| talk to a claude worker directly | `ListAgents` / `SendMessage`, when the feature is on at both ends | [§5.13](reference/verbs.md#513-messaging-claude-workers) |
-| clean up | `delete_session "$SID"` per id you created. Case directories and git worktrees are **not** removed with it; `GET /api/v1/cases/agent-created` lists the scratch case dirs your spawns left behind, for you to report | [§5.14](reference/verbs.md#514-clean-up) |
+| I want to                                    | Call                                                                                                                                                                                                                                                                                                                                                                             | Detail                                                      |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| start a worker **where the work is**         | `POST /api/v1/quick-start {"caseName":…}`, which **creates** `~/codeman-cases/<name>` unless the name is already a case. Any other path (a git worktree): `POST /api/v1/sessions {"workingDir":…}` then `POST /api/v1/sessions/:id/interactive`. Both install hooks by default, so expect full signals in either, and **verify** rather than assume. N workers means N worktrees | [§5.1](reference/verbs.md#51-where-to-spawn)                |
+| know a new worker can accept a prompt        | `GET .../wait-output?match=shift+tab&from=buffer` (urlencode the `+`); a `deepseek` worker draws `❯` instead, and its boot `stop` fires ~300 ms BEFORE that, so never read the signal as readiness                                                                                                                                                                               | [§5.2](reference/verbs.md#52-readiness)                     |
+| deliver a task **and** know when it finished | `POST .../input` with `"input":"…\r"`, `clientId`, `seq`, `"wait":true`. Resolves on `stop`, so it is trustworthy where the signal is real: claude mode with hooks (installed by default, but the operator can disable it and remote sessions never get them) and `deepseek` mode through its status bridge. Costs the worker one billed turn                                    | [§5.3](reference/verbs.md#53-send-a-task-and-wait)          |
+| know a hook-less worker finished             | it has no `stop`, and `wait:true` there resolves on flapping `idle` **without erroring**: make it print a split, unique marker and `wait-output` on that instead                                                                                                                                                                                                                 | [§5.5](reference/verbs.md#55-markers-for-hook-less-workers) |
+| read the answer                              | `GET .../last-response`, **polled** (claude, codex and deepseek write a transcript; empty for the other modes)                                                                                                                                                                                                                                                                   | [§5.4](reference/verbs.md#54-read-the-answer)               |
+| know if it is alive                          | `GET .../wait?until=exit&timeout=1000`: an immediate `signal:"exit"` means dead. `status` and `pid` both lie                                                                                                                                                                                                                                                                     | [§5.6](reference/verbs.md#56-alive-and-stuck)               |
+| know if it is stuck                          | `GET .../active-tools` and `GET .../run-summary` are structured and free; two `terminal?tail=` samples are the crude fallback                                                                                                                                                                                                                                                    | [§5.6](reference/verbs.md#56-alive-and-stuck)               |
+| make a runaway worker stop                   | `POST .../input {"input":"\u001b"}` (ESC, **no** `\r`). Deleting the session would destroy the conversation instead                                                                                                                                                                                                                                                              | [§5.7](reference/verbs.md#57-interrupt-without-destroying)  |
+| resume a worker halted on a usage limit      | `POST .../auto-resume {"enabled":true}`. Respawn and Ralph are **not** the remedy: respawn runs `/clear`                                                                                                                                                                                                                                                                         | [§5.8](reference/verbs.md#58-usage-limits)                  |
+| give a worker big input                      | write a file into its workspace with your own tools and send one short line pointing at it. The composer takes 65536 characters, and `send` takes one line                                                                                                                                                                                                                       | [§5.9](reference/verbs.md#59-big-input-via-the-workspace)   |
+| watch N workers at once                      | one in-flight wait per worker (per-session waiter cap 16); fan-out shapes differ for claude and shell                                                                                                                                                                                                                                                                            | [§5.10](reference/verbs.md#510-fan-out)                     |
+| find yourself, list what exists              | `GET /api/v1/sessions`, match your `$SELF` by **prefix**                                                                                                                                                                                                                                                                                                                         | [§5.11](reference/verbs.md#511-list-and-find-yourself)      |
+| read or record what the user wants           | `GET/PUT .../intent`, and `POST .../readmymind` to predict                                                                                                                                                                                                                                                                                                                       | [§5.12](reference/verbs.md#512-read-my-mind)                |
+| talk to a claude worker directly             | `ListAgents` / `SendMessage`, when the feature is on at both ends                                                                                                                                                                                                                                                                                                                | [§5.13](reference/verbs.md#513-messaging-claude-workers)    |
+| clean up                                     | `delete_session "$SID"` per id you created. Case directories and git worktrees are **not** removed with it; `GET /api/v1/cases/agent-created` lists the scratch case dirs your spawns left behind, for you to report                                                                                                                                                             | [§5.14](reference/verbs.md#514-clean-up)                    |
 
 ## 3. Rules digest
 
@@ -660,7 +676,7 @@ You are yourself a session on this server, and the API has **no undo**.
     code** from disk. One wrong case name destroys work that was never yours.
   - `DELETE /api/sessions` (no id) is a **bulk kill of every session**, the user's
     real work included. `DELETE /api/subagents/:agentId` kills one background agent;
-    `DELETE /api/subagents` (no id) does *not* kill anything, it clears the watcher's
+    `DELETE /api/subagents` (no id) does _not_ kill anything, it clears the watcher's
     map and timers, which blinds every subagent surface in the UI until they are
     rediscovered. Neither is yours to call.
   - respawn / ralph / orchestrator / cron mutations: respawn runs `/clear` (wipes a
@@ -691,22 +707,22 @@ so it is not paid for on every skill load. Section numbers and anchors are uncha
 a `§5.4` reference still resolves. **§1 already covers the common job without any of
 these**; open the one row you actually hit.
 
-| Open | When |
-|------|------|
-| [5.1 Where to spawn](reference/verbs.md#51-where-to-spawn) | the work is **not** a fresh scratch case: a linked case, a git worktree, any path that already existed. Hooks are absent there, which silently breaks send-and-wait. The costliest mistake in this skill |
-| [5.2 Readiness](reference/verbs.md#52-readiness) | a worker never drew its composer, or you need the trust-dialog ladder by hand |
-| [5.3 Send a task and wait](reference/verbs.md#53-send-a-task-and-wait) | the `sendwait` body, its signals, and the duplicate-resend loop |
-| [5.4 Read the answer](reference/verbs.md#54-read-the-answer) | `last_text` came back empty, or the mode is not claude/codex/deepseek |
-| [5.5 Markers for hook-less workers](reference/verbs.md#55-markers-for-hook-less-workers) | the worker has no `stop` hook: synchronize on a split, unique printed marker |
-| [5.6 Alive and stuck](reference/verbs.md#56-alive-and-stuck) | is it dead or just slow? `status` and `pid` both lie |
-| [5.7 Interrupt without destroying](reference/verbs.md#57-interrupt-without-destroying) | a runaway worker you want to stop but keep |
-| [5.8 Usage limits](reference/verbs.md#58-usage-limits) | a worker halted on a subscription limit |
-| [5.9 Big input via the workspace](reference/verbs.md#59-big-input-via-the-workspace) | the prompt is larger than one composer line |
-| [5.10 Fan out](reference/verbs.md#510-fan-out) | many workers at once: waiter caps, and why signals are edge-triggered |
-| [5.11 List and find yourself](reference/verbs.md#511-list-and-find-yourself) | enumerate sessions, or match `$SELF` by prefix |
-| [5.12 Read My Mind](reference/verbs.md#512-read-my-mind) | read or record what the user wants for a case |
-| [5.13 Messaging claude workers](reference/verbs.md#513-messaging-claude-workers) | `ListAgents` / `SendMessage` instead of the HTTP path |
-| [5.14 Clean up](reference/verbs.md#514-clean-up) | what deleting a session does **not** remove, and how to list the case dirs you left |
+| Open                                                                                     | When                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [5.1 Where to spawn](reference/verbs.md#51-where-to-spawn)                               | the work is **not** a fresh scratch case: a linked case, a git worktree, any path that already existed. Hooks are absent there, which silently breaks send-and-wait. The costliest mistake in this skill |
+| [5.2 Readiness](reference/verbs.md#52-readiness)                                         | a worker never drew its composer, or you need the trust-dialog ladder by hand                                                                                                                            |
+| [5.3 Send a task and wait](reference/verbs.md#53-send-a-task-and-wait)                   | the `sendwait` body, its signals, and the duplicate-resend loop                                                                                                                                          |
+| [5.4 Read the answer](reference/verbs.md#54-read-the-answer)                             | `last_text` came back empty, or the mode is not claude/codex/deepseek                                                                                                                                    |
+| [5.5 Markers for hook-less workers](reference/verbs.md#55-markers-for-hook-less-workers) | the worker has no `stop` hook: synchronize on a split, unique printed marker                                                                                                                             |
+| [5.6 Alive and stuck](reference/verbs.md#56-alive-and-stuck)                             | is it dead or just slow? `status` and `pid` both lie                                                                                                                                                     |
+| [5.7 Interrupt without destroying](reference/verbs.md#57-interrupt-without-destroying)   | a runaway worker you want to stop but keep                                                                                                                                                               |
+| [5.8 Usage limits](reference/verbs.md#58-usage-limits)                                   | a worker halted on a subscription limit                                                                                                                                                                  |
+| [5.9 Big input via the workspace](reference/verbs.md#59-big-input-via-the-workspace)     | the prompt is larger than one composer line                                                                                                                                                              |
+| [5.10 Fan out](reference/verbs.md#510-fan-out)                                           | many workers at once: waiter caps, and why signals are edge-triggered                                                                                                                                    |
+| [5.11 List and find yourself](reference/verbs.md#511-list-and-find-yourself)             | enumerate sessions, or match `$SELF` by prefix                                                                                                                                                           |
+| [5.12 Read My Mind](reference/verbs.md#512-read-my-mind)                                 | read or record what the user wants for a case                                                                                                                                                            |
+| [5.13 Messaging claude workers](reference/verbs.md#513-messaging-claude-workers)         | `ListAgents` / `SendMessage` instead of the HTTP path                                                                                                                                                    |
+| [5.14 Clean up](reference/verbs.md#514-clean-up)                                         | what deleting a session does **not** remove, and how to list the case dirs you left                                                                                                                      |
 
 ## 6. Setup and auth
 

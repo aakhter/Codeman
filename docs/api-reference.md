@@ -598,7 +598,7 @@ any transcript, pane or receipt lookup.
 | Endpoint | Parameters/body | Result |
 | --- | --- | --- |
 | `GET /api/v1/sessions/:id/inspect` | `maxBytes=8192` (integer 1–65536), optional opaque `since` UUID | `source`, `identity`, observed `activity`, bounded UTF8 `evidence`, `truncated`, `incremental`, `cursor`, `maxBytes`; native results also include `omittedBeforeBytes`, `scannedBytes`, optional `blockedReason` |
-| `POST /api/v1/sessions/:id/stage` | `{ "message": "printable single line" }` | `{ stageId, sha256, expiresAt, sessionId, submitted:false }`; types without Enter |
+| `POST /api/v1/sessions/:id/stage` | `{ "message": "printable text", "multiline": false } (`multiline:true` explicitly authorizes LF)` | `{ stageId, sha256, expiresAt, sessionId, submitted:false }`; types without Enter |
 | `POST /api/v1/sessions/:id/submit` | `{ "stageId": "UUID", "confirmSha": "64 lowercase hex characters" }` | `{ stageId, sessionId, submitted:true }`; sends one conditional Enter |
 
 Inspection initially supports native local Codex JSONL with strict conversation
@@ -622,11 +622,14 @@ cursors or loss of the attributed source return `409 CONFLICT`. No transcript
 filesystem path is returned as cursor/identity metadata; evidence retains the
 owner's native record content, which can itself contain paths.
 
-Guarded input initially requires a local characterized Codex composer, one
-unwrapped visible line, a recognized footer and a cursor at its exact end.
-Unknown/working/modal/shell/remote/container composers fail closed. Stage accepts
-at most 8192 UTF8 bytes, no C0/C1/DEL controls, multiline text, or trailing
-whitespace (the existing mux transport trims it). Its two-minute receipt stores
+Guarded input requires a local characterized Codex or Claude composer, a recognized
+footer, exact visible logical rows and a cursor at the draft's end.
+Unknown/working/modal/shell/remote/container and unprovable wrapped or collapsed
+composers fail closed. Stage accepts at most 8192 UTF8 bytes without trailing
+whitespace on any line. LF additionally requires explicit `multiline:true` and
+active bracketed-paste mode, rechecked at the managed paste dispatch boundary;
+other C0/C1/DEL controls are refused. The CLI normalizes one terminal file newline.
+Its two-minute receipt stores
 only hashes/ephemeral identities in a bounded in-memory store (1024 live receipts),
 never persisted prompt content. A receipt acknowledges typing; a delayed screen
 paint can still make submit refuse until exact verification becomes possible.

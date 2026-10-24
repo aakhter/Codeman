@@ -34,6 +34,8 @@ const TOP_LEVEL: Record<string, string[]> = {
   attach: [],
   skill: [],
   agent: [],
+  history: [],
+  local: [],
   session: ['s'],
   task: ['t'],
   ralph: ['r'],
@@ -55,6 +57,8 @@ const SUBCOMMANDS: Record<string, Record<string, string[]>> = {
   ralph: { start: [], stop: [], status: [] },
   skill: { install: [], uninstall: [] },
   agent: { ls: ['list'], spawn: [], send: [], wait: [], read: [], interrupt: [], rm: [] },
+  history: { read: [] },
+  local: { inspect: [], stage: [], submit: [] },
   service: { install: [], uninstall: [], status: [] },
   users: { add: [], passwd: [], list: ['ls'], rm: [] },
 };
@@ -111,6 +115,18 @@ describe('registered commands', () => {
 });
 
 describe('registered options', () => {
+  it('keeps file and arbitrary pane access on local-only commands', () => {
+    expect(flagsOf(find(find(program, 'history')!, 'read')!)).toEqual(
+      expect.arrayContaining(['--file', '--session-id', '--root-session-id', '--topic', '--after', '--before'])
+    );
+    for (const verb of ['inspect', 'stage', 'submit']) {
+      expect(flagsOf(find(find(program, 'local')!, verb)!)).toEqual(
+        expect.arrayContaining(['--tmux-socket', '--target'])
+      );
+    }
+    expect(flagsOf(find(find(program, 'agent')!, 'spawn')!)).toContain('--working-dir');
+    expect(flagsOf(find(find(program, 'agent')!, 'inspect')!)).not.toContain('--file');
+  });
   it('exposes the web launch flags', () => {
     const flags = flagsOf(find(program, 'web')!);
     expect(flags).toEqual(

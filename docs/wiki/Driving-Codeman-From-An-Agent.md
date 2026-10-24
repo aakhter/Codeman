@@ -18,8 +18,8 @@ English instead of pasting endpoint documentation into prompts:
 codeman skill install    # or: npx skills add Ark0N/Codeman --skill codeman -g
 ```
 
-Then ask the agent in a Codeman session something like *"use codeman to start 5 claude
-workers, one per TODO item"*. It starts the workers, hands each one its task, gathers the
+Then ask the agent in a Codeman session something like _"use codeman to start 5 claude
+workers, one per TODO item"_. It starts the workers, hands each one its task, gathers the
 answers and deletes the sessions it created.
 
 **[The Codeman Skill](Codeman-Skill)** has the rest: recordings of real runs, every install
@@ -35,8 +35,8 @@ The skill drives the API with `curl` and `jq`. Where it does not reach (a pi or 
 session, a machine without `jq`), the agent runs in the same environment, so `codeman agent`
 packages the same verbs as shell commands. It is a thin client over the endpoints in
 [the manual path](#the-manual-path), so auth and ownership apply unchanged, and it refuses to
-act outside a Codeman session. One line in a case's `AGENTS.md` is enough: *"other sessions:
-`codeman agent --help`"*.
+act outside a Codeman session. One line in a case's `AGENTS.md` is enough: _"other sessions:
+`codeman agent --help`"_.
 
 ```bash
 codeman agent ls                                          # sessions; * marks this one
@@ -45,7 +45,7 @@ codeman agent send "$SID" 'review src/, then say DONE' --until stop,exit --timeo
 codeman agent read "$SID"                                 # last answer (as the server reads it for that mode)
 codeman agent read "$SID" --tail 3000                     # terminal tail, ANSI stripped (every mode)
 codeman agent inspect "$SID" --max-bytes 8192 --json     # recent evidence + opaque cursor (pane snapshots are labeled)
-codeman agent stage "$SID" --message-file /tmp/prompt.txt --json  # no Enter; known local Codex composer only
+codeman agent stage "$SID" --message-file /tmp/prompt.txt --json  # no Enter; characterized local composer; --multiline opts into bracketed multiline paste
 codeman agent submit "$SID" --stage-id "$STAGE_ID" --confirm-sha "$SHA256" --json  # one conditional Enter
 codeman agent send "$SID" 'run the tests, then print WORKDONE followed by _4711'   # hook-less modes: the marker in halves …
 codeman agent wait "$SID" --match WORKDONE_4711           # … and the wait on the joined form
@@ -104,7 +104,7 @@ The JSON form is what Claude Desktop, Cursor and Gemini CLI take. Add `CODEMAN_P
   to configure it.
 - **Only its own sessions.** Prompting, interrupting and deleting are limited to sessions it
   started; listing, reading and waiting work on everything. `codeman mcp
-  --allow-any-session` lifts that, for an assistant that should drive your existing tabs.
+--allow-any-session` lifts that, for an assistant that should drive your existing tabs.
 - **Waits are short by default** (45 s, at most 600 s), so they fit a client's tool
   timeout. A `timed_out` answer means call again.
 
@@ -117,12 +117,12 @@ support.
 
 These are set in every managed session. Read them rather than hardcoding anything:
 
-| Variable                   | Meaning                                                                  |
-| -------------------------- | ------------------------------------------------------------------------ |
+| Variable                   | Meaning                                                                                                                             |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `CODEMAN_MUX=1`            | You are in a managed tmux session. Never `tmux kill-session`, `pkill claude`, or `pkill tmux`: you will kill yourself or a sibling. |
-| `CODEMAN_API_URL`          | Base URL, with the correct scheme.                                        |
-| `CODEMAN_SESSION_ID`       | Your own session id. Use it to avoid acting on yourself.                   |
-| `CODEMAN_HOOK_SECRET_FILE` | Path to the hook secret.                                                   |
+| `CODEMAN_API_URL`          | Base URL, with the correct scheme.                                                                                                  |
+| `CODEMAN_SESSION_ID`       | Your own session id. Use it to avoid acting on yourself.                                                                            |
+| `CODEMAN_HOOK_SECRET_FILE` | Path to the hook secret.                                                                                                            |
 
 ### Rules of the road
 
@@ -157,8 +157,8 @@ Read these before writing any code. Each one has cost somebody an afternoon.
    `idle` fires **once at startup and never again**, so synchronize hook-less sessions with an
    output marker instead.
 7. **Nothing reports "ready", so wait for it explicitly.** A new session answers
-   `{"signal":"exit","immediate":true}` until its PID exists, and that means *not started*,
-   not *crashed*. A Claude worker in a fresh case then sits on the CLI's trust dialog, whose
+   `{"signal":"exit","immediate":true}` until its PID exists, and that means _not started_,
+   not _crashed_. A Claude worker in a fresh case then sits on the CLI's trust dialog, whose
    highlighted option is `No, exit`: prompt it there and your Enter quits the CLI. Codeman
    holds `idle` while the dialog is on screen, but that is not a readiness signal either.
 
@@ -257,4 +257,4 @@ failing the spawn, because a cosmetic field must never break a worker.
 - [Watching Agents Work](Watching-Agents-Work) - seeing the fan-out in the UI.
 - [`skills/codeman/SKILL.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/SKILL.md) - the skill itself.
 
-Bounded inspection and guarded stage/submit details: [API reference](../api-reference.md#bounded-agent-inspection-and-guarded-input). Stage accepts one printable UTF8 line without trailing whitespace; receipts expire after two minutes. Submit refuses changed/unprovable composers and never automatically replays Enter. `send --no-enter` alone has no receipt.
+Bounded inspection and guarded stage/submit details: [API reference](../api-reference.md#bounded-agent-inspection-and-guarded-input). Stage accepts printable UTF8 without trailing whitespace; explicit `--multiline` additionally requires verified multiline rows and active bracketed paste. Receipts expire after two minutes. Submit refuses changed/unprovable composers and never automatically replays Enter. `send --no-enter` alone has no receipt.

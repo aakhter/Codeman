@@ -102,6 +102,20 @@ Jira with branch, commit, verification, and any requested PR before marking work
 link Jira/issues, and include screenshots for UI/mobile changes. Before review, run typecheck, lint, format check, lockfile
 check, and targeted tests.
 
+## Native Local Session Tools (COD-549)
+
+`codeman history read` replaces session-bridge for offline Codex transcripts, native
+ID lookup and root/child topic/date queries. `codeman local inspect|stage|submit`
+takes an explicit tmux socket and pane target for local operator use. These commands
+never expose arbitrary files or panes through HTTP. Read
+`skills/codeman/reference/local-session-tools.md` for budgets and limitations.
+Use `codeman agent` for managed peers; `agent spawn` without a case preserves cwd,
+or accepts `--working-dir`. Never bypass a refused managed write with local input.
+Guarded staging supports characterized composer profiles and explicitly authorized
+multiline bracketed paste. Retain lifecycle/input revisions and one-shot receipts;
+unsupported rendering is a refusal, not permission to send raw Enter. Local capture
+cannot serialize independent tmux writers and must not claim managed guarantees.
+
 ## Project Overview
 
 Codeman is a Claude Code session manager with web interface and autonomous Ralph Loop. Spawns Claude CLI via PTY, streams via SSE, supports respawn cycling for 24+ hour autonomous runs.

@@ -30,9 +30,11 @@
  */
 import http from 'node:http';
 import https from 'node:https';
-import { open, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { open, lstat, stat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { isUtf8 } from 'node:buffer';
-import { STAGE_MAX_BYTES } from './agent-staging.js';
+import { STAGE_MAX_BYTES, guardedMessageRefusal, normalizeGuardedMessageFile } from './agent-staging.js';
 import { INSPECT_MAX_BYTES } from './agent-inspection.js';
 import type { Command } from 'commander';
 import {
@@ -451,7 +453,8 @@ export async function agentLs(deps: AgentDeps): Promise<number> {
 }
 
 export interface SpawnOptions {
-  caseName: string;
+  caseName?: string;
+  workingDir?: string;
   mode: string;
   name?: string;
   /** Wait for the composer before returning, where the registry gives the mode a ready mark. */
@@ -476,42 +479,86 @@ export function composerReadyMark(mode: string): string | undefined {
 }
 /** `agent spawn` — quick-start with lineage, then the readiness ladder where the mode has one. */
 export async function agentSpawn(deps: AgentDeps, options: SpawnOptions): Promise<number> {
+  const cli = getCli(options.mode);
+  if (!cli) return fail(deps, `Unknown mode: ${options.mode}`, EXIT.refused);
+  if (options.caseName && options.workingDir !== undefined)
+    return fail(deps, 'Use a case OR --working-dir, not both', EXIT.refused);
+  const workingDir = options.caseName ? undefined : resolve(options.workingDir ?? process.cwd());
+  if (workingDir) {
+    // eslint-disable-next-line no-control-regex
+    if (/[\x00-\x1f\x7f]/.test(workingDir))
+      return fail(deps, 'Working directory contains control characters', EXIT.refused);
+    try {
+      if (!(await stat(workingDir)).isDirectory()) throw new Error('not a directory');
+    } catch {
+      return fail(deps, 'Working directory must be an existing local directory', EXIT.refused);
+    }
+  }
   const body: Record<string, unknown> = {
-    caseName: options.caseName,
+    ...(workingDir ? { workingDir } : { caseName: options.caseName }),
     mode: options.mode,
     parentSessionId: deps.ctx.selfId,
   };
-  if (options.name) body.sessionName = options.name;
+  if (options.name) body[workingDir ? 'name' : 'sessionName'] = options.name;
   const res = await deps.request(deps.ctx, {
     method: 'POST',
-    path: '/api/v1/quick-start',
+    path: workingDir ? '/api/v1/sessions' : '/api/v1/quick-start',
     body,
-    headers: { ...AGENT_ORIGIN_HEADER },
+    headers: workingDir ? undefined : { ...AGENT_ORIGIN_HEADER },
   });
-  const data = res.json?.data as { sessionId?: string; caseName?: string; casePath?: string } | undefined;
+  const created = res.json?.data as
+    | { id?: string; session?: { id?: string }; sessionId?: string; caseName?: string; casePath?: string }
+    | undefined;
+  const createdId = created?.session?.id ?? created?.id;
+  const data:
+    | { sessionId?: string; caseName?: string; casePath?: string; workingDir?: string; created?: boolean }
+    | undefined = workingDir && createdId ? { sessionId: createdId, workingDir, created: true } : created;
   if (!res.json?.success || !data?.sessionId) return fail(deps, describeFailure(res));
   const sid = data.sessionId;
+  if (workingDir) {
+    // Creation alone leaves a session without a pane. Report the exact created id
+    // on an ambiguous or rejected start; never retry a start or hide a leaked tab.
+    let startupError: string | undefined;
+    try {
+      const started = await deps.request(deps.ctx, {
+        method: 'POST',
+        path: `/api/v1/sessions/${encodeURIComponent(sid)}/${cli.capabilities.startMode}`,
+      });
+      if (!started.json?.success) startupError = describeFailure(started);
+    } catch (error) {
+      startupError = getErrorMessage(error);
+    }
+    if (startupError) {
+      if (deps.json) emitJson(deps, { ...data, ready: false, startupError });
+      else deps.io.out(sid);
+      return fail(deps, `Session ${sid} was created but startup failed or is ambiguous: ${startupError}`);
+    }
+  }
 
   let ready: boolean | undefined;
   let readinessError: string | undefined;
   let dead = false;
   const mark = composerReadyMark(options.mode);
   if (options.ready && mark) {
-    const wait = await deps.request(deps.ctx, {
-      method: 'GET',
-      path: `/api/v1/sessions/${encodeURIComponent(sid)}/wait-output`,
-      query: { match: mark, from: 'buffer', timeout: options.timeoutMs },
-      timeoutMs: options.timeoutMs + 10_000,
-    });
-    // A failed readiness call (waiter cap, 400, network) is its own error, not "the
-    // composer never showed up": report the real reason instead of the trust-dialog hint.
-    if (!wait.json?.success) readinessError = describeFailure(wait);
-    else {
-      const result = (wait.json.data as { wait?: WaitResult } | undefined)?.wait;
-      // A worker that died while we waited is exit 3 like every other wait, not a
-      // "composer not seen" timeout that sends the caller looking for a dialog.
-      dead = waitExitCode(result) === EXIT.dead;
-      ready = !dead && Boolean(result?.matched);
+    try {
+      const wait = await deps.request(deps.ctx, {
+        method: 'GET',
+        path: `/api/v1/sessions/${encodeURIComponent(sid)}/wait-output`,
+        query: { match: mark, from: 'buffer', timeout: options.timeoutMs },
+        timeoutMs: options.timeoutMs + 10_000,
+      });
+      // A failed readiness call (waiter cap, 400, network) is its own error, not "the
+      // composer never showed up": report the real reason instead of the trust-dialog hint.
+      if (!wait.json?.success) readinessError = describeFailure(wait);
+      else {
+        const result = (wait.json.data as { wait?: WaitResult } | undefined)?.wait;
+        // A worker that died while we waited is exit 3 like every other wait, not a
+        // "composer not seen" timeout that sends the caller looking for a dialog.
+        dead = waitExitCode(result) === EXIT.dead;
+        ready = !dead && Boolean(result?.matched);
+      }
+    } catch (error) {
+      readinessError = getErrorMessage(error);
     }
   }
 
@@ -520,7 +567,7 @@ export async function agentSpawn(deps: AgentDeps, options: SpawnOptions): Promis
   } else {
     // Human lines go to stderr so `SID=$(codeman agent spawn …)` captures the id alone.
     const say = (line: string) => deps.io.err(line);
-    say(palette.ok(`${GLYPH.ok} spawned ${sid} (${options.mode}, case ${data.caseName ?? options.caseName})`));
+    say(palette.ok(`${GLYPH.ok} spawned ${sid} (${options.mode}, ${workingDir ?? data.caseName ?? options.caseName})`));
     if (ready === true) say(palette.muted('  composer up: the worker can take a prompt'));
     if (dead) say(palette.err(`${GLYPH.fail} the worker exited during the readiness wait`));
     if (ready === false && !dead) {
@@ -733,36 +780,42 @@ export async function agentInspect(
 }
 
 /** Stage exactly the printable UTF8 file contents; never sends Enter. */
-export async function agentStage(deps: AgentDeps, options: { id: string; messageFile: string }): Promise<number> {
+export async function agentStage(
+  deps: AgentDeps,
+  options: { id: string; messageFile: string; multiline?: boolean }
+): Promise<number> {
   if (isSelfSession(deps.ctx.selfId, options.id)) return fail(deps, `refusing: ${options.id} is me`, EXIT.refused);
   let message: string;
   try {
-    const info = await stat(options.messageFile);
-    if (!info.isFile() || info.size > STAGE_MAX_BYTES)
+    const info = await lstat(options.messageFile);
+    if (!info.isFile() || info.size > STAGE_MAX_BYTES + 2)
       return fail(deps, 'message file must be a regular file within 8192 UTF8 bytes', EXIT.refused);
-    const handle = await open(options.messageFile, 'r');
+    const handle = await open(options.messageFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    if (!(await handle.stat()).isFile()) {
+      await handle.close();
+      return fail(deps, 'message must be a regular file', EXIT.refused);
+    }
     try {
-      const buffer = Buffer.alloc(STAGE_MAX_BYTES + 1);
+      const buffer = Buffer.alloc(STAGE_MAX_BYTES + 3);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       const bytes = buffer.subarray(0, bytesRead);
-      if (bytesRead > STAGE_MAX_BYTES || !isUtf8(bytes))
+      if (bytesRead > STAGE_MAX_BYTES + 2 || !isUtf8(bytes))
         return fail(deps, 'message file must contain at most 8192 bytes of UTF8', EXIT.refused);
-      message = bytes.toString('utf8');
+      message = normalizeGuardedMessageFile(bytes.toString('utf8'));
     } finally {
       await handle.close();
     }
   } catch (error) {
     return fail(deps, `cannot read message file: ${getErrorMessage(error)}`, EXIT.refused);
   }
-  const refusal = inputRefusal(message);
-  if (refusal || message !== message.trimEnd())
-    return fail(deps, refusal ?? 'stage refuses trailing whitespace', EXIT.refused);
+  const refusal = guardedMessageRefusal(message, options.multiline);
+  if (refusal) return fail(deps, refusal, EXIT.refused);
   const target = await resolveSessionId(deps, options.id);
   if ('error' in target) return fail(deps, target.error, target.code);
   const response = await deps.request(deps.ctx, {
     method: 'POST',
     path: `/api/v1/sessions/${encodeURIComponent(target.id)}/stage`,
-    body: { message },
+    body: { message, ...(options.multiline ? { multiline: true } : {}) },
   });
   if (!response.json?.success) return fail(deps, describeFailure(response));
   if (deps.json) emitJson(deps, response.json.data);
@@ -944,20 +997,25 @@ export function registerAgentCommands(program: Command): Command {
     .action((options: { json?: boolean }) => run(Boolean(options.json), agentLs));
 
   agent
-    .command('spawn <case>')
+    .command('spawn [case]')
     .description(
       'Start a worker session in a case (created if missing) and wait for its composer where the mode draws one'
     )
     .option('-m, --mode <mode>', 'Run mode id, as the Run menu names it', 'claude')
     .option('-n, --name <name>', 'Session name shown in the UI')
+    .option('--working-dir <directory>', 'Existing project directory (defaults to cwd when no case is given)')
     .option('--no-ready', 'Return as soon as the session exists, without the readiness wait')
     .option('-t, --timeout <ms>', 'Readiness budget in ms', String(DEFAULT_WAIT_MS))
     .option('--json', 'Machine-readable output')
     .action(
-      (caseName: string, options: { mode: string; name?: string; ready: boolean; timeout?: string; json?: boolean }) =>
+      (
+        caseName: string | undefined,
+        options: { mode: string; name?: string; workingDir?: string; ready: boolean; timeout?: string; json?: boolean }
+      ) =>
         run(Boolean(options.json), (deps) =>
           agentSpawn(deps, {
             caseName,
+            workingDir: options.workingDir,
             mode: options.mode,
             name: options.name,
             ready: options.ready,
@@ -1072,11 +1130,14 @@ export function registerAgentCommands(program: Command): Command {
 
   agent
     .command('stage <id>')
-    .description('Type a printable single-line UTF8 file without Enter; requires a verifiable local Codex composer')
-    .requiredOption('--message-file <path>', 'Regular UTF8 file, at most 8192 bytes, no trailing newline')
+    .description('Type a UTF8 file without Enter; requires an exactly verifiable local composer')
+    .requiredOption('--message-file <path>', 'Regular UTF8 prompt file, at most 8192 bytes after one file terminator')
+    .option('--multiline', 'Explicitly authorize LF inside a verified bracketed paste')
     .option('--json', 'Machine-readable output')
-    .action((id: string, options: { messageFile: string; json?: boolean }) =>
-      run(Boolean(options.json), (deps) => agentStage(deps, { id, messageFile: options.messageFile }))
+    .action((id: string, options: { messageFile: string; multiline?: boolean; json?: boolean }) =>
+      run(Boolean(options.json), (deps) =>
+        agentStage(deps, { id, messageFile: options.messageFile, multiline: options.multiline })
+      )
     );
 
   agent
