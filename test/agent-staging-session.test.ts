@@ -379,3 +379,52 @@ it('enforces Session checkpoint revision guards between the real mux text and En
     mux.destroy();
   }
 });
+
+it('stages authorized multiline only with bracketed paste enabled and never emits Enter', async () => {
+  let enabled = false;
+  const writes: string[] = [];
+  const mux = {
+    isAvailable: () => true,
+    isBracketedPasteEnabled: () => enabled,
+    capturePaneBuffer: () =>
+      formatPaneSnapshot(['› ', '  GPT-6-Luna default · ~/case'], { cols: 100, rows: 20, cursorX: 2, cursorY: 0 }),
+    sendInput: async (_id: string, value: string) => {
+      writes.push(value);
+      return true;
+    },
+  };
+  const session = new Session({
+    workingDir: '/tmp',
+    mode: 'codex',
+    mux,
+    muxSession: { muxName: 'codeman-test', sessionId: 'test', createdAt: 1, pid: 1 },
+  } as unknown as ConstructorParameters<typeof Session>[0]);
+  try {
+    expect(await session.stageGuardedInput('first\nsecond', true)).toBe(false);
+    enabled = true;
+    expect(await session.stageGuardedInput('first\nsecond')).toBe(false);
+    expect(await session.stageGuardedInput('first\nsecond', true)).toBe(true);
+    expect(writes).toEqual(['first\nsecond']);
+  } finally {
+    await session.stop(false);
+  }
+});
+
+it('uses capability-selected Claude verification and exact multiline hash', async () => {
+  const screen = formatPaneSnapshot(
+    ['────────────────', '❯ first', '  second', '────────────────', '  ⏵⏵ bypass permissions on (shift+tab to cycle)'],
+    { cols: 100, rows: 20, cursorX: 8, cursorY: 2 }
+  );
+  const mux = { isAvailable: () => true, capturePaneBuffer: () => screen };
+  const session = new Session({
+    workingDir: '/tmp',
+    mode: 'claude',
+    mux,
+    muxSession: { muxName: 'codeman-test', sessionId: 'test', createdAt: 1, pid: 1 },
+  } as unknown as ConstructorParameters<typeof Session>[0]);
+  try {
+    expect(session.guardedInputSnapshot()?.composerSha).toBe(promptSha256('first\nsecond'));
+  } finally {
+    await session.stop(false);
+  }
+});

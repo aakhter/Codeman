@@ -476,6 +476,9 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   listPaneCurrentPaths?(): Promise<Map<string, string>>;
 
+  /** Optional proof for guarded multiline paste; absent/false fails closed. */
+  isBracketedPasteEnabled?(muxName: string): boolean;
+
   /**
    * Capture a pane's current tmux buffer with ANSI escape codes preserved.
    * Pass `{ fullHistory: true }` to capture the entire scrollback (`-S -`)

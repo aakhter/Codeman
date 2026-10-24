@@ -60,12 +60,12 @@ it('stage reads a bounded UTF8 file and never adds Enter; submit sends only rece
     expect(await agentSubmit(d.deps, { id: OTHER, stageId: OTHER, confirmSha: 'a'.repeat(64) })).toBe(0);
     expect(d.calls[1].body).toEqual({ stageId: OTHER, confirmSha: 'a'.repeat(64) });
     await writeFile(path, 'hello\n');
-    expect(await agentStage(d.deps, { id: OTHER, messageFile: path })).toBe(4);
+    expect(await agentStage(d.deps, { id: OTHER, messageFile: path })).toBe(0);
     await writeFile(path, Buffer.from([0xff]));
     expect(await agentStage(d.deps, { id: OTHER, messageFile: path })).toBe(4);
     await writeFile(path, 'x'.repeat(8193));
     expect(await agentStage(d.deps, { id: OTHER, messageFile: path })).toBe(4);
-    expect(d.calls).toHaveLength(2);
+    expect(d.calls).toHaveLength(3);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -91,4 +91,22 @@ it('registers required file and confirmation options and bounded inspect flags',
     commands.find((command) => command.name() === 'submit')!.options.find((option) => option.long === '--confirm-sha')
       ?.mandatory
   ).toBe(true);
+});
+
+it('normalizes one terminator and requires explicit multiline authorization before transport', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-stage-lines-'));
+  try {
+    const path = join(dir, 'message');
+    const d = deps();
+    await writeFile(path, 'first\nsecond\n');
+    expect(await agentStage(d.deps, { id: OTHER, messageFile: path })).toBe(4);
+    expect(d.calls).toHaveLength(0);
+    expect(await agentStage(d.deps, { id: OTHER, messageFile: path, multiline: true })).toBe(0);
+    expect(d.calls[0].body).toEqual({ message: 'first\nsecond', multiline: true });
+    await writeFile(path, 'hello\r\n');
+    expect(await agentStage(d.deps, { id: OTHER, messageFile: path })).toBe(0);
+    expect(d.calls[1].body).toEqual({ message: 'hello' });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

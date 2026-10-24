@@ -2566,7 +2566,9 @@ export const AgentInspectQuerySchema = z
     since: z.string().uuid().optional(),
   })
   .strict();
-export const AgentStageSchema = z.object({ message: z.string().min(1).max(8192) }).strict();
+export const AgentStageSchema = z
+  .object({ message: z.string().min(1).max(8192), multiline: z.boolean().optional() })
+  .strict();
 export const AgentSubmitSchema = z
   .object({ stageId: z.string().uuid(), confirmSha: z.string().regex(/^[a-f0-9]{64}$/) })
   .strict();

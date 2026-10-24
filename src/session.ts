@@ -29,7 +29,12 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { promptSha256, readGuardedCodexSnapshot, type GuardedInputSnapshot } from './agent-staging.js';
+import {
+  promptSha256,
+  readGuardedComposerSnapshot,
+  guardedMessageRefusal,
+  type GuardedInputSnapshot,
+} from './agent-staging.js';
 import { workerResumeOptions } from './remote-worker-recovery.js';
 import { basename } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
@@ -6087,14 +6092,15 @@ export class Session extends EventEmitter {
       this.remote ||
       this.docker ||
       this.paneExit ||
-      getCli(this.mode)?.capabilities.nativeAssistantProfile !== 'codex' ||
       !this._muxSession
     )
       return null;
     const screen = this._mux?.capturePaneBuffer?.(this._muxSession.muxName);
     if (!screen) return null;
-    if (classifyCodexRenderedState(screen) !== 'input-ready') return null;
-    const composer = readGuardedCodexSnapshot(screen);
+    const profile = getCli(this.mode)?.capabilities.nativeAssistantProfile;
+    if (profile !== 'codex' && profile !== 'claude') return null;
+    if (profile === 'codex' && classifyCodexRenderedState(screen) !== 'input-ready') return null;
+    const composer = readGuardedComposerSnapshot(screen, profile, true);
     return composer === null
       ? null
       : {
@@ -6104,8 +6110,13 @@ export class Session extends EventEmitter {
         };
   }
   /** Type a guarded draft without leaving an earlier Enter verifier armed. */
-  async stageGuardedInput(message: string): Promise<boolean> {
-    if (/[\r\n]/.test(message)) return false;
+  async stageGuardedInput(message: string, multiline = false): Promise<boolean> {
+    if (guardedMessageRefusal(message, multiline)) return false;
+    if (
+      message.includes('\n') &&
+      (!this._muxSession || !this._mux?.isBracketedPasteEnabled?.(this._muxSession.muxName))
+    )
+      return false;
     if (this._assistantPendingWrites || this._guardedSubmitInFlight) {
       this._guardedInputRevision++;
       return false;

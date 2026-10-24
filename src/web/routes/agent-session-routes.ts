@@ -22,14 +22,14 @@ export function registerAgentSessionRoutes(app: FastifyInstance, ctx: SessionPor
     stages.clear();
   });
   const generation = (session: Session) => session.inspectionGeneration;
-  const target = (session: Session): GuardedInputTarget => ({
+  const target = (session: Session, multiline = false): GuardedInputTarget => ({
     id: session.id,
     snapshot: () => {
       if (ctx.sessions.get(session.id) !== session) return null;
       const snapshot = session.guardedInputSnapshot?.();
       return snapshot ? { ...snapshot, generation: generation(session) } : null;
     },
-    write: (text) => session.stageGuardedInput(text),
+    write: (text) => session.stageGuardedInput(text, multiline),
     submit: (expected) => session.submitGuardedInput(expected),
   });
   app.get('/api/sessions/:id/inspect', async (req, reply) => {
@@ -108,9 +108,9 @@ export function registerAgentSessionRoutes(app: FastifyInstance, ctx: SessionPor
   });
   app.post('/api/sessions/:id/stage', async (req, reply) => {
     const session = findSessionOrFail(ctx, (req.params as { id: string }).id, req);
-    const { message } = parseBody(AgentStageSchema, req.body);
+    const { message, multiline } = parseBody(AgentStageSchema, req.body);
     try {
-      const receipt = await stages.stage(target(session), getAuthUser(req).username, message);
+      const receipt = await stages.stage(target(session, multiline), getAuthUser(req).username, message, { multiline });
       return { success: true, data: receipt };
     } catch (error) {
       return reply

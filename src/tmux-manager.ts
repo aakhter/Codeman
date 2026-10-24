@@ -5347,6 +5347,23 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     }
   }
 
+  /** Fail-closed proof that a characterized composer currently accepts bracketed LF paste. */
+  isBracketedPasteEnabled(muxName: string): boolean {
+    if (IS_TEST_MODE) return false;
+    const target = resolveTmuxPaneTarget(muxName);
+    if (!target) return false;
+    try {
+      return (
+        execSync(`${this.tmux()} display-message -p -t ${shellescape(target)} '#{bracketed_paste}'`, {
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        }).trim() === '1'
+      );
+    } catch {
+      return false;
+    }
+  }
+
   capturePaneBuffer(muxName: string, paneTarget?: string, opts?: PaneCaptureOptions): string | null {
     if (IS_TEST_MODE) return '';
     const target = resolveTmuxPaneTarget(muxName, paneTarget);

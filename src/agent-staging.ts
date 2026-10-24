@@ -51,8 +51,11 @@ export function readGuardedCodexComposer(screen: string): string | null {
     )
   )
     return null;
+  return withoutDimText(screen.split('\n')[last.index]).trimStart().slice(2).trimEnd();
+}
+
+function withoutDimText(raw: string): string {
   // Preserve exact printable content; only SGR-dim placeholder/suggestion text is excluded.
-  const raw = screen.split('\n')[last.index];
   let dim = false;
   let visible = '';
   // eslint-disable-next-line no-control-regex
@@ -69,13 +72,37 @@ export function readGuardedCodexComposer(screen: string): string | null {
       }
     } else if (!dim) visible += token;
   }
-  return stripAnsi(visible).trimStart().slice(2).trimEnd();
+  return stripAnsi(visible);
 }
 
-/** Require the capture's caret at the exact end of the unwrapped composer. */
-export function readGuardedCodexSnapshot(snapshot: string): string | null {
+export type GuardedComposerProfile = 'codex' | 'claude';
+
+/** A conventional file terminator is not part of a prompt; remove exactly one. */
+export function normalizeGuardedMessageFile(message: string): string {
+  return message.endsWith('\r\n') ? message.slice(0, -2) : message.endsWith('\n') ? message.slice(0, -1) : message;
+}
+
+/** Shared local/API prompt validation, independent of the delivery transport. */
+export function guardedMessageRefusal(message: string, multiline = false): string | undefined {
+  // LF is allowed only with explicit multiline authorization; CR, tabs and terminal controls never are.
+  // eslint-disable-next-line no-control-regex
+  const controls = multiline ? /[\x00-\x09\x0b-\x1f\x7f-\x9f]/ : /[\x00-\x1f\x7f-\x9f]/;
+  if (!message || Buffer.byteLength(message) > STAGE_MAX_BYTES || Buffer.from(message).toString('utf8') !== message)
+    return 'Stage requires nonempty UTF8 input within 8192 bytes';
+  if (controls.test(message))
+    return 'Stage refuses terminal controls; newline requires explicit multiline authorization';
+  if (message.split('\n').some((line) => line !== line.trimEnd()) || message.endsWith('\n'))
+    return 'Stage refuses trailing whitespace on any line';
+  return undefined;
+}
+
+/** Require an exact, supported visible composer and caret. Wrapped or collapsed pastes fail closed. */
+export function readGuardedComposerSnapshot(
+  snapshot: string,
+  profile: GuardedComposerProfile,
+  multiline = false
+): string | null {
   // formatPaneSnapshot emits one absolute row address per line, then the caret.
-  // Plain captures lack caret evidence and cannot prove invisible trailing edits.
   // eslint-disable-next-line no-control-regex
   const positions = [...snapshot.matchAll(/\x1b\[(\d+);(\d+)H/g)];
   if (positions.length < 2) return null;
@@ -87,18 +114,81 @@ export function readGuardedCodexSnapshot(snapshot: string): string | null {
     if (Number(position[1]) !== i + 1 || position[2] !== '1') return null;
     rows.push(snapshot.slice(position.index! + position[0].length, positions[i + 1].index));
   }
-  const composer = readGuardedCodexComposer(rows.join('\n'));
-  if (composer === null) return null;
-  let composerRow = -1;
-  for (let i = rows.length - 1; i >= 0; i--)
-    if (/^\s*›(?:\s|$)/.test(stripAnsi(rows[i]))) {
-      composerRow = i;
-      break;
+  const plain = rows.map((row) => stripAnsi(row));
+  let start = -1,
+    end = -1;
+  let composer: string | null = null;
+  let prefix: string | undefined;
+  if (profile === 'codex') {
+    for (let i = plain.length - 1; i >= 0; i--)
+      if (/^\s*›(?:\s|$)/.test(plain[i])) {
+        start = i;
+        break;
+      }
+    if (start < 0) return null;
+    const footer = plain.findIndex(
+      (line, index) =>
+        index > start &&
+        /^\s+(?:\d+% context left|\? for shortcuts|← for agents|\S+ (?:default|low|medium|high|xhigh|max) · )/.test(
+          line
+        )
+    );
+    if (footer < 0) return null;
+    end = footer - 1;
+    while (end > start && !plain[end].trim()) end--;
+    if (end === start) composer = readGuardedCodexComposer(rows.slice(start).join('\n'));
+    else {
+      if (!multiline || plain.slice(start + 1, end + 1).some((line) => line && !line.startsWith('  '))) return null;
+      const first = readGuardedCodexComposer([rows[start], ...rows.slice(footer)].join('\n'));
+      if (first === null) return null;
+      composer = [first, ...plain.slice(start + 1, end + 1).map((line) => line.slice(2).trimEnd())].join('\n');
     }
-  const prefix = stripAnsi(rows[composerRow]).match(/^(\s*›[ \u00a0])/);
-  if (!prefix || Number(caret[1]) !== composerRow + 1 || Number(caret[2]) !== visibleWidth(prefix[1] + composer) + 1)
-    return null;
+    prefix = plain[start].match(/^(\s*›[ \u00a0])/)?.[1];
+  } else if (profile === 'claude') {
+    // The bordered composer and permission-cycle footer distinguish it from trust/approval menus.
+    for (let i = plain.length - 1; i >= 0; i--)
+      if (/^❯(?:[ \u00a0]|$)/.test(plain[i])) {
+        start = i;
+        break;
+      }
+    if (start < 1 || !/^─{4,}\s*$/.test(plain[start - 1])) return null;
+    const border = plain.findIndex((line, index) => index > start && /^─{4,}\s*$/.test(line));
+    if (border < 0) return null;
+    const footer = plain.slice(border + 1).filter((line) => line.trim());
+    if (
+      footer.length < 1 ||
+      footer.length > 3 ||
+      !footer.some((line) => /\(shift\+tab to cycle\)/.test(line)) ||
+      footer.some(
+        (line) =>
+          !/^\s*(?:[⏵⏸]+ .*\(shift\+tab to cycle\)|\? for shortcuts|(?:Opus|Sonnet|Haiku|Fable) \S.*(?:ctx:|context))/.test(
+            line
+          )
+      )
+    )
+      return null;
+    if (plain.slice(0, start - 1).some((line) => /(?:esc to interrupt|[✻✽✶✳✢·] .*[.…])/i.test(line))) return null;
+    end = border - 1;
+    if ((!multiline && end !== start) || plain.slice(start + 1, end + 1).some((line) => line && !line.startsWith('  ')))
+      return null;
+    prefix = plain[start].match(/^(❯[ \u00a0]?)/)?.[1];
+    composer = [
+      withoutDimText(rows[start])
+        .slice(prefix?.length ?? 0)
+        .trimEnd(),
+      ...plain.slice(start + 1, end + 1).map((line) => line.slice(2).trimEnd()),
+    ].join('\n');
+  } else return null;
+  if (composer === null || !prefix || Number(caret[1]) !== end + 1) return null;
+  const lastLine = composer.split('\n').at(-1)!;
+  const linePrefix = end === start ? prefix : '  ';
+  if (Number(caret[2]) !== visibleWidth(linePrefix + lastLine) + 1) return null;
   return composer;
+}
+
+/** Backward-compatible single-line Codex verifier. */
+export function readGuardedCodexSnapshot(snapshot: string): string | null {
+  return readGuardedComposerSnapshot(snapshot, 'codex');
 }
 
 export class GuardedStageStore {
@@ -109,19 +199,9 @@ export class GuardedStageStore {
     private readonly capacity = 1024,
     private readonly ttlMs = 120000
   ) {}
-  async stage(target: GuardedInputTarget, owner: string, message: string) {
-    // eslint-disable-next-line no-control-regex
-    const hasControls = /[\x00-\x1f\x7f-\x9f]/.test(message);
-    if (
-      !message ||
-      message !== message.trimEnd() ||
-      Buffer.byteLength(message) > STAGE_MAX_BYTES ||
-      Buffer.from(message).toString('utf8') !== message ||
-      hasControls
-    )
-      throw new GuardedInputConflict(
-        'Stage requires printable single-line input within 8192 UTF8 bytes, without trailing whitespace'
-      );
+  async stage(target: GuardedInputTarget, owner: string, message: string, options: { multiline?: boolean } = {}) {
+    const refusal = guardedMessageRefusal(message, options.multiline);
+    if (refusal) throw new GuardedInputConflict(refusal);
     const key = target.id;
     if (this.busy.has(key)) throw new GuardedInputConflict('Another guarded input operation is in progress');
     this.busy.add(key);
