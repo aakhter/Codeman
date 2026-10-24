@@ -300,6 +300,17 @@ async function readMessages(source: Source, budget: Budget): Promise<Message[]> 
         budget.scan.malformedRecords++;
         continue;
       }
+      if (object(parsed).type === 'session_meta') {
+        const declared = metadata(parsed, source.path);
+        if (
+          !declared ||
+          declared.sessionId !== source.sessionId ||
+          declared.parentId !== source.parentId ||
+          declared.rootId !== source.rootId
+        )
+          throw new Error('History source contains conflicting native metadata; attribution refused');
+        continue;
+      }
       const item = message(parsed);
       if (!item) continue;
       const previous = records.at(-1);

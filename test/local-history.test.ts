@@ -155,6 +155,21 @@ describe('offline native history', () => {
     expect(result.complete).toBe(false);
     expect(result.scan.unattributedFiles).toBe(1);
   });
+  it('refuses conflicting session metadata instead of attributing another conversation answer', async () => {
+    const file = await fixture(ROOT, [row('user', 'root question'), meta(CHILD), row('assistant', 'child answer')]);
+    await expect(history.readLocalHistory({ file })).rejects.toThrow(/conflicting.*metadata/);
+  });
+  it('accepts repeated metadata only when native identity and genealogy agree', async () => {
+    const file = await fixture(ROOT, [row('user', 'question'), meta(ROOT), row('assistant', 'answer')]);
+    expect((await history.readLocalHistory({ file })).records.map((record) => record.message)).toEqual([
+      'question',
+      'answer',
+    ]);
+    await fixture(CHILD, [meta(CHILD, GRANDCHILD), row('assistant', 'child answer')], ROOT);
+    await expect(history.readLocalHistory({ sessionId: CHILD, sessionsRoot: dir })).rejects.toThrow(
+      /conflicting.*metadata/
+    );
+  });
   it('labels skipped malformed and pending partial records', async () => {
     const file = await fixture(ROOT, [row('assistant', 'complete')]);
     const { appendFile } = await import('node:fs/promises');
