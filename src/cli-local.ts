@@ -33,7 +33,7 @@ export function registerLocalCommands(program: Command): void {
   targetOptions(
     local.command('stage').description('Paste without Enter into a verified empty composer; issue a one-shot receipt')
   )
-    .requiredOption('--mode <mode>', 'Characterized composer: codex or claude')
+    .requiredOption('--mode <mode>', 'Installed CLI mode with a characterized Codex or Claude composer profile')
     .requiredOption('--message-file <path>', 'Regular UTF8 message file; one trailing newline is normalized')
     .option('--multiline', 'Explicitly authorize multiline bracketed paste')
     .action(

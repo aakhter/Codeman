@@ -19,6 +19,7 @@ import {
   STAGE_MAX_BYTES,
 } from './agent-staging.js';
 import { stripAnsi } from './utils/regex-patterns.js';
+import { getCli } from './config/cli-registry/registry.js';
 
 export type LocalTmuxRunner = (args: string[], input?: string) => Promise<string>;
 export interface LocalTarget {
@@ -26,7 +27,7 @@ export interface LocalTarget {
   target: string;
 }
 export interface LocalStageOptions extends LocalTarget {
-  mode: 'codex' | 'claude';
+  mode: string;
   messageFile: string;
   multiline?: boolean;
 }
@@ -71,7 +72,7 @@ export interface LocalTerminalOptions {
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const META =
-  '#{pid}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_dead}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{alternate_on}\t#{bracketed_paste}';
+  '#{pid}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_dead}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{alternate_on}\t#{bracket_paste_flag}';
 const uid = () => process.getuid?.() ?? 0;
 const identity = (pane: Pane) => JSON.stringify([pane.serverPid, pane.id, pane.pid, pane.tty]);
 const defaultRunner: LocalTmuxRunner = async (args, input) =>
@@ -94,7 +95,7 @@ function validateTarget(options: LocalTarget): void {
   if (!options.socket || !options.target) throw new Error('An explicit tmux socket and target are required');
 }
 function parsePane(raw: string): Pane {
-  const values = raw.trimEnd().split('\t');
+  const values = raw.replace(/\r?\n$/, '').split('\t');
   if (values.length !== 11 || !/^%\d+$/.test(values[1])) throw new Error('Unrecognized tmux pane metadata');
   for (const index of [0, 2, 4, 5, 6, 7, 8, 9])
     if (!/^\d+$/.test(values[index])) throw new Error('Unrecognized tmux pane metadata');
@@ -276,8 +277,9 @@ export class LocalTerminal {
   }
   async stage(options: LocalStageOptions) {
     validateTarget(options);
-    if (options.mode !== 'codex' && options.mode !== 'claude')
-      throw new Error('Stage requires an explicit supported mode: codex or claude');
+    const profile = getCli(options.mode)?.capabilities.nativeAssistantProfile;
+    if (profile !== 'codex' && profile !== 'claude')
+      throw new Error('Stage requires an installed mode with a characterized Codex or Claude composer profile');
     const message = normalizeGuardedMessageFile(
       (await readRegular(options.messageFile, STAGE_MAX_BYTES + 2)).toString('utf8')
     );
@@ -286,7 +288,7 @@ export class LocalTerminal {
     await this.store();
     await this.capacity();
     const before = await this.frame(options, true);
-    if (readGuardedComposerSnapshot(before.snapshot, options.mode, options.multiline) !== '')
+    if (readGuardedComposerSnapshot(before.snapshot, profile, options.multiline) !== '')
       throw new Error('An empty, verifiable composer and caret are required');
     if (message.includes('\n') && !before.pane.bracketedPaste)
       throw new Error('Multiline staging requires active bracketed paste mode');
@@ -313,7 +315,7 @@ export class LocalTerminal {
       after = await this.frame(target, true);
       if (identity(after.pane) !== identity(before.pane))
         throw new Error('Pane changed after paste; no receipt issued');
-      if (readGuardedComposerSnapshot(after.snapshot, options.mode, options.multiline) === message) break;
+      if (readGuardedComposerSnapshot(after.snapshot, profile, options.multiline) === message) break;
       if (Date.now() - started >= this.paintTimeoutMs)
         throw new Error('Staged composer is not verified; no receipt issued, inspect before trying again');
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -327,7 +329,7 @@ export class LocalTerminal {
       requestedTarget: options.target,
       paneIdentity: identity(after.pane),
       target: after.pane.id,
-      mode: options.mode,
+      mode: profile,
       multiline: options.multiline ?? false,
       expiresAt: this.now() + 120000,
       sha256: promptSha256(message),

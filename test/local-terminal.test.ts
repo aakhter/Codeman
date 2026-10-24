@@ -1,5 +1,5 @@
 /** @fileoverview Local-only tmux operators: bounded evidence and one-shot guarded submission. */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { Command } from 'commander';
 import { LocalTerminal, type LocalTmuxRunner } from '../src/local-terminal.js';
 import { registerLocalCommands } from '../src/cli-local.js';
+import * as registry from '../src/config/cli-registry/registry.js';
 
 let dir: string;
 let composer: string;
@@ -48,7 +49,12 @@ const run: LocalTmuxRunner = async (args, input) => {
       ].join('\t') + '\n'
     );
   }
-  if (verb === 'capture-pane') return frame().join('\n') + '\n';
+  if (verb === 'capture-pane')
+    return (
+      frame()
+        .map((line) => line.trimEnd())
+        .join('\n') + '\n'
+    );
   if (verb === 'load-buffer') return '';
   if (verb === 'paste-buffer') {
     if (failPaste) throw Error('paste delivery ambiguous');
@@ -75,7 +81,10 @@ beforeEach(async () => {
   calls = [];
   terminal = new LocalTerminal({ run, receiptDir: join(dir, 'receipts'), now: () => time, env: {}, paintTimeoutMs: 0 });
 });
-afterEach(async () => rm(dir, { recursive: true, force: true }));
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await rm(dir, { recursive: true, force: true });
+});
 const message = async (text = 'Review the tests') => {
   const path = join(dir, 'message.txt');
   await writeFile(path, text);
@@ -85,6 +94,14 @@ const stage = async (text = 'Review the tests') =>
   terminal.stage({ ...options, mode: 'codex', messageFile: await message(text) });
 
 describe('local terminal evidence', () => {
+  it('uses the actual tmux bracket_paste_flag and tolerates unsupported empty mode flags', async () => {
+    pasteMode = '';
+    await terminal.inspect(options);
+    expect(calls[0].args.at(-1)).toContain('#{bracket_paste_flag}');
+    await expect(
+      terminal.stage({ ...options, mode: 'codex', messageFile: await message('one\ntwo'), multiline: true })
+    ).rejects.toThrow(/bracketed/i);
+  });
   it('requires an explicit socket and target and never interpolates a shell', async () => {
     await expect(terminal.inspect({ socket: '', target: '%7' })).rejects.toThrow(/socket/i);
     await expect(terminal.inspect({ socket: 'unit', target: '' })).rejects.toThrow(/target/i);
@@ -131,6 +148,13 @@ describe('local terminal evidence', () => {
 });
 
 describe('local guarded stage and submit', () => {
+  it('selects characterized composers through registry capabilities for custom CLI IDs', async () => {
+    const codex = registry.getCli('codex')!;
+    vi.spyOn(registry, 'getCli').mockImplementation((mode) => (mode === 'review-worker' ? codex : undefined));
+    const receipt = await terminal.stage({ ...options, mode: 'review-worker', messageFile: await message('Review') });
+    await terminal.submit({ ...options, stageId: receipt.stageId, confirmSha: receipt.sha256 });
+    expect(calls.filter((c) => c.args[2] === 'send-keys')).toHaveLength(1);
+  });
   it('types without Enter, stores private content-free receipt, then sends Enter once', async () => {
     const receipt = await stage('Review tests\n');
     expect(composer).toBe('Review tests');
