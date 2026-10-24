@@ -383,7 +383,14 @@ describe('checkpoint prompt observations', () => {
     const secondSnapshotPending = new Promise<string[]>((resolve) => {
       resolveSecondSnapshot = resolve;
     });
-    const sendCheckpointCommand = vi.fn(async () => ({ ok: true as const, attempt: 1 }));
+    const sendCheckpointCommand = vi.fn(
+      async (_sessionId: string, _command: string, options: { beforeDispatch: () => boolean }) => {
+        // Exercise the production guard at the transport boundary while this
+        // exact run is current, rather than accepting any third argument.
+        expect(options.beforeDispatch()).toBe(true);
+        return { ok: true as const, attempt: 1 };
+      }
+    );
     const internals = session as unknown as {
       _findRecentOwnedCodexConversationIds: ReturnType<typeof vi.fn>;
       getCheckpointAutomationObservation: () => Promise<{
@@ -397,6 +404,7 @@ describe('checkpoint prompt observations', () => {
     };
     internals._findRecentOwnedCodexConversationIds = vi
       .fn()
+      .mockResolvedValue([])
       .mockImplementationOnce(() => firstSnapshotPending)
       .mockImplementationOnce(() => secondSnapshotPending);
     internals.getCheckpointAutomationObservation = async () => ({
@@ -429,8 +437,19 @@ describe('checkpoint prompt observations', () => {
     resolveSecondSnapshot([]);
     await vi.advanceTimersByTimeAsync(0);
     expect(sendCheckpointCommand).toHaveBeenCalledTimes(1);
-    expect(sendCheckpointCommand).toHaveBeenCalledWith(session.id, '/new\r');
+    const [dispatchedSessionId, dispatchedCommand, { beforeDispatch }] = sendCheckpointCommand.mock.calls[0];
+    expect([dispatchedSessionId, dispatchedCommand]).toEqual([session.id, '/new\r']);
     expect(session.checkpointState).toMatchObject({ runId: newer.runId, status: 'running' });
+    expect(beforeDispatch()).toBe(true);
+
+    session.cancelCheckpoint('verify-dispatch-fence');
+    expect(beforeDispatch()).toBe(false);
+    const replacement = session.requestCheckpoint({ mode: 'new' });
+    expect(replacement.triggered).toBe(true);
+    expect(replacement.runId).not.toBe(newer.runId);
+    expect(session.isCheckpointActive).toBe(true);
+    // A live replacement run cannot restore an older run's dispatch authority.
+    expect(beforeDispatch()).toBe(false);
     await session.stop();
     vi.useRealTimers();
   });

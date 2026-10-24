@@ -661,7 +661,9 @@ describe('Focus section on the rail (COD-509)', () => {
     const puts = installFetch();
     const app = makeApp();
     openRowMenu(app, 's4');
+    // 'Notes' leads every session row menu: COD-481's session notes (downstream).
     expect(menuLabels()).toEqual([
+      'Notes',
       'Session options',
       'Remove from Focus',
       'Move to "Core"',
@@ -680,6 +682,29 @@ describe('Focus section on the rail (COD-509)', () => {
     expect(shortcutKeys()).toEqual(['webview:w1', 'session:s4']);
     // The row never moved.
     expect(row('s4').closest('[data-tab-group-id="gy"]')).not.toBeNull();
+  });
+
+  it('Escape from a shortcut menu hands focus back to the shortcut', () => {
+    installFetch();
+    const app = makeApp();
+    shortcut('session:s4')!.focus();
+    openShortcutMenu(app, 'session:s4');
+    expect(document.activeElement?.closest('.tab-rail-action-menu')).not.toBeNull();
+    document.activeElement!.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    );
+    expect(document.querySelector('.tab-rail-action-menu')).toBeNull();
+    expect((document.activeElement as HTMLElement).dataset.focusKey).toBe('session:s4');
+  });
+
+  it('a web tab becoming active marks its shortcut current at once', () => {
+    installFetch();
+    const app = makeApp();
+    expect(shortcut('webview:w1')!.getAttribute('aria-current')).toBe('false');
+    app.activeWebviewId = 'w1';
+    app._updateActiveWebviewTab();
+    expect(shortcut('webview:w1')!.getAttribute('aria-current')).toBe('true');
+    expect(shortcut('session:s4')!.getAttribute('aria-current')).toBe('false');
   });
 
   it('"Remove from Focus" on a shortcut removes only the shortcut', async () => {

@@ -346,7 +346,12 @@ const CLAUDE: CliEntry = {
       'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
       'CLAUDE_CONFIG_DIR',
     ],
-    gates: { nameFlag: { minVersion: '2.1.224', failClosed: true } },
+    // idleCompactionSetting: the `idleCompaction` settings key first ships in 2.1.290 (2.1.289
+    // already idle-compacts with no opt-out); see TmuxManager._resolveIdleCompactionOptOut.
+    gates: {
+      nameFlag: { minVersion: '2.1.224', failClosed: true },
+      idleCompactionSetting: { minVersion: '2.1.290', failClosed: true },
+    },
     // claude reads `$CLAUDE_CONFIG_DIR/.claude.json` when that is set (checked in 2.1.289).
     mcpConfig: {
       path: '.claude.json',
@@ -831,7 +836,8 @@ const CODEX: CliEntry = {
     // on (`mouse_any_flag=1`, alternate screen) and scrolls exactly 3 rows per
     // report at any rate (5-12 ms repaint), no reversal debounce. 'mouse-tracking'
     // forwards ONLY while the pane has asked for mouse reports, so the older
-    // versions keep the PageUp/local fallback by construction.
+    // versions keep the PageUp/local fallback by construction. Upstream re-measured
+    // 0.163.0 fullscreen the same way (SGR scrolling only with observed tracking).
     wheelForward: { mode: 'mouse-tracking', rows: 3 },
     // Codex also pages its transcript on PageUp/PageDown. Measured on 0.157.1 (local,
     // alternate screen inside tmux, so xterm holds no history) and 0.160 (remote): PageUp

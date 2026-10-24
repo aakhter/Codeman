@@ -48,6 +48,9 @@ function createHarness(
     setCaseDefaultGroup: vi.fn((owner: string, caseName: string, groupId: string | null) => {
       caseDefaults[owner] = { ...(caseDefaults[owner] ?? {}), [caseName]: groupId };
     }),
+    deleteCaseDefaultGroup: vi.fn((owner: string, caseName: string) => {
+      if (caseDefaults[owner]) delete caseDefaults[owner][caseName];
+    }),
   };
   const broadcast = vi.fn();
   const broadcastSessionOrder = vi.fn();
@@ -58,6 +61,8 @@ function createHarness(
     broadcast,
     broadcastSessionOrder,
     childrenFollowParent: vi.fn(() => options.follow === true),
+    // Upstream #676 reads case defaults through this dep, not `store`.
+    caseDefaults: store as never,
     now: options.now ?? (() => '2026-08-16T12:00:00.000Z'),
   });
   return { service, store, broadcast, broadcastSessionOrder, layouts, order, live, persisted, caseDefaults };
@@ -907,7 +912,7 @@ describe('TabLayoutService', () => {
     expect(h.store.getCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav');
   });
 
-  it('repairs a stale case default even when an explicit group determines placement', async () => {
+  it('forgets a stale case default even when an explicit group determines placement', async () => {
     const h = createHarness({
       layouts: {
         alice: { ...existing([]), groups: [{ id: 'tcc', name: 'TCC', refs: [] }] },
@@ -922,8 +927,10 @@ describe('TabLayoutService', () => {
     });
 
     expect(result.layout.groups[0].refs).toEqual([{ kind: 'session', id: 'created' }]);
-    expect(h.store.setCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav', null);
-    expect(h.caseDefaults.alice.nzbdav).toBeNull();
+    // Upstream #676: a stale default is forgotten (unset) after the creating write, not set to null.
+    expect(h.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+    expect(h.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav');
+    expect(h.caseDefaults.alice.nzbdav).toBeUndefined();
   });
 
   it('keeps an eligible represented parent ahead of the configured case default', async () => {
@@ -955,7 +962,7 @@ describe('TabLayoutService', () => {
     expect(h.store.getCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav');
   });
 
-  it('repairs a stale case default even when an eligible represented parent determines placement', async () => {
+  it('forgets a stale case default even when an eligible represented parent determines placement', async () => {
     const h = createHarness({
       layouts: {
         alice: {
@@ -973,8 +980,10 @@ describe('TabLayoutService', () => {
     const result = await h.service.sessionCreated('alice', 'child', { caseName: 'nzbdav' });
 
     expect(result.layout.groups[0].refs.map((ref) => ref.id)).toEqual(['parent', 'child']);
-    expect(h.store.setCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav', null);
-    expect(h.caseDefaults.alice.nzbdav).toBeNull();
+    // Upstream #676: a stale default is forgotten (unset) after the creating write, not set to null.
+    expect(h.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+    expect(h.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav');
+    expect(h.caseDefaults.alice.nzbdav).toBeUndefined();
   });
 
   it('removes only the created ref manual marker when a case default moves an orphaned child', async () => {
@@ -1011,7 +1020,7 @@ describe('TabLayoutService', () => {
     expect(h.store.setCaseDefaultGroup).not.toHaveBeenCalled();
   });
 
-  it('repairs a deleted case default to intentional Ungrouped under the owner lock', async () => {
+  it('forgets a deleted case default (leaving the session Ungrouped) after the creating write', async () => {
     const h = createHarness({
       layouts: { alice: existing([]) },
       live: [{ id: 'created', owner: 'alice', createdAt: 1 }],
@@ -1022,8 +1031,10 @@ describe('TabLayoutService', () => {
 
     expect(result.layout.ungrouped).toEqual([{ kind: 'session', id: 'created' }]);
     expect(result.placementSource).toBeUndefined();
-    expect(h.store.setCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav', null);
-    expect(h.caseDefaults.alice.nzbdav).toBeNull();
+    // Upstream #676: a stale default is forgotten (unset) after the creating write, not set to null.
+    expect(h.store.setCaseDefaultGroup).not.toHaveBeenCalled();
+    expect(h.store.deleteCaseDefaultGroup).toHaveBeenCalledWith('alice', 'nzbdav');
+    expect(h.caseDefaults.alice.nzbdav).toBeUndefined();
   });
 
   it('prefers an explicit group over inherited parent placement and marks the child manual', async () => {

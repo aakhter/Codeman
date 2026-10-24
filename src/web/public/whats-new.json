@@ -1,4 +1,9 @@
 {
-  "version": "1.44.0",
-  "highlights": ["Private session notebooks"]
+  "version": "1.44.1",
+  "highlights": [
+    "Bounded session inspection and guarded submission (COD-529)",
+    "Integration and case settings",
+    "Delivery",
+    "Session rail (COD-545)"
+  ]
 }
