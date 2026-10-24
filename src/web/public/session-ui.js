@@ -157,11 +157,11 @@ const CASE_PICKER_REFRESH_MS = 5000;
  * last case; Enter or a click runs `run`.
  */
 const CASE_PICKER_ACTIONS = [
-  { id: 'add', icon: '+', label: 'New or link a case…', run: (app) => app.showCreateCaseModal() },
-  { id: 'settings', icon: '\u2699', label: 'Case settings…', run: (app) => app.toggleCaseSettings() },
+  { id: 'add', icon: '+', label: 'Add or manage cases…', run: (app) => app.showCreateCaseModal() },
+  { id: 'settings', icon: '\u2699', label: 'New session settings…', run: (app) => app.toggleCaseSettings() },
   // The selected case's git worktrees (openWorktreeModal below): a row here rather than a
   // toolbar button, for the same reason the two above replaced theirs.
-  { id: 'worktrees', icon: '⑂', label: 'Git worktrees…', run: (app) => app.openWorktreeModal() },
+  { id: 'worktrees', icon: '⑂', label: 'Manage this case’s worktrees…', run: (app) => app.openWorktreeModal() },
 ];
 
 /** A worktree name the server accepts (src/git-worktrees.ts `worktreeNameError`), checked before the POST. */

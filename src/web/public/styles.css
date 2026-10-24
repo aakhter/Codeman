@@ -7162,7 +7162,7 @@ html[data-skin="og"] .welcome-primary:hover {
   text-align: center;
 }
 
-/* The picker's own action rows ("New or link a case…", "Case settings…"),
+/* The picker's own action rows ("Add or manage cases…", "New session settings…"),
    which replaced the "+" and gear buttons beside it. Sticky at the bottom so
    a long case list scrolls under them, a hairline above, quieter than a case. */
 .case-combobox-actions {

@@ -264,13 +264,13 @@
     'Link Existing': '关联现有目录',
     // The toolbar case picker's action rows (session-ui.js CASE_PICKER_ACTIONS),
     // which replaced the "+" and gear buttons, and its empty state.
-    'New or link a case…': '新建或关联案例…',
-    'Case settings…': '案例设置…',
+    'Add or manage cases…': '添加或管理案例…',
+    'New session settings…': '新会话设置…',
     'No cases match': '没有匹配的案例',
     // Git worktrees of a case (session-ui.js openWorktreeModal, the case picker row, the
     // phone case sheet and Close Session's worktree option). Worktree and branch names,
     // paths and git's own messages are user/git text and pass through untranslated.
-    'Git worktrees…': 'Git 工作树…',
+    'Manage this case’s worktrees…': '管理此案例的工作树…',
     'Git worktrees': 'Git 工作树',
     'Close git worktrees': '关闭 Git 工作树',
     Worktrees: '工作树',
