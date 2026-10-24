@@ -80,6 +80,28 @@ describe('offline native history', () => {
     ]);
     expect(result.records.every((r) => r.rootSessionId === ROOT)).toBe(true);
   });
+  it('resolves the real native root when querying a child by id', async () => {
+    await fixture(ROOT, [row('assistant', 'root')]);
+    await fixture(CHILD, [row('assistant', 'child')], ROOT);
+    await fixture(GRANDCHILD, [row('assistant', 'grandchild')], CHILD);
+    const result = await history.readLocalHistory({ sessionId: GRANDCHILD, sessionsRoot: dir });
+    expect(result.records[0].rootSessionId).toBe(ROOT);
+    expect(result.sessions[0]).toMatchObject({ parentSessionId: CHILD, rootSessionId: ROOT });
+  });
+  it('labels a file-only child root unknown rather than inventing an ancestor', async () => {
+    const file = await fixture(CHILD, [row('assistant', 'child')], ROOT);
+    const result = await history.readLocalHistory({ file });
+    expect(result.records[0].rootSessionId).toBeNull();
+    expect(result.sessions[0]).toMatchObject({ parentSessionId: ROOT, rootSessionId: null });
+  });
+  it('labels missing ancestors unknown and refuses cyclic ancestry', async () => {
+    await fixture(CHILD, [row('assistant', 'child')], ROOT);
+    expect(
+      (await history.readLocalHistory({ sessionId: CHILD, sessionsRoot: dir })).records[0].rootSessionId
+    ).toBeNull();
+    await fixture(ROOT, [row('assistant', 'root')], CHILD);
+    await expect(history.readLocalHistory({ sessionId: CHILD, sessionsRoot: dir })).rejects.toThrow(/cyclic/);
+  });
   it('supports legacy shared session_id genealogy', async () => {
     await fixture(ROOT, [row('assistant', 'root')]);
     await writeFile(

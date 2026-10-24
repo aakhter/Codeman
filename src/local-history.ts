@@ -24,7 +24,7 @@ export interface LocalHistoryOptions {
   maxEntries?: number;
 }
 export interface HistoryRecord {
-  rootSessionId: string;
+  rootSessionId: string | null;
   sessionId: string;
   timestamp: string;
   role: 'user' | 'assistant';
@@ -42,7 +42,7 @@ interface Source {
 export interface LocalHistoryResult {
   source: 'codex-jsonl';
   complete: boolean;
-  sessions: Array<{ sessionId: string; rootSessionId: string; path: string }>;
+  sessions: Array<{ sessionId: string; rootSessionId: string | null; parentSessionId?: string; path: string }>;
   records: HistoryRecord[];
   scan: {
     bytesRead: number;
@@ -344,6 +344,22 @@ function selectedTurns(messages: Message[], options: LocalHistoryOptions): Messa
     .flat();
 }
 
+/** Native ancestry is metadata evidence, not the conversation selected by a query. */
+function nativeRoot(source: Source, sources: Source[]): string | null {
+  const seen = new Set<string>();
+  let current = source;
+  while (true) {
+    if (seen.has(current.sessionId)) throw new Error('Native history contains cyclic ancestry');
+    seen.add(current.sessionId);
+    if (current.rootId) return current.rootId;
+    if (!current.parentId) return current.sessionId;
+    const parents = sources.filter((candidate) => candidate.sessionId === current.parentId);
+    if (parents.length === 0) return null;
+    if (parents.length > 1) throw new Error('Native ancestor id is ambiguous');
+    current = parents[0];
+  }
+}
+
 export async function readLocalHistory(options: LocalHistoryOptions): Promise<LocalHistoryResult> {
   validate(options);
   const scan: LocalHistoryResult['scan'] = {
@@ -360,12 +376,12 @@ export async function readLocalHistory(options: LocalHistoryOptions): Promise<Lo
     scan,
   };
   let sources: Source[];
-  let rootId: string | undefined;
+  let attributionSources: Source[];
   if (options.file !== undefined) {
     const source = await readMetadata(resolve(options.file), budget);
     if (!source) throw new Error('History source is missing valid native session metadata');
     sources = [source];
-    rootId = source.rootId ?? source.sessionId;
+    attributionSources = sources;
   } else {
     const root = options.sessionsRoot ?? join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions');
     const all = await findSources(resolve(root), budget);
@@ -374,7 +390,8 @@ export async function readLocalHistory(options: LocalHistoryOptions): Promise<Lo
     if (!matches.length) throw new Error('Native session missing from history store');
     if (matches.length !== 1) throw new Error('Native session id is ambiguous');
     const target = matches[0];
-    rootId = options.rootSessionId?.toLowerCase() ?? target.rootId ?? target.sessionId;
+    attributionSources = all;
+    const queryRootId = target.sessionId;
     sources = [target];
     if (options.rootSessionId) {
       const selected = new Set([target.sessionId]);
@@ -384,7 +401,7 @@ export async function readLocalHistory(options: LocalHistoryOptions): Promise<Lo
         for (const source of all) {
           if (
             !selected.has(source.sessionId) &&
-            (source.rootId === rootId || (source.parentId && selected.has(source.parentId)))
+            (source.rootId === queryRootId || (source.parentId && selected.has(source.parentId)))
           ) {
             selected.add(source.sessionId);
             sources.push(source);
@@ -399,11 +416,12 @@ export async function readLocalHistory(options: LocalHistoryOptions): Promise<Lo
     }
   }
   sources.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sessionId.localeCompare(b.sessionId));
+  const roots = new Map(sources.map((source) => [source.sessionId, nativeRoot(source, attributionSources)]));
   const records: HistoryRecord[] = [];
   for (const source of sources) {
     records.push(
       ...selectedTurns(await readMessages(source, budget), options).map((item) => ({
-        rootSessionId: rootId!,
+        rootSessionId: roots.get(source.sessionId) ?? null,
         sessionId: source.sessionId,
         role: item.role,
         message: item.message,
@@ -419,8 +437,14 @@ export async function readLocalHistory(options: LocalHistoryOptions): Promise<Lo
       scan.malformedRecords === 0 &&
       scan.partialRecords === 0 &&
       scan.skippedSymlinks === 0 &&
-      scan.unattributedFiles === 0,
-    sessions: sources.map((source) => ({ sessionId: source.sessionId, rootSessionId: rootId!, path: source.path })),
+      scan.unattributedFiles === 0 &&
+      [...roots.values()].every((root) => root !== null),
+    sessions: sources.map((source) => ({
+      sessionId: source.sessionId,
+      rootSessionId: roots.get(source.sessionId) ?? null,
+      ...(source.parentId ? { parentSessionId: source.parentId } : {}),
+      path: source.path,
+    })),
     records,
     scan,
   };
