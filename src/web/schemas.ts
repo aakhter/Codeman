@@ -894,9 +894,10 @@ const noCommandSubstitution = (s: string) => !s.includes('$(');
 // (rejects `$`/backtick that survive the outer quoting) as defense-in-depth.
 const NO_SHELL_META = /^[^\n\r\0`$]*$/;
 
-export const RemoteHostSchema = z.object({
-  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
+const RemoteHostBaseSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/, 'Invalid remote host id'),
   label: z.string().min(1).max(100),
+  useSshConfig: z.boolean().optional(),
   host: z
     .string()
     .min(1)
@@ -906,7 +907,8 @@ export const RemoteHostSchema = z.object({
     .string()
     .min(1)
     .max(100)
-    .regex(/^[a-zA-Z0-9._-]+$/, 'Invalid SSH username'),
+    .regex(/^[a-zA-Z0-9._-]+$/, 'Invalid SSH username')
+    .optional(),
   port: z.number().int().min(1).max(65535).optional(),
   // Identity (private-key) file PATH only — never key bytes. No newline/NUL.
   identityFile: z
@@ -980,6 +982,30 @@ export const RemoteHostSchema = z.object({
     .optional(),
 });
 
+export const RemoteHostSchema = RemoteHostBaseSchema.superRefine((host, ctx) => {
+  if (host.useSshConfig) {
+    if (host.host !== host.id) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['host'], message: 'SSH config alias must match Host ID' });
+    }
+    if (
+      host.username ||
+      host.port ||
+      host.identityFile ||
+      host.socksProxy ||
+      host.jumpHost ||
+      host.extraSshOptions?.length
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['useSshConfig'],
+        message: 'SSH config mode cannot include manual connection options',
+      });
+    }
+  } else if (!host.username) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['username'], message: 'SSH username is required' });
+  }
+});
+
 const remoteWorkspacePathSchema = z
   .string()
   .min(1)
@@ -989,7 +1015,7 @@ const remoteWorkspacePathSchema = z
 
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
-  hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
+  hostId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/, 'Invalid remote host id'),
   remotePath: remoteWorkspacePathSchema,
   commands: RemoteCommandOverridesSchema.optional(),
   codexCommandSelection: CodexCommandSelectionSchema.optional(),

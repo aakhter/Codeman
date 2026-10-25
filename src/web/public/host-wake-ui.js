@@ -140,7 +140,7 @@ Object.assign(CodemanApp.prototype, {
       // Known from the payload already: a proxied host is not probeable (the server
       // says so too, on every answer), so not even the activation poll is worth a
       // round trip whose verdict could only be a wrong "asleep".
-      state.probeable = !(session.remote.jumpHost || session.remote.socksProxy);
+      state.probeable = !(session.remote.useSshConfig || session.remote.jumpHost || session.remote.socksProxy);
       this._renderHostWakeBanner();
     }
     if (!state.probeable) return;

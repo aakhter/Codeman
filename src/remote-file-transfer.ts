@@ -81,7 +81,8 @@ export async function writeRemoteFileBytes(remote: SessionRemote, opts: WriteRem
     tmpPath,
     notADirectoryMessage: opts.notADirectoryMessage,
   });
-  const args = [...buildSshConnectionArgv(remote), '-o', 'ConnectTimeout=10', remoteSshTarget(remote), script];
+  const timeoutArgs = remote.useSshConfig ? [] : ['-o', 'ConnectTimeout=10'];
+  const args = [...buildSshConnectionArgv(remote), ...timeoutArgs, remoteSshTarget(remote), script];
   await new Promise<void>((resolve, reject) => {
     const child = spawn('ssh', args, { stdio: ['pipe', 'ignore', 'pipe'] });
     const stderr: Buffer[] = [];

@@ -540,7 +540,7 @@ export async function listCaseView(
       remote: {
         hostId: host.id,
         host: host.host,
-        username: host.username,
+        username: host.username ?? '',
         path: remoteCase.remotePath,
         commands: remoteCase.commands ?? host.commands,
         codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, viewer),
@@ -718,7 +718,7 @@ export function registerCaseRoutes(
         remote: {
           hostId: host.id,
           host: host.host,
-          username: host.username,
+          username: host.username ?? '',
           path: remoteCase.remotePath,
           commands: remoteCase.commands ?? host.commands,
           codexCommandSelection: selectionMetadata(remoteCase, remoteCase.owner, ownerFor(req)),
@@ -2141,7 +2141,7 @@ export function registerCaseRoutes(
         remote: {
           hostId: host.id,
           host: host.host,
-          username: host.username,
+          username: host.username ?? '',
           path: remotePath,
           commands: commands ?? host.commands,
           codexCommandSelection: selectionMetadata(nextRemoteCase, nextRemoteCase.owner, ownerFor(req)),

@@ -136,6 +136,8 @@ export type RemoteCommandMode = Extract<
  * custom port — the same connection `ssh-aa-desktop` makes — without a wrapper.
  */
 export interface RemoteSshOptions {
+  /** Use `host` as an OpenSSH config alias without adding connection overrides. */
+  useSshConfig?: boolean;
   /**
    * Path to an SSH identity (private key) file — path ONLY, never key bytes.
    * A leading `~`/`$HOME` is expanded to an absolute path at command-build time
@@ -157,7 +159,7 @@ export interface RemoteHost extends RemoteSshOptions {
   id: string;
   label: string;
   host: string;
-  username: string;
+  username?: string;
   port?: number;
   /** Legacy/default command overrides. New case-specific overrides live on RemoteCase. */
   commands?: Partial<Record<RemoteCommandMode, string>>;
@@ -201,7 +203,7 @@ export interface SessionRemote extends RemoteSshOptions {
   hostId: string;
   label: string;
   host: string;
-  username: string;
+  username?: string;
   port?: number;
   remotePath: string;
   commands?: Partial<Record<RemoteCommandMode, string>>;

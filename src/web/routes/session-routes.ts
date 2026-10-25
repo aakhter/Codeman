@@ -1249,6 +1249,7 @@ function wakeableHost(host: RemoteHost): WakeableRemote {
     hostId: host.id,
     label: host.label,
     host: host.host,
+    useSshConfig: host.useSshConfig,
     port: host.port,
     wakeMac: host.wakeMac,
     wakeCommand: host.wakeCommand,
@@ -1428,7 +1429,7 @@ export function registerSessionRoutes(
           `${host.label} did not come back after a wake-on-LAN request — nothing was attached`
         );
       }
-      workingDir = `${host.username}@${host.host}:${remoteSessionName}`;
+      workingDir = `${host.username ? `${host.username}@` : ''}${host.host}:${remoteSessionName}`;
       remote = toAttachedSessionRemote(host, remoteSessionName, workingDir);
     } else if (body.caseName) {
       const remoteCases = await readRemoteCases(CODEMAN_CONFIG_DIR);

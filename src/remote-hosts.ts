@@ -162,8 +162,8 @@ export function withRemotePathBootstrap(command: string): string {
   return `${REMOTE_PATH_BOOTSTRAP}; ${command}`;
 }
 
-export function remoteSshTarget(host: Pick<RemoteHost, 'username' | 'host'>): string {
-  return `${host.username}@${host.host}`;
+export function remoteSshTarget(host: Pick<RemoteHost, 'username' | 'host' | 'useSshConfig'>): string {
+  return host.useSshConfig ? host.host : `${host.username}@${host.host}`;
 }
 
 /**
@@ -203,7 +203,8 @@ function expandIdentityPath(identityFile: string): string {
  * the real launch connect with IDENTICAL options (they can't drift).
  *
  * Returns the leading tokens of an ssh command line (NOT including `-t`, the
- * target, or any remote command). Order:
+ * target, or any remote command). With `useSshConfig`, returns only `ssh` so
+ * OpenSSH supplies all connection settings from its own config. Otherwise:
  *   ssh -o BatchMode=yes
  *       [-p <port>]
  *       [-i <abs-identity>]              (~/$HOME expanded, then shellescaped)
@@ -219,6 +220,7 @@ function expandIdentityPath(identityFile: string): string {
  *    byte-identical to the historical behavior.
  */
 export function buildSshConnectionArgs(remote: RemoteSshOptions & Pick<RemoteHost, 'port'>): string[] {
+  if (remote.useSshConfig) return ['ssh'];
   const parts: string[] = ['ssh', '-o BatchMode=yes'];
   const hasConnectTimeout = (remote.extraSshOptions ?? []).some((opt) => /^ConnectTimeout=/i.test(opt));
   if (!hasConnectTimeout) parts.push('-o ConnectTimeout=10');
@@ -235,6 +237,7 @@ export function buildSshConnectionArgs(remote: RemoteSshOptions & Pick<RemoteHos
 }
 
 export function buildSshConnectionArgv(remote: RemoteSshOptions & Pick<RemoteHost, 'port'>): string[] {
+  if (remote.useSshConfig) return [];
   const args: string[] = ['-o', 'BatchMode=yes'];
   const hasConnectTimeout = (remote.extraSshOptions ?? []).some((opt) => /^ConnectTimeout=/i.test(opt));
   if (!hasConnectTimeout) args.push('-o', 'ConnectTimeout=10');
@@ -716,10 +719,12 @@ export async function listRemoteCodemanSessions(
 }
 
 export function remoteDisplayPath(
-  remote: Pick<SessionRemote, 'username' | 'host' | 'remotePath'> | { username: string; host: string; path: string }
+  remote:
+    | Pick<SessionRemote, 'username' | 'host' | 'useSshConfig' | 'remotePath'>
+    | { username?: string; host: string; path: string }
 ): string {
   const path = 'remotePath' in remote ? remote.remotePath : remote.path;
-  return `${remote.username}@${remote.host}:${path}`;
+  return `${remote.username ? `${remote.username}@` : ''}${remote.host}:${path}`;
 }
 
 /**
@@ -754,6 +759,7 @@ export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): Sessi
     label: host.label,
     host: host.host,
     username: host.username,
+    useSshConfig: host.useSshConfig,
     port: host.port,
     remotePath: remoteCase.remotePath,
     commands: remoteCase.commands ?? host.commands,
@@ -798,6 +804,7 @@ export function toAttachedSessionRemote(
     label: host.label,
     host: host.host,
     username: host.username,
+    useSshConfig: host.useSshConfig,
     port: host.port,
     remotePath,
     commands: host.commands,

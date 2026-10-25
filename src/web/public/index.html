@@ -4142,23 +4142,27 @@
         </div>
         <div class="modal-body">
           <div class="form-row">
-            <label>Host ID</label>
-            <input type="text" id="remoteHostId" placeholder="gpu-box" pattern="[a-zA-Z0-9_-]+" autocomplete="off" autocapitalize="off" spellcheck="false">
+            <label class="checkbox-row"><input type="checkbox" id="remoteHostUseSshConfig" onchange="app.onRemoteHostConfigModeChanged()"> Use local SSH config</label>
+            <span class="form-hint">Use the Host ID as an OpenSSH alias from this Codeman machine. SSH settings come from its ~/.ssh/config.</span>
           </div>
           <div class="form-row">
+            <label for="remoteHostId">Host ID</label>
+            <input type="text" id="remoteHostId" placeholder="gpu-box" pattern="[a-zA-Z0-9][a-zA-Z0-9._-]*" autocomplete="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div class="form-row remote-host-manual-option">
             <label>SSH Host/IP</label>
             <input type="text" id="remoteHostAddress" placeholder="10.0.0.42" autocomplete="off" autocapitalize="off" spellcheck="false">
           </div>
-          <div class="form-row">
+          <div class="form-row remote-host-manual-option">
             <label>SSH Username</label>
             <input type="text" id="remoteHostUsername" placeholder="ubuntu" autocomplete="off" autocapitalize="off" spellcheck="false">
           </div>
-          <div class="form-row">
+          <div class="form-row remote-host-manual-option">
             <label>SSH Port</label>
             <input type="number" id="remoteHostPort" placeholder="22" min="1" max="65535" autocomplete="off">
             <span class="form-hint">Optional. Leave blank for the default port 22.</span>
           </div>
-          <details class="advanced-options">
+          <details class="advanced-options remote-host-manual-option">
             <summary>Advanced SSH</summary>
             <div class="advanced-options-content">
               <div class="form-row">

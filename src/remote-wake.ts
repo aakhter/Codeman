@@ -151,6 +151,8 @@ export interface WakeableRemote {
   hostId: string;
   label: string;
   host: string;
+  /** OpenSSH config may redirect this alias, so direct TCP probing is unreliable. */
+  useSshConfig?: boolean;
   port?: number;
   /** SSH jump host (`-J`): the host is reached THROUGH it, never directly. */
   jumpHost?: string;
@@ -173,7 +175,7 @@ export interface WakeableRemote {
  * `false`. A wake target can still be fired for it, blind.
  */
 export function isProbeable(remote: WakeableRemote): boolean {
-  if (remote.jumpHost || remote.socksProxy) return false;
+  if (remote.useSshConfig || remote.jumpHost || remote.socksProxy) return false;
   return !(remote.extraSshOptions ?? []).some((option) => /^\s*proxy(command|jump)\s*=/i.test(option));
 }
 

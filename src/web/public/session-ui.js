@@ -4778,6 +4778,8 @@ Object.assign(CodemanApp.prototype, {
     const remotePath = document.getElementById('remoteCasePath').value.trim();
     const hostId = document.getElementById('remoteHostId').value.trim()
       || document.getElementById('remoteHostSavedSelect')?.value.trim();
+    const savedHost = (this.caseRemoteHosts || []).find(item => item.id === hostId);
+    const useSshConfig = Boolean(savedHost?.useSshConfig);
     const host = document.getElementById('remoteHostAddress').value.trim();
     const username = document.getElementById('remoteHostUsername').value.trim();
     const codexSelection = this._readCaseCodexCommandFromForm('remote');
@@ -4794,12 +4796,12 @@ Object.assign(CodemanApp.prototype, {
       .map(line => line.trim())
       .filter(line => line.length > 0);
 
-    if (!name || !remotePath || !hostId || !host || !username) {
+    if (!name || !remotePath || !hostId || (!useSshConfig && (!host || !username))) {
       this.showToast('Please complete all required remote fields', 'error');
       return;
     }
-    if (!/^[a-zA-Z0-9_-]+$/.test(name) || !/^[a-zA-Z0-9_-]+$/.test(hostId)) {
-      this.showToast('Invalid name. Use only letters, numbers, hyphens, underscores.', 'error');
+    if (!/^[a-zA-Z0-9_-]+$/.test(name) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/.test(hostId)) {
+      this.showToast('Invalid case name or Host ID.', 'error');
       return;
     }
     if (!remotePath.startsWith('/')) {
@@ -4816,7 +4818,7 @@ Object.assign(CodemanApp.prototype, {
     }
 
     try {
-      const hostPayload = {
+      const hostPayload = useSshConfig ? savedHost : {
         id: hostId,
         label: hostId,
         host,
@@ -4864,16 +4866,69 @@ Object.assign(CodemanApp.prototype, {
     return Array.isArray(data) ? data : data?.data || [];
   },
 
-  _fillRemoteHostForm(host) {
+  _fillRemoteHostForm(host, root = document) {
     if (!host) return;
-    document.getElementById('remoteHostId').value = host.id || '';
-    document.getElementById('remoteHostAddress').value = host.host || '';
-    document.getElementById('remoteHostUsername').value = host.username || '';
-    document.getElementById('remoteHostPort').value = host.port ? String(host.port) : '';
-    document.getElementById('remoteHostIdentityFile').value = host.identityFile || '';
-    document.getElementById('remoteHostSocksProxy').value = host.socksProxy || '';
-    document.getElementById('remoteHostJumpHost').value = host.jumpHost || '';
-    document.getElementById('remoteHostExtraSshOptions').value = (host.extraSshOptions || []).join('\n');
+    const get = id => root === document ? document.getElementById(id) : root.querySelector(`#${id}`);
+    get('remoteHostId').value = host.id || '';
+    get('remoteHostAddress').value = host.host || '';
+    get('remoteHostUsername').value = host.username || '';
+    get('remoteHostPort').value = host.port ? String(host.port) : '';
+    get('remoteHostIdentityFile').value = host.identityFile || '';
+    get('remoteHostSocksProxy').value = host.socksProxy || '';
+    get('remoteHostJumpHost').value = host.jumpHost || '';
+    get('remoteHostExtraSshOptions').value = (host.extraSshOptions || []).join('\n');
+    if (root !== document) {
+      const useConfig = get('remoteHostUseSshConfig');
+      if (useConfig) useConfig.checked = Boolean(host.useSshConfig);
+      this.onRemoteHostConfigModeChanged();
+    }
+  },
+
+  onRemoteHostConfigModeChanged() {
+    const modal = document.getElementById('remoteHostConfigModal');
+    const checked = modal?.querySelector('#remoteHostUseSshConfig')?.checked || false;
+    modal?.querySelectorAll('.remote-host-manual-option').forEach(row => row.classList.toggle('hidden', checked));
+    const label = modal?.querySelector('label[for="remoteHostId"]');
+    if (label) label.textContent = checked ? 'SSH config alias / Host ID' : 'Host ID';
+    if (checked) {
+      const id = modal?.querySelector('#remoteHostId')?.value.trim() || '';
+      const address = modal?.querySelector('#remoteHostAddress');
+      if (address) address.value = id;
+    }
+  },
+
+  _readRemoteHostConfigForm() {
+    const modal = document.getElementById('remoteHostConfigModal');
+    const get = id => modal?.querySelector(`#${id}`);
+    const id = get('remoteHostId')?.value.trim() || '';
+    const useSshConfig = Boolean(get('remoteHostUseSshConfig')?.checked);
+    const host = useSshConfig ? id : get('remoteHostAddress')?.value.trim() || '';
+    const username = useSshConfig ? '' : get('remoteHostUsername')?.value.trim() || '';
+    const payload = {
+      id,
+      label: id,
+      host,
+      ...(username ? { username } : {}),
+      ...(useSshConfig ? { useSshConfig: true } : {}),
+    };
+    if (useSshConfig) return payload;
+    const portRaw = get('remoteHostPort')?.value.trim() || '';
+    const port = portRaw ? Number(portRaw) : undefined;
+    const identityFile = get('remoteHostIdentityFile')?.value.trim() || '';
+    const socksProxy = get('remoteHostSocksProxy')?.value.trim() || '';
+    const jumpHost = get('remoteHostJumpHost')?.value.trim() || '';
+    const extraSshOptions = (get('remoteHostExtraSshOptions')?.value || '')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean);
+    return {
+      ...payload,
+      ...(port ? { port } : {}),
+      ...(identityFile ? { identityFile } : {}),
+      ...(socksProxy ? { socksProxy } : {}),
+      ...(jumpHost ? { jumpHost } : {}),
+      ...(extraSshOptions.length ? { extraSshOptions } : {}),
+    };
   },
 
   async loadRemoteHostsForCaseModal(selectedHostId = '') {
@@ -4914,6 +4969,7 @@ Object.assign(CodemanApp.prototype, {
     if (select) select.value = '';
     this.remoteHostConfigMode = 'new';
     this.remoteHostConfigOriginalId = null;
+    const modal = document.getElementById('remoteHostConfigModal');
     [
       'remoteHostId',
       'remoteHostAddress',
@@ -4924,17 +4980,20 @@ Object.assign(CodemanApp.prototype, {
       'remoteHostJumpHost',
       'remoteHostExtraSshOptions',
     ].forEach(id => {
-      const el = document.getElementById(id);
+      const el = modal?.querySelector(`#${id}`);
       if (el) el.value = '';
     });
-    const hostId = document.getElementById('remoteHostId');
+    const useConfig = modal?.querySelector('#remoteHostUseSshConfig');
+    if (useConfig) useConfig.checked = false;
+    this.onRemoteHostConfigModeChanged();
+    const hostId = modal?.querySelector('#remoteHostId');
     if (hostId) {
       hostId.disabled = false;
       hostId.focus?.();
     }
     this.remoteHostVerifiedFingerprint = null;
     this._setRemoteHostVerificationState(false, 'Test SSH access before saving.');
-    document.getElementById('remoteHostConfigModal')?.classList.add('active');
+    modal?.classList.add('active');
     this.closeCaseDirectoryBrowser();
   },
 
@@ -4952,12 +5011,13 @@ Object.assign(CodemanApp.prototype, {
     }
     this.remoteHostConfigMode = 'edit';
     this.remoteHostConfigOriginalId = host.id;
-    this._fillRemoteHostForm(host);
-    const hostIdInput = document.getElementById('remoteHostId');
+    const modal = document.getElementById('remoteHostConfigModal');
+    this._fillRemoteHostForm(host, modal);
+    const hostIdInput = modal?.querySelector('#remoteHostId');
     if (hostIdInput) hostIdInput.disabled = true;
     this.remoteHostVerifiedFingerprint = null;
     this._setRemoteHostVerificationState(false, 'Test SSH access before saving changes.');
-    document.getElementById('remoteHostConfigModal')?.classList.add('active');
+    modal?.classList.add('active');
     this.closeCaseDirectoryBrowser();
   },
 
@@ -4981,7 +5041,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async testRemoteHostConfig() {
-    const hostPayload = this._readRemoteHostFromForm();
+    const hostPayload = this._readRemoteHostConfigForm();
     if (!this._validateRemoteHostFormForBrowse(hostPayload)) return;
     const verifyBtn = document.getElementById('remoteHostVerifyBtn');
     if (verifyBtn) verifyBtn.disabled = true;
@@ -5007,7 +5067,7 @@ Object.assign(CodemanApp.prototype, {
   },
 
   async saveRemoteHostConfig() {
-    const hostPayload = this._readRemoteHostFromForm();
+    const hostPayload = this._readRemoteHostConfigForm();
     if (!this._validateRemoteHostFormForBrowse(hostPayload)) return;
     if (this.remoteHostVerifiedFingerprint !== this._remoteHostFingerprint(hostPayload)) {
       this._setRemoteHostVerificationState(false, 'Test SSH access before saving.');
@@ -5050,6 +5110,7 @@ Object.assign(CodemanApp.prototype, {
       await this.loadRemoteHostsForCaseModal(hostPayload.id);
       const select = document.getElementById('remoteHostSavedSelect');
       if (select) select.value = hostPayload.id;
+      this.onRemoteHostSelected();
       this.closeRemoteHostConfigModal();
       this.showToast(`SSH profile "${hostPayload.id}" saved`, 'success');
     } catch (err) {
@@ -5059,12 +5120,20 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _validateRemoteHostFormForBrowse(hostPayload) {
-    if (!hostPayload.id || !hostPayload.host || !hostPayload.username) {
-      this.showToast('Fill in Host ID, address, and username first', 'error');
+    if (!hostPayload.id || !hostPayload.host || (!hostPayload.useSshConfig && !hostPayload.username)) {
+      this.showToast(
+        hostPayload.useSshConfig
+          ? 'Enter a valid SSH config alias as the Host ID'
+          : 'Fill in Host ID, address, and username first',
+        'error'
+      );
       return false;
     }
-    if (!/^[a-zA-Z0-9_-]+$/.test(hostPayload.id)) {
-      this.showToast('Invalid Host ID. Use letters, numbers, hyphens, underscores.', 'error');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/.test(hostPayload.id)) {
+      this.showToast(
+        'Invalid Host ID. Use a letter or number first, then letters, numbers, dots, hyphens, or underscores.',
+        'error'
+      );
       return false;
     }
     const portRaw = document.getElementById('remoteHostPort')?.value.trim() || '';
@@ -5860,13 +5929,23 @@ Object.assign(CodemanApp.prototype, {
   async discoverRemoteSessions() {
     const results = document.getElementById('remoteDiscoverResults');
     const btn = document.getElementById('remoteDiscoverBtn');
-    const hostPayload = this._readRemoteHostFromForm();
-    if (!hostPayload.id || !hostPayload.host || !hostPayload.username) {
-      this.showToast('Fill in Host ID, address, and username first', 'error');
+    const selectedHostId = document.getElementById('remoteHostSavedSelect')?.value || '';
+    const savedHost = (this.caseRemoteHosts || []).find(item => item.id === selectedHostId);
+    const hostPayload = savedHost || this._readRemoteHostFromForm();
+    if (!hostPayload.id || !hostPayload.host || (!hostPayload.useSshConfig && !hostPayload.username)) {
+      this.showToast(
+        hostPayload.useSshConfig
+          ? 'Enter a valid SSH config alias as the Host ID'
+          : 'Fill in Host ID, address, and username first',
+        'error'
+      );
       return;
     }
-    if (!/^[a-zA-Z0-9_-]+$/.test(hostPayload.id)) {
-      this.showToast('Invalid Host ID. Use letters, numbers, hyphens, underscores.', 'error');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/.test(hostPayload.id)) {
+      this.showToast(
+        'Invalid Host ID. Use a letter or number first, then letters, numbers, dots, hyphens, or underscores.',
+        'error'
+      );
       return;
     }
     if (btn) btn.disabled = true;

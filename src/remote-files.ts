@@ -12,8 +12,7 @@
  * Connection options come from `buildSshConnectionArgs()` — never a hand-built ssh
  * line (the COD-107 discipline in docs/remote-sessions.md) — so a proxied,
  * custom-port or jump-hosted case reaches its files with exactly the credentials the
- * launch used, and `BatchMode=yes` means a host that needs a passphrase fails fast
- * instead of hanging on a prompt nothing can answer.
+ * launch used; local SSH config profiles retain OpenSSH's configured behavior.
  *
  * ⚠️ The path is the injection surface: it arrives from the browser (`?path=`). It is
  * always interpolated as a single `shellescape`d token, and the whole remote command

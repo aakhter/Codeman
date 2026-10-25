@@ -275,7 +275,11 @@ function isAllowedSuperpowersArtifactPath(normalizedPath: string, homeDir: strin
 
 function isAllowedRemoteGeneratedArtifactPath(filePath: string, remote: SessionRemote): boolean {
   const candidateHomes =
-    remote.username === 'root' ? ['/root'] : [`/home/${remote.username}`, `/Users/${remote.username}`];
+    remote.username === 'root'
+      ? ['/root']
+      : remote.username
+        ? [`/home/${remote.username}`, `/Users/${remote.username}`]
+        : [];
   return candidateHomes.some((home) => isAllowedGeneratedArtifactPath(filePath, remote.remotePath, home));
 }
 
@@ -440,7 +444,11 @@ export function buildRemoteGeneratedArtifactInspectionArgs(
   streamBytes = false
 ): string[] {
   const candidateHomes =
-    remote.username === 'root' ? ['/root', '/root'] : [`/home/${remote.username}`, `/Users/${remote.username}`];
+    remote.username === 'root'
+      ? ['/root', '/root']
+      : remote.username
+        ? [`/home/${remote.username}`, `/Users/${remote.username}`]
+        : [];
   const command = [
     `PATH=${REMOTE_SYSTEM_PATH}`,
     '/bin/sh -c',
@@ -461,7 +469,7 @@ export function buildRemoteGeneratedArtifactCachePath(
   remotePath: string
 ): string {
   const digest = createHash('sha256')
-    .update(`${remote.username}@${remote.host}:${remote.port ?? 22}:${remotePath}`)
+    .update(`${remote.username ? `${remote.username}@` : ''}${remote.host}:${remote.port ?? 22}:${remotePath}`)
     .digest('hex')
     .slice(0, 16);
   return join(dataPath('generated-artifacts', sessionId, digest), sanitizeCacheFileName(basename(remotePath)));
