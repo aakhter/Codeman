@@ -6,15 +6,14 @@ verbs `spawn_worker` / `spawn_workers` / `sendwait` / `last_text`); see
 [SKILL.md §0](../SKILL.md#0-guard-and-bootstrap) for it and
 [the safety rules](../SKILL.md#4-safety-rules) for what you may call unprompted.
 
-⚠️ **These flows are the long way round, and most jobs do not need them.** If the job is
-"spawn N claude workers, task them, collect the answers", [SKILL.md
-§1](../SKILL.md#1-the-fast-path-n-workers-one-bash-call) already is that job in one Bash
-call, measured at about 10 s for two cold workers end to end. Come here when you need a
-mechanism §1 does not cover: shell or otherwise hook-less workers (Flows 2, 3), a worker
-stuck on a permission dialog (Flow 5), messaging (Flow 6), or real work in git worktrees
-(Flow 7). The flows below spell each step out because they are teaching the mechanism;
-spelling them out again when §1 would have done is the most common way an agent turns a
-ten-second run into a multi-minute one.
+⚠️ **These flows are for cases where the managed CLI path is insufficient.** For ordinary
+work, use `codeman agent spawn` in the current project or pass `--working-dir` for an
+existing project/worktree. Use separate worktrees for parallel edits. [SKILL.md §1
+](../SKILL.md#1-opt-in-scratch-cases-n-workers-one-bash-call) is an opt-in flow that
+creates persistent scratch case directories; do not use it just to fan out worker jobs.
+Come here when you need a mechanism the CLI does not cover: shell or otherwise hook-less
+workers (Flows 2, 3), a worker stuck on a permission dialog (Flow 5), messaging (Flow 6),
+or real work in git worktrees (Flow 7).
 
 ⚠️ **Shell state does not survive between tool calls**, so every Bash call below opens
 by sourcing the preamble file the §0 bootstrap wrote, and checking its version stamp:

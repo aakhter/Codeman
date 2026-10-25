@@ -85,7 +85,7 @@ API input-revision tracking, so use the managed commands for managed peers.
 ```bash
 codeman agent spawn --mode codex --working-dir /absolute/project --json
 codeman agent spawn --mode claude --json   # defaults to current project directory
-codeman agent spawn scratch-case --mode claude --json  # named case behavior
+codeman agent spawn scratch-case --mode claude --json  # creates/selects a persistent case
 ```
 
 These commands require the managed session's actual API environment. Use only

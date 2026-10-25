@@ -172,7 +172,7 @@ The skill checks for both and says so instead of acting.
 
 | File                                                                                                           | Contents                                                                                                                   |
 | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| [`SKILL.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/SKILL.md)                             | Safety rules, the fast path (start N workers, task them, collect the answers) and the verb index. Always loaded.           |
+| [`SKILL.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/SKILL.md)                             | Safety rules, the opt-in scratch-case flow, and the verb index. Use existing project sessions by default. Always loaded.     |
 | [`reference/verbs.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/verbs.md)         | Every verb in detail: readiness, send-and-wait, markers, interrupts, cleanup. Loaded on demand.                            |
 | [`reference/recipes.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/recipes.md)     | Worked flows: claude, DeepSeek Harness and shell workers, fan-out, watching a blocked worker, messaging. Loaded on demand. |
 | [`reference/endpoints.md`](https://github.com/Ark0N/Codeman/blob/master/skills/codeman/reference/endpoints.md) | Endpoint tables, error codes, the signals each mode emits, capacity limits. Loaded on demand.                              |

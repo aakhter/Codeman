@@ -35,10 +35,11 @@ server that spawned you; its HTTP API can start, prompt, watch, and delete other
 sessions.
 
 **Read as far as your job needs and no further.** §0 is the bootstrap, run once. §1 is
-the whole fast path: spawn N workers, task them, collect answers. **If §1 covers your
-job, run it and stop there.** The sections after it are for jobs it does not cover, and
-reading them to be thorough is the main reason a ten-second run takes minutes. §2 is the
-verb table when your job is a different one. §3 and §4 are the rules; §6 is setup and
+an opt-in scratch-case flow; it creates persistent case directories and is not the
+default for worker jobs. For work in the current project, use `codeman agent spawn`
+without a case name; use `--working-dir` for an existing project or worktree. Give
+parallel workers separate worktrees when they may edit files. §2 is the verb table when
+your job needs a different operation. §3 and §4 are the rules; §6 is setup and
 credentials, which you only need when something 401s.
 
 Everything else loads on demand, and is meant to be opened at one section, not read
@@ -476,24 +477,23 @@ Why it is built this way, all of it load-bearing:
 If a call comes back as unparseable text instead of JSON, that is almost always a
 plain-text 401: see §6 and [the symptom gallery](reference/endpoints.md#symptom-gallery).
 
-## 1. The fast path: N workers, one Bash call
+## 1. Opt-in scratch cases: N workers, one Bash call
 
-**If the job is "spawn N claude workers, give them tasks, collect the answers", this
-block is the whole thing. Run it, report, and stop reading. §2 onward is for jobs this
-does not cover; you are not being careless by not reading them.**
+**Use this only when the task calls for isolated throwaway cases.** Each new case name
+creates a persistent `~/codeman-cases/<name>` directory that appears in the case
+picker; deleting its worker session does not remove the directory. For ordinary work,
+use the current project or an existing worktree with `codeman agent spawn` as described
+above. Do not invent case names just to start workers.
 
-Fill in the case names and the prompts, then run it as your FIRST Bash call: no
-standalone preamble check before it (line one below IS that check), and no
-reconnaissance. `ls ~/codeman-cases` answers nothing this block needs: invented
-fresh names need no lookup, and `spawn_worker` refuses a name that already exists
-rather than silently reusing it. Everything below is `spawn_workers` / `sendwait` /
-`last_text` / `delete_session` from the §0 preamble, so there is nothing to assemble
-and no per-call body to hand-build.
+Only after choosing scratch cases deliberately, fill in their names and prompts. The
+names must be fresh; `spawn_worker` refuses a name that already exists rather than
+silently reusing it. The helper uses `spawn_workers` / `sendwait` / `last_text` /
+`delete_session` from the §0 preamble.
 
 ```bash
 . "${XDG_CACHE_HOME:-$HOME/.cache}/codeman-agent-$CODEMAN_SESSION_ID.sh" 2>/dev/null   # §0 loader
 [ "${CODEMAN_PREAMBLE:-}" = 1.44.0 ] || { echo "preamble missing or stale; run the full §0 block"; exit 1; }
-N=(alpha beta)                    # INVENT one fresh case name per worker; never list cases first
+N=(alpha beta)                    # Fresh scratch-case names only; use this block only by choice
                                   # (a name may carry a mode: `beta:deepseek`, see below)
 T=('reply with one line: the absolute path of your working directory'
    'reply with one line: your model name')            # tasks, same order as N
@@ -606,7 +606,7 @@ One row per job. Acting on this table alone is correct; the §5 links are the de
 
 | I want to                                    | Call                                                                                                                                                                                                                                                                                                                                                                             | Detail                                                      |
 | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| start a worker **where the work is**         | `POST /api/v1/quick-start {"caseName":…}`, which **creates** `~/codeman-cases/<name>` unless the name is already a case. Any other path (a git worktree): `POST /api/v1/sessions {"workingDir":…}` then `POST /api/v1/sessions/:id/interactive`. Both install hooks by default, so expect full signals in either, and **verify** rather than assume. N workers means N worktrees | [§5.1](reference/verbs.md#51-where-to-spawn)                |
+| start a worker **where the work is**         | Prefer `codeman agent spawn --mode <mode> --json` in the current project, or pass `--working-dir` for an existing project/worktree. For parallel edits, use a separate worktree per worker. Named-case quick-start **creates or selects a persistent case**; use it only when a case is explicitly wanted. Verify hooks/signals rather than assume | [§5.1](reference/verbs.md#51-where-to-spawn)                |
 | know a new worker can accept a prompt        | `GET .../wait-output?match=shift+tab&from=buffer` (urlencode the `+`); a `deepseek` worker draws `❯` instead, and its boot `stop` fires ~300 ms BEFORE that, so never read the signal as readiness                                                                                                                                                                               | [§5.2](reference/verbs.md#52-readiness)                     |
 | deliver a task **and** know when it finished | `POST .../input` with `"input":"…\r"`, `clientId`, `seq`, `"wait":true`. Resolves on `stop`, so it is trustworthy where the signal is real: claude mode with hooks (installed by default, but the operator can disable it and remote sessions never get them) and `deepseek` mode through its status bridge. Costs the worker one billed turn                                    | [§5.3](reference/verbs.md#53-send-a-task-and-wait)          |
 | know a hook-less worker finished             | it has no `stop`, and `wait:true` there resolves on flapping `idle` **without erroring**: make it print a split, unique marker and `wait-output` on that instead                                                                                                                                                                                                                 | [§5.5](reference/verbs.md#55-markers-for-hook-less-workers) |

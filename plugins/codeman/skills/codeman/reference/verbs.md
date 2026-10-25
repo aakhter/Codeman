@@ -5,10 +5,11 @@ table in [SKILL.md §2](../SKILL.md#2-what-do-you-want-to-do): where to spawn, r
 sending a task, reading the answer, markers, liveness, interrupting, usage limits, big
 input, fan-out, listing, intent, messaging, and cleanup.
 
-⚠️ **Most jobs never need this file.** [SKILL.md
-§1](../SKILL.md#1-the-fast-path-n-workers-one-bash-call) already spawns N claude workers,
-tasks them and collects the answers in one Bash call, measured at about 10 s for two cold
-workers. Open a section here when you hit the thing it covers, not to be thorough.
+⚠️ **Most jobs never need this file.** For ordinary worker jobs, use
+`codeman agent spawn` in the current project or an existing worktree. [SKILL.md §1
+](../SKILL.md#1-opt-in-scratch-cases-n-workers-one-bash-call) is only for deliberate
+scratch cases, which create persistent case directories. Open a section here when you
+hit the thing it covers, not to be thorough.
 
 Section numbers and anchors are unchanged from when this lived inside SKILL.md, so a
 `§5.4` reference still resolves. Worked end-to-end flows are in
@@ -29,7 +30,7 @@ wrong directory.** `quick-start` with a new `caseName` does not find your repo: 
 
 | Where the work is | Call | Hooks, and therefore signals |
 |-------------------|------|------------------------------|
-| a fresh scratch dir (throwaway experiments) | `POST /api/v1/quick-start {"caseName":"scratch-1","mode":"claude"}` with a **new** case name | Codeman creates the directory and **writes hooks**: `stop` and `blocked` fire, send-and-wait is trustworthy |
+| a fresh scratch dir (only when explicitly wanted) | `POST /api/v1/quick-start {"caseName":"scratch-1","mode":"claude"}` with a **new** case name | Codeman creates a persistent directory under `~/codeman-cases/` that appears in the case picker; deleting the worker session does not remove it. Hooks are written: `stop` and `blocked` fire, send-and-wait is trustworthy |
 | a linked case (a real repo in the linked-cases registry) | same call with the linked name | **hooks installed at session create**, so `stop` fires here too. Not guaranteed: the operator can turn it off. Check |
 | any other absolute path, e.g. a git worktree you made | `POST /api/v1/sessions {"workingDir":"/abs/path","mode":"claude"}` then `POST /api/v1/sessions/:id/interactive` | same: **hooks installed at session create**, subject to the same setting. Check |
 
